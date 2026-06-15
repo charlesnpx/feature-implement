@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -16,6 +17,13 @@ func slug(value string) string {
 		return "untitled"
 	}
 	return value
+}
+
+func validateSafeIDSegment(id string, kind string) error {
+	if slug(id) != id {
+		return fmt.Errorf("%s id %q must contain only lowercase letters, numbers, and hyphen separators", kind, id)
+	}
+	return nil
 }
 
 func num(n int) string {

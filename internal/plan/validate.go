@@ -63,10 +63,18 @@ func validateManifestShape(manifest Manifest) error {
 		}
 	}
 	assigned := map[string]string{}
+	unitIDs := map[string]bool{}
 	for _, unit := range manifest.MergeUnits {
 		if unit.ID == "" {
 			return fmt.Errorf("merge unit id is required")
 		}
+		if err := validateSafeIDSegment(unit.ID, "merge unit"); err != nil {
+			return err
+		}
+		if unitIDs[unit.ID] {
+			return fmt.Errorf("duplicate merge unit id %s", unit.ID)
+		}
+		unitIDs[unit.ID] = true
 		if len(unit.StoryIDs) == 0 {
 			return fmt.Errorf("merge unit %s requires at least one story", unit.ID)
 		}

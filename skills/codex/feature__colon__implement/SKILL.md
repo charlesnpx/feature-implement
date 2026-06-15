@@ -22,12 +22,13 @@ Implement a validated feature plan.
 3. Create one temporary isolated worktree for the active merge unit at `<plan-dir>/worktrees/<merge-unit-id>`, then record `feature implement start ... --write-state`.
 4. Implement the story or merge unit, run repo checks, commit locally, then record `feature implement commit ... --commit-sha <sha> --write-state`.
 5. Push the implementation branch, open a PR with a clear title and description, then record PR number/URL with `feature implement open-pr ... --write-state`.
-6. Spawn a Codex subagent to review the opened PR. Use branch-diff review only when PR creation is not approved. Assess findings and apply only useful fixes.
-7. If the review has worthwhile findings, implement them on the same branch, commit them, push them, and repeat PR review until no worthwhile findings remain.
-8. Record review state with `feature implement review ... --review-status passed|changes-applied --write-state` only after the final reviewed branch has been pushed.
-9. Merge only when checks and policy allow it. Record merge state with `feature implement merge ... --merge-commit <sha> --write-state`.
-10. Update local main, remove the temporary worktree, then record `feature implement cleanup ... --write-state`. Delete the remote branch only when the plan permits it and the user explicitly approved it.
-11. Confirm `feature implement next <plan-dir> --json` advances before continuing to the next merge unit.
+6. Spawn a Codex subagent to review the opened PR. Use branch-diff review only when PR creation is not approved.
+7. Run a PR review loop with a maximum of 10 review iterations: assess findings, apply only worthwhile fixes on the same branch, run checks, commit, push, then spawn a fresh subagent to review the updated PR.
+8. Stop the loop only when a subagent returns no findings worth addressing. If iteration 10 still has worthwhile findings, stop and report the remaining findings instead of merging.
+9. Record review state with `feature implement review ... --review-status passed|changes-applied --write-state` only after the final reviewed branch has been pushed.
+10. Merge only when checks and policy allow it. Record merge state with `feature implement merge ... --merge-commit <sha> --write-state`.
+11. Update local main, remove the temporary worktree, then record `feature implement cleanup ... --write-state`. Delete the remote branch only when the plan permits it and the user explicitly approved it.
+12. Confirm `feature implement next <plan-dir> --json` advances before continuing to the next merge unit.
 
 Use these guarded CLI forms for write steps:
 

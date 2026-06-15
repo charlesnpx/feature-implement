@@ -24,6 +24,10 @@ func TestImplementLifecycleRecordsStateAndAdvances(t *testing.T) {
 	if start.Branch != "feature/sample-migration-plan/story-current-state" {
 		t.Fatalf("branch = %q", start.Branch)
 	}
+	wantStartCommand := "git worktree add -b feature/sample-migration-plan/story-current-state " + filepath.Join(planDir, "worktrees", "story-current-state") + " main"
+	if len(start.Commands) != 1 || start.Commands[0] != wantStartCommand {
+		t.Fatalf("start commands = %#v", start.Commands)
+	}
 
 	steps := []ImplementOptions{
 		{PlanDir: planDir, Action: "commit", MergeUnit: "story-current-state", WriteState: true, CommitSHA: "commit-sha"},
@@ -125,6 +129,30 @@ func TestImplementPlansConcretePushCommand(t *testing.T) {
 	want := "git push -u origin HEAD:feature/sample-migration-plan/story-current-state"
 	if len(push.Commands) != 1 || push.Commands[0] != want {
 		t.Fatalf("push commands = %#v", push.Commands)
+	}
+}
+
+func TestImplementPlansConcreteMergeCommand(t *testing.T) {
+	planDir := materializeExamplePlan(t)
+	steps := []ImplementOptions{
+		{PlanDir: planDir, Action: "start", MergeUnit: "story-current-state", WriteState: true, BaseSHA: "base-sha"},
+		{PlanDir: planDir, Action: "commit", MergeUnit: "story-current-state", WriteState: true, CommitSHA: "commit-sha"},
+		{PlanDir: planDir, Action: "push", MergeUnit: "story-current-state", WriteState: true, AllowPush: true},
+		{PlanDir: planDir, Action: "open-pr", MergeUnit: "story-current-state", WriteState: true, AllowOpenPR: true, PRNumber: 42, PRURL: "https://example.test/pr/42"},
+		{PlanDir: planDir, Action: "review", MergeUnit: "story-current-state", WriteState: true, ReviewStatus: "passed"},
+	}
+	for _, step := range steps {
+		if _, err := Implement(step); err != nil {
+			t.Fatalf("%s: %v", step.Action, err)
+		}
+	}
+
+	merge, err := Implement(ImplementOptions{PlanDir: planDir, Action: "merge", MergeUnit: "story-current-state", AllowMerge: true})
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if len(merge.Commands) != 1 || merge.Commands[0] != "gh pr merge 42 --merge" {
+		t.Fatalf("merge commands = %#v", merge.Commands)
 	}
 }
 

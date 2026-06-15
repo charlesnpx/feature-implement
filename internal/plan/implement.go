@@ -68,13 +68,14 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 	case "start":
 		branch := firstNonBlank(opts.Branch, defaultBranchName(lock, unitID))
 		worktree := firstNonBlank(opts.Worktree, defaultWorktreePath(opts.PlanDir, unitID))
+		baseRef := firstNonBlank(lock.BaseRef, "main")
 		result := ImplementResult{
 			Status:    "planned",
 			Action:    opts.Action,
 			MergeUnit: unitID,
 			Branch:    branch,
 			Worktree:  worktree,
-			Commands:  []string{fmt.Sprintf("git worktree add -b %s %s <base-ref>", branch, worktree)},
+			Commands:  []string{fmt.Sprintf("git worktree add -b %s %s %s", branch, worktree, baseRef)},
 			Message:   "runtime preflight and worktree creation are required before implementation; use --write-state after the worktree exists",
 		}
 		if opts.WriteState {
@@ -150,7 +151,12 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 		if !opts.AllowMerge {
 			return ImplementResult{}, fmt.Errorf("merge requires --allow-merge")
 		}
-		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{"gh pr merge"}}
+		state, _ := mergeUnitState(lock, unitID)
+		prNumber := firstPositive(opts.PRNumber, state.PRNumber)
+		if prNumber <= 0 {
+			return ImplementResult{}, fmt.Errorf("merge requires recorded PR number; run open-pr --write-state first")
+		}
+		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{fmt.Sprintf("gh pr merge %d --merge", prNumber)}}
 		if opts.WriteState {
 			if strings.TrimSpace(opts.MergeCommit) == "" {
 				return ImplementResult{}, fmt.Errorf("merge --write-state requires --merge-commit")
@@ -235,4 +241,13 @@ func firstNonBlank(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstPositive(values ...int) int {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }

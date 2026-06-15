@@ -222,9 +222,9 @@ func validateTransition(current string, action string) error {
 
 func defaultBranchName(lock Lock, unitID string) string {
 	if lock.ManifestID == "" {
-		return "feature/" + unitID
+		return "feature/" + slug(unitID)
 	}
-	return "feature/" + lock.ManifestID + "/" + unitID
+	return "feature/" + slug(lock.ManifestID) + "/" + slug(unitID)
 }
 
 func defaultWorktreePath(planDir, unitID string) string {

@@ -265,6 +265,34 @@ func TestImplementRequiresLockAndExplicitWriteFlags(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsDuplicateMergeUnitIDs(t *testing.T) {
+	manifest := minimalValidManifest()
+	manifest.MergeUnits = []MergeUnit{
+		{ID: "story-a", Name: "Story A", StoryIDs: []string{"story-a"}},
+		{ID: "story-a", Name: "Story A Again", StoryIDs: []string{"story-b"}},
+	}
+
+	err := validateManifestShape(manifest)
+
+	if err == nil || !strings.Contains(err.Error(), "duplicate merge unit id story-a") {
+		t.Fatalf("validate error = %v", err)
+	}
+}
+
+func TestValidateRejectsUnsafeMergeUnitIDs(t *testing.T) {
+	manifest := minimalValidManifest()
+	manifest.MergeUnits = []MergeUnit{
+		{ID: "../outside", Name: "Unsafe", StoryIDs: []string{"story-a"}},
+		{ID: "story-b", Name: "Story B", StoryIDs: []string{"story-b"}},
+	}
+
+	err := validateManifestShape(manifest)
+
+	if err == nil || !strings.Contains(err.Error(), `merge unit id "../outside"`) {
+		t.Fatalf("validate error = %v", err)
+	}
+}
+
 func TestExampleManifestMaterializesAndValidates(t *testing.T) {
 	root := t.TempDir()
 	manifestPath := filepath.Join(root, "feature.plan.yaml")
@@ -356,4 +384,44 @@ merge_units:
     story_ids:
       - story-install-contract
 `
+}
+
+func minimalValidManifest() Manifest {
+	return Manifest{
+		SchemaVersion: 1,
+		ID:            "sample",
+		Title:         "Sample",
+		Epics: []Epic{{
+			ID:      "epic-a",
+			Number:  1,
+			Name:    "Epic A",
+			Summary: "Epic summary.",
+			Features: []Feature{{
+				ID:      "feature-a",
+				Number:  1,
+				Name:    "Feature A",
+				Summary: "Feature summary.",
+				Stories: []Story{
+					{
+						ID:             "story-a",
+						Number:         1,
+						Name:           "Story A",
+						Summary:        "Story summary.",
+						Acceptance:     []string{"Acceptance."},
+						Implementation: []string{"Implementation."},
+						Testing:        []string{"Testing."},
+					},
+					{
+						ID:             "story-b",
+						Number:         2,
+						Name:           "Story B",
+						Summary:        "Story summary.",
+						Acceptance:     []string{"Acceptance."},
+						Implementation: []string{"Implementation."},
+						Testing:        []string{"Testing."},
+					},
+				},
+			}},
+		}},
+	}
 }
