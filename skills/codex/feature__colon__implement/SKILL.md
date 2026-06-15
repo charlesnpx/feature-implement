@@ -23,12 +23,13 @@ Implement a validated feature plan.
 4. Implement the story or merge unit, run repo checks, commit locally, then record `feature implement commit ... --commit-sha <sha> --write-state`.
 5. Push the implementation branch, open a PR with a clear title and description, then record PR number/URL with `feature implement open-pr ... --write-state`.
 6. Spawn a Codex subagent to review the opened PR. Use branch-diff review only when PR creation is not approved.
-7. Run a PR review loop with a maximum of 10 review iterations: assess findings, apply only worthwhile fixes on the same branch, run checks, commit, push, then spawn a fresh subagent to review the updated PR.
-8. Stop the loop only when a subagent returns no findings worth addressing. If iteration 10 still has worthwhile findings, stop and report the remaining findings instead of merging.
-9. Record review state with `feature implement review ... --review-status passed|changes-applied --write-state` only after the final reviewed branch has been pushed.
-10. Merge only when checks and policy allow it. Record merge state with `feature implement merge ... --merge-commit <sha> --write-state`.
-11. Update local main, remove the temporary worktree, then record `feature implement cleanup ... --write-state`. Delete the remote branch only when the plan permits it and the user explicitly approved it.
-12. Confirm `feature implement next <plan-dir> --json` advances before continuing to the next merge unit.
+7. Run a PR review loop with a maximum of 10 fresh-review iterations. For each review with worthwhile findings, keep that reviewer agent alive, apply the selected fixes locally, run checks, and do not commit yet.
+8. Send the same reviewer the addressed findings, changed file list, and relevant local diff; ask whether the patch resolves their specific concerns. Iterate locally until the reviewer confirms, or until you deliberately reject the concern with a concrete reason.
+9. Commit and push the confirmed fixes, then spawn a fresh subagent to review the updated PR. Stop only when a fresh reviewer returns no findings worth addressing. If iteration 10 still has worthwhile findings, stop and report the remaining findings instead of merging.
+10. Record review state with `feature implement review ... --review-status passed|changes-applied --write-state` only after the final reviewed branch has been pushed.
+11. Merge only when checks and policy allow it. Record merge state with `feature implement merge ... --merge-commit <sha> --write-state`.
+12. Update local main, remove the temporary worktree, then record `feature implement cleanup ... --write-state`. Delete the remote branch only when the plan permits it and the user explicitly approved it.
+13. Confirm `feature implement next <plan-dir> --json` advances before continuing to the next merge unit.
 
 Use these guarded CLI forms for write steps:
 
