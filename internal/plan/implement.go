@@ -54,6 +54,13 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 	if !hasUnit(lock, unitID) {
 		return ImplementResult{}, fmt.Errorf("unknown merge unit: %s", unitID)
 	}
+	if opts.Action != "next" {
+		var err error
+		lock, _, _, err = validateMergeUnitTransition(lock, unitID, opts.Action)
+		if err != nil {
+			return ImplementResult{}, err
+		}
+	}
 	switch opts.Action {
 	case "next":
 		state, _ := mergeUnitState(lock, unitID)

@@ -106,6 +106,13 @@ func TestDocumentedTrailingFlagsWork(t *testing.T) {
 		t.Fatalf("validate did not report valid status:\n%s", stdout)
 	}
 
+	if _, stderr, err := runFeature(t, "implement", "start", planDir, "--merge-unit", "story-current-state", "--base-sha", "base", "--write-state", "--json"); err != nil {
+		t.Fatalf("feature implement start failed: %v\nstderr=%s", err, stderr)
+	}
+	if _, stderr, err := runFeature(t, "implement", "commit", planDir, "--merge-unit", "story-current-state", "--commit-sha", "commit", "--write-state", "--json"); err != nil {
+		t.Fatalf("feature implement commit failed: %v\nstderr=%s", err, stderr)
+	}
+
 	stdout, stderr, err = runFeature(t, "implement", "push", planDir, "--merge-unit", "story-current-state", "--allow-push", "--json")
 	if err != nil {
 		t.Fatalf("feature implement with trailing flags failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)

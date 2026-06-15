@@ -165,6 +165,17 @@ func mergeUnitState(lock Lock, id string) (MergeUnitState, bool) {
 }
 
 func transitionMergeUnit(lock Lock, id string, action string, mutate func(*MergeUnitState)) (Lock, MergeUnitState, error) {
+	next, index, current, err := validateMergeUnitTransition(lock, id, action)
+	if err != nil {
+		return Lock{}, MergeUnitState{}, err
+	}
+	updated := current
+	mutate(&updated)
+	next.State.MergeUnits[index] = updated
+	return next, updated, nil
+}
+
+func validateMergeUnitTransition(lock Lock, id string, action string) (Lock, int, MergeUnitState, error) {
 	next := normalizeLockState(lock)
 	index := -1
 	for i, state := range next.State.MergeUnits {
@@ -174,20 +185,17 @@ func transitionMergeUnit(lock Lock, id string, action string, mutate func(*Merge
 		}
 	}
 	if index < 0 {
-		return Lock{}, MergeUnitState{}, fmt.Errorf("unknown merge unit: %s", id)
+		return Lock{}, -1, MergeUnitState{}, fmt.Errorf("unknown merge unit: %s", id)
 	}
 	nextID := nextMergeUnitID(next)
 	if id != nextID {
-		return Lock{}, MergeUnitState{}, fmt.Errorf("cannot %s merge unit %s before %s", action, id, nextID)
+		return Lock{}, -1, MergeUnitState{}, fmt.Errorf("cannot %s merge unit %s before %s", action, id, nextID)
 	}
 	current := next.State.MergeUnits[index]
 	if err := validateTransition(current.Status, action); err != nil {
-		return Lock{}, MergeUnitState{}, err
+		return Lock{}, -1, MergeUnitState{}, err
 	}
-	updated := current
-	mutate(&updated)
-	next.State.MergeUnits[index] = updated
-	return next, updated, nil
+	return next, index, current, nil
 }
 
 func validateTransition(current string, action string) error {

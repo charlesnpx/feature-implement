@@ -246,10 +246,17 @@ func TestImplementRequiresLockAndExplicitWriteFlags(t *testing.T) {
 	if _, err := Validate(ValidateOptions{PlanDir: materialized.PlanDir, WriteLock: true}); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if _, err := Implement(ImplementOptions{PlanDir: materialized.PlanDir, Action: "push"}); err == nil {
+	mergeUnitID := "story-install-contract"
+	if _, err := Implement(ImplementOptions{PlanDir: materialized.PlanDir, Action: "start", MergeUnit: mergeUnitID, WriteState: true, BaseSHA: "base-sha"}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if _, err := Implement(ImplementOptions{PlanDir: materialized.PlanDir, Action: "commit", MergeUnit: mergeUnitID, WriteState: true, CommitSHA: "commit-sha"}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if _, err := Implement(ImplementOptions{PlanDir: materialized.PlanDir, Action: "push", MergeUnit: mergeUnitID}); err == nil {
 		t.Fatalf("push should require explicit flag")
 	}
-	result, err := Implement(ImplementOptions{PlanDir: materialized.PlanDir, Action: "push", AllowPush: true})
+	result, err := Implement(ImplementOptions{PlanDir: materialized.PlanDir, Action: "push", MergeUnit: mergeUnitID, AllowPush: true})
 	if err != nil {
 		t.Fatalf("push with flag: %v", err)
 	}

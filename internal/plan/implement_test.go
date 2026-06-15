@@ -72,6 +72,9 @@ func TestImplementRejectsInvalidLifecycleTransitions(t *testing.T) {
 	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "push", MergeUnit: "story-current-state", WriteState: true, AllowPush: true}); err == nil {
 		t.Fatalf("push before start/commit should fail")
 	}
+	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "merge", MergeUnit: "story-current-state", AllowMerge: true}); err == nil {
+		t.Fatalf("planned merge before review should fail")
+	}
 	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "start", MergeUnit: "story-current-state", WriteState: true}); err == nil {
 		t.Fatalf("start without base SHA should fail")
 	}
