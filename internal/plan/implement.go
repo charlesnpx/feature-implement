@@ -153,9 +153,13 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 		}
 		return result, nil
 	case "cleanup":
-		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{"git worktree remove"}}
+		state, _ := mergeUnitState(lock, unitID)
+		worktree := firstNonBlank(state.Worktree, opts.Worktree, defaultWorktreePath(opts.PlanDir, unitID))
+		branch := firstNonBlank(state.Branch, opts.Branch, defaultBranchName(lock, unitID))
+		remote := firstNonBlank(lock.Remote, "origin")
+		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{fmt.Sprintf("git worktree remove %s", worktree)}}
 		if lock.MergePolicy.DeleteBranchAllowed && opts.AllowDeleteBranch {
-			result.Commands = append(result.Commands, "git push origin --delete")
+			result.Commands = append(result.Commands, fmt.Sprintf("git push %s --delete %s", remote, branch))
 		}
 		if opts.WriteState {
 			cleanupStatus := "worktree-removed"

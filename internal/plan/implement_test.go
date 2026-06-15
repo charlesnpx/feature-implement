@@ -105,6 +105,22 @@ func TestImplementWriteStateRequiresLifecycleMetadata(t *testing.T) {
 	}
 }
 
+func TestImplementRejectsOutOfOrderWritesForAlreadyStartedUnit(t *testing.T) {
+	planDir := materializeExamplePlan(t)
+	lock := readTestLock(t, planDir)
+	lock.State.MergeUnits[1].Status = MergeUnitStarted
+	lock.State.MergeUnits[1].Branch = "feature/sample-migration-plan/story-target-plan"
+	lock.State.MergeUnits[1].Worktree = filepath.Join(planDir, "worktrees", "story-target-plan")
+	lock.State.MergeUnits[1].BaseSHA = "base-sha"
+	if err := writeLock(planDir, lock); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "commit", MergeUnit: "story-target-plan", WriteState: true, CommitSHA: "commit-sha"}); err == nil {
+		t.Fatalf("commit on later started unit should fail while an earlier unit is pending")
+	}
+}
+
 func TestImplementMergeAndLocalCleanupDoNotRequireDeleteBranchApproval(t *testing.T) {
 	planDir := materializeExamplePlan(t)
 	lock := readTestLock(t, planDir)
@@ -120,12 +136,29 @@ func TestImplementMergeAndLocalCleanupDoNotRequireDeleteBranchApproval(t *testin
 		{PlanDir: planDir, Action: "open-pr", MergeUnit: "story-current-state", WriteState: true, AllowOpenPR: true, PRNumber: 42, PRURL: "https://example.test/pr/42"},
 		{PlanDir: planDir, Action: "review", MergeUnit: "story-current-state", WriteState: true, ReviewStatus: "passed"},
 		{PlanDir: planDir, Action: "merge", MergeUnit: "story-current-state", WriteState: true, AllowMerge: true, MergeCommit: "merge-sha"},
-		{PlanDir: planDir, Action: "cleanup", MergeUnit: "story-current-state", WriteState: true},
 	}
 	for _, step := range steps {
 		if _, err := Implement(step); err != nil {
 			t.Fatalf("%s without delete-branch approval: %v", step.Action, err)
 		}
+	}
+
+	plannedCleanup, err := Implement(ImplementOptions{PlanDir: planDir, Action: "cleanup", MergeUnit: "story-current-state", AllowDeleteBranch: true})
+	if err != nil {
+		t.Fatalf("planned cleanup with delete-branch approval: %v", err)
+	}
+	wantWorktreeCommand := "git worktree remove " + filepath.Join(planDir, "worktrees", "story-current-state")
+	wantDeleteCommand := "git push origin --delete feature/sample-migration-plan/story-current-state"
+	if len(plannedCleanup.Commands) != 2 || plannedCleanup.Commands[0] != wantWorktreeCommand || plannedCleanup.Commands[1] != wantDeleteCommand {
+		t.Fatalf("planned cleanup commands = %#v", plannedCleanup.Commands)
+	}
+
+	cleanup, err := Implement(ImplementOptions{PlanDir: planDir, Action: "cleanup", MergeUnit: "story-current-state", WriteState: true})
+	if err != nil {
+		t.Fatalf("cleanup without delete-branch approval: %v", err)
+	}
+	if len(cleanup.Commands) != 1 || cleanup.Commands[0] != wantWorktreeCommand {
+		t.Fatalf("cleanup commands = %#v", cleanup.Commands)
 	}
 }
 

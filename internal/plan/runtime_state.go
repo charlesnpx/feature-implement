@@ -176,11 +176,9 @@ func transitionMergeUnit(lock Lock, id string, action string, mutate func(*Merge
 	if index < 0 {
 		return Lock{}, MergeUnitState{}, fmt.Errorf("unknown merge unit: %s", id)
 	}
-	if action == "start" {
-		nextID := nextMergeUnitID(next)
-		if id != nextID {
-			return Lock{}, MergeUnitState{}, fmt.Errorf("cannot start merge unit %s before %s", id, nextID)
-		}
+	nextID := nextMergeUnitID(next)
+	if id != nextID {
+		return Lock{}, MergeUnitState{}, fmt.Errorf("cannot %s merge unit %s before %s", action, id, nextID)
 	}
 	current := next.State.MergeUnits[index]
 	if err := validateTransition(current.Status, action); err != nil {
