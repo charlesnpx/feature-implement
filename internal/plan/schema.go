@@ -143,7 +143,7 @@ func ManifestSchema() map[string]any {
 				"additionalProperties": false,
 				"required":             []string{"id", "number", "name", "summary", "acceptance", "implementation", "testing"},
 				"properties": map[string]any{
-					"id":             map[string]any{"type": "string", "minLength": 1},
+					"id":             map[string]any{"type": "string", "pattern": safeIDPattern},
 					"number":         map[string]any{"type": "integer", "minimum": 1},
 					"name":           map[string]any{"type": "string", "minLength": 1},
 					"summary":        map[string]any{"type": "string", "minLength": 1},

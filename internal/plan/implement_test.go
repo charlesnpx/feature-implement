@@ -118,6 +118,21 @@ func TestImplementPlansConcretePushCommand(t *testing.T) {
 	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "start", MergeUnit: "story-current-state", WriteState: true, BaseSHA: "base-sha"}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
+
+	commitPlan, err := Implement(ImplementOptions{PlanDir: planDir, Action: "commit", MergeUnit: "story-current-state"})
+	if err != nil {
+		t.Fatalf("commit plan: %v", err)
+	}
+	worktree := filepath.Join(planDir, "worktrees", "story-current-state")
+	wantCommitCommands := []string{
+		"git -C " + worktree + " status --short",
+		"git -C " + worktree + " add .",
+		"git -C " + worktree + " commit",
+	}
+	if strings.Join(commitPlan.Commands, "\n") != strings.Join(wantCommitCommands, "\n") {
+		t.Fatalf("commit commands = %#v", commitPlan.Commands)
+	}
+
 	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "commit", MergeUnit: "story-current-state", WriteState: true, CommitSHA: "commit-sha"}); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -126,9 +141,21 @@ func TestImplementPlansConcretePushCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("push: %v", err)
 	}
-	want := "git push -u origin HEAD:feature/sample-migration-plan/story-current-state"
+	want := "git -C " + worktree + " push -u origin HEAD:feature/sample-migration-plan/story-current-state"
 	if len(push.Commands) != 1 || push.Commands[0] != want {
 		t.Fatalf("push commands = %#v", push.Commands)
+	}
+
+	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "push", MergeUnit: "story-current-state", WriteState: true, AllowPush: true}); err != nil {
+		t.Fatalf("record push: %v", err)
+	}
+	openPR, err := Implement(ImplementOptions{PlanDir: planDir, Action: "open-pr", MergeUnit: "story-current-state", AllowOpenPR: true})
+	if err != nil {
+		t.Fatalf("open-pr: %v", err)
+	}
+	wantOpenPR := "cd " + worktree + " && gh pr create --base main --head feature/sample-migration-plan/story-current-state"
+	if len(openPR.Commands) != 1 || openPR.Commands[0] != wantOpenPR {
+		t.Fatalf("open-pr commands = %#v", openPR.Commands)
 	}
 }
 
@@ -152,11 +179,39 @@ func TestImplementQuotesWorktreeCommandsWithSpaces(t *testing.T) {
 	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "start", MergeUnit: "story-current-state", WriteState: true, BaseSHA: "base-sha"}); err != nil {
 		t.Fatalf("record start: %v", err)
 	}
+	commitPlan, err := Implement(ImplementOptions{PlanDir: planDir, Action: "commit", MergeUnit: "story-current-state"})
+	if err != nil {
+		t.Fatalf("commit plan: %v", err)
+	}
+	wantCommitCommands := []string{
+		"git -C '" + wantWorktree + "' status --short",
+		"git -C '" + wantWorktree + "' add .",
+		"git -C '" + wantWorktree + "' commit",
+	}
+	if strings.Join(commitPlan.Commands, "\n") != strings.Join(wantCommitCommands, "\n") {
+		t.Fatalf("commit commands = %#v", commitPlan.Commands)
+	}
 	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "commit", MergeUnit: "story-current-state", WriteState: true, CommitSHA: "commit-sha"}); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
+	pushPlan, err := Implement(ImplementOptions{PlanDir: planDir, Action: "push", MergeUnit: "story-current-state", AllowPush: true})
+	if err != nil {
+		t.Fatalf("push plan: %v", err)
+	}
+	wantPushCommand := "git -C '" + wantWorktree + "' push -u origin HEAD:feature/sample-migration-plan/story-current-state"
+	if len(pushPlan.Commands) != 1 || pushPlan.Commands[0] != wantPushCommand {
+		t.Fatalf("push commands = %#v", pushPlan.Commands)
+	}
 	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "push", MergeUnit: "story-current-state", WriteState: true, AllowPush: true}); err != nil {
 		t.Fatalf("push: %v", err)
+	}
+	openPRPlan, err := Implement(ImplementOptions{PlanDir: planDir, Action: "open-pr", MergeUnit: "story-current-state", AllowOpenPR: true})
+	if err != nil {
+		t.Fatalf("open-pr plan: %v", err)
+	}
+	wantOpenPRCommand := "cd '" + wantWorktree + "' && gh pr create --base main --head feature/sample-migration-plan/story-current-state"
+	if len(openPRPlan.Commands) != 1 || openPRPlan.Commands[0] != wantOpenPRCommand {
+		t.Fatalf("open-pr commands = %#v", openPRPlan.Commands)
 	}
 	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "open-pr", MergeUnit: "story-current-state", WriteState: true, AllowOpenPR: true, PRNumber: 42, PRURL: "https://example.test/pr/42"}); err != nil {
 		t.Fatalf("open-pr: %v", err)
@@ -197,7 +252,7 @@ func TestImplementPlansConcreteMergeCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("merge: %v", err)
 	}
-	if len(merge.Commands) != 1 || merge.Commands[0] != "gh pr merge 42 --merge" {
+	if len(merge.Commands) != 1 || merge.Commands[0] != "gh pr merge https://example.test/pr/42 --merge" {
 		t.Fatalf("merge commands = %#v", merge.Commands)
 	}
 }

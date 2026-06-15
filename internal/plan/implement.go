@@ -91,7 +91,13 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 		}
 		return result, nil
 	case "commit":
-		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{"git status --short", "git add", "git commit"}}
+		state, _ := mergeUnitState(lock, unitID)
+		worktree := firstNonBlank(state.Worktree, opts.Worktree, defaultWorktreePath(opts.PlanDir, unitID))
+		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{
+			fmt.Sprintf("git -C %s status --short", shellQuote(worktree)),
+			fmt.Sprintf("git -C %s add .", shellQuote(worktree)),
+			fmt.Sprintf("git -C %s commit", shellQuote(worktree)),
+		}}
 		if opts.WriteState {
 			if strings.TrimSpace(opts.CommitSHA) == "" {
 				return ImplementResult{}, fmt.Errorf("commit --write-state requires --commit-sha")
@@ -107,9 +113,10 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 			return ImplementResult{}, fmt.Errorf("push requires --allow-push")
 		}
 		state, _ := mergeUnitState(lock, unitID)
+		worktree := firstNonBlank(state.Worktree, opts.Worktree, defaultWorktreePath(opts.PlanDir, unitID))
 		branch := firstNonBlank(state.Branch, opts.Branch, defaultBranchName(lock, unitID))
 		remote := firstNonBlank(lock.Remote, "origin")
-		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{fmt.Sprintf("git push -u %s %s", shellQuote(remote), shellQuote("HEAD:"+branch))}}
+		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{fmt.Sprintf("git -C %s push -u %s %s", shellQuote(worktree), shellQuote(remote), shellQuote("HEAD:"+branch))}}
 		if opts.WriteState {
 			return writeTransition(opts.PlanDir, lock, unitID, opts.Action, result, func(state *MergeUnitState) {
 				state.Status = MergeUnitPushed
@@ -120,7 +127,11 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 		if !opts.AllowOpenPR {
 			return ImplementResult{}, fmt.Errorf("open-pr requires --allow-open-pr")
 		}
-		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{"gh pr create"}}
+		state, _ := mergeUnitState(lock, unitID)
+		worktree := firstNonBlank(state.Worktree, opts.Worktree, defaultWorktreePath(opts.PlanDir, unitID))
+		branch := firstNonBlank(state.Branch, opts.Branch, defaultBranchName(lock, unitID))
+		baseRef := firstNonBlank(lock.BaseRef, "main")
+		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{fmt.Sprintf("cd %s && gh pr create --base %s --head %s", shellQuote(worktree), shellQuote(baseRef), shellQuote(branch))}}
 		if opts.WriteState {
 			if opts.PRNumber <= 0 {
 				return ImplementResult{}, fmt.Errorf("open-pr --write-state requires --pr")
@@ -153,10 +164,14 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 		}
 		state, _ := mergeUnitState(lock, unitID)
 		prNumber := firstPositive(opts.PRNumber, state.PRNumber)
-		if prNumber <= 0 {
-			return ImplementResult{}, fmt.Errorf("merge requires recorded PR number; run open-pr --write-state first")
+		prTarget := firstNonBlank(state.PRURL)
+		if prTarget == "" && prNumber > 0 {
+			prTarget = fmt.Sprintf("%d", prNumber)
 		}
-		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{fmt.Sprintf("gh pr merge %d --merge", prNumber)}}
+		if prTarget == "" {
+			return ImplementResult{}, fmt.Errorf("merge requires recorded PR number or URL; run open-pr --write-state first")
+		}
+		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{fmt.Sprintf("gh pr merge %s --merge", shellQuote(prTarget))}}
 		if opts.WriteState {
 			if strings.TrimSpace(opts.MergeCommit) == "" {
 				return ImplementResult{}, fmt.Errorf("merge --write-state requires --merge-commit")

@@ -293,6 +293,18 @@ func TestValidateRejectsUnsafeMergeUnitIDs(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsUnsafeStoryIDs(t *testing.T) {
+	manifest := minimalValidManifest()
+	manifest.Epics[0].Features[0].Stories[0].ID = "Story A"
+	manifest.MergeUnits = nil
+
+	err := validateManifestShape(manifest)
+
+	if err == nil || !strings.Contains(err.Error(), `story id "Story A"`) {
+		t.Fatalf("validate error = %v", err)
+	}
+}
+
 func TestExampleManifestMaterializesAndValidates(t *testing.T) {
 	root := t.TempDir()
 	manifestPath := filepath.Join(root, "feature.plan.yaml")
@@ -343,6 +355,12 @@ func TestManifestSchemaExposesRequiredContract(t *testing.T) {
 	mergeUnitID := mergeUnitProps["id"].(map[string]any)
 	if mergeUnitID["pattern"] != safeIDPattern {
 		t.Fatalf("merge unit id pattern = %+v", mergeUnitID["pattern"])
+	}
+	story := defs["story"].(map[string]any)
+	storyProps := story["properties"].(map[string]any)
+	storyID := storyProps["id"].(map[string]any)
+	if storyID["pattern"] != safeIDPattern {
+		t.Fatalf("story id pattern = %+v", storyID["pattern"])
 	}
 }
 

@@ -161,6 +161,9 @@ func validateMaterializeShape(manifest Manifest) error {
 				if err := addID(ids, story.ID, "story"); err != nil {
 					return err
 				}
+				if err := validateSafeIDSegment(story.ID, "story"); err != nil {
+					return err
+				}
 				if story.Number <= 0 || story.Name == "" {
 					return fmt.Errorf("story %s requires positive number and name", story.ID)
 				}
