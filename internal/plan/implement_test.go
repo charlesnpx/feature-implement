@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -108,6 +109,25 @@ func TestImplementWriteStateRequiresLifecycleMetadata(t *testing.T) {
 	}
 }
 
+func TestImplementPlansConcretePushCommand(t *testing.T) {
+	planDir := materializeExamplePlan(t)
+	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "start", MergeUnit: "story-current-state", WriteState: true, BaseSHA: "base-sha"}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "commit", MergeUnit: "story-current-state", WriteState: true, CommitSHA: "commit-sha"}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	push, err := Implement(ImplementOptions{PlanDir: planDir, Action: "push", MergeUnit: "story-current-state", AllowPush: true})
+	if err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	want := "git push -u origin HEAD:feature/sample-migration-plan/story-current-state"
+	if len(push.Commands) != 1 || push.Commands[0] != want {
+		t.Fatalf("push commands = %#v", push.Commands)
+	}
+}
+
 func TestImplementRejectsOutOfOrderWritesForAlreadyStartedUnit(t *testing.T) {
 	planDir := materializeExamplePlan(t)
 	lock := readTestLock(t, planDir)
@@ -121,6 +141,24 @@ func TestImplementRejectsOutOfOrderWritesForAlreadyStartedUnit(t *testing.T) {
 
 	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "commit", MergeUnit: "story-target-plan", WriteState: true, CommitSHA: "commit-sha"}); err == nil {
 		t.Fatalf("commit on later started unit should fail while an earlier unit is pending")
+	}
+}
+
+func TestDefaultWorktreePathDoesNotEscapePlanWorktrees(t *testing.T) {
+	planDir := t.TempDir()
+
+	worktree := defaultWorktreePath(planDir, "../outside")
+
+	want := filepath.Join(planDir, "worktrees", "outside")
+	if worktree != want {
+		t.Fatalf("worktree = %q, want %q", worktree, want)
+	}
+	rel, err := filepath.Rel(filepath.Join(planDir, "worktrees"), worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		t.Fatalf("worktree escaped plan worktrees root: %q", worktree)
 	}
 }
 

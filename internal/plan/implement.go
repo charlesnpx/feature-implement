@@ -105,7 +105,10 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 		if !opts.AllowPush {
 			return ImplementResult{}, fmt.Errorf("push requires --allow-push")
 		}
-		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{"git push -u"}}
+		state, _ := mergeUnitState(lock, unitID)
+		branch := firstNonBlank(state.Branch, opts.Branch, defaultBranchName(lock, unitID))
+		remote := firstNonBlank(lock.Remote, "origin")
+		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{fmt.Sprintf("git push -u %s HEAD:%s", remote, branch)}}
 		if opts.WriteState {
 			return writeTransition(opts.PlanDir, lock, unitID, opts.Action, result, func(state *MergeUnitState) {
 				state.Status = MergeUnitPushed

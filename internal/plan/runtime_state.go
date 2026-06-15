@@ -228,5 +228,5 @@ func defaultBranchName(lock Lock, unitID string) string {
 }
 
 func defaultWorktreePath(planDir, unitID string) string {
-	return filepath.Join(planDir, "worktrees", unitID)
+	return filepath.Join(planDir, "worktrees", slug(unitID))
 }
