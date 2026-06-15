@@ -30,6 +30,8 @@ epics:
               - Migration risks and unknowns are captured.
             implementation:
               - Review existing docs, code paths, and operational runbooks.
+            testing:
+              - Validate that the inventory covers systems, owners, dependencies, and risks.
           - id: story-target-plan
             number: 2
             name: Target Migration Plan
@@ -39,6 +41,8 @@ epics:
               - Rollback and validation steps are documented.
             implementation:
               - Convert findings into an implementation-ready migration sequence.
+            testing:
+              - Review the plan against phase gates, rollback expectations, and validation steps.
             dependencies:
               - story-current-state
 merge_units:
@@ -137,14 +141,15 @@ func ManifestSchema() map[string]any {
 			"story": map[string]any{
 				"type":                 "object",
 				"additionalProperties": false,
-				"required":             []string{"id", "number", "name"},
+				"required":             []string{"id", "number", "name", "summary", "acceptance", "implementation", "testing"},
 				"properties": map[string]any{
 					"id":             map[string]any{"type": "string", "minLength": 1},
 					"number":         map[string]any{"type": "integer", "minimum": 1},
 					"name":           map[string]any{"type": "string", "minLength": 1},
-					"summary":        map[string]any{"type": "string"},
-					"acceptance":     stringArray,
-					"implementation": stringArray,
+					"summary":        map[string]any{"type": "string", "minLength": 1},
+					"acceptance":     requiredStringArray,
+					"implementation": requiredStringArray,
+					"testing":        requiredStringArray,
 					"dependencies":   stringArray,
 				},
 			},

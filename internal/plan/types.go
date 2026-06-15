@@ -43,6 +43,7 @@ type Story struct {
 	Summary        string   `yaml:"summary,omitempty" json:"summary,omitempty"`
 	Acceptance     []string `yaml:"acceptance,omitempty" json:"acceptance,omitempty"`
 	Implementation []string `yaml:"implementation,omitempty" json:"implementation,omitempty"`
+	Testing        []string `yaml:"testing,omitempty" json:"testing,omitempty"`
 	Dependencies   []string `yaml:"dependencies,omitempty" json:"dependencies,omitempty"`
 }
 

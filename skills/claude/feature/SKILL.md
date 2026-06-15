@@ -9,12 +9,13 @@ argument-hint: "[--out <folder>] <scope/task>"
 Create a feature implementation plan from the user's scope.
 
 1. Parse the requested scope and optional output folder. If omitted, do not pass `--out-root`; let `feature plan materialize` use its default output root.
-2. Draft `feature.plan.yaml` using the manifest contract below. Use stable slug-style IDs, ordered numbers, epics, features, stories, dependencies, and merge units.
-3. Default to one merge unit per story. Use a feature-level merge unit only when all included stories are in the same feature and have no unresolved dependency on an outside story.
-4. For migration or phased-planning prompts, map phases to epics, workstreams/capability areas to features, and concrete implementation steps to stories.
-5. Run `feature plan materialize --manifest <manifest> --out-root <folder> --json` only when the user gave an output folder; otherwise run `feature plan materialize --manifest <manifest> --json`.
-6. Spawn a Claude subagent to review hierarchy, story granularity, dependencies, merge units, missing caveats, and implementation order.
-7. Apply useful review findings, then run `feature validate <plan-dir> --write-lock --json`.
+2. Choose a scratch manifest staging root. Use the provided output folder when one was specified; otherwise use `~/tmp` if it exists; otherwise use the system temp directory. Never write the draft manifest in the current repo root unless the user explicitly supplied the repo root as the output folder.
+3. Create a non-hidden scratch staging folder under that root, for example `<staging-root>/feature-manifest-<slug>/feature.plan.yaml`, and draft the manifest there using the contract below. Use stable slug-style IDs, ordered numbers, epics, features, stories, dependencies, and merge units.
+4. Default to one merge unit per story. Use a feature-level merge unit only when all included stories are in the same feature and have no unresolved dependency on an outside story.
+5. For migration or phased-planning prompts, map phases to epics, workstreams/capability areas to features, and concrete implementation steps to stories.
+6. Run `feature plan materialize --manifest <manifest> --out-root <folder> --json` only when the user gave an output folder; otherwise run `feature plan materialize --manifest <manifest> --json`.
+7. Spawn a Claude subagent to review hierarchy, story granularity, dependencies, merge units, missing caveats, and implementation order.
+8. Apply useful review findings, then run `feature validate <plan-dir> --write-lock --json`.
 
 Return the plan directory, validation status, and implementation order.
 
@@ -35,7 +36,19 @@ Optional top-level fields:
 - `merge_policy`: `auto_merge_allowed`, `delete_branch_allowed`, `require_passing_checks`.
 - `merge_units`: explicit implementation/PR units. If omitted, validation creates one merge unit per story.
 
-Each epic requires `id`, `number`, `name`, and at least one feature. Each feature requires `id`, `number`, `name`, and at least one story. Each story requires `id`, `number`, and `name`; use `summary`, `acceptance`, `implementation`, and `dependencies` when useful. Story dependencies must reference story IDs.
+Each epic requires `id`, `number`, `name`, and at least one feature. Each feature requires `id`, `number`, `name`, and at least one story.
+
+Every story must be implementation-ready and include:
+
+- `id`, `number`, `name`, and `summary`
+- `acceptance`: concrete acceptance criteria that define done behavior
+- `implementation`: specific implementation notes detailed enough for a coding agent to act on
+- `testing`: explicit test criteria, including unit/integration/manual checks as appropriate
+- `dependencies` when the story depends on earlier story IDs
+
+Story dependencies must reference story IDs.
+
+Materialized story Markdown must include Acceptance Criteria, Implementation Notes, and Testing Criteria sections.
 
 Each merge unit requires `id` and `story_ids`. Use `allow_feature_level_pr: true` only when grouping multiple stories from the same feature.
 
@@ -72,6 +85,8 @@ epics:
               - Migration risks and unknowns are captured.
             implementation:
               - Review existing docs, code paths, and operational runbooks.
+            testing:
+              - Validate that the inventory covers systems, owners, dependencies, and risks.
           - id: story-target-plan
             number: 2
             name: Target Migration Plan
@@ -81,6 +96,8 @@ epics:
               - Rollback and validation steps are documented.
             implementation:
               - Convert findings into an implementation-ready migration sequence.
+            testing:
+              - Review the plan against phase gates, rollback expectations, and validation steps.
             dependencies:
               - story-current-state
 merge_units:
