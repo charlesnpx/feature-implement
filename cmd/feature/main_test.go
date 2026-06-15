@@ -32,6 +32,34 @@ func TestHelpCommandsExitSuccessfully(t *testing.T) {
 	}
 }
 
+func TestHelpTokenAsValueDoesNotTriggerUsage(t *testing.T) {
+	stdout, stderr, err := runFeature(t, "validate", "help")
+	if err == nil {
+		t.Fatalf("feature validate help should try to validate path named help")
+	}
+	if strings.Contains(stdout, "Usage:") || strings.Contains(stderr, "Usage:") {
+		t.Fatalf("literal help positional was treated as usage:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+
+	stdout, stderr, err = runFeature(t, "plan", "materialize", "--manifest", "help")
+	if err == nil {
+		t.Fatalf("feature plan materialize --manifest help should try to read manifest named help")
+	}
+	if strings.Contains(stdout, "Usage:") || strings.Contains(stderr, "Usage:") {
+		t.Fatalf("literal help manifest was treated as usage:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+}
+
+func TestInvalidImplementActionHelpFails(t *testing.T) {
+	stdout, stderr, err := runFeature(t, "implement", "frobnicate", "--help")
+	if err == nil {
+		t.Fatalf("invalid implement action help should fail")
+	}
+	if !strings.Contains(stderr, "unsupported implement action: frobnicate") {
+		t.Fatalf("expected unsupported action error:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+}
+
 func TestPlanExampleAndSchemaCommands(t *testing.T) {
 	stdout, stderr, err := runFeature(t, "plan", "example")
 	if err != nil {

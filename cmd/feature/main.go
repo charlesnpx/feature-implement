@@ -57,7 +57,7 @@ func usage(w io.Writer) {
 }
 
 func installSkills(args []string) error {
-	if hasHelp(args) {
+	if hasHelpFlag(args) {
 		usageInstallSkills(os.Stdout)
 		return nil
 	}
@@ -108,7 +108,7 @@ func planCommand(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("plan requires subcommand: example, schema, or materialize")
 	}
-	if isHelp(args[0]) {
+	if isHelpCommand(args[0]) {
 		usagePlan(os.Stdout)
 		return nil
 	}
@@ -125,7 +125,7 @@ func planCommand(args []string) error {
 }
 
 func planExample(args []string) error {
-	if hasHelp(args) {
+	if hasHelpFlag(args) {
 		usagePlanExample(os.Stdout)
 		return nil
 	}
@@ -137,7 +137,7 @@ func planExample(args []string) error {
 }
 
 func planSchema(args []string) error {
-	if hasHelp(args) {
+	if hasHelpFlag(args) {
 		usagePlanSchema(os.Stdout)
 		return nil
 	}
@@ -154,7 +154,7 @@ func planSchema(args []string) error {
 }
 
 func planMaterialize(args []string) error {
-	if hasHelp(args) {
+	if hasHelpFlag(args) {
 		usagePlanMaterialize(os.Stdout)
 		return nil
 	}
@@ -178,7 +178,7 @@ func planMaterialize(args []string) error {
 }
 
 func validateCommand(args []string) error {
-	if hasHelp(args) {
+	if hasHelpFlag(args) {
 		usageValidate(os.Stdout)
 		return nil
 	}
@@ -204,7 +204,7 @@ func validateCommand(args []string) error {
 }
 
 func statusCommand(args []string) error {
-	if hasHelp(args) {
+	if hasHelpFlag(args) {
 		usageStatus(os.Stdout)
 		return nil
 	}
@@ -233,11 +233,14 @@ func implementCommand(args []string) error {
 		return fmt.Errorf("implement requires subcommand: next, start, commit, push, open-pr, or merge")
 	}
 	action := args[0]
-	if isHelp(action) {
+	if isHelpCommand(action) {
 		usageImplement(os.Stdout)
 		return nil
 	}
-	if hasHelp(args[1:]) {
+	if !supportedImplementAction(action) {
+		return fmt.Errorf("unsupported implement action: %s", action)
+	}
+	if hasHelpFlag(args[1:]) {
 		usageImplementAction(os.Stdout, action)
 		return nil
 	}
@@ -280,17 +283,26 @@ func writeJSON(value any) error {
 	return enc.Encode(value)
 }
 
-func hasHelp(args []string) bool {
+func hasHelpFlag(args []string) bool {
 	for _, arg := range args {
-		if isHelp(arg) {
+		if arg == "-h" || arg == "--help" {
 			return true
 		}
 	}
 	return false
 }
 
-func isHelp(arg string) bool {
+func isHelpCommand(arg string) bool {
 	return arg == "-h" || arg == "--help" || arg == "help"
+}
+
+func supportedImplementAction(action string) bool {
+	switch action {
+	case "next", "start", "commit", "push", "open-pr", "merge":
+		return true
+	default:
+		return false
+	}
 }
 
 func parsePermissive(fs *flag.FlagSet, args []string, valueFlags ...string) error {

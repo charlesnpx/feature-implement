@@ -61,6 +61,11 @@ func ManifestSchema() map[string]any {
 		"type":  "array",
 		"items": map[string]any{"type": "string"},
 	}
+	requiredStringArray := map[string]any{
+		"type":     "array",
+		"minItems": 1,
+		"items":    map[string]any{"type": "string", "minLength": 1},
+	}
 	return map[string]any{
 		"$schema":              "https://json-schema.org/draft/2020-12/schema",
 		"title":                "feature.plan.yaml",
@@ -150,7 +155,7 @@ func ManifestSchema() map[string]any {
 				"properties": map[string]any{
 					"id":                     map[string]any{"type": "string", "minLength": 1},
 					"name":                   map[string]any{"type": "string"},
-					"story_ids":              stringArray,
+					"story_ids":              requiredStringArray,
 					"allow_feature_level_pr": map[string]any{"type": "boolean"},
 				},
 			},
