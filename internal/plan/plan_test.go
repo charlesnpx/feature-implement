@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -94,6 +95,62 @@ func TestImplementRequiresLockAndExplicitWriteFlags(t *testing.T) {
 	if result.Status != "planned" {
 		t.Fatalf("result = %+v", result)
 	}
+}
+
+func TestExampleManifestMaterializesAndValidates(t *testing.T) {
+	root := t.TempDir()
+	manifestPath := filepath.Join(root, "feature.plan.yaml")
+	if err := os.WriteFile(manifestPath, []byte(ExampleManifestYAML()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	materialized, err := Materialize(MaterializeOptions{ManifestPath: manifestPath, OutRoot: root})
+	if err != nil {
+		t.Fatalf("Materialize example: %v", err)
+	}
+	if _, err := Validate(ValidateOptions{PlanDir: materialized.PlanDir, WriteLock: true}); err != nil {
+		t.Fatalf("Validate example: %v", err)
+	}
+}
+
+func TestManifestSchemaExposesRequiredContract(t *testing.T) {
+	b, err := json.Marshal(ManifestSchema())
+	if err != nil {
+		t.Fatalf("Marshal schema: %v", err)
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(b, &schema); err != nil {
+		t.Fatalf("Unmarshal schema: %v", err)
+	}
+	if schema["title"] != "feature.plan.yaml" {
+		t.Fatalf("unexpected title: %+v", schema["title"])
+	}
+	required, ok := schema["required"].([]any)
+	if !ok {
+		t.Fatalf("required missing: %+v", schema["required"])
+	}
+	for _, field := range []string{"schema_version", "id", "title", "epics"} {
+		if !containsAny(required, field) {
+			t.Fatalf("required field %s missing from %+v", field, required)
+		}
+	}
+	defs, ok := schema["$defs"].(map[string]any)
+	if !ok {
+		t.Fatalf("$defs missing: %+v", schema["$defs"])
+	}
+	for _, def := range []string{"epic", "feature", "story", "merge_unit"} {
+		if _, ok := defs[def]; !ok {
+			t.Fatalf("definition %s missing from %+v", def, defs)
+		}
+	}
+}
+
+func containsAny(values []any, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func sampleManifest() string {
