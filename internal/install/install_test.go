@@ -3,6 +3,7 @@ package install
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -54,6 +55,27 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 		for _, file := range files.Files {
 			if len(file.SHA256) != 64 {
 				t.Fatalf("target %s file %s missing sha256: %+v", target, file.Path, file)
+			}
+		}
+	}
+	for _, path := range []string{
+		filepath.Join(stage, ".codex", "skills", "feature", "SKILL.md"),
+		filepath.Join(stage, ".claude", "skills", "feature", "SKILL.md"),
+	} {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read staged skill %s: %v", path, err)
+		}
+		content := string(b)
+		for _, want := range []string{
+			"## Manifest Contract",
+			"schema_version: 1",
+			"feature plan example",
+			"feature plan schema --json",
+			"For migration or phased-planning prompts",
+		} {
+			if !strings.Contains(content, want) {
+				t.Fatalf("staged skill %s missing %q", path, want)
 			}
 		}
 	}

@@ -21,6 +21,8 @@ The installer emits delegated JSON with `schema: 1`, `kind: delegated`, target f
 ## Commands
 
 ```sh
+feature plan example
+feature plan schema --json
 feature plan materialize --manifest feature.plan.yaml --json
 feature validate <plan-dir> --write-lock --json
 feature status <plan-dir> --json
@@ -31,6 +33,93 @@ feature implement merge <plan-dir> --merge-unit <id> --allow-merge --allow-delet
 ```
 
 `feature validate` writes `feature.plan.lock.json`; implementation commands consume that validated snapshot rather than live-edited Markdown.
+
+## Manifest Contract
+
+`$feature` and `/feature` create a `feature.plan.yaml` manifest, then `feature plan materialize` turns it into epic, feature, and story Markdown folders.
+
+Required top-level fields:
+
+- `schema_version: 1`
+- `id`
+- `title`
+- `epics`
+
+Optional top-level fields:
+
+- `output_name`: output folder name under the selected root.
+- `base_ref`: implementation base branch, usually `main`.
+- `remote`: implementation remote, usually `origin`.
+- `merge_policy`: `auto_merge_allowed`, `delete_branch_allowed`, `require_passing_checks`.
+- `merge_units`: explicit implementation/PR units. If omitted, validation creates one merge unit per story.
+
+Each epic requires `id`, `number`, `name`, and at least one feature. Each feature requires `id`, `number`, `name`, and at least one story. Each story requires `id`, `number`, and `name`; use `summary`, `acceptance`, `implementation`, and `dependencies` when useful. Story dependencies must reference story IDs.
+
+Each merge unit requires `id` and `story_ids`. Use `allow_feature_level_pr: true` only when grouping multiple stories from the same feature.
+
+For migration or phased-planning prompts, map phases to epics, workstreams/capability areas to features, and concrete implementation steps to stories.
+
+```yaml
+schema_version: 1
+id: sample-migration-plan
+title: Sample Migration Plan
+output_name: sample-migration-plan
+base_ref: main
+remote: origin
+merge_policy:
+  require_passing_checks: true
+epics:
+  - id: epic-discovery
+    number: 1
+    name: Discovery
+    summary: Inventory the current state and migration constraints.
+    constraints:
+      - Keep production behavior stable while planning.
+    features:
+      - id: feature-inventory
+        number: 1
+        name: Inventory
+        summary: Capture the systems, data, and workflows that must migrate.
+        stories:
+          - id: story-current-state
+            number: 1
+            name: Current State Inventory
+            summary: Document systems, owners, data, dependencies, and risks.
+            acceptance:
+              - Current systems and owners are listed.
+              - Migration risks and unknowns are captured.
+            implementation:
+              - Review existing docs, code paths, and operational runbooks.
+          - id: story-target-plan
+            number: 2
+            name: Target Migration Plan
+            summary: Produce sequencing, rollback approach, and validation gates.
+            acceptance:
+              - Target phases and success gates are defined.
+              - Rollback and validation steps are documented.
+            implementation:
+              - Convert findings into an implementation-ready migration sequence.
+            dependencies:
+              - story-current-state
+merge_units:
+  - id: story-current-state
+    name: Current State Inventory
+    story_ids:
+      - story-current-state
+  - id: story-target-plan
+    name: Target Migration Plan
+    story_ids:
+      - story-target-plan
+```
+
+Smoke test:
+
+```sh
+feature plan example > feature.plan.yaml
+plan_dir="$(feature plan materialize --manifest feature.plan.yaml)"
+feature validate "$plan_dir" --write-lock
+feature status "$plan_dir"
+```
 
 ## Development
 
