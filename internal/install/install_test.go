@@ -96,8 +96,11 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 		content := string(b)
 		for _, want := range []string{
 			"<plan-dir>/worktrees/<merge-unit-id>",
+			"open a PR with a clear title and description",
 			"review the opened PR",
 			"branch-diff review only when PR creation is not approved",
+			"commit them, push them, and repeat PR review until no worthwhile findings remain",
+			"only after the final reviewed branch has been pushed",
 			"feature implement cleanup",
 			"immutable and ordered",
 			"--write-state",
@@ -105,6 +108,9 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			if !strings.Contains(content, want) {
 				t.Fatalf("staged implement skill %s missing %q", path, want)
 			}
+		}
+		if strings.Contains(content, "feature implement push <plan-dir> --merge-unit <id> --allow-push --json") {
+			t.Fatalf("staged implement skill %s includes a non-state-recording push write step", path)
 		}
 	}
 }

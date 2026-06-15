@@ -72,11 +72,60 @@ func TestImplementRejectsInvalidLifecycleTransitions(t *testing.T) {
 	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "push", MergeUnit: "story-current-state", WriteState: true, AllowPush: true}); err == nil {
 		t.Fatalf("push before start/commit should fail")
 	}
-	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "start", MergeUnit: "story-current-state", WriteState: true}); err != nil {
+	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "start", MergeUnit: "story-current-state", WriteState: true}); err == nil {
+		t.Fatalf("start without base SHA should fail")
+	}
+	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "start", MergeUnit: "story-target-plan", WriteState: true, BaseSHA: "base-sha"}); err == nil {
+		t.Fatalf("starting a later merge unit before the next unit should fail")
+	}
+	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "start", MergeUnit: "story-current-state", WriteState: true, BaseSHA: "base-sha"}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "commit", MergeUnit: "story-current-state", WriteState: true}); err == nil {
 		t.Fatalf("commit without commit SHA should fail")
+	}
+}
+
+func TestImplementWriteStateRequiresLifecycleMetadata(t *testing.T) {
+	planDir := materializeExamplePlan(t)
+	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "start", MergeUnit: "story-current-state", WriteState: true}); err == nil {
+		t.Fatalf("start without base SHA should fail")
+	}
+	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "start", MergeUnit: "story-current-state", WriteState: true, BaseSHA: "base-sha"}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "commit", MergeUnit: "story-current-state", WriteState: true, CommitSHA: "commit-sha"}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "push", MergeUnit: "story-current-state", WriteState: true, AllowPush: true}); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "open-pr", MergeUnit: "story-current-state", WriteState: true, AllowOpenPR: true, PRNumber: 42}); err == nil {
+		t.Fatalf("open-pr without PR URL should fail")
+	}
+}
+
+func TestImplementMergeAndLocalCleanupDoNotRequireDeleteBranchApproval(t *testing.T) {
+	planDir := materializeExamplePlan(t)
+	lock := readTestLock(t, planDir)
+	lock.MergePolicy.DeleteBranchAllowed = true
+	if err := writeLock(planDir, lock); err != nil {
+		t.Fatal(err)
+	}
+
+	steps := []ImplementOptions{
+		{PlanDir: planDir, Action: "start", MergeUnit: "story-current-state", WriteState: true, BaseSHA: "base-sha"},
+		{PlanDir: planDir, Action: "commit", MergeUnit: "story-current-state", WriteState: true, CommitSHA: "commit-sha"},
+		{PlanDir: planDir, Action: "push", MergeUnit: "story-current-state", WriteState: true, AllowPush: true},
+		{PlanDir: planDir, Action: "open-pr", MergeUnit: "story-current-state", WriteState: true, AllowOpenPR: true, PRNumber: 42, PRURL: "https://example.test/pr/42"},
+		{PlanDir: planDir, Action: "review", MergeUnit: "story-current-state", WriteState: true, ReviewStatus: "passed"},
+		{PlanDir: planDir, Action: "merge", MergeUnit: "story-current-state", WriteState: true, AllowMerge: true, MergeCommit: "merge-sha"},
+		{PlanDir: planDir, Action: "cleanup", MergeUnit: "story-current-state", WriteState: true},
+	}
+	for _, step := range steps {
+		if _, err := Implement(step); err != nil {
+			t.Fatalf("%s without delete-branch approval: %v", step.Action, err)
+		}
 	}
 }
 
@@ -127,7 +176,7 @@ func TestImplementMigratesLegacyMapStateOnWrite(t *testing.T) {
 	if err := os.WriteFile(lockPath, []byte(legacy), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Implement(ImplementOptions{PlanDir: root, Action: "start", MergeUnit: "unit-a", WriteState: true}); err != nil {
+	if _, err := Implement(ImplementOptions{PlanDir: root, Action: "start", MergeUnit: "unit-a", WriteState: true, BaseSHA: "base-sha"}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	var raw map[string]any

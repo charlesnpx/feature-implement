@@ -27,9 +27,9 @@ feature plan materialize --manifest feature.plan.yaml --json
 feature validate <plan-dir> --write-lock --json
 feature status <plan-dir> --json
 feature implement next <plan-dir> --json
-feature implement start <plan-dir> --merge-unit <id> --write-state --json
+feature implement start <plan-dir> --merge-unit <id> --base-sha <sha> --write-state --json
 feature implement commit <plan-dir> --merge-unit <id> --commit-sha <sha> --write-state --json
-feature implement push <plan-dir> --merge-unit <id> --allow-push --json
+feature implement push <plan-dir> --merge-unit <id> --allow-push --write-state --json
 feature implement open-pr <plan-dir> --merge-unit <id> --allow-open-pr --pr <number> --pr-url <url> --write-state --json
 feature implement review <plan-dir> --merge-unit <id> --review-status passed --write-state --json
 feature implement merge <plan-dir> --merge-unit <id> --allow-merge --merge-commit <sha> --write-state --json

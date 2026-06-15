@@ -71,6 +71,9 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 			Message:   "runtime preflight and worktree creation are required before implementation; use --write-state after the worktree exists",
 		}
 		if opts.WriteState {
+			if strings.TrimSpace(opts.BaseSHA) == "" {
+				return ImplementResult{}, fmt.Errorf("start --write-state requires --base-sha")
+			}
 			return writeTransition(opts.PlanDir, lock, unitID, opts.Action, result, func(state *MergeUnitState) {
 				state.Status = MergeUnitStarted
 				state.Branch = branch
@@ -111,6 +114,9 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 			if opts.PRNumber <= 0 {
 				return ImplementResult{}, fmt.Errorf("open-pr --write-state requires --pr")
 			}
+			if strings.TrimSpace(opts.PRURL) == "" {
+				return ImplementResult{}, fmt.Errorf("open-pr --write-state requires --pr-url")
+			}
 			return writeTransition(opts.PlanDir, lock, unitID, opts.Action, result, func(state *MergeUnitState) {
 				state.Status = MergeUnitPROpen
 				state.PRNumber = opts.PRNumber
@@ -134,9 +140,6 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 		if !opts.AllowMerge {
 			return ImplementResult{}, fmt.Errorf("merge requires --allow-merge")
 		}
-		if lock.MergePolicy.DeleteBranchAllowed && !opts.AllowDeleteBranch {
-			return ImplementResult{}, fmt.Errorf("branch deletion requires --allow-delete-branch")
-		}
 		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{"gh pr merge"}}
 		if opts.WriteState {
 			if strings.TrimSpace(opts.MergeCommit) == "" {
@@ -151,10 +154,7 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 		return result, nil
 	case "cleanup":
 		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{"git worktree remove"}}
-		if lock.MergePolicy.DeleteBranchAllowed {
-			if !opts.AllowDeleteBranch {
-				return ImplementResult{}, fmt.Errorf("branch deletion requires --allow-delete-branch")
-			}
+		if lock.MergePolicy.DeleteBranchAllowed && opts.AllowDeleteBranch {
 			result.Commands = append(result.Commands, "git push origin --delete")
 		}
 		if opts.WriteState {
