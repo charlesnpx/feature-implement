@@ -74,18 +74,22 @@ type PlanFile struct {
 }
 
 type RuntimeState struct {
-	SchemaVersion int                       `json:"schema_version"`
-	MergeUnits    map[string]MergeUnitState `json:"merge_units"`
+	SchemaVersion   int              `json:"schema_version"`
+	MergeUnits      []MergeUnitState `json:"merge_units"`
+	legacyMergeUnit map[string]MergeUnitState
 }
 
 type MergeUnitState struct {
+	ID            string `json:"id"`
 	Status        string `json:"status"`
 	Branch        string `json:"branch,omitempty"`
 	Worktree      string `json:"worktree,omitempty"`
 	BaseSHA       string `json:"base_sha,omitempty"`
 	CommitSHA     string `json:"commit_sha,omitempty"`
 	PRNumber      int    `json:"pr_number,omitempty"`
+	PRURL         string `json:"pr_url,omitempty"`
 	ReviewStatus  string `json:"review_status,omitempty"`
 	MergeStatus   string `json:"merge_status,omitempty"`
+	MergeCommit   string `json:"merge_commit,omitempty"`
 	CleanupStatus string `json:"cleanup_status,omitempty"`
 }

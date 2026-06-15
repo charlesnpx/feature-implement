@@ -63,10 +63,18 @@ func validateManifestShape(manifest Manifest) error {
 		}
 	}
 	assigned := map[string]string{}
+	unitIDs := map[string]bool{}
 	for _, unit := range manifest.MergeUnits {
 		if unit.ID == "" {
 			return fmt.Errorf("merge unit id is required")
 		}
+		if err := validateSafeIDSegment(unit.ID, "merge unit"); err != nil {
+			return err
+		}
+		if unitIDs[unit.ID] {
+			return fmt.Errorf("duplicate merge unit id %s", unit.ID)
+		}
+		unitIDs[unit.ID] = true
 		if len(unit.StoryIDs) == 0 {
 			return fmt.Errorf("merge unit %s requires at least one story", unit.ID)
 		}
@@ -153,6 +161,9 @@ func validateMaterializeShape(manifest Manifest) error {
 				if err := addID(ids, story.ID, "story"); err != nil {
 					return err
 				}
+				if err := validateSafeIDSegment(story.ID, "story"); err != nil {
+					return err
+				}
 				if story.Number <= 0 || story.Name == "" {
 					return fmt.Errorf("story %s requires positive number and name", story.ID)
 				}
@@ -237,9 +248,9 @@ func buildLock(manifest Manifest, files []PlanFile) Lock {
 			}
 		}
 	}
-	state := RuntimeState{SchemaVersion: 1, MergeUnits: map[string]MergeUnitState{}}
+	state := RuntimeState{SchemaVersion: runtimeStateSchemaVersion}
 	for _, unit := range units {
-		state.MergeUnits[unit.ID] = MergeUnitState{Status: "pending"}
+		state.MergeUnits = append(state.MergeUnits, MergeUnitState{ID: unit.ID, Status: MergeUnitPending})
 	}
 	return Lock{
 		SchemaVersion: 1,

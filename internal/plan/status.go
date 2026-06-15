@@ -26,5 +26,6 @@ func Status(planDir string) (StatusResult, error) {
 	if err := json.Unmarshal(b, &lock); err != nil {
 		return StatusResult{}, err
 	}
+	lock = normalizeLockState(lock)
 	return StatusResult{Status: "validated", PlanDir: planDir, LockPath: lockPath, State: lock.State}, nil
 }

@@ -106,12 +106,66 @@ func TestDocumentedTrailingFlagsWork(t *testing.T) {
 		t.Fatalf("validate did not report valid status:\n%s", stdout)
 	}
 
+	if _, stderr, err := runFeature(t, "implement", "start", planDir, "--merge-unit", "story-current-state", "--base-sha", "base", "--write-state", "--json"); err != nil {
+		t.Fatalf("feature implement start failed: %v\nstderr=%s", err, stderr)
+	}
+	if _, stderr, err := runFeature(t, "implement", "commit", planDir, "--merge-unit", "story-current-state", "--commit-sha", "commit", "--write-state", "--json"); err != nil {
+		t.Fatalf("feature implement commit failed: %v\nstderr=%s", err, stderr)
+	}
+
 	stdout, stderr, err = runFeature(t, "implement", "push", planDir, "--merge-unit", "story-current-state", "--allow-push", "--json")
 	if err != nil {
 		t.Fatalf("feature implement with trailing flags failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
 	}
 	if !strings.Contains(stdout, `"action":"push"`) {
 		t.Fatalf("implement did not report push action:\n%s", stdout)
+	}
+}
+
+func TestImplementLifecycleWriteStateCommands(t *testing.T) {
+	root := t.TempDir()
+	example, stderr, err := runFeature(t, "plan", "example")
+	if err != nil {
+		t.Fatalf("feature plan example failed: %v\nstderr=%s", err, stderr)
+	}
+	manifestPath := filepath.Join(root, "feature.plan.yaml")
+	if err := os.WriteFile(manifestPath, []byte(example), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err := runFeature(t, "plan", "materialize", "--manifest", manifestPath, "--out-root", root)
+	if err != nil {
+		t.Fatalf("feature plan materialize failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	planDir := strings.TrimSpace(stdout)
+	if _, stderr, err := runFeature(t, "validate", planDir, "--write-lock", "--json"); err != nil {
+		t.Fatalf("feature validate failed: %v\nstderr=%s", err, stderr)
+	}
+
+	commands := [][]string{
+		{"implement", "start", planDir, "--merge-unit", "story-current-state", "--base-sha", "base", "--write-state", "--json"},
+		{"implement", "commit", planDir, "--merge-unit", "story-current-state", "--commit-sha", "commit", "--write-state", "--json"},
+		{"implement", "push", planDir, "--merge-unit", "story-current-state", "--allow-push", "--write-state", "--json"},
+		{"implement", "open-pr", planDir, "--merge-unit", "story-current-state", "--allow-open-pr", "--pr", "7", "--pr-url", "https://example.test/pr/7", "--write-state", "--json"},
+		{"implement", "review", planDir, "--merge-unit", "story-current-state", "--review-status", "passed", "--write-state", "--json"},
+		{"implement", "merge", planDir, "--merge-unit", "story-current-state", "--allow-merge", "--merge-commit", "merge", "--write-state", "--json"},
+		{"implement", "cleanup", planDir, "--merge-unit", "story-current-state", "--write-state", "--json"},
+	}
+	for _, args := range commands {
+		stdout, stderr, err := runFeature(t, args...)
+		if err != nil {
+			t.Fatalf("feature %s failed: %v\nstdout=%s\nstderr=%s", strings.Join(args, " "), err, stdout, stderr)
+		}
+		if !strings.Contains(stdout, `"status":"recorded"`) {
+			t.Fatalf("feature %s did not record state:\n%s", strings.Join(args, " "), stdout)
+		}
+	}
+
+	stdout, stderr, err = runFeature(t, "implement", "next", planDir, "--json")
+	if err != nil {
+		t.Fatalf("feature implement next failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, `"merge_unit":"story-target-plan"`) {
+		t.Fatalf("next did not advance:\n%s", stdout)
 	}
 }
 

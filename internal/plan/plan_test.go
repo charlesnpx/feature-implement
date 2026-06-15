@@ -246,15 +246,62 @@ func TestImplementRequiresLockAndExplicitWriteFlags(t *testing.T) {
 	if _, err := Validate(ValidateOptions{PlanDir: materialized.PlanDir, WriteLock: true}); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if _, err := Implement(ImplementOptions{PlanDir: materialized.PlanDir, Action: "push"}); err == nil {
+	mergeUnitID := "story-install-contract"
+	if _, err := Implement(ImplementOptions{PlanDir: materialized.PlanDir, Action: "start", MergeUnit: mergeUnitID, WriteState: true, BaseSHA: "base-sha"}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if _, err := Implement(ImplementOptions{PlanDir: materialized.PlanDir, Action: "commit", MergeUnit: mergeUnitID, WriteState: true, CommitSHA: "commit-sha"}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if _, err := Implement(ImplementOptions{PlanDir: materialized.PlanDir, Action: "push", MergeUnit: mergeUnitID}); err == nil {
 		t.Fatalf("push should require explicit flag")
 	}
-	result, err := Implement(ImplementOptions{PlanDir: materialized.PlanDir, Action: "push", AllowPush: true})
+	result, err := Implement(ImplementOptions{PlanDir: materialized.PlanDir, Action: "push", MergeUnit: mergeUnitID, AllowPush: true})
 	if err != nil {
 		t.Fatalf("push with flag: %v", err)
 	}
 	if result.Status != "planned" {
 		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestValidateRejectsDuplicateMergeUnitIDs(t *testing.T) {
+	manifest := minimalValidManifest()
+	manifest.MergeUnits = []MergeUnit{
+		{ID: "story-a", Name: "Story A", StoryIDs: []string{"story-a"}},
+		{ID: "story-a", Name: "Story A Again", StoryIDs: []string{"story-b"}},
+	}
+
+	err := validateManifestShape(manifest)
+
+	if err == nil || !strings.Contains(err.Error(), "duplicate merge unit id story-a") {
+		t.Fatalf("validate error = %v", err)
+	}
+}
+
+func TestValidateRejectsUnsafeMergeUnitIDs(t *testing.T) {
+	manifest := minimalValidManifest()
+	manifest.MergeUnits = []MergeUnit{
+		{ID: "../outside", Name: "Unsafe", StoryIDs: []string{"story-a"}},
+		{ID: "story-b", Name: "Story B", StoryIDs: []string{"story-b"}},
+	}
+
+	err := validateManifestShape(manifest)
+
+	if err == nil || !strings.Contains(err.Error(), `merge unit id "../outside"`) {
+		t.Fatalf("validate error = %v", err)
+	}
+}
+
+func TestValidateRejectsUnsafeStoryIDs(t *testing.T) {
+	manifest := minimalValidManifest()
+	manifest.Epics[0].Features[0].Stories[0].ID = "Story A"
+	manifest.MergeUnits = nil
+
+	err := validateManifestShape(manifest)
+
+	if err == nil || !strings.Contains(err.Error(), `story id "Story A"`) {
+		t.Fatalf("validate error = %v", err)
 	}
 }
 
@@ -303,6 +350,18 @@ func TestManifestSchemaExposesRequiredContract(t *testing.T) {
 			t.Fatalf("definition %s missing from %+v", def, defs)
 		}
 	}
+	mergeUnit := defs["merge_unit"].(map[string]any)
+	mergeUnitProps := mergeUnit["properties"].(map[string]any)
+	mergeUnitID := mergeUnitProps["id"].(map[string]any)
+	if mergeUnitID["pattern"] != safeIDPattern {
+		t.Fatalf("merge unit id pattern = %+v", mergeUnitID["pattern"])
+	}
+	story := defs["story"].(map[string]any)
+	storyProps := story["properties"].(map[string]any)
+	storyID := storyProps["id"].(map[string]any)
+	if storyID["pattern"] != safeIDPattern {
+		t.Fatalf("story id pattern = %+v", storyID["pattern"])
+	}
 }
 
 func containsAny(values []any, want string) bool {
@@ -349,4 +408,44 @@ merge_units:
     story_ids:
       - story-install-contract
 `
+}
+
+func minimalValidManifest() Manifest {
+	return Manifest{
+		SchemaVersion: 1,
+		ID:            "sample",
+		Title:         "Sample",
+		Epics: []Epic{{
+			ID:      "epic-a",
+			Number:  1,
+			Name:    "Epic A",
+			Summary: "Epic summary.",
+			Features: []Feature{{
+				ID:      "feature-a",
+				Number:  1,
+				Name:    "Feature A",
+				Summary: "Feature summary.",
+				Stories: []Story{
+					{
+						ID:             "story-a",
+						Number:         1,
+						Name:           "Story A",
+						Summary:        "Story summary.",
+						Acceptance:     []string{"Acceptance."},
+						Implementation: []string{"Implementation."},
+						Testing:        []string{"Testing."},
+					},
+					{
+						ID:             "story-b",
+						Number:         2,
+						Name:           "Story B",
+						Summary:        "Story summary.",
+						Acceptance:     []string{"Acceptance."},
+						Implementation: []string{"Implementation."},
+						Testing:        []string{"Testing."},
+					},
+				},
+			}},
+		}},
+	}
 }

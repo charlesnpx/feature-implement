@@ -85,6 +85,36 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			}
 		}
 	}
+	for _, path := range []string{
+		filepath.Join(stage, ".codex", "skills", "feature:implement", "SKILL.md"),
+		filepath.Join(stage, ".claude", "skills", "feature:implement", "SKILL.md"),
+	} {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read staged implement skill %s: %v", path, err)
+		}
+		content := string(b)
+		for _, want := range []string{
+			"<plan-dir>/worktrees/<merge-unit-id>",
+			"open a PR with a clear title and description",
+			"review the opened PR",
+			"branch-diff review only when PR creation is not approved",
+			"maximum of 10 review iterations",
+			"spawn a fresh subagent to review the updated PR",
+			"stop and report the remaining findings instead of merging",
+			"only after the final reviewed branch has been pushed",
+			"feature implement cleanup",
+			"immutable and ordered",
+			"--write-state",
+		} {
+			if !strings.Contains(content, want) {
+				t.Fatalf("staged implement skill %s missing %q", path, want)
+			}
+		}
+		if strings.Contains(content, "feature implement push <plan-dir> --merge-unit <id> --allow-push --json") {
+			t.Fatalf("staged implement skill %s includes a non-state-recording push write step", path)
+		}
+	}
 }
 
 func TestRunTargetFiltering(t *testing.T) {
