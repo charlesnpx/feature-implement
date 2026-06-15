@@ -338,6 +338,12 @@ func TestManifestSchemaExposesRequiredContract(t *testing.T) {
 			t.Fatalf("definition %s missing from %+v", def, defs)
 		}
 	}
+	mergeUnit := defs["merge_unit"].(map[string]any)
+	mergeUnitProps := mergeUnit["properties"].(map[string]any)
+	mergeUnitID := mergeUnitProps["id"].(map[string]any)
+	if mergeUnitID["pattern"] != safeIDPattern {
+		t.Fatalf("merge unit id pattern = %+v", mergeUnitID["pattern"])
+	}
 }
 
 func containsAny(values []any, want string) bool {

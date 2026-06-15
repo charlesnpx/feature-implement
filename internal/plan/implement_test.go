@@ -132,6 +132,52 @@ func TestImplementPlansConcretePushCommand(t *testing.T) {
 	}
 }
 
+func TestImplementQuotesWorktreeCommandsWithSpaces(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "plans with spaces")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	planDir := materializeExamplePlanAt(t, root)
+
+	start, err := Implement(ImplementOptions{PlanDir: planDir, Action: "start", MergeUnit: "story-current-state"})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	wantWorktree := filepath.Join(planDir, "worktrees", "story-current-state")
+	wantStartCommand := "git worktree add -b feature/sample-migration-plan/story-current-state '" + wantWorktree + "' main"
+	if len(start.Commands) != 1 || start.Commands[0] != wantStartCommand {
+		t.Fatalf("start commands = %#v", start.Commands)
+	}
+
+	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "start", MergeUnit: "story-current-state", WriteState: true, BaseSHA: "base-sha"}); err != nil {
+		t.Fatalf("record start: %v", err)
+	}
+	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "commit", MergeUnit: "story-current-state", WriteState: true, CommitSHA: "commit-sha"}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "push", MergeUnit: "story-current-state", WriteState: true, AllowPush: true}); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "open-pr", MergeUnit: "story-current-state", WriteState: true, AllowOpenPR: true, PRNumber: 42, PRURL: "https://example.test/pr/42"}); err != nil {
+		t.Fatalf("open-pr: %v", err)
+	}
+	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "review", MergeUnit: "story-current-state", WriteState: true, ReviewStatus: "passed"}); err != nil {
+		t.Fatalf("review: %v", err)
+	}
+	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "merge", MergeUnit: "story-current-state", WriteState: true, AllowMerge: true, MergeCommit: "merge-sha"}); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+
+	cleanup, err := Implement(ImplementOptions{PlanDir: planDir, Action: "cleanup", MergeUnit: "story-current-state"})
+	if err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	wantCleanupCommand := "git worktree remove '" + wantWorktree + "'"
+	if len(cleanup.Commands) != 1 || cleanup.Commands[0] != wantCleanupCommand {
+		t.Fatalf("cleanup commands = %#v", cleanup.Commands)
+	}
+}
+
 func TestImplementPlansConcreteMergeCommand(t *testing.T) {
 	planDir := materializeExamplePlan(t)
 	steps := []ImplementOptions{
@@ -297,7 +343,11 @@ func TestImplementMigratesLegacyMapStateOnWrite(t *testing.T) {
 
 func materializeExamplePlan(t *testing.T) string {
 	t.Helper()
-	root := t.TempDir()
+	return materializeExamplePlanAt(t, t.TempDir())
+}
+
+func materializeExamplePlanAt(t *testing.T, root string) string {
+	t.Helper()
 	manifestPath := filepath.Join(root, "feature.plan.yaml")
 	if err := os.WriteFile(manifestPath, []byte(ExampleManifestYAML()), 0o644); err != nil {
 		t.Fatal(err)

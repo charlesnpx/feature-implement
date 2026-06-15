@@ -158,7 +158,7 @@ func ManifestSchema() map[string]any {
 				"additionalProperties": false,
 				"required":             []string{"id", "story_ids"},
 				"properties": map[string]any{
-					"id":                     map[string]any{"type": "string", "minLength": 1},
+					"id":                     map[string]any{"type": "string", "pattern": safeIDPattern},
 					"name":                   map[string]any{"type": "string"},
 					"story_ids":              requiredStringArray,
 					"allow_feature_level_pr": map[string]any{"type": "boolean"},

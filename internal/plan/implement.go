@@ -75,7 +75,7 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 			MergeUnit: unitID,
 			Branch:    branch,
 			Worktree:  worktree,
-			Commands:  []string{fmt.Sprintf("git worktree add -b %s %s %s", branch, worktree, baseRef)},
+			Commands:  []string{fmt.Sprintf("git worktree add -b %s %s %s", shellQuote(branch), shellQuote(worktree), shellQuote(baseRef))},
 			Message:   "runtime preflight and worktree creation are required before implementation; use --write-state after the worktree exists",
 		}
 		if opts.WriteState {
@@ -109,7 +109,7 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 		state, _ := mergeUnitState(lock, unitID)
 		branch := firstNonBlank(state.Branch, opts.Branch, defaultBranchName(lock, unitID))
 		remote := firstNonBlank(lock.Remote, "origin")
-		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{fmt.Sprintf("git push -u %s HEAD:%s", remote, branch)}}
+		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{fmt.Sprintf("git push -u %s %s", shellQuote(remote), shellQuote("HEAD:"+branch))}}
 		if opts.WriteState {
 			return writeTransition(opts.PlanDir, lock, unitID, opts.Action, result, func(state *MergeUnitState) {
 				state.Status = MergeUnitPushed
@@ -173,9 +173,9 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 		worktree := firstNonBlank(state.Worktree, opts.Worktree, defaultWorktreePath(opts.PlanDir, unitID))
 		branch := firstNonBlank(state.Branch, opts.Branch, defaultBranchName(lock, unitID))
 		remote := firstNonBlank(lock.Remote, "origin")
-		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{fmt.Sprintf("git worktree remove %s", worktree)}}
+		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{fmt.Sprintf("git worktree remove %s", shellQuote(worktree))}}
 		if lock.MergePolicy.DeleteBranchAllowed && opts.AllowDeleteBranch {
-			result.Commands = append(result.Commands, fmt.Sprintf("git push %s --delete %s", remote, branch))
+			result.Commands = append(result.Commands, fmt.Sprintf("git push %s --delete %s", shellQuote(remote), shellQuote(branch)))
 		}
 		if opts.WriteState {
 			cleanupStatus := "worktree-removed"
@@ -250,4 +250,25 @@ func firstPositive(values ...int) int {
 		}
 	}
 	return 0
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.IndexFunc(value, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			r == '/' ||
+			r == '.' ||
+			r == '_' ||
+			r == '-' ||
+			r == ':' ||
+			r == '@' ||
+			r == '+')
+	}) == -1 {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
