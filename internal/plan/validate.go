@@ -237,9 +237,9 @@ func buildLock(manifest Manifest, files []PlanFile) Lock {
 			}
 		}
 	}
-	state := RuntimeState{SchemaVersion: 1, MergeUnits: map[string]MergeUnitState{}}
+	state := RuntimeState{SchemaVersion: runtimeStateSchemaVersion}
 	for _, unit := range units {
-		state.MergeUnits[unit.ID] = MergeUnitState{Status: "pending"}
+		state.MergeUnits = append(state.MergeUnits, MergeUnitState{ID: unit.ID, Status: MergeUnitPending})
 	}
 	return Lock{
 		SchemaVersion: 1,

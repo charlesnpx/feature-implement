@@ -52,7 +52,7 @@ func usage(w io.Writer) {
   feature plan materialize --manifest <file> [--out-root <dir>] [--json]
   feature validate <plan-dir> [--write-lock] [--json]
   feature status <plan-dir> [--json]
-  feature implement next|start|commit|push|open-pr|merge <plan-dir> [--merge-unit <id>] [--allow-push] [--allow-open-pr] [--allow-merge] [--allow-delete-branch] [--json]
+  feature implement next|start|commit|push|open-pr|review|merge|cleanup <plan-dir> [--merge-unit <id>] [--write-state] [metadata flags] [--json]
   feature version`)
 }
 
@@ -230,7 +230,7 @@ func statusCommand(args []string) error {
 
 func implementCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("implement requires subcommand: next, start, commit, push, open-pr, or merge")
+		return fmt.Errorf("implement requires subcommand: next, start, commit, push, open-pr, review, merge, or cleanup")
 	}
 	action := args[0]
 	if isHelpCommand(action) {
@@ -251,8 +251,17 @@ func implementCommand(args []string) error {
 	allowOpenPR := fs.Bool("allow-open-pr", false, "Allow GitHub PR creation")
 	allowMerge := fs.Bool("allow-merge", false, "Allow PR merge")
 	allowDeleteBranch := fs.Bool("allow-delete-branch", false, "Allow branch deletion")
+	writeState := fs.Bool("write-state", false, "Write lifecycle state to feature.plan.lock.json")
+	branch := fs.String("branch", "", "Branch name for start state")
+	worktree := fs.String("worktree", "", "Worktree path for start state")
+	baseSHA := fs.String("base-sha", "", "Base commit SHA for start state")
+	commitSHA := fs.String("commit-sha", "", "Commit SHA for commit state")
+	prNumber := fs.Int("pr", 0, "Pull request number for open-pr state")
+	prURL := fs.String("pr-url", "", "Pull request URL for open-pr state")
+	reviewStatus := fs.String("review-status", "", "Review status: passed | changes-applied")
+	mergeCommit := fs.String("merge-commit", "", "Merge commit SHA for merge state")
 	asJSON := fs.Bool("json", false, "Emit JSON result")
-	if err := parsePermissive(fs, args[1:], "merge-unit"); err != nil {
+	if err := parsePermissive(fs, args[1:], "merge-unit", "branch", "worktree", "base-sha", "commit-sha", "pr", "pr-url", "review-status", "merge-commit"); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -266,6 +275,15 @@ func implementCommand(args []string) error {
 		AllowOpenPR:       *allowOpenPR,
 		AllowMerge:        *allowMerge,
 		AllowDeleteBranch: *allowDeleteBranch,
+		WriteState:        *writeState,
+		Branch:            *branch,
+		Worktree:          *worktree,
+		BaseSHA:           *baseSHA,
+		CommitSHA:         *commitSHA,
+		PRNumber:          *prNumber,
+		PRURL:             *prURL,
+		ReviewStatus:      *reviewStatus,
+		MergeCommit:       *mergeCommit,
 	})
 	if err != nil {
 		return err
@@ -298,7 +316,7 @@ func isHelpCommand(arg string) bool {
 
 func supportedImplementAction(action string) bool {
 	switch action {
-	case "next", "start", "commit", "push", "open-pr", "merge":
+	case "next", "start", "commit", "push", "open-pr", "review", "merge", "cleanup":
 		return true
 	default:
 		return false
@@ -392,14 +410,14 @@ Reports whether a plan is materialized or validated.`)
 
 func usageImplement(w io.Writer) {
 	fmt.Fprintln(w, `Usage:
-  feature implement next|start|commit|push|open-pr|merge <plan-dir> [--merge-unit <id>] [--allow-push] [--allow-open-pr] [--allow-merge] [--allow-delete-branch] [--json]
+  feature implement next|start|commit|push|open-pr|review|merge|cleanup <plan-dir> [--merge-unit <id>] [--write-state] [metadata flags] [--json]
 
 Plans guarded implementation actions for the next or selected merge unit.`)
 }
 
 func usageImplementAction(w io.Writer, action string) {
 	fmt.Fprintf(w, `Usage:
-  feature implement %s <plan-dir> [--merge-unit <id>] [--allow-push] [--allow-open-pr] [--allow-merge] [--allow-delete-branch] [--json]
+  feature implement %s <plan-dir> [--merge-unit <id>] [--write-state] [--branch <name>] [--worktree <path>] [--base-sha <sha>] [--commit-sha <sha>] [--pr <number>] [--pr-url <url>] [--review-status passed|changes-applied] [--merge-commit <sha>] [--allow-push] [--allow-open-pr] [--allow-merge] [--allow-delete-branch] [--json]
 
 Reads feature.plan.lock.json and returns the guarded next action for the selected merge unit.
 `, action)

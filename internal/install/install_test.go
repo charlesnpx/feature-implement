@@ -85,6 +85,28 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			}
 		}
 	}
+	for _, path := range []string{
+		filepath.Join(stage, ".codex", "skills", "feature:implement", "SKILL.md"),
+		filepath.Join(stage, ".claude", "skills", "feature:implement", "SKILL.md"),
+	} {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read staged implement skill %s: %v", path, err)
+		}
+		content := string(b)
+		for _, want := range []string{
+			"<plan-dir>/worktrees/<merge-unit-id>",
+			"review the opened PR",
+			"branch-diff review only when PR creation is not approved",
+			"feature implement cleanup",
+			"immutable and ordered",
+			"--write-state",
+		} {
+			if !strings.Contains(content, want) {
+				t.Fatalf("staged implement skill %s missing %q", path, want)
+			}
+		}
+	}
 }
 
 func TestRunTargetFiltering(t *testing.T) {
