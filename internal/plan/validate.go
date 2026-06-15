@@ -155,6 +155,18 @@ func validateMaterializeShape(manifest Manifest) error {
 				if story.Number <= 0 || story.Name == "" {
 					return fmt.Errorf("story %s requires positive number and name", story.ID)
 				}
+				if story.Summary == "" {
+					return fmt.Errorf("story %s requires summary", story.ID)
+				}
+				if len(story.Acceptance) == 0 {
+					return fmt.Errorf("story %s requires acceptance criteria", story.ID)
+				}
+				if len(story.Implementation) == 0 {
+					return fmt.Errorf("story %s requires implementation details", story.ID)
+				}
+				if len(story.Testing) == 0 {
+					return fmt.Errorf("story %s requires testing criteria", story.ID)
+				}
 			}
 		}
 	}

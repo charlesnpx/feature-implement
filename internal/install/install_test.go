@@ -73,6 +73,12 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"feature plan example",
 			"feature plan schema --json",
 			"For migration or phased-planning prompts",
+			"Every story must be implementation-ready",
+			"`testing`: explicit test criteria",
+			"Testing Criteria",
+			"Never write the draft manifest in the current repo root",
+			"~/tmp",
+			"system temp directory",
 		} {
 			if !strings.Contains(content, want) {
 				t.Fatalf("staged skill %s missing %q", path, want)

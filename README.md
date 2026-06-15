@@ -34,6 +34,8 @@ feature implement merge <plan-dir> --merge-unit <id> --allow-merge --allow-delet
 
 `feature validate` writes `feature.plan.lock.json`; implementation commands consume that validated snapshot rather than live-edited Markdown.
 
+When `$feature` or `/feature` needs to draft the temporary `feature.plan.yaml`, it should stage that scratch manifest under the user-provided output folder, `~/tmp` when it exists, or the system temp directory. It should not write scratch manifests into the current repository root unless that repo root was explicitly supplied as the output folder.
+
 ## Manifest Contract
 
 `$feature` and `/feature` create a `feature.plan.yaml` manifest, then `feature plan materialize` turns it into epic, feature, and story Markdown folders.
@@ -53,7 +55,19 @@ Optional top-level fields:
 - `merge_policy`: `auto_merge_allowed`, `delete_branch_allowed`, `require_passing_checks`.
 - `merge_units`: explicit implementation/PR units. If omitted, validation creates one merge unit per story.
 
-Each epic requires `id`, `number`, `name`, and at least one feature. Each feature requires `id`, `number`, `name`, and at least one story. Each story requires `id`, `number`, and `name`; use `summary`, `acceptance`, `implementation`, and `dependencies` when useful. Story dependencies must reference story IDs.
+Each epic requires `id`, `number`, `name`, and at least one feature. Each feature requires `id`, `number`, `name`, and at least one story.
+
+Every story must be implementation-ready and include:
+
+- `id`, `number`, `name`, and `summary`
+- `acceptance`: concrete acceptance criteria that define done behavior
+- `implementation`: specific implementation notes detailed enough for a coding agent to act on
+- `testing`: explicit test criteria, including unit/integration/manual checks as appropriate
+- `dependencies` when the story depends on earlier story IDs
+
+Story dependencies must reference story IDs.
+
+Materialized story Markdown includes Acceptance Criteria, Implementation Notes, and Testing Criteria sections.
 
 Each merge unit requires `id` and `story_ids`. Use `allow_feature_level_pr: true` only when grouping multiple stories from the same feature.
 
@@ -90,6 +104,8 @@ epics:
               - Migration risks and unknowns are captured.
             implementation:
               - Review existing docs, code paths, and operational runbooks.
+            testing:
+              - Validate that the inventory covers systems, owners, dependencies, and risks.
           - id: story-target-plan
             number: 2
             name: Target Migration Plan
@@ -99,6 +115,8 @@ epics:
               - Rollback and validation steps are documented.
             implementation:
               - Convert findings into an implementation-ready migration sequence.
+            testing:
+              - Review the plan against phase gates, rollback expectations, and validation steps.
             dependencies:
               - story-current-state
 merge_units:

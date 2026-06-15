@@ -38,6 +38,7 @@ func storyMarkdown(epic Epic, feature Feature, story Story) string {
 	writeParagraph(&b, story.Summary)
 	writeList(&b, "Acceptance Criteria", story.Acceptance)
 	writeList(&b, "Implementation Notes", story.Implementation)
+	writeList(&b, "Testing Criteria", story.Testing)
 	writeList(&b, "Dependencies", story.Dependencies)
 	return b.String()
 }

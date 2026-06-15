@@ -65,7 +65,7 @@ func TestPlanExampleAndSchemaCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("feature plan example failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
 	}
-	if !strings.Contains(stdout, "schema_version: 1") || !strings.Contains(stdout, "merge_units:") {
+	if !strings.Contains(stdout, "schema_version: 1") || !strings.Contains(stdout, "merge_units:") || !strings.Contains(stdout, "testing:") {
 		t.Fatalf("example missing manifest contract:\n%s", stdout)
 	}
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -18,8 +19,12 @@ func TestMaterializeAndValidateWritesLock(t *testing.T) {
 		t.Fatalf("Materialize: %v", err)
 	}
 	expected := filepath.Join(materialized.PlanDir, "001-epic-foundation", "001-feature-installer", "001-story-install-contract.md")
-	if _, err := os.Stat(expected); err != nil {
+	b, err := os.ReadFile(expected)
+	if err != nil {
 		t.Fatalf("expected story file: %v", err)
+	}
+	if !strings.Contains(string(b), "## Testing Criteria") {
+		t.Fatalf("expected testing criteria section in story markdown:\n%s", string(b))
 	}
 	validated, err := Validate(ValidateOptions{PlanDir: materialized.PlanDir, WriteLock: true})
 	if err != nil {
@@ -55,6 +60,13 @@ epics:
           - id: story-a
             number: 1
             name: Install Contract
+            summary: Implement install contract validation.
+            acceptance:
+              - Broken dependency is still represented for validation.
+            implementation:
+              - Keep this manifest valid except for the dependency reference.
+            testing:
+              - Confirm validation rejects the missing dependency.
             dependencies: [missing-story]
 `
 	if err := os.WriteFile(manifestPath, []byte(broken), 0o644); err != nil {
@@ -178,6 +190,10 @@ epics:
             summary: Implement delegated installer contract.
             acceptance:
               - install JSON includes hashes
+            implementation:
+              - Build delegated installer output from staged files.
+            testing:
+              - Validate staged install JSON includes hashes for installed files.
 merge_units:
   - id: story-install-contract
     name: Install Contract
