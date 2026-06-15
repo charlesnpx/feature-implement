@@ -133,8 +133,16 @@ merge_units:
 Smoke test:
 
 ```sh
-feature plan example > feature.plan.yaml
-plan_dir="$(feature plan materialize --manifest feature.plan.yaml)"
+scratch_root="${HOME}/tmp"
+if [ -d "$scratch_root" ]; then
+  scratch_dir="$(mktemp -d "$scratch_root/feature-manifest-XXXXXX")"
+else
+  scratch_dir="$(mktemp -d)"
+fi
+
+manifest="$scratch_dir/feature.plan.yaml"
+feature plan example > "$manifest"
+plan_dir="$(feature plan materialize --manifest "$manifest")"
 feature validate "$plan_dir" --write-lock
 feature status "$plan_dir"
 ```

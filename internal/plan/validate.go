@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 type ValidateOptions struct {
@@ -155,19 +156,31 @@ func validateMaterializeShape(manifest Manifest) error {
 				if story.Number <= 0 || story.Name == "" {
 					return fmt.Errorf("story %s requires positive number and name", story.ID)
 				}
-				if story.Summary == "" {
+				if strings.TrimSpace(story.Summary) == "" {
 					return fmt.Errorf("story %s requires summary", story.ID)
 				}
-				if len(story.Acceptance) == 0 {
-					return fmt.Errorf("story %s requires acceptance criteria", story.ID)
+				if err := requireNonBlankList(story.ID, "acceptance criteria", story.Acceptance); err != nil {
+					return err
 				}
-				if len(story.Implementation) == 0 {
-					return fmt.Errorf("story %s requires implementation details", story.ID)
+				if err := requireNonBlankList(story.ID, "implementation details", story.Implementation); err != nil {
+					return err
 				}
-				if len(story.Testing) == 0 {
-					return fmt.Errorf("story %s requires testing criteria", story.ID)
+				if err := requireNonBlankList(story.ID, "testing criteria", story.Testing); err != nil {
+					return err
 				}
 			}
+		}
+	}
+	return nil
+}
+
+func requireNonBlankList(storyID, field string, values []string) error {
+	if len(values) == 0 {
+		return fmt.Errorf("story %s requires %s", storyID, field)
+	}
+	for i, value := range values {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("story %s requires non-blank %s item %d", storyID, field, i+1)
 		}
 	}
 	return nil

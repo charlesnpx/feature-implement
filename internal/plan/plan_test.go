@@ -81,6 +81,155 @@ epics:
 	}
 }
 
+func TestMaterializeRejectsSparseStories(t *testing.T) {
+	tests := []struct {
+		name    string
+		story   string
+		wantErr string
+	}{
+		{
+			name: "missing summary",
+			story: `          - id: story-a
+            number: 1
+            name: Install Contract
+            acceptance:
+              - Done behavior is defined.
+            implementation:
+              - Implement the behavior.
+            testing:
+              - Run the relevant checks.
+`,
+			wantErr: "story story-a requires summary",
+		},
+		{
+			name: "blank summary",
+			story: `          - id: story-a
+            number: 1
+            name: Install Contract
+            summary: "   "
+            acceptance:
+              - Done behavior is defined.
+            implementation:
+              - Implement the behavior.
+            testing:
+              - Run the relevant checks.
+`,
+			wantErr: "story story-a requires summary",
+		},
+		{
+			name: "missing acceptance",
+			story: `          - id: story-a
+            number: 1
+            name: Install Contract
+            summary: Implement the contract.
+            implementation:
+              - Implement the behavior.
+            testing:
+              - Run the relevant checks.
+`,
+			wantErr: "story story-a requires acceptance criteria",
+		},
+		{
+			name: "blank acceptance",
+			story: `          - id: story-a
+            number: 1
+            name: Install Contract
+            summary: Implement the contract.
+            acceptance:
+              - "   "
+            implementation:
+              - Implement the behavior.
+            testing:
+              - Run the relevant checks.
+`,
+			wantErr: "story story-a requires non-blank acceptance criteria item 1",
+		},
+		{
+			name: "missing implementation",
+			story: `          - id: story-a
+            number: 1
+            name: Install Contract
+            summary: Implement the contract.
+            acceptance:
+              - Done behavior is defined.
+            testing:
+              - Run the relevant checks.
+`,
+			wantErr: "story story-a requires implementation details",
+		},
+		{
+			name: "blank implementation",
+			story: `          - id: story-a
+            number: 1
+            name: Install Contract
+            summary: Implement the contract.
+            acceptance:
+              - Done behavior is defined.
+            implementation:
+              - "   "
+            testing:
+              - Run the relevant checks.
+`,
+			wantErr: "story story-a requires non-blank implementation details item 1",
+		},
+		{
+			name: "missing testing",
+			story: `          - id: story-a
+            number: 1
+            name: Install Contract
+            summary: Implement the contract.
+            acceptance:
+              - Done behavior is defined.
+            implementation:
+              - Implement the behavior.
+`,
+			wantErr: "story story-a requires testing criteria",
+		},
+		{
+			name: "blank testing",
+			story: `          - id: story-a
+            number: 1
+            name: Install Contract
+            summary: Implement the contract.
+            acceptance:
+              - Done behavior is defined.
+            implementation:
+              - Implement the behavior.
+            testing:
+              - "   "
+`,
+			wantErr: "story story-a requires non-blank testing criteria item 1",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			manifestPath := filepath.Join(root, "feature.plan.yaml")
+			manifest := `schema_version: 1
+id: sparse
+title: Sparse
+output_name: sparse
+epics:
+  - id: epic-a
+    number: 1
+    name: Foundation
+    features:
+      - id: feature-a
+        number: 1
+        name: Installer
+        stories:
+` + tt.story
+			if err := os.WriteFile(manifestPath, []byte(manifest), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Materialize(MaterializeOptions{ManifestPath: manifestPath, OutRoot: root})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Materialize error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestImplementRequiresLockAndExplicitWriteFlags(t *testing.T) {
 	root := t.TempDir()
 	if _, err := Implement(ImplementOptions{PlanDir: root, Action: "push"}); err == nil {
