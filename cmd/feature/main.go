@@ -56,7 +56,7 @@ func usage(w io.Writer) {
   feature validate <plan-dir> [--write-lock] [--json]
   feature status <plan-dir> [--json]
   feature implement next|start|commit|push|open-pr|review|merge|cleanup <plan-dir> [--merge-unit <id>] [--write-state] [metadata flags] [--json]
-  feature workspace init|validate|status [args]
+  feature workspace init|validate|status|next [args]
   feature version`)
 }
 
@@ -301,7 +301,7 @@ func implementCommand(args []string) error {
 
 func workspaceCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("workspace requires subcommand: init, validate, or status")
+		return fmt.Errorf("workspace requires subcommand: init, validate, status, or next")
 	}
 	action := args[0]
 	if isHelpCommand(action) {
@@ -320,6 +320,8 @@ func workspaceCommand(args []string) error {
 		return workspaceValidate(args[1:])
 	case "status":
 		return workspaceStatus(args[1:])
+	case "next":
+		return workspaceNext(args[1:])
 	default:
 		return workspace.ErrNotImplemented(action)
 	}
@@ -404,6 +406,44 @@ func blockedWorkspaceUnitSummaries(result workspace.StatusResult) []string {
 		summaries = append(summaries, fmt.Sprintf("%s (blocked_by: %s)", id, strings.Join(blockedBy, ", ")))
 	}
 	return summaries
+}
+
+func workspaceNext(args []string) error {
+	fs := flag.NewFlagSet("workspace next", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	agentID := fs.String("agent", "", "Agent ID claiming the next ready merge unit")
+	claim := fs.Bool("claim", false, "Create a lease for the selected merge unit")
+	asJSON := fs.Bool("json", false, "Emit JSON result")
+	if err := parsePermissive(fs, args, "agent"); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("workspace next requires <workspace-dir>")
+	}
+	result, err := workspace.Next(workspace.NextOptions{WorkspaceDir: fs.Arg(0), AgentID: *agentID, Claim: *claim})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(result)
+	}
+	writeWorkspaceNextText(result)
+	return nil
+}
+
+func writeWorkspaceNextText(result workspace.NextResult) {
+	if result.Status == "none" {
+		fmt.Println("no ready merge units")
+		return
+	}
+	fmt.Printf(
+		"claimed %s lease=%s agent=%s expires_at=%s lifecycle=%s\n",
+		result.MergeUnitID,
+		result.LeaseID,
+		result.AgentID,
+		result.LeaseExpiresAt,
+		result.Lifecycle,
+	)
 }
 
 func writeJSON(value any) error {
@@ -539,6 +579,7 @@ func usageWorkspace(w io.Writer) {
   feature workspace init --manifest <file> [--write-lock] [--json]
   feature workspace validate <workspace-dir> [--write-lock] [--json]
   feature workspace status <workspace-dir> [--json]
+  feature workspace next <workspace-dir> --agent <id> --claim [--json]
 
 Coordinates validated feature plans through a workspace-level orchestration layer.`)
 }
@@ -560,6 +601,11 @@ Validates a feature workspace and optionally writes feature.workspace.lock.json.
   feature workspace status <workspace-dir> [--json]
 
 Reports feature workspace scheduler status.`)
+	case "next":
+		fmt.Fprintln(w, `Usage:
+  feature workspace next <workspace-dir> --agent <id> --claim [--json]
+
+Claims the next dependency-ready workspace merge unit for an agent.`)
 	default:
 		usageWorkspace(w)
 	}

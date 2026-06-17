@@ -118,6 +118,8 @@ func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, event Jour
 	switch event.Type {
 	case EventWorkspaceCreated, EventWorkspaceValidated:
 		return nil
+	case EventLeaseGranted:
+		return nil
 	case EventMergeUnitStarted:
 		return updateMergeUnitStatus(unitByID, event, MergeUnitInProgress)
 	case EventMergeUnitCompleted:
