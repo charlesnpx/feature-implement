@@ -627,6 +627,10 @@ func TestStartAttemptRecordsFirstAttempt(t *testing.T) {
 	if attempt.BaseRef != fixtureWorkspaceBaseRef || attempt.BaseSHA != "base-sha-1" || attempt.Mode != "fresh-from-base" {
 		t.Fatalf("base/mode metadata = %+v", attempt)
 	}
+	wantCommand := "git worktree add -b feature/workspace-a/foundation/story-a/attempt-1 " + wantWorktree + " workspace-orchestration"
+	if len(attempt.Commands) != 1 || attempt.Commands[0] != wantCommand {
+		t.Fatalf("commands = %+v, want %q", attempt.Commands, wantCommand)
+	}
 
 	events := readTestJournalEvents(t, fixture.Dir)
 	last := events[len(events)-1]
@@ -662,6 +666,54 @@ func TestStartAttemptRecordsFirstAttempt(t *testing.T) {
 	unit := findSchedulerUnit(t, view, "foundation:story-a")
 	if unit.CurrentAttempt == nil || unit.CurrentAttempt.AttemptID != attempt.AttemptID || unit.CurrentAttempt.Branch != attempt.Branch {
 		t.Fatalf("current attempt = %+v", unit.CurrentAttempt)
+	}
+}
+
+func TestStartAttemptQuotesWorktreeCommandWithSpaces(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace root with spaces")
+	workspaceDir := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := WorkspaceManifest{
+		SchemaVersion: manifestSchemaVersion,
+		ID:            "workspace-a",
+		Repo:          ".",
+		BaseRef:       fixtureWorkspaceBaseRef,
+		Remote:        "origin",
+		Plans: []WorkspacePlanRef{{
+			ID:   "foundation",
+			Path: filepath.ToSlash(filepath.Join("plans", "foundation")),
+		}},
+	}
+	materializeFixturePlan(t, workspaceDir, fixtureWorkspaceBaseRef, workspaceFixturePlan{ID: "foundation", StoryID: "story-a"})
+	writeWorkspaceManifest(t, workspaceDir, manifest)
+	writeWorkspaceLock(t, workspaceDir)
+	claim, err := Next(NextOptions{
+		WorkspaceDir: workspaceDir,
+		AgentID:      "worker-a",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+
+	attempt, err := StartAttempt(AttemptStartOptions{
+		WorkspaceDir: workspaceDir,
+		MergeUnitID:  "foundation:story-a",
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		BaseSHA:      "base-sha-1",
+		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("StartAttempt: %v", err)
+	}
+	wantWorktree := filepath.Join(workspaceDir, "state", "worktrees", "workspace-a", "foundation", "story-a", "attempt-1")
+	wantCommand := "git worktree add -b feature/workspace-a/foundation/story-a/attempt-1 '" + wantWorktree + "' workspace-orchestration"
+	if len(attempt.Commands) != 1 || attempt.Commands[0] != wantCommand {
+		t.Fatalf("commands = %+v, want %q", attempt.Commands, wantCommand)
 	}
 }
 

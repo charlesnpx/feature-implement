@@ -589,6 +589,9 @@ func workspaceAttemptStart(args []string) error {
 		return writeJSON(result)
 	}
 	fmt.Printf("started %s attempt=%s branch=%s worktree=%s mode=%s\n", result.MergeUnitID, result.AttemptID, result.Branch, result.Worktree, result.Mode)
+	for _, command := range result.Commands {
+		fmt.Printf("command %s\n", command)
+	}
 	return nil
 }
 

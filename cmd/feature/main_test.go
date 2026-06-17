@@ -474,15 +474,16 @@ func TestWorkspaceAttemptStartCommandJSON(t *testing.T) {
 		t.Fatalf("feature workspace attempt start failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
 	}
 	var attempt struct {
-		Status        string `json:"status"`
-		MergeUnitID   string `json:"merge_unit_id"`
-		AttemptID     string `json:"attempt_id"`
-		AttemptNumber int    `json:"attempt_number"`
-		Branch        string `json:"branch"`
-		Worktree      string `json:"worktree"`
-		BaseRef       string `json:"base_ref"`
-		BaseSHA       string `json:"base_sha"`
-		Mode          string `json:"mode"`
+		Status        string   `json:"status"`
+		MergeUnitID   string   `json:"merge_unit_id"`
+		AttemptID     string   `json:"attempt_id"`
+		AttemptNumber int      `json:"attempt_number"`
+		Branch        string   `json:"branch"`
+		Worktree      string   `json:"worktree"`
+		BaseRef       string   `json:"base_ref"`
+		BaseSHA       string   `json:"base_sha"`
+		Mode          string   `json:"mode"`
+		Commands      []string `json:"commands"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &attempt); err != nil {
 		t.Fatalf("attempt stdout is not JSON: %v\n%s", err, stdout)
@@ -498,6 +499,10 @@ func TestWorkspaceAttemptStartCommandJSON(t *testing.T) {
 	}
 	if !strings.Contains(attempt.Worktree, filepath.Join("state", "worktrees", "workspace-a", "foundation", "story-a", "attempt-1")) {
 		t.Fatalf("worktree = %q", attempt.Worktree)
+	}
+	wantCommand := "git worktree add -b feature/workspace-a/foundation/story-a/attempt-1 " + attempt.Worktree + " workspace-orchestration"
+	if len(attempt.Commands) != 1 || attempt.Commands[0] != wantCommand {
+		t.Fatalf("commands = %+v, want %q", attempt.Commands, wantCommand)
 	}
 }
 
