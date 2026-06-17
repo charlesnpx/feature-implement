@@ -37,20 +37,34 @@ type SchedulerView struct {
 }
 
 type SchedulerMergeUnitView struct {
-	ID           string              `json:"id"`
-	PlanID       string              `json:"plan_id"`
-	MergeUnitID  string              `json:"merge_unit_id"`
-	StoryIDs     []string            `json:"story_ids"`
-	Dependencies []string            `json:"dependencies,omitempty"`
-	Status       string              `json:"status"`
-	BlockedBy    []string            `json:"blocked_by,omitempty"`
-	ActiveLease  *SchedulerLeaseView `json:"active_lease,omitempty"`
+	ID             string                `json:"id"`
+	PlanID         string                `json:"plan_id"`
+	MergeUnitID    string                `json:"merge_unit_id"`
+	StoryIDs       []string              `json:"story_ids"`
+	Dependencies   []string              `json:"dependencies,omitempty"`
+	Status         string                `json:"status"`
+	BlockedBy      []string              `json:"blocked_by,omitempty"`
+	ActiveLease    *SchedulerLeaseView   `json:"active_lease,omitempty"`
+	CurrentAttempt *SchedulerAttemptView `json:"current_attempt,omitempty"`
 }
 
 type SchedulerLeaseView struct {
 	LeaseID        string `json:"lease_id"`
 	AgentID        string `json:"agent_id"`
 	LeaseExpiresAt string `json:"lease_expires_at"`
+}
+
+type SchedulerAttemptView struct {
+	AttemptID     string `json:"attempt_id"`
+	AttemptNumber int    `json:"attempt_number"`
+	AgentID       string `json:"agent_id"`
+	LeaseID       string `json:"lease_id"`
+	Branch        string `json:"branch"`
+	Worktree      string `json:"worktree"`
+	BaseRef       string `json:"base_ref"`
+	BaseSHA       string `json:"base_sha"`
+	Mode          string `json:"mode"`
+	Status        string `json:"status"`
 }
 
 func SchedulerViewPath(workspaceDir string) string {
@@ -117,6 +131,10 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 	if err != nil {
 		return SchedulerView{}, err
 	}
+	attempts, err := attemptSnapshots(events)
+	if err != nil {
+		return SchedulerView{}, err
+	}
 	for i := range view.MergeUnits {
 		unit := &view.MergeUnits[i]
 		if lease, ok := activeLeases[unit.ID]; ok {
@@ -126,6 +144,20 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 				LeaseExpiresAt: lease.LeaseExpiresAt.UTC().Format(time.RFC3339Nano),
 			}
 			view.Leased = append(view.Leased, unit.ID)
+		}
+		if attempt := currentAttempt(attempts[unit.ID]); attempt != nil {
+			unit.CurrentAttempt = &SchedulerAttemptView{
+				AttemptID:     attempt.AttemptID,
+				AttemptNumber: attempt.AttemptNumber,
+				AgentID:       attempt.AgentID,
+				LeaseID:       attempt.LeaseID,
+				Branch:        attempt.Branch,
+				Worktree:      attempt.Worktree,
+				BaseRef:       attempt.BaseRef,
+				BaseSHA:       attempt.BaseSHA,
+				Mode:          attempt.Mode,
+				Status:        attempt.Status,
+			}
 		}
 		view.Counts[unit.Status]++
 		if unit.Status == MergeUnitPending {
@@ -151,7 +183,7 @@ func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, event Jour
 	switch event.Type {
 	case EventWorkspaceCreated, EventWorkspaceValidated:
 		return nil
-	case EventLeaseGranted, EventLeaseHeartbeat, EventLeaseReleased, EventLeaseRecovered:
+	case EventLeaseGranted, EventLeaseHeartbeat, EventLeaseReleased, EventLeaseRecovered, EventAttemptStarted, EventAttemptAbandoned:
 		return nil
 	case EventMergeUnitStarted:
 		return updateMergeUnitStatus(unitByID, event, MergeUnitInProgress)

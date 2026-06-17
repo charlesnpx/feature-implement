@@ -572,3 +572,184 @@ func TestRecoverRebuildsSchedulerViewWithoutHistoryChange(t *testing.T) {
 		t.Fatalf("stat events: %v", err)
 	}
 }
+
+func TestStartAttemptRequiresActiveLease(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	writeWorkspaceLock(t, fixture.Dir)
+
+	_, err := StartAttempt(AttemptStartOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  "foundation:story-a",
+		AgentID:      "worker-a",
+		LeaseID:      "missing-lease",
+		BaseSHA:      "base-sha",
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "active lease not found: missing-lease") {
+		t.Fatalf("missing lease error = %v", err)
+	}
+}
+
+func TestStartAttemptRecordsFirstAttempt(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	writeWorkspaceLock(t, fixture.Dir)
+	claim, err := Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+
+	attempt, err := StartAttempt(AttemptStartOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  "foundation:story-a",
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		BaseSHA:      "base-sha-1",
+		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("StartAttempt: %v", err)
+	}
+	if attempt.Status != "started" || attempt.AttemptID != "foundation:story-a:attempt-1" || attempt.AttemptNumber != 1 {
+		t.Fatalf("attempt result = %+v", attempt)
+	}
+	if attempt.Branch != "feature/workspace-a/foundation/story-a/attempt-1" {
+		t.Fatalf("branch = %q", attempt.Branch)
+	}
+	wantWorktree := filepath.Join(fixture.Dir, "state", "worktrees", "workspace-a", "foundation", "story-a", "attempt-1")
+	if attempt.Worktree != wantWorktree {
+		t.Fatalf("worktree = %q, want %q", attempt.Worktree, wantWorktree)
+	}
+	if attempt.BaseRef != fixtureWorkspaceBaseRef || attempt.BaseSHA != "base-sha-1" || attempt.Mode != "fresh-from-base" {
+		t.Fatalf("base/mode metadata = %+v", attempt)
+	}
+
+	events := readTestJournalEvents(t, fixture.Dir)
+	last := events[len(events)-1]
+	if last.Type != EventAttemptStarted {
+		t.Fatalf("attempt event = %+v", last)
+	}
+	if last.Payload[eventPayloadAttemptIDKey] != attempt.AttemptID ||
+		last.Payload[eventPayloadBranchKey] != attempt.Branch ||
+		last.Payload[eventPayloadWorktreeKey] != attempt.Worktree ||
+		last.Payload[eventPayloadBaseSHAKey] != attempt.BaseSHA ||
+		last.Payload[eventPayloadModeKey] != attempt.Mode {
+		t.Fatalf("attempt payload = %+v", last.Payload)
+	}
+	wantReadSet := map[string]int{
+		LeaseResource("foundation:story-a"):     1,
+		MergeUnitResource("foundation:story-a"): 1,
+	}
+	if !reflect.DeepEqual(last.ReadSet, wantReadSet) {
+		t.Fatalf("attempt read set = %+v, want %+v", last.ReadSet, wantReadSet)
+	}
+	if len(last.WriteSet) != 1 || last.WriteSet[0] != MergeUnitResource("foundation:story-a") {
+		t.Fatalf("attempt write set = %+v", last.WriteSet)
+	}
+
+	lock, err := readWorkspaceLock(filepath.Join(fixture.Dir, LockFileName))
+	if err != nil {
+		t.Fatalf("readWorkspaceLock: %v", err)
+	}
+	view, err := buildSchedulerViewAt(lock, events, fixedJournalTime("2026-06-17T10:02:00Z")())
+	if err != nil {
+		t.Fatalf("buildSchedulerViewAt: %v", err)
+	}
+	unit := findSchedulerUnit(t, view, "foundation:story-a")
+	if unit.CurrentAttempt == nil || unit.CurrentAttempt.AttemptID != attempt.AttemptID || unit.CurrentAttempt.Branch != attempt.Branch {
+		t.Fatalf("current attempt = %+v", unit.CurrentAttempt)
+	}
+}
+
+func TestStartAttemptRejectsExistingActiveAttempt(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	writeWorkspaceLock(t, fixture.Dir)
+	claim, err := Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	first, err := StartAttempt(AttemptStartOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  "foundation:story-a",
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		BaseSHA:      "base-sha-1",
+		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("StartAttempt first: %v", err)
+	}
+
+	_, err = StartAttempt(AttemptStartOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  "foundation:story-a",
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		BaseSHA:      "base-sha-2",
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "already has active attempt "+first.AttemptID) {
+		t.Fatalf("active attempt error = %v", err)
+	}
+}
+
+func TestStartAttemptIncrementsAfterAbandon(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	writeWorkspaceLock(t, fixture.Dir)
+	claim, err := Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	first, err := StartAttempt(AttemptStartOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  "foundation:story-a",
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		BaseSHA:      "base-sha-1",
+		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("StartAttempt first: %v", err)
+	}
+	if _, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: fixture.Dir,
+		Type:         EventAttemptAbandoned,
+		Payload: map[string]any{
+			eventPayloadMergeUnitIDKey: "foundation:story-a",
+			eventPayloadAttemptIDKey:   first.AttemptID,
+		},
+		WriteSet: []string{MergeUnitResource("foundation:story-a")},
+		Now:      fixedJournalTime("2026-06-17T10:02:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent abandon: %v", err)
+	}
+
+	second, err := StartAttempt(AttemptStartOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  "foundation:story-a",
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		BaseSHA:      "base-sha-2",
+		Now:          fixedJournalTime("2026-06-17T10:03:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("StartAttempt second: %v", err)
+	}
+	if second.AttemptID != "foundation:story-a:attempt-2" || second.AttemptNumber != 2 {
+		t.Fatalf("second attempt = %+v", second)
+	}
+}
