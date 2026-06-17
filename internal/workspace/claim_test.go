@@ -368,6 +368,46 @@ func TestLeaseOperationsRejectWrongLeaseAndAgent(t *testing.T) {
 	}
 }
 
+func TestLeaseOperationsRejectStaleSnapshotUnderCAS(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	writeWorkspaceLock(t, fixture.Dir)
+	claim, err := Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+
+	state, err := loadLeaseOperationState(fixture.Dir, fixedJournalTime("2026-06-17T10:01:00Z")())
+	if err != nil {
+		t.Fatalf("loadLeaseOperationState: %v", err)
+	}
+	lease, _, err := requireOwnedActiveLease(state, claim.LeaseID, "worker-a")
+	if err != nil {
+		t.Fatalf("requireOwnedActiveLease: %v", err)
+	}
+
+	if _, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: fixture.Dir,
+		Type:         EventMergeUnitStarted,
+		Payload:      map[string]any{eventPayloadMergeUnitIDKey: "foundation:story-a"},
+		WriteSet:     []string{MergeUnitResource("foundation:story-a")},
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent start: %v", err)
+	}
+
+	err = appendLeaseEvent(fixture.Dir, EventLeaseReleased, lease, "", state.Revisions, fixedJournalTime("2026-06-17T10:03:00Z")())
+
+	var stale StaleResourceError
+	if !errors.As(err, &stale) || stale.Resource != MergeUnitResource("foundation:story-a") {
+		t.Fatalf("release should reject stale CAS snapshot: %v", err)
+	}
+}
+
 func TestHeartbeatRejectsExpiredLease(t *testing.T) {
 	fixture := newOnePlanWorkspaceFixture(t)
 	writeWorkspaceLock(t, fixture.Dir)
