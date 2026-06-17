@@ -315,10 +315,14 @@ func workspaceCommand(args []string) error {
 		usageWorkspaceAction(os.Stdout, action)
 		return nil
 	}
-	if action == "validate" {
+	switch action {
+	case "validate":
 		return workspaceValidate(args[1:])
+	case "status":
+		return workspaceStatus(args[1:])
+	default:
+		return workspace.ErrNotImplemented(action)
 	}
-	return workspace.ErrNotImplemented(action)
 }
 
 func workspaceValidate(args []string) error {
@@ -341,6 +345,65 @@ func workspaceValidate(args []string) error {
 	}
 	fmt.Println(result.Status)
 	return nil
+}
+
+func workspaceStatus(args []string) error {
+	fs := flag.NewFlagSet("workspace status", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	asJSON := fs.Bool("json", false, "Emit JSON result")
+	if err := parsePermissive(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("workspace status requires <workspace-dir>")
+	}
+	result, err := workspace.Status(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(result)
+	}
+	writeWorkspaceStatusText(result)
+	return nil
+}
+
+func writeWorkspaceStatusText(result workspace.StatusResult) {
+	fmt.Printf("workspace %s\n", result.WorkspaceID)
+	fmt.Printf("base_ref %s\n", result.BaseRef)
+	fmt.Printf(
+		"merge_units total=%d pending=%d in_progress=%d completed=%d failed=%d ready=%d blocked=%d\n",
+		result.TotalMergeUnits,
+		result.Counts[workspace.MergeUnitPending],
+		result.Counts[workspace.MergeUnitInProgress],
+		result.Counts[workspace.MergeUnitCompleted],
+		result.Counts[workspace.MergeUnitFailed],
+		len(result.Ready),
+		len(result.Blocked),
+	)
+	if len(result.Ready) > 0 {
+		fmt.Printf("ready %s\n", strings.Join(result.Ready, ", "))
+	}
+	if len(result.Blocked) > 0 {
+		fmt.Printf("blocked %s\n", strings.Join(blockedWorkspaceUnitSummaries(result), ", "))
+	}
+}
+
+func blockedWorkspaceUnitSummaries(result workspace.StatusResult) []string {
+	blockedByUnit := map[string][]string{}
+	for _, unit := range result.MergeUnits {
+		blockedByUnit[unit.ID] = unit.BlockedBy
+	}
+	summaries := []string{}
+	for _, id := range result.Blocked {
+		blockedBy := blockedByUnit[id]
+		if len(blockedBy) == 0 {
+			summaries = append(summaries, id)
+			continue
+		}
+		summaries = append(summaries, fmt.Sprintf("%s (blocked_by: %s)", id, strings.Join(blockedBy, ", ")))
+	}
+	return summaries
 }
 
 func writeJSON(value any) error {

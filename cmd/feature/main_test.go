@@ -144,6 +144,110 @@ func TestWorkspaceValidateCommandWritesLock(t *testing.T) {
 	}
 }
 
+func TestWorkspaceStatusCommandJSON(t *testing.T) {
+	workspaceDir := workspaceWithPlanLocks(t)
+	if _, stderr, err := runFeature(t, "workspace", "validate", workspaceDir, "--write-lock", "--json"); err != nil {
+		t.Fatalf("feature workspace validate failed: %v\nstderr=%s", err, stderr)
+	}
+
+	stdout, stderr, err := runFeature(t, "workspace", "status", workspaceDir, "--json")
+	if err != nil {
+		t.Fatalf("feature workspace status failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var result struct {
+		Status          string         `json:"status"`
+		WorkspaceID     string         `json:"workspace_id"`
+		BaseRef         string         `json:"base_ref"`
+		TotalMergeUnits int            `json:"total_merge_units"`
+		Counts          map[string]int `json:"counts"`
+		Ready           []string       `json:"ready"`
+		Blocked         []string       `json:"blocked"`
+		MergeUnits      []struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"merge_units"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("stdout is not workspace status JSON: %v\n%s", err, stdout)
+	}
+	if result.Status != "ok" || result.WorkspaceID != "workspace-a" || result.BaseRef != "workspace-orchestration" {
+		t.Fatalf("status metadata = %+v", result)
+	}
+	if result.TotalMergeUnits != 1 || result.Counts["pending"] != 1 || result.Counts["completed"] != 0 {
+		t.Fatalf("status counts = %+v", result)
+	}
+	if len(result.Ready) != 1 || result.Ready[0] != "foundation:story-a" {
+		t.Fatalf("ready = %+v", result.Ready)
+	}
+	if len(result.Blocked) != 0 {
+		t.Fatalf("blocked = %+v", result.Blocked)
+	}
+	if len(result.MergeUnits) != 1 || result.MergeUnits[0].ID != "foundation:story-a" || result.MergeUnits[0].Status != "pending" {
+		t.Fatalf("merge units = %+v", result.MergeUnits)
+	}
+	if _, err := os.Stat(filepath.Join(workspaceDir, "state", "scheduler.view.json")); err != nil {
+		t.Fatalf("expected scheduler view file: %v", err)
+	}
+}
+
+func TestWorkspaceStatusCommandText(t *testing.T) {
+	workspaceDir := workspaceWithPlanLocks(t)
+	if _, stderr, err := runFeature(t, "workspace", "validate", workspaceDir, "--write-lock", "--json"); err != nil {
+		t.Fatalf("feature workspace validate failed: %v\nstderr=%s", err, stderr)
+	}
+
+	stdout, stderr, err := runFeature(t, "workspace", "status", workspaceDir)
+	if err != nil {
+		t.Fatalf("feature workspace status failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	for _, want := range []string{
+		"workspace workspace-a",
+		"base_ref workspace-orchestration",
+		"merge_units total=1 pending=1 in_progress=0 completed=0 failed=0 ready=1 blocked=0",
+		"ready foundation:story-a",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("workspace status text missing %q:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "{") || strings.Contains(stderr, "Usage:") {
+		t.Fatalf("workspace status text output is noisy:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+}
+
+func TestWorkspaceStatusCommandMissingLockFailsClearly(t *testing.T) {
+	workspaceDir := workspaceWithPlanLocks(t)
+
+	stdout, stderr, err := runFeature(t, "workspace", "status", workspaceDir)
+	if err == nil {
+		t.Fatalf("feature workspace status should fail without workspace lock")
+	}
+	if !strings.Contains(stderr, "workspace lock missing:") || !strings.Contains(stderr, "feature workspace validate <workspace-dir> --write-lock") {
+		t.Fatalf("missing lock error was not clear:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+	if strings.Contains(stdout, "Usage:") || strings.Contains(stderr, "Usage:") {
+		t.Fatalf("missing lock should not print usage:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+}
+
+func TestWorkspaceStatusCommandInvalidLockFailsClearly(t *testing.T) {
+	workspaceDir := workspaceWithPlanLocks(t)
+	if err := os.WriteFile(filepath.Join(workspaceDir, "feature.workspace.lock.json"), []byte("{not-json}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := runFeature(t, "workspace", "status", workspaceDir)
+	if err == nil {
+		t.Fatalf("feature workspace status should fail with invalid workspace lock")
+	}
+	if !strings.Contains(stderr, "workspace status: parse feature.workspace.lock.json") {
+		t.Fatalf("invalid lock error was not clear:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+	if strings.Contains(stdout, "Usage:") || strings.Contains(stderr, "Usage:") {
+		t.Fatalf("invalid lock should not print usage:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+}
+
 func TestPlanExampleAndSchemaCommands(t *testing.T) {
 	stdout, stderr, err := runFeature(t, "plan", "example")
 	if err != nil {
