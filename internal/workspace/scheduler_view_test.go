@@ -100,8 +100,15 @@ func TestRebuildSchedulerViewIsDeterministicAfterDelete(t *testing.T) {
 		t.Fatalf("AppendEvent: %v", err)
 	}
 
-	if _, err := RebuildSchedulerView(fixture.Dir); err != nil {
+	view, err := RebuildSchedulerView(fixture.Dir)
+	if err != nil {
 		t.Fatalf("RebuildSchedulerView first: %v", err)
+	}
+	if got := findSchedulerUnit(t, view, "sources:story-b").Status; got != MergeUnitInProgress {
+		t.Fatalf("sources status = %q", got)
+	}
+	if view.Counts[MergeUnitInProgress] != 1 || view.Counts[MergeUnitPending] != 1 {
+		t.Fatalf("counts = %+v", view.Counts)
 	}
 	firstBytes, err := os.ReadFile(SchedulerViewPath(fixture.Dir))
 	if err != nil {
