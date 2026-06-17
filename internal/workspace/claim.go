@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -60,11 +61,19 @@ func Next(opts NextOptions) (NextResult, error) {
 	}
 	claimedAt := now()
 
-	view, err := RebuildSchedulerView(opts.WorkspaceDir)
+	lock, err := readWorkspaceLock(filepath.Join(opts.WorkspaceDir, LockFileName))
 	if err != nil {
 		return NextResult{}, err
 	}
 	events, err := readJournalEvents(EventsPath(opts.WorkspaceDir))
+	if err != nil {
+		return NextResult{}, err
+	}
+	revisions, err := replayResourceRevisions(events)
+	if err != nil {
+		return NextResult{}, err
+	}
+	view, err := BuildSchedulerView(lock, events)
 	if err != nil {
 		return NextResult{}, err
 	}
@@ -81,7 +90,7 @@ func Next(opts NextOptions) (NextResult, error) {
 		if unit == nil {
 			return NextResult{}, fmt.Errorf("ready merge unit %s missing from scheduler view", mergeUnitID)
 		}
-		return claimReadyMergeUnit(opts, view, *unit, claimedAt, leaseDuration)
+		return claimReadyMergeUnit(opts, view, *unit, claimedAt, leaseDuration, revisions)
 	}
 	return NextResult{
 		Status:       "none",
@@ -91,14 +100,18 @@ func Next(opts NextOptions) (NextResult, error) {
 	}, nil
 }
 
-func claimReadyMergeUnit(opts NextOptions, view SchedulerView, unit SchedulerMergeUnitView, claimedAt time.Time, leaseDuration time.Duration) (NextResult, error) {
+func claimReadyMergeUnit(opts NextOptions, view SchedulerView, unit SchedulerMergeUnitView, claimedAt time.Time, leaseDuration time.Duration, revisions map[string]int) (NextResult, error) {
 	expiresAt := claimedAt.Add(leaseDuration).UTC().Format(time.RFC3339Nano)
 	leaseID := fmt.Sprintf("%s:%s:%d", unit.ID, opts.AgentID, claimedAt.UTC().UnixNano())
 	leaseResource := LeaseResource(unit.ID)
 	mergeUnitResource := MergeUnitResource(unit.ID)
-	revisions, err := ResourceRevisions(opts.WorkspaceDir)
-	if err != nil {
-		return NextResult{}, err
+	readSet := map[string]int{
+		leaseResource:     revisions[leaseResource],
+		mergeUnitResource: revisions[mergeUnitResource],
+	}
+	for _, dependencyID := range unit.Dependencies {
+		dependencyResource := MergeUnitResource(dependencyID)
+		readSet[dependencyResource] = revisions[dependencyResource]
 	}
 	if _, err := AppendEvent(AppendEventOptions{
 		WorkspaceDir: opts.WorkspaceDir,
@@ -109,10 +122,7 @@ func claimReadyMergeUnit(opts NextOptions, view SchedulerView, unit SchedulerMer
 			eventPayloadAgentIDKey:        opts.AgentID,
 			eventPayloadLeaseExpiresAtKey: expiresAt,
 		},
-		ReadSet: map[string]int{
-			leaseResource:     revisions[leaseResource],
-			mergeUnitResource: revisions[mergeUnitResource],
-		},
+		ReadSet:  readSet,
 		WriteSet: []string{leaseResource, mergeUnitResource},
 		Now:      func() time.Time { return claimedAt },
 	}); err != nil {

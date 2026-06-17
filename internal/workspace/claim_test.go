@@ -1,6 +1,8 @@
 package workspace
 
 import (
+	"errors"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -112,6 +114,12 @@ func TestNextSkipsBlockedDependencies(t *testing.T) {
 	if third.Status != "claimed" || third.MergeUnitID != "foundation:story-c" {
 		t.Fatalf("dependency-ready claim = %+v", third)
 	}
+	events := readTestJournalEvents(t, fixture.Dir)
+	thirdEvent := events[len(events)-1]
+	dependencyResource := MergeUnitResource("foundation:story-a")
+	if got := thirdEvent.ReadSet[dependencyResource]; got != 2 {
+		t.Fatalf("dependency read set revision = %d, want 2; read_set=%+v", got, thirdEvent.ReadSet)
+	}
 }
 
 func TestNextPreventsDuplicateActiveClaim(t *testing.T) {
@@ -154,5 +162,44 @@ func TestNextPreventsDuplicateActiveClaim(t *testing.T) {
 	}
 	if third.Status != "none" {
 		t.Fatalf("all ready units have active leases: %+v", third)
+	}
+}
+
+func TestClaimReadyMergeUnitRejectsStaleSnapshot(t *testing.T) {
+	fixture := newIndependentDAGFixture(t).Workspace
+	writeWorkspaceLock(t, fixture.Dir)
+	lock, err := readWorkspaceLock(filepath.Join(fixture.Dir, LockFileName))
+	if err != nil {
+		t.Fatalf("readWorkspaceLock: %v", err)
+	}
+	view, err := BuildSchedulerView(lock, nil)
+	if err != nil {
+		t.Fatalf("BuildSchedulerView: %v", err)
+	}
+	unit := findSchedulerUnit(t, view, "foundation:story-a")
+	revisions := map[string]int{}
+
+	if _, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: fixture.Dir,
+		Type:         EventMergeUnitCompleted,
+		Payload:      map[string]any{eventPayloadMergeUnitIDKey: "foundation:story-a"},
+		WriteSet:     []string{MergeUnitResource("foundation:story-a")},
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent completion: %v", err)
+	}
+
+	_, err = claimReadyMergeUnit(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		Claim:        true,
+	}, view, unit, fixedJournalTime("2026-06-17T10:01:00Z")(), DefaultLeaseDuration, revisions)
+
+	var stale StaleResourceError
+	if !errors.As(err, &stale) {
+		t.Fatalf("claimReadyMergeUnit error = %v", err)
+	}
+	if stale.Resource != MergeUnitResource("foundation:story-a") || stale.Expected != 0 || stale.Observed != 1 {
+		t.Fatalf("stale error = %+v", stale)
 	}
 }
