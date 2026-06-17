@@ -22,8 +22,9 @@ feature plan materialize --manifest <manifest> --out-root <folder> --json
 feature plan materialize --manifest <manifest> --json
 ```
 
-7. Spawn a Codex subagent to review the generated folder. Ask it to check hierarchy, story granularity, dependencies, merge units, missing caveats, and implementation order.
-8. Assess the review findings, apply useful edits to the manifest and Markdown files, then run:
+7. Spawn a fresh Codex subagent to review the generated folder. Ask it to check hierarchy, story granularity, dependencies, merge units, missing caveats, and implementation order. Do not use `pr:review:local:no-file` for this generated-folder review.
+8. Run a plan review loop with a maximum of 10 fresh-review iterations. For each review with useful findings, apply selected edits to the scratch manifest, re-run `feature plan materialize` with the same manifest and output arguments so Markdown stays in sync, then spawn a fresh reviewer for the updated generated folder. Stop only when a fresh reviewer returns no findings worth addressing. If iteration 10 still has worthwhile findings, stop and report the remaining findings instead of validating.
+9. After a clean review, run:
 
 ```sh
 feature validate <plan-dir> --write-lock --json

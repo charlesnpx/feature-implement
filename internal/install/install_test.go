@@ -85,6 +85,22 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			}
 		}
 	}
+	codexFeatureSkill := filepath.Join(stage, ".codex", "skills", "feature", "SKILL.md")
+	b, err := os.ReadFile(codexFeatureSkill)
+	if err != nil {
+		t.Fatalf("read staged codex feature skill %s: %v", codexFeatureSkill, err)
+	}
+	codexFeatureContent := string(b)
+	for _, want := range []string{
+		"Do not use `pr:review:local:no-file`",
+		"maximum of 10 fresh-review iterations",
+		"re-run `feature plan materialize`",
+		"Stop only when a fresh reviewer returns no findings worth addressing",
+	} {
+		if !strings.Contains(codexFeatureContent, want) {
+			t.Fatalf("staged codex feature skill missing %q", want)
+		}
+	}
 	for _, path := range []string{
 		filepath.Join(stage, ".codex", "skills", "feature:implement", "SKILL.md"),
 		filepath.Join(stage, ".claude", "skills", "feature:implement", "SKILL.md"),
@@ -119,13 +135,16 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 		}
 	}
 	codexImplementSkill := filepath.Join(stage, ".codex", "skills", "feature:implement", "SKILL.md")
-	b, err := os.ReadFile(codexImplementSkill)
+	b, err = os.ReadFile(codexImplementSkill)
 	if err != nil {
 		t.Fatalf("read staged codex implement skill %s: %v", codexImplementSkill, err)
 	}
-	content := string(b)
+	codexImplementContent := string(b)
 	for _, want := range []string{
 		"active Codex Skills list includes `pr:review:no-file`",
+		"`story_progress_label`",
+		"(Story 4/16)",
+		"clear title and description that includes the active `story_progress_label`",
 		"implementation worktree/repository path",
 		"`$pr:review:no-file <pr-number>`",
 		"generic Codex PR-review subagent",
@@ -133,7 +152,7 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 		"that fresh no-file review is the confirmation mechanism",
 		"same skill-selection rule",
 	} {
-		if !strings.Contains(content, want) {
+		if !strings.Contains(codexImplementContent, want) {
 			t.Fatalf("staged codex implement skill missing %q", want)
 		}
 	}
