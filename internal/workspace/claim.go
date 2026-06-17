@@ -868,7 +868,7 @@ func activeLeaseSnapshots(events []JournalEvent, now time.Time) (map[string]acti
 	}
 	active := map[string]activeLeaseSnapshot{}
 	for mergeUnitID, lease := range leases {
-		if now.Before(lease.LeaseExpiresAt) {
+		if !now.Before(lease.LeaseStartedAt) && now.Before(lease.LeaseExpiresAt) {
 			active[mergeUnitID] = lease
 		}
 	}
