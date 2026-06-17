@@ -31,6 +31,13 @@ const (
 	eventPayloadModeKey           = "mode"
 	eventPayloadReasonKey         = "reason"
 	eventPayloadStatusKey         = "status"
+	eventPayloadFromKey           = "from"
+	eventPayloadToKey             = "to"
+	eventPayloadEvidenceKey       = "evidence"
+
+	evidenceWorktreeKey  = "worktree"
+	evidenceCommitSHAKey = "commit_sha"
+	evidenceReasonKey    = "reason"
 
 	attemptStatusActive    = "active"
 	attemptStatusAbandoned = "abandoned"
@@ -114,6 +121,18 @@ type AttemptAbandonOptions struct {
 	Now          func() time.Time
 }
 
+type TransitionOptions struct {
+	WorkspaceDir string
+	MergeUnitID  string
+	AttemptID    string
+	AgentID      string
+	LeaseID      string
+	From         string
+	To           string
+	Evidence     map[string]any
+	Now          func() time.Time
+}
+
 type AttemptResult struct {
 	Status        string   `json:"status"`
 	WorkspaceDir  string   `json:"workspace_dir"`
@@ -133,6 +152,21 @@ type AttemptResult struct {
 	Commands      []string `json:"commands,omitempty"`
 }
 
+type TransitionResult struct {
+	Status       string         `json:"status"`
+	WorkspaceDir string         `json:"workspace_dir"`
+	WorkspaceID  string         `json:"workspace_id"`
+	BaseRef      string         `json:"base_ref"`
+	MergeUnitID  string         `json:"merge_unit_id"`
+	AttemptID    string         `json:"attempt_id"`
+	AgentID      string         `json:"agent_id"`
+	LeaseID      string         `json:"lease_id"`
+	From         string         `json:"from"`
+	To           string         `json:"to"`
+	EventType    string         `json:"event_type"`
+	Evidence     map[string]any `json:"evidence"`
+}
+
 type RecoveredLeaseView struct {
 	MergeUnitID    string `json:"merge_unit_id"`
 	LeaseID        string `json:"lease_id"`
@@ -144,6 +178,7 @@ type activeLeaseSnapshot struct {
 	MergeUnitID    string
 	LeaseID        string
 	AgentID        string
+	LeaseStartedAt time.Time
 	LeaseExpiresAt time.Time
 }
 
@@ -151,6 +186,7 @@ type attemptSnapshot struct {
 	MergeUnitID   string
 	AttemptID     string
 	AttemptNumber int
+	StartedAt     time.Time
 	AgentID       string
 	LeaseID       string
 	Branch        string
@@ -472,6 +508,63 @@ func AbandonAttempt(opts AttemptAbandonOptions) (AttemptResult, error) {
 	}, nil
 }
 
+func Transition(opts TransitionOptions) (TransitionResult, error) {
+	opts, transitionedAt, err := normalizeTransitionOptions(opts)
+	if err != nil {
+		return TransitionResult{}, err
+	}
+	state, err := loadLeaseOperationState(opts.WorkspaceDir, transitionedAt)
+	if err != nil {
+		return TransitionResult{}, err
+	}
+	lease, unit, err := requireOwnedActiveLease(state, opts.LeaseID, opts.AgentID)
+	if err != nil {
+		return TransitionResult{}, err
+	}
+	if lease.MergeUnitID != opts.MergeUnitID {
+		return TransitionResult{}, fmt.Errorf("lease %s is for merge unit %s, not %s", opts.LeaseID, lease.MergeUnitID, opts.MergeUnitID)
+	}
+	if unit.Status != opts.From {
+		return TransitionResult{}, fmt.Errorf("merge unit %s lifecycle is %s, not %s", opts.MergeUnitID, unit.Status, opts.From)
+	}
+	attempts, err := attemptSnapshots(state.Events)
+	if err != nil {
+		return TransitionResult{}, err
+	}
+	current, err := requireCurrentAttemptAt(attempts, opts.MergeUnitID, opts.AttemptID, transitionedAt)
+	if err != nil {
+		return TransitionResult{}, err
+	}
+	if err := validateAttemptLeaseOwner(opts.AttemptID, current.AgentID, current.LeaseID, opts.AgentID, opts.LeaseID); err != nil {
+		return TransitionResult{}, err
+	}
+	eventType, err := transitionEventType(opts.From, opts.To)
+	if err != nil {
+		return TransitionResult{}, err
+	}
+	evidence, err := normalizeTransitionEvidence(opts.From, opts.To, opts.Evidence, current)
+	if err != nil {
+		return TransitionResult{}, err
+	}
+	if err := appendTransitionEvent(opts.WorkspaceDir, opts, eventType, evidence, state.Revisions, transitionedAt); err != nil {
+		return TransitionResult{}, err
+	}
+	return TransitionResult{
+		Status:       "transitioned",
+		WorkspaceDir: opts.WorkspaceDir,
+		WorkspaceID:  state.View.WorkspaceID,
+		BaseRef:      state.View.BaseRef,
+		MergeUnitID:  opts.MergeUnitID,
+		AttemptID:    opts.AttemptID,
+		AgentID:      opts.AgentID,
+		LeaseID:      opts.LeaseID,
+		From:         opts.From,
+		To:           opts.To,
+		EventType:    eventType,
+		Evidence:     evidence,
+	}, nil
+}
+
 func claimReadyMergeUnit(opts NextOptions, view SchedulerView, unit SchedulerMergeUnitView, claimedAt time.Time, leaseDuration time.Duration, revisions map[string]int) (NextResult, error) {
 	expiresAt := claimedAt.Add(leaseDuration).UTC().Format(time.RFC3339Nano)
 	leaseID := fmt.Sprintf("%s:%s:%d", unit.ID, opts.AgentID, claimedAt.UTC().UnixNano())
@@ -605,6 +698,44 @@ func normalizeAttemptAbandonOptions(opts AttemptAbandonOptions) (AttemptAbandonO
 	return opts, now(), nil
 }
 
+func normalizeTransitionOptions(opts TransitionOptions) (TransitionOptions, time.Time, error) {
+	if opts.WorkspaceDir == "" {
+		return TransitionOptions{}, time.Time{}, fmt.Errorf("workspace transition requires <workspace-dir>")
+	}
+	opts.MergeUnitID = strings.TrimSpace(opts.MergeUnitID)
+	if opts.MergeUnitID == "" {
+		return TransitionOptions{}, time.Time{}, fmt.Errorf("workspace transition requires --merge-unit")
+	}
+	opts.AttemptID = strings.TrimSpace(opts.AttemptID)
+	if opts.AttemptID == "" {
+		return TransitionOptions{}, time.Time{}, fmt.Errorf("workspace transition requires --attempt")
+	}
+	opts.AgentID = strings.TrimSpace(opts.AgentID)
+	if opts.AgentID == "" {
+		return TransitionOptions{}, time.Time{}, fmt.Errorf("workspace transition requires --agent")
+	}
+	opts.LeaseID = strings.TrimSpace(opts.LeaseID)
+	if opts.LeaseID == "" {
+		return TransitionOptions{}, time.Time{}, fmt.Errorf("workspace transition requires --lease")
+	}
+	opts.From = strings.TrimSpace(opts.From)
+	if opts.From == "" {
+		return TransitionOptions{}, time.Time{}, fmt.Errorf("workspace transition requires --from")
+	}
+	opts.To = strings.TrimSpace(opts.To)
+	if opts.To == "" {
+		return TransitionOptions{}, time.Time{}, fmt.Errorf("workspace transition requires --to")
+	}
+	if opts.Evidence == nil {
+		opts.Evidence = map[string]any{}
+	}
+	now := time.Now
+	if opts.Now != nil {
+		now = opts.Now
+	}
+	return opts, now(), nil
+}
+
 func loadLeaseOperationState(workspaceDir string, observedAt time.Time) (leaseOperationState, error) {
 	lock, err := readWorkspaceLock(filepath.Join(workspaceDir, LockFileName))
 	if err != nil {
@@ -663,6 +794,27 @@ func requireCurrentAttempt(attempts map[string][]attemptSnapshot, mergeUnitID st
 	return *current, nil
 }
 
+func requireCurrentAttemptAt(attempts map[string][]attemptSnapshot, mergeUnitID string, attemptID string, observedAt time.Time) (attemptSnapshot, error) {
+	current, err := requireCurrentAttempt(attempts, mergeUnitID, attemptID)
+	if err != nil {
+		return attemptSnapshot{}, err
+	}
+	if observedAt.Before(current.StartedAt) {
+		return attemptSnapshot{}, fmt.Errorf("attempt %s has not started yet", attemptID)
+	}
+	return current, nil
+}
+
+func validateAttemptLeaseOwner(attemptID string, attemptAgentID string, attemptLeaseID string, agentID string, leaseID string) error {
+	if attemptLeaseID != leaseID {
+		return fmt.Errorf("attempt %s was started under lease %s, not %s", attemptID, attemptLeaseID, leaseID)
+	}
+	if attemptAgentID != agentID {
+		return fmt.Errorf("attempt %s is owned by agent %s, not %s", attemptID, attemptAgentID, agentID)
+	}
+	return nil
+}
+
 func appendLeaseEvent(workspaceDir string, eventType string, lease activeLeaseSnapshot, leaseExpiresAt string, revisions map[string]int, occurredAt time.Time) error {
 	leaseResource := LeaseResource(lease.MergeUnitID)
 	mergeUnitResource := MergeUnitResource(lease.MergeUnitID)
@@ -688,6 +840,31 @@ func appendLeaseEvent(workspaceDir string, eventType string, lease activeLeaseSn
 	return err
 }
 
+func appendTransitionEvent(workspaceDir string, opts TransitionOptions, eventType string, evidence map[string]any, revisions map[string]int, occurredAt time.Time) error {
+	leaseResource := LeaseResource(opts.MergeUnitID)
+	mergeUnitResource := MergeUnitResource(opts.MergeUnitID)
+	_, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: workspaceDir,
+		Type:         eventType,
+		Payload: map[string]any{
+			eventPayloadMergeUnitIDKey: opts.MergeUnitID,
+			eventPayloadAttemptIDKey:   opts.AttemptID,
+			eventPayloadAgentIDKey:     opts.AgentID,
+			eventPayloadLeaseIDKey:     opts.LeaseID,
+			eventPayloadFromKey:        opts.From,
+			eventPayloadToKey:          opts.To,
+			eventPayloadEvidenceKey:    evidence,
+		},
+		ReadSet: map[string]int{
+			leaseResource:     revisions[leaseResource],
+			mergeUnitResource: revisions[mergeUnitResource],
+		},
+		WriteSet: []string{mergeUnitResource},
+		Now:      func() time.Time { return occurredAt },
+	})
+	return err
+}
+
 func schedulerUnitByID(view SchedulerView) map[string]*SchedulerMergeUnitView {
 	unitByID := map[string]*SchedulerMergeUnitView{}
 	for i := range view.MergeUnits {
@@ -703,7 +880,7 @@ func activeLeaseSnapshots(events []JournalEvent, now time.Time) (map[string]acti
 	}
 	active := map[string]activeLeaseSnapshot{}
 	for mergeUnitID, lease := range leases {
-		if now.Before(lease.LeaseExpiresAt) {
+		if !now.Before(lease.LeaseStartedAt) && now.Before(lease.LeaseExpiresAt) {
 			active[mergeUnitID] = lease
 		}
 	}
@@ -850,6 +1027,10 @@ func (t *attemptTracker) Snapshots() map[string][]attemptSnapshot {
 }
 
 func eventAttemptStartedPayload(event JournalEvent) (attemptSnapshot, error) {
+	startedAt, err := eventTimestamp(event)
+	if err != nil {
+		return attemptSnapshot{}, err
+	}
 	mergeUnitID, err := eventStringPayload(event, eventPayloadMergeUnitIDKey)
 	if err != nil {
 		return attemptSnapshot{}, err
@@ -894,6 +1075,7 @@ func eventAttemptStartedPayload(event JournalEvent) (attemptSnapshot, error) {
 		MergeUnitID:   mergeUnitID,
 		AttemptID:     attemptID,
 		AttemptNumber: attemptNumber,
+		StartedAt:     startedAt,
 		AgentID:       agentID,
 		LeaseID:       leaseID,
 		Branch:        branch,
@@ -930,6 +1112,105 @@ func eventAttemptAbandonedPayload(event JournalEvent) (attemptSnapshot, error) {
 		Status:      status,
 		Reason:      reason,
 	}, nil
+}
+
+func transitionEventType(from string, to string) (string, error) {
+	switch {
+	case from == MergeUnitPending && to == MergeUnitInProgress:
+		return EventMergeUnitStarted, nil
+	case from == MergeUnitInProgress && to == MergeUnitCompleted:
+		return EventMergeUnitCompleted, nil
+	case (from == MergeUnitPending || from == MergeUnitInProgress) && to == MergeUnitFailed:
+		return EventMergeUnitFailed, nil
+	default:
+		return "", fmt.Errorf("unsupported workspace transition: %s -> %s", from, to)
+	}
+}
+
+func normalizeTransitionEvidence(from string, to string, evidence map[string]any, attempt attemptSnapshot) (map[string]any, error) {
+	normalized := map[string]any{}
+	for key, value := range evidence {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			return nil, fmt.Errorf("transition evidence key is required")
+		}
+		text, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("transition evidence %s must be a string", key)
+		}
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return nil, fmt.Errorf("transition evidence %s is required", key)
+		}
+		normalized[key] = text
+	}
+	switch to {
+	case MergeUnitInProgress:
+		worktree, err := requiredStringEvidence(normalized, evidenceWorktreeKey)
+		if err != nil {
+			return nil, err
+		}
+		if worktree != attempt.Worktree {
+			return nil, fmt.Errorf("transition evidence worktree %s does not match current attempt worktree %s", worktree, attempt.Worktree)
+		}
+	case MergeUnitCompleted:
+		if _, err := requiredStringEvidence(normalized, evidenceCommitSHAKey); err != nil {
+			return nil, err
+		}
+	case MergeUnitFailed:
+		if _, err := requiredStringEvidence(normalized, evidenceReasonKey); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("unsupported workspace transition: %s -> %s", from, to)
+	}
+	return normalized, nil
+}
+
+func requiredStringEvidence(evidence map[string]any, key string) (string, error) {
+	value, ok := evidence[key]
+	if !ok {
+		return "", fmt.Errorf("transition evidence %s is required", key)
+	}
+	text, ok := value.(string)
+	if !ok || strings.TrimSpace(text) == "" {
+		return "", fmt.Errorf("transition evidence %s must be a string", key)
+	}
+	return text, nil
+}
+
+func eventTransitionPayload(event JournalEvent) (from string, to string, evidence map[string]any, ok bool, err error) {
+	hasFrom := event.Payload[eventPayloadFromKey] != nil
+	hasTo := event.Payload[eventPayloadToKey] != nil
+	hasEvidence := event.Payload[eventPayloadEvidenceKey] != nil
+	if !hasFrom && !hasTo && !hasEvidence {
+		return "", "", nil, false, nil
+	}
+	from, err = eventStringPayload(event, eventPayloadFromKey)
+	if err != nil {
+		return "", "", nil, true, err
+	}
+	to, err = eventStringPayload(event, eventPayloadToKey)
+	if err != nil {
+		return "", "", nil, true, err
+	}
+	evidence, err = eventEvidencePayload(event)
+	if err != nil {
+		return "", "", nil, true, err
+	}
+	return from, to, evidence, true, nil
+}
+
+func eventEvidencePayload(event JournalEvent) (map[string]any, error) {
+	value, ok := event.Payload[eventPayloadEvidenceKey]
+	if !ok {
+		return nil, fmt.Errorf("scheduler event %s missing payload %s", event.ID, eventPayloadEvidenceKey)
+	}
+	evidence, ok := value.(map[string]any)
+	if !ok || len(evidence) == 0 {
+		return nil, fmt.Errorf("scheduler event %s payload %s must be an object", event.ID, eventPayloadEvidenceKey)
+	}
+	return evidence, nil
 }
 
 func eventIntPayload(event JournalEvent, key string) (int, error) {
@@ -1000,6 +1281,10 @@ func eventLeasePayload(event JournalEvent) (activeLeaseSnapshot, error) {
 	if err != nil {
 		return activeLeaseSnapshot{}, err
 	}
+	startedAt, err := eventTimestamp(event)
+	if err != nil {
+		return activeLeaseSnapshot{}, err
+	}
 	expiresAtText, err := eventStringPayload(event, eventPayloadLeaseExpiresAtKey)
 	if err != nil {
 		return activeLeaseSnapshot{}, err
@@ -1008,8 +1293,17 @@ func eventLeasePayload(event JournalEvent) (activeLeaseSnapshot, error) {
 	if err != nil {
 		return activeLeaseSnapshot{}, fmt.Errorf("scheduler event %s payload %s must be RFC3339Nano: %w", event.ID, eventPayloadLeaseExpiresAtKey, err)
 	}
+	lease.LeaseStartedAt = startedAt
 	lease.LeaseExpiresAt = expiresAt
 	return lease, nil
+}
+
+func eventTimestamp(event JournalEvent) (time.Time, error) {
+	timestamp, err := time.Parse(time.RFC3339Nano, event.Timestamp)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("scheduler event %s timestamp must be RFC3339Nano: %w", event.ID, err)
+	}
+	return timestamp, nil
 }
 
 func eventReleasedLeasePayload(event JournalEvent) (activeLeaseSnapshot, error) {

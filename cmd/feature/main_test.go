@@ -31,6 +31,7 @@ func TestHelpCommandsExitSuccessfully(t *testing.T) {
 		{"workspace", "attempt", "--help"},
 		{"workspace", "attempt", "start", "--help"},
 		{"workspace", "attempt", "abandon", "--help"},
+		{"workspace", "transition", "--help"},
 	}
 	for _, args := range tests {
 		stdout, stderr, err := runFeature(t, args...)
@@ -88,6 +89,7 @@ func TestWorkspaceCommandShell(t *testing.T) {
 		"feature workspace release",
 		"feature workspace recover",
 		"feature workspace attempt",
+		"feature workspace transition",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("workspace help missing %q:\n%s", want, stdout)
@@ -563,6 +565,78 @@ func TestWorkspaceAttemptAbandonCommandJSON(t *testing.T) {
 	}
 	if abandoned.Status != "abandoned" || abandoned.MergeUnitID != claim.MergeUnitID || abandoned.AttemptID != started.AttemptID || abandoned.Reason != "review findings require restart" {
 		t.Fatalf("abandon result = %+v", abandoned)
+	}
+}
+
+func TestWorkspaceTransitionCommandJSON(t *testing.T) {
+	workspaceDir := workspaceWithPlanLocks(t)
+	if _, stderr, err := runFeature(t, "workspace", "validate", workspaceDir, "--write-lock", "--json"); err != nil {
+		t.Fatalf("feature workspace validate failed: %v\nstderr=%s", err, stderr)
+	}
+	stdout, stderr, err := runFeature(t, "workspace", "next", workspaceDir, "--agent", "worker-a", "--claim", "--json")
+	if err != nil {
+		t.Fatalf("feature workspace next failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var claim struct {
+		MergeUnitID string `json:"merge_unit_id"`
+		LeaseID     string `json:"lease_id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &claim); err != nil {
+		t.Fatalf("claim stdout is not JSON: %v\n%s", err, stdout)
+	}
+	stdout, stderr, err = runFeature(t,
+		"workspace", "attempt", "start", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--agent", "worker-a",
+		"--lease", claim.LeaseID,
+		"--base-sha", "base-sha-cli",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace attempt start failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var attempt struct {
+		AttemptID string `json:"attempt_id"`
+		Worktree  string `json:"worktree"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &attempt); err != nil {
+		t.Fatalf("attempt stdout is not JSON: %v\n%s", err, stdout)
+	}
+
+	stdout, stderr, err = runFeature(t,
+		"workspace", "transition", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--attempt", attempt.AttemptID,
+		"--agent", "worker-a",
+		"--lease", claim.LeaseID,
+		"--from", "pending",
+		"--to", "in_progress",
+		"--evidence", "worktree="+attempt.Worktree,
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace transition failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var transitioned struct {
+		Status      string         `json:"status"`
+		MergeUnitID string         `json:"merge_unit_id"`
+		AttemptID   string         `json:"attempt_id"`
+		From        string         `json:"from"`
+		To          string         `json:"to"`
+		EventType   string         `json:"event_type"`
+		Evidence    map[string]any `json:"evidence"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &transitioned); err != nil {
+		t.Fatalf("transition stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if transitioned.Status != "transitioned" || transitioned.MergeUnitID != claim.MergeUnitID || transitioned.AttemptID != attempt.AttemptID {
+		t.Fatalf("transition result = %+v", transitioned)
+	}
+	if transitioned.From != "pending" || transitioned.To != "in_progress" || transitioned.EventType != "merge_unit.started" {
+		t.Fatalf("transition metadata = %+v", transitioned)
+	}
+	if transitioned.Evidence["worktree"] != attempt.Worktree {
+		t.Fatalf("transition evidence = %+v", transitioned.Evidence)
 	}
 }
 
