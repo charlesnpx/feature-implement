@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,40 +128,59 @@ func readJournalEvents(path string) ([]JournalEvent, error) {
 	defer f.Close()
 
 	events := []JournalEvent{}
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+	reader := bufio.NewReader(f)
 	lineNo := 0
-	for scanner.Scan() {
+	for {
+		raw, readErr := reader.ReadString('\n')
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return nil, readErr
+		}
+		if errors.Is(readErr, io.EOF) && raw == "" {
+			break
+		}
 		lineNo++
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
+		if event, ok, err := parseJournalLine(path, lineNo, raw); err != nil {
+			return nil, err
+		} else if ok {
+			if len(events) == 0 && event.PreviousHash != zeroEventHash {
+				return nil, fmt.Errorf("parse %s line %d: previous hash mismatch", filepath.Base(path), lineNo)
+			}
+			if len(events) > 0 && event.PreviousHash != events[len(events)-1].EventHash {
+				return nil, fmt.Errorf("parse %s line %d: previous hash mismatch", filepath.Base(path), lineNo)
+			}
+			events = append(events, event)
 		}
-		var event JournalEvent
-		decoder := json.NewDecoder(strings.NewReader(line))
-		decoder.UseNumber()
-		if err := decoder.Decode(&event); err != nil {
-			return nil, fmt.Errorf("parse %s line %d: %w", filepath.Base(path), lineNo, err)
+		if errors.Is(readErr, io.EOF) {
+			break
 		}
-		eventHash, err := hashJournalEvent(event)
-		if err != nil {
-			return nil, fmt.Errorf("parse %s line %d: %w", filepath.Base(path), lineNo, err)
-		}
-		if event.EventHash != eventHash {
-			return nil, fmt.Errorf("parse %s line %d: event hash mismatch", filepath.Base(path), lineNo)
-		}
-		if len(events) == 0 && event.PreviousHash != zeroEventHash {
-			return nil, fmt.Errorf("parse %s line %d: previous hash mismatch", filepath.Base(path), lineNo)
-		}
-		if len(events) > 0 && event.PreviousHash != events[len(events)-1].EventHash {
-			return nil, fmt.Errorf("parse %s line %d: previous hash mismatch", filepath.Base(path), lineNo)
-		}
-		events = append(events, event)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
 	}
 	return events, nil
+}
+
+func parseJournalLine(path string, lineNo int, raw string) (JournalEvent, bool, error) {
+	line := strings.TrimSpace(raw)
+	if line == "" {
+		return JournalEvent{}, false, nil
+	}
+	var event JournalEvent
+	decoder := json.NewDecoder(strings.NewReader(line))
+	decoder.UseNumber()
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&event); err != nil {
+		return JournalEvent{}, false, fmt.Errorf("parse %s line %d: %w", filepath.Base(path), lineNo, err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return JournalEvent{}, false, fmt.Errorf("parse %s line %d: trailing data", filepath.Base(path), lineNo)
+	}
+	eventHash, err := hashJournalEvent(event)
+	if err != nil {
+		return JournalEvent{}, false, fmt.Errorf("parse %s line %d: %w", filepath.Base(path), lineNo, err)
+	}
+	if event.EventHash != eventHash {
+		return JournalEvent{}, false, fmt.Errorf("parse %s line %d: event hash mismatch", filepath.Base(path), lineNo)
+	}
+	return event, true, nil
 }
 
 func appendJournalEvent(path string, event JournalEvent) error {

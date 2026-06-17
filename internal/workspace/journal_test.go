@@ -107,7 +107,7 @@ func TestAppendEventReplaysLargeIntegerPayload(t *testing.T) {
 
 func TestAppendEventReplaysLargeJournalLine(t *testing.T) {
 	workspaceDir := t.TempDir()
-	largePayload := strings.Repeat("x", 70*1024)
+	largePayload := strings.Repeat("x", 11*1024*1024)
 	first, err := AppendEvent(AppendEventOptions{
 		WorkspaceDir: workspaceDir,
 		Type:         "workspace.large",
@@ -128,6 +128,72 @@ func TestAppendEventReplaysLargeJournalLine(t *testing.T) {
 	}
 	if second.PreviousHash != first.EventHash {
 		t.Fatalf("second previous hash = %q, want %q", second.PreviousHash, first.EventHash)
+	}
+}
+
+func TestAppendEventRejectsUnknownJournalFields(t *testing.T) {
+	workspaceDir := t.TempDir()
+	if _, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: workspaceDir,
+		Type:         "workspace.created",
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent first: %v", err)
+	}
+	b, err := os.ReadFile(EventsPath(workspaceDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(b))), &record); err != nil {
+		t.Fatal(err)
+	}
+	record["ignored"] = "not-covered-by-hash"
+	tampered, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(EventsPath(workspaceDir), append(tampered, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = AppendEvent(AppendEventOptions{
+		WorkspaceDir: workspaceDir,
+		Type:         "workspace.validated",
+		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("AppendEvent error = %v", err)
+	}
+}
+
+func TestAppendEventRejectsTrailingJournalData(t *testing.T) {
+	workspaceDir := t.TempDir()
+	if _, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: workspaceDir,
+		Type:         "workspace.created",
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent first: %v", err)
+	}
+	b, err := os.ReadFile(EventsPath(workspaceDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := strings.TrimSpace(string(b)) + " {}\n"
+	if err := os.WriteFile(EventsPath(workspaceDir), []byte(tampered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = AppendEvent(AppendEventOptions{
+		WorkspaceDir: workspaceDir,
+		Type:         "workspace.validated",
+		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "trailing data") {
+		t.Fatalf("AppendEvent error = %v", err)
 	}
 }
 
