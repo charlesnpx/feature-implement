@@ -95,11 +95,7 @@ func BuildLock(workspaceDir string, manifest WorkspaceManifest) (WorkspaceLock, 
 	for _, plan := range manifest.Plans {
 		planDir := resolveWorkspacePath(workspaceDir, plan.Path)
 		lockPath := filepath.Join(planDir, planLockFileName)
-		hash, err := hashCanonicalJSONFile(lockPath)
-		if err != nil {
-			return WorkspaceLock{}, fmt.Errorf("plan %s lock: %w", plan.ID, err)
-		}
-		planLock, err := readPlanLock(lockPath)
+		planLock, hash, err := readPlanLockSnapshot(lockPath)
 		if err != nil {
 			return WorkspaceLock{}, fmt.Errorf("plan %s lock: %w", plan.ID, err)
 		}
@@ -126,33 +122,25 @@ func resolveWorkspacePath(workspaceDir string, path string) string {
 	return filepath.Clean(filepath.Join(workspaceDir, path))
 }
 
-func hashCanonicalJSONFile(path string) (string, error) {
+func readPlanLockSnapshot(path string) (planpkg.Lock, string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return "", err
+		return planpkg.Lock{}, "", err
 	}
 	var value any
 	if err := json.Unmarshal(b, &value); err != nil {
-		return "", fmt.Errorf("parse %s: %w", filepath.Base(path), err)
+		return planpkg.Lock{}, "", fmt.Errorf("parse %s: %w", filepath.Base(path), err)
 	}
 	canonical, err := json.Marshal(value)
 	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(canonical)
-	return hex.EncodeToString(sum[:]), nil
-}
-
-func readPlanLock(path string) (planpkg.Lock, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return planpkg.Lock{}, err
+		return planpkg.Lock{}, "", err
 	}
 	var lock planpkg.Lock
 	if err := json.Unmarshal(b, &lock); err != nil {
-		return planpkg.Lock{}, fmt.Errorf("parse %s: %w", filepath.Base(path), err)
+		return planpkg.Lock{}, "", fmt.Errorf("parse %s: %w", filepath.Base(path), err)
 	}
-	return lock, nil
+	sum := sha256.Sum256(canonical)
+	return lock, hex.EncodeToString(sum[:]), nil
 }
 
 func buildMergeUnitIndex(manifest WorkspaceManifest, plans []loadedPlanLock) ([]WorkspaceMergeUnitLock, error) {
