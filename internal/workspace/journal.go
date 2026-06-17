@@ -127,6 +127,7 @@ func readJournalEvents(path string) ([]JournalEvent, error) {
 
 	events := []JournalEvent{}
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	lineNo := 0
 	for scanner.Scan() {
 		lineNo++
@@ -135,7 +136,9 @@ func readJournalEvents(path string) ([]JournalEvent, error) {
 			continue
 		}
 		var event JournalEvent
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
+		decoder := json.NewDecoder(strings.NewReader(line))
+		decoder.UseNumber()
+		if err := decoder.Decode(&event); err != nil {
 			return nil, fmt.Errorf("parse %s line %d: %w", filepath.Base(path), lineNo, err)
 		}
 		eventHash, err := hashJournalEvent(event)

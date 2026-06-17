@@ -80,6 +80,57 @@ func TestAppendEventChainsJournalEvents(t *testing.T) {
 	}
 }
 
+func TestAppendEventReplaysLargeIntegerPayload(t *testing.T) {
+	workspaceDir := t.TempDir()
+	first, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: workspaceDir,
+		Type:         "workspace.counted",
+		Payload:      map[string]any{"count": int64(9_007_199_254_740_993)},
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("AppendEvent first: %v", err)
+	}
+
+	second, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: workspaceDir,
+		Type:         "workspace.validated",
+		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("AppendEvent second: %v", err)
+	}
+	if second.PreviousHash != first.EventHash {
+		t.Fatalf("second previous hash = %q, want %q", second.PreviousHash, first.EventHash)
+	}
+}
+
+func TestAppendEventReplaysLargeJournalLine(t *testing.T) {
+	workspaceDir := t.TempDir()
+	largePayload := strings.Repeat("x", 70*1024)
+	first, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: workspaceDir,
+		Type:         "workspace.large",
+		Payload:      map[string]any{"blob": largePayload},
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("AppendEvent first: %v", err)
+	}
+
+	second, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: workspaceDir,
+		Type:         "workspace.validated",
+		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("AppendEvent second: %v", err)
+	}
+	if second.PreviousHash != first.EventHash {
+		t.Fatalf("second previous hash = %q, want %q", second.PreviousHash, first.EventHash)
+	}
+}
+
 func TestAppendEventRejectsCorruptJSONL(t *testing.T) {
 	workspaceDir := t.TempDir()
 	if err := os.MkdirAll(StateDir(workspaceDir), 0o755); err != nil {
