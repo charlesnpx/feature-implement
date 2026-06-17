@@ -122,16 +122,13 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 	for i := range view.MergeUnits {
 		unitByID[view.MergeUnits[i].ID] = &view.MergeUnits[i]
 	}
+	attempts := newAttemptTracker()
 	for _, event := range events {
-		if err := applySchedulerEvent(unitByID, event); err != nil {
+		if err := applySchedulerEvent(unitByID, attempts, event); err != nil {
 			return SchedulerView{}, err
 		}
 	}
 	activeLeases, err := activeLeaseSnapshots(events, now)
-	if err != nil {
-		return SchedulerView{}, err
-	}
-	attempts, err := attemptSnapshots(events)
 	if err != nil {
 		return SchedulerView{}, err
 	}
@@ -145,7 +142,7 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 			}
 			view.Leased = append(view.Leased, unit.ID)
 		}
-		if attempt := currentAttempt(attempts[unit.ID]); attempt != nil {
+		if attempt := attempts.Current(unit.ID); attempt != nil {
 			unit.CurrentAttempt = &SchedulerAttemptView{
 				AttemptID:     attempt.AttemptID,
 				AttemptNumber: attempt.AttemptNumber,
@@ -179,24 +176,24 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 	return view, nil
 }
 
-func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, event JournalEvent) error {
+func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, attempts *attemptTracker, event JournalEvent) error {
 	switch event.Type {
 	case EventWorkspaceCreated, EventWorkspaceValidated:
 		return nil
 	case EventLeaseGranted, EventLeaseHeartbeat, EventLeaseReleased, EventLeaseRecovered, EventAttemptStarted, EventAttemptAbandoned:
-		return nil
+		return attempts.Apply(event)
 	case EventMergeUnitStarted:
-		return updateMergeUnitStatus(unitByID, event, MergeUnitInProgress)
+		return updateMergeUnitStatus(unitByID, attempts, event, MergeUnitInProgress)
 	case EventMergeUnitCompleted:
-		return updateMergeUnitStatus(unitByID, event, MergeUnitCompleted)
+		return updateMergeUnitStatus(unitByID, attempts, event, MergeUnitCompleted)
 	case EventMergeUnitFailed:
-		return updateMergeUnitStatus(unitByID, event, MergeUnitFailed)
+		return updateMergeUnitStatus(unitByID, attempts, event, MergeUnitFailed)
 	default:
 		return fmt.Errorf("unknown scheduler event type %q", event.Type)
 	}
 }
 
-func updateMergeUnitStatus(unitByID map[string]*SchedulerMergeUnitView, event JournalEvent, status string) error {
+func updateMergeUnitStatus(unitByID map[string]*SchedulerMergeUnitView, attempts *attemptTracker, event JournalEvent, status string) error {
 	unitID, err := eventStringPayload(event, eventPayloadMergeUnitIDKey)
 	if err != nil {
 		return err
@@ -205,7 +202,35 @@ func updateMergeUnitStatus(unitByID map[string]*SchedulerMergeUnitView, event Jo
 	if unit == nil {
 		return fmt.Errorf("scheduler event %s references unknown merge unit %s", event.ID, unitID)
 	}
+	if err := validateCurrentAttemptForTransition(event, attempts, unitID); err != nil {
+		return err
+	}
 	unit.Status = status
+	return nil
+}
+
+func validateCurrentAttemptForTransition(event JournalEvent, attempts *attemptTracker, mergeUnitID string) error {
+	if !attempts.HasAny(mergeUnitID) {
+		if _, ok := event.Payload[eventPayloadAttemptIDKey]; ok {
+			attemptID, err := eventStringPayload(event, eventPayloadAttemptIDKey)
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("scheduler event %s references unknown attempt %s", event.ID, attemptID)
+		}
+		return nil
+	}
+	attemptID, err := eventStringPayload(event, eventPayloadAttemptIDKey)
+	if err != nil {
+		return err
+	}
+	current := attempts.Current(mergeUnitID)
+	if current == nil {
+		return fmt.Errorf("scheduler event %s cannot advance merge unit %s without an active attempt", event.ID, mergeUnitID)
+	}
+	if attemptID != current.AttemptID {
+		return fmt.Errorf("scheduler event %s attempt %s is not current active attempt %s", event.ID, attemptID, current.AttemptID)
+	}
 	return nil
 }
 

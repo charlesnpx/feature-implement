@@ -535,21 +535,28 @@ func writeWorkspaceRecoverText(result workspace.RecoverResult) {
 
 func workspaceAttempt(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("workspace attempt requires subcommand: start")
+		return fmt.Errorf("workspace attempt requires subcommand: start or abandon")
 	}
 	action := args[0]
 	if isHelpCommand(action) {
 		usageWorkspaceAttempt(os.Stdout)
 		return nil
 	}
-	if action != "start" {
+	if action != "start" && action != "abandon" {
 		return fmt.Errorf("unsupported workspace attempt action: %s", action)
 	}
 	if hasHelpFlag(args[1:]) {
-		usageWorkspaceAttemptStart(os.Stdout)
+		usageWorkspaceAttemptAction(os.Stdout, action)
 		return nil
 	}
-	return workspaceAttemptStart(args[1:])
+	switch action {
+	case "start":
+		return workspaceAttemptStart(args[1:])
+	case "abandon":
+		return workspaceAttemptAbandon(args[1:])
+	default:
+		return workspace.ErrNotImplemented(action)
+	}
 }
 
 func workspaceAttemptStart(args []string) error {
@@ -582,6 +589,39 @@ func workspaceAttemptStart(args []string) error {
 		return writeJSON(result)
 	}
 	fmt.Printf("started %s attempt=%s branch=%s worktree=%s mode=%s\n", result.MergeUnitID, result.AttemptID, result.Branch, result.Worktree, result.Mode)
+	return nil
+}
+
+func workspaceAttemptAbandon(args []string) error {
+	fs := flag.NewFlagSet("workspace attempt abandon", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	mergeUnitID := fs.String("merge-unit", "", "Merge unit ID")
+	attemptID := fs.String("attempt", "", "Attempt ID")
+	agentID := fs.String("agent", "", "Agent ID that owns the lease")
+	leaseID := fs.String("lease", "", "Lease ID")
+	reason := fs.String("reason", "", "Reason for abandoning the attempt")
+	asJSON := fs.Bool("json", false, "Emit JSON result")
+	if err := parsePermissive(fs, args, "merge-unit", "attempt", "agent", "lease", "reason"); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("workspace attempt abandon requires <workspace-dir>")
+	}
+	result, err := workspace.AbandonAttempt(workspace.AttemptAbandonOptions{
+		WorkspaceDir: fs.Arg(0),
+		MergeUnitID:  *mergeUnitID,
+		AttemptID:    *attemptID,
+		AgentID:      *agentID,
+		LeaseID:      *leaseID,
+		Reason:       *reason,
+	})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(result)
+	}
+	fmt.Printf("abandoned %s attempt=%s reason=%s\n", result.MergeUnitID, result.AttemptID, result.Reason)
 	return nil
 }
 
@@ -723,6 +763,7 @@ func usageWorkspace(w io.Writer) {
   feature workspace release <workspace-dir> --agent <id> --lease <id> [--json]
   feature workspace recover <workspace-dir> [--json]
   feature workspace attempt start <workspace-dir> --merge-unit <id> --agent <id> --lease <id> --base-sha <sha> [--mode fresh-from-base] [--json]
+  feature workspace attempt abandon <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --reason <text> [--json]
 
 Coordinates validated feature plans through a workspace-level orchestration layer.`)
 }
@@ -774,8 +815,20 @@ Recovers expired leases and rebuilds the scheduler view.`)
 func usageWorkspaceAttempt(w io.Writer) {
 	fmt.Fprintln(w, `Usage:
   feature workspace attempt start <workspace-dir> --merge-unit <id> --agent <id> --lease <id> --base-sha <sha> [--mode fresh-from-base] [--json]
+  feature workspace attempt abandon <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --reason <text> [--json]
 
 Manages concrete workspace implementation attempts.`)
+}
+
+func usageWorkspaceAttemptAction(w io.Writer, action string) {
+	switch action {
+	case "start":
+		usageWorkspaceAttemptStart(w)
+	case "abandon":
+		usageWorkspaceAttemptAbandon(w)
+	default:
+		usageWorkspaceAttempt(w)
+	}
 }
 
 func usageWorkspaceAttemptStart(w io.Writer) {
@@ -783,4 +836,11 @@ func usageWorkspaceAttemptStart(w io.Writer) {
   feature workspace attempt start <workspace-dir> --merge-unit <id> --agent <id> --lease <id> --base-sha <sha> [--mode fresh-from-base] [--json]
 
 Starts a fresh-from-base attempt for a leased merge unit.`)
+}
+
+func usageWorkspaceAttemptAbandon(w io.Writer) {
+	fmt.Fprintln(w, `Usage:
+  feature workspace attempt abandon <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --reason <text> [--json]
+
+Abandons the current active attempt for a leased merge unit.`)
 }

@@ -702,6 +702,81 @@ func TestStartAttemptRejectsExistingActiveAttempt(t *testing.T) {
 	}
 }
 
+func TestAbandonAttemptRecordsReasonAndClearsCurrentAttempt(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	writeWorkspaceLock(t, fixture.Dir)
+	claim, err := Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	first, err := StartAttempt(AttemptStartOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  "foundation:story-a",
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		BaseSHA:      "base-sha-1",
+		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("StartAttempt first: %v", err)
+	}
+
+	abandoned, err := AbandonAttempt(AttemptAbandonOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  "foundation:story-a",
+		AttemptID:    first.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Reason:       "tests failed",
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("AbandonAttempt: %v", err)
+	}
+	if abandoned.Status != attemptStatusAbandoned || abandoned.AttemptID != first.AttemptID || abandoned.Reason != "tests failed" {
+		t.Fatalf("abandon result = %+v", abandoned)
+	}
+
+	events := readTestJournalEvents(t, fixture.Dir)
+	last := events[len(events)-1]
+	if last.Type != EventAttemptAbandoned {
+		t.Fatalf("abandon event = %+v", last)
+	}
+	if last.Payload[eventPayloadStatusKey] != attemptStatusAbandoned ||
+		last.Payload[eventPayloadReasonKey] != "tests failed" ||
+		last.Payload[eventPayloadAttemptIDKey] != first.AttemptID ||
+		last.Payload[eventPayloadLeaseIDKey] != claim.LeaseID {
+		t.Fatalf("abandon payload = %+v", last.Payload)
+	}
+	wantReadSet := map[string]int{
+		LeaseResource("foundation:story-a"):     1,
+		MergeUnitResource("foundation:story-a"): 2,
+	}
+	if !reflect.DeepEqual(last.ReadSet, wantReadSet) {
+		t.Fatalf("abandon read set = %+v, want %+v", last.ReadSet, wantReadSet)
+	}
+	if len(last.WriteSet) != 1 || last.WriteSet[0] != MergeUnitResource("foundation:story-a") {
+		t.Fatalf("abandon write set = %+v", last.WriteSet)
+	}
+
+	lock, err := readWorkspaceLock(filepath.Join(fixture.Dir, LockFileName))
+	if err != nil {
+		t.Fatalf("readWorkspaceLock: %v", err)
+	}
+	view, err := buildSchedulerViewAt(lock, events, fixedJournalTime("2026-06-17T10:03:00Z")())
+	if err != nil {
+		t.Fatalf("buildSchedulerViewAt: %v", err)
+	}
+	if unit := findSchedulerUnit(t, view, "foundation:story-a"); unit.CurrentAttempt != nil {
+		t.Fatalf("current attempt should be cleared after abandon: %+v", unit.CurrentAttempt)
+	}
+}
+
 func TestStartAttemptIncrementsAfterAbandon(t *testing.T) {
 	fixture := newOnePlanWorkspaceFixture(t)
 	writeWorkspaceLock(t, fixture.Dir)
@@ -725,17 +800,16 @@ func TestStartAttemptIncrementsAfterAbandon(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartAttempt first: %v", err)
 	}
-	if _, err := AppendEvent(AppendEventOptions{
+	if _, err := AbandonAttempt(AttemptAbandonOptions{
 		WorkspaceDir: fixture.Dir,
-		Type:         EventAttemptAbandoned,
-		Payload: map[string]any{
-			eventPayloadMergeUnitIDKey: "foundation:story-a",
-			eventPayloadAttemptIDKey:   first.AttemptID,
-		},
-		WriteSet: []string{MergeUnitResource("foundation:story-a")},
-		Now:      fixedJournalTime("2026-06-17T10:02:00Z"),
+		MergeUnitID:  "foundation:story-a",
+		AttemptID:    first.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Reason:       "retry with a clean branch",
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
 	}); err != nil {
-		t.Fatalf("AppendEvent abandon: %v", err)
+		t.Fatalf("AbandonAttempt: %v", err)
 	}
 
 	second, err := StartAttempt(AttemptStartOptions{
@@ -751,5 +825,72 @@ func TestStartAttemptIncrementsAfterAbandon(t *testing.T) {
 	}
 	if second.AttemptID != "foundation:story-a:attempt-2" || second.AttemptNumber != 2 {
 		t.Fatalf("second attempt = %+v", second)
+	}
+	attempts, err := attemptSnapshots(readTestJournalEvents(t, fixture.Dir))
+	if err != nil {
+		t.Fatalf("attemptSnapshots: %v", err)
+	}
+	if len(attempts["foundation:story-a"]) != 2 || attempts["foundation:story-a"][0].Status != attemptStatusAbandoned || attempts["foundation:story-a"][1].Status != attemptStatusActive {
+		t.Fatalf("attempt audit state = %+v", attempts["foundation:story-a"])
+	}
+}
+
+func TestAbandonAttemptRejectsNonCurrentAttempt(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	writeWorkspaceLock(t, fixture.Dir)
+	claim, err := Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	first, err := StartAttempt(AttemptStartOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  "foundation:story-a",
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		BaseSHA:      "base-sha-1",
+		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("StartAttempt first: %v", err)
+	}
+	if _, err := AbandonAttempt(AttemptAbandonOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  "foundation:story-a",
+		AttemptID:    first.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Reason:       "superseded",
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	}); err != nil {
+		t.Fatalf("AbandonAttempt first: %v", err)
+	}
+	second, err := StartAttempt(AttemptStartOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  "foundation:story-a",
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		BaseSHA:      "base-sha-2",
+		Now:          fixedJournalTime("2026-06-17T10:03:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("StartAttempt second: %v", err)
+	}
+
+	_, err = AbandonAttempt(AttemptAbandonOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  "foundation:story-a",
+		AttemptID:    first.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Reason:       "old attempt",
+		Now:          fixedJournalTime("2026-06-17T10:04:00Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "not current active attempt "+second.AttemptID) {
+		t.Fatalf("non-current abandon error = %v", err)
 	}
 }
