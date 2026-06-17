@@ -116,10 +116,7 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"review the opened PR",
 			"branch-diff review only when PR creation is not approved",
 			"maximum of 10 fresh-review iterations",
-			"keep that reviewer agent alive",
-			"changed file list",
-			"do not commit yet",
-			"spawn a fresh subagent to review the updated PR",
+			"subagent to review the updated PR",
 			"stop and report the remaining findings instead of merging",
 			"only after the final reviewed branch has been pushed",
 			"feature implement cleanup",
@@ -148,12 +145,22 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 		"implementation worktree/repository path",
 		"`$pr:review:no-file <pr-number>`",
 		"generic Codex PR-review subagent",
-		"selected from a no-file review",
-		"that fresh no-file review is the confirmation mechanism",
+		"close that reviewer subagent",
+		"Do not send addressed findings back to the previous reviewer",
+		"fresh review of the pushed branch is the confirmation mechanism",
 		"same skill-selection rule",
 	} {
 		if !strings.Contains(codexImplementContent, want) {
 			t.Fatalf("staged codex implement skill missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"keep that reviewer agent alive",
+		"changed file list, and relevant local diff",
+		"ask whether the patch resolves its specific concerns",
+	} {
+		if strings.Contains(codexImplementContent, forbidden) {
+			t.Fatalf("staged codex implement skill still contains removed reviewer-confirmation wording %q", forbidden)
 		}
 	}
 }
