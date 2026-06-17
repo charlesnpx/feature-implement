@@ -126,8 +126,11 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 	content := string(b)
 	for _, want := range []string{
 		"active Codex Skills list includes `pr:review:no-file`",
+		"implementation worktree/repository path",
 		"`$pr:review:no-file <pr-number>`",
 		"generic Codex PR-review subagent",
+		"When using `pr:review:no-file`, apply selected fixes locally",
+		"fresh no-file review returns no findings worth addressing",
 		"same skill-selection rule",
 	} {
 		if !strings.Contains(content, want) {
