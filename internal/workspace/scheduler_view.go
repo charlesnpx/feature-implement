@@ -229,19 +229,19 @@ func updateMergeUnitStatus(unitByID map[string]*SchedulerMergeUnitView, attempts
 	if unit == nil {
 		return fmt.Errorf("scheduler event %s references unknown merge unit %s", event.ID, unitID)
 	}
-	attemptID, err := validateCurrentAttemptForTransition(event, attempts, unitID)
-	if err != nil {
-		return err
-	}
 	occurredAt, err := eventTimestamp(event)
 	if err != nil {
 		return err
 	}
-	if err := validateTransitionEventPayload(event, unit.Status, status, attempts.Current(unitID), leases.ActiveAt(unitID, occurredAt)); err != nil {
+	attempt, err := validateCurrentAttemptForTransition(event, attempts, unitID, occurredAt)
+	if err != nil {
+		return err
+	}
+	if err := validateTransitionEventPayload(event, unit.Status, status, attempt, leases.ActiveAt(unitID, occurredAt)); err != nil {
 		return err
 	}
 	unit.Status = status
-	lifecycles.RecordTransition(unitID, attemptID)
+	lifecycles.RecordTransition(unitID, attempt.AttemptID)
 	return nil
 }
 
@@ -351,29 +351,25 @@ func (t *lifecycleTracker) ClearIfFromAttempt(mergeUnitID string, attemptID stri
 	return true
 }
 
-func validateCurrentAttemptForTransition(event JournalEvent, attempts *attemptTracker, mergeUnitID string) (string, error) {
-	if !attempts.HasAny(mergeUnitID) {
-		if _, ok := event.Payload[eventPayloadAttemptIDKey]; ok {
-			attemptID, err := eventStringPayload(event, eventPayloadAttemptIDKey)
-			if err != nil {
-				return "", err
-			}
-			return "", fmt.Errorf("scheduler event %s references unknown attempt %s", event.ID, attemptID)
-		}
-		return "", nil
-	}
+func validateCurrentAttemptForTransition(event JournalEvent, attempts *attemptTracker, mergeUnitID string, occurredAt time.Time) (*attemptSnapshot, error) {
 	attemptID, err := eventStringPayload(event, eventPayloadAttemptIDKey)
 	if err != nil {
-		return "", err
+		return nil, err
+	}
+	if !attempts.HasAny(mergeUnitID) {
+		return nil, fmt.Errorf("scheduler event %s references unknown attempt %s", event.ID, attemptID)
 	}
 	current := attempts.Current(mergeUnitID)
 	if current == nil {
-		return "", fmt.Errorf("scheduler event %s cannot advance merge unit %s without an active attempt", event.ID, mergeUnitID)
+		return nil, fmt.Errorf("scheduler event %s cannot advance merge unit %s without an active attempt", event.ID, mergeUnitID)
+	}
+	if occurredAt.Before(current.StartedAt) {
+		return nil, fmt.Errorf("scheduler event %s attempt %s has not started yet", event.ID, current.AttemptID)
 	}
 	if attemptID != current.AttemptID {
-		return "", fmt.Errorf("scheduler event %s attempt %s is not current active attempt %s", event.ID, attemptID, current.AttemptID)
+		return nil, fmt.Errorf("scheduler event %s attempt %s is not current active attempt %s", event.ID, attemptID, current.AttemptID)
 	}
-	return attemptID, nil
+	return current, nil
 }
 
 func eventStringPayload(event JournalEvent, key string) (string, error) {

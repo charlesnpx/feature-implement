@@ -186,6 +186,7 @@ type attemptSnapshot struct {
 	MergeUnitID   string
 	AttemptID     string
 	AttemptNumber int
+	StartedAt     time.Time
 	AgentID       string
 	LeaseID       string
 	Branch        string
@@ -530,7 +531,7 @@ func Transition(opts TransitionOptions) (TransitionResult, error) {
 	if err != nil {
 		return TransitionResult{}, err
 	}
-	current, err := requireCurrentAttempt(attempts, opts.MergeUnitID, opts.AttemptID)
+	current, err := requireCurrentAttemptAt(attempts, opts.MergeUnitID, opts.AttemptID, transitionedAt)
 	if err != nil {
 		return TransitionResult{}, err
 	}
@@ -793,6 +794,17 @@ func requireCurrentAttempt(attempts map[string][]attemptSnapshot, mergeUnitID st
 	return *current, nil
 }
 
+func requireCurrentAttemptAt(attempts map[string][]attemptSnapshot, mergeUnitID string, attemptID string, observedAt time.Time) (attemptSnapshot, error) {
+	current, err := requireCurrentAttempt(attempts, mergeUnitID, attemptID)
+	if err != nil {
+		return attemptSnapshot{}, err
+	}
+	if observedAt.Before(current.StartedAt) {
+		return attemptSnapshot{}, fmt.Errorf("attempt %s has not started yet", attemptID)
+	}
+	return current, nil
+}
+
 func validateAttemptLeaseOwner(attemptID string, attemptAgentID string, attemptLeaseID string, agentID string, leaseID string) error {
 	if attemptLeaseID != leaseID {
 		return fmt.Errorf("attempt %s was started under lease %s, not %s", attemptID, attemptLeaseID, leaseID)
@@ -1015,6 +1027,10 @@ func (t *attemptTracker) Snapshots() map[string][]attemptSnapshot {
 }
 
 func eventAttemptStartedPayload(event JournalEvent) (attemptSnapshot, error) {
+	startedAt, err := eventTimestamp(event)
+	if err != nil {
+		return attemptSnapshot{}, err
+	}
 	mergeUnitID, err := eventStringPayload(event, eventPayloadMergeUnitIDKey)
 	if err != nil {
 		return attemptSnapshot{}, err
@@ -1059,6 +1075,7 @@ func eventAttemptStartedPayload(event JournalEvent) (attemptSnapshot, error) {
 		MergeUnitID:   mergeUnitID,
 		AttemptID:     attemptID,
 		AttemptNumber: attemptNumber,
+		StartedAt:     startedAt,
 		AgentID:       agentID,
 		LeaseID:       leaseID,
 		Branch:        branch,

@@ -394,6 +394,54 @@ func TestRebuildSchedulerViewRejectsExpiredTransitionLease(t *testing.T) {
 	}
 }
 
+func TestRebuildSchedulerViewRejectsTransitionBeforeAttemptStart(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	writeWorkspaceLock(t, fixture.Dir)
+	claim, err := Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	attempt, err := StartAttempt(AttemptStartOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  "foundation:story-a",
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		BaseSHA:      "base-sha-1",
+		Now:          fixedJournalTime("2026-06-17T10:10:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("StartAttempt: %v", err)
+	}
+	if _, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: fixture.Dir,
+		Type:         EventMergeUnitStarted,
+		Payload: map[string]any{
+			eventPayloadMergeUnitIDKey: "foundation:story-a",
+			eventPayloadAttemptIDKey:   attempt.AttemptID,
+			eventPayloadAgentIDKey:     "worker-a",
+			eventPayloadLeaseIDKey:     claim.LeaseID,
+			eventPayloadFromKey:        MergeUnitPending,
+			eventPayloadToKey:          MergeUnitInProgress,
+			eventPayloadEvidenceKey:    map[string]any{evidenceWorktreeKey: attempt.Worktree},
+		},
+		WriteSet: []string{MergeUnitResource("foundation:story-a")},
+		Now:      fixedJournalTime("2026-06-17T10:05:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent transition: %v", err)
+	}
+
+	_, err = RebuildSchedulerView(fixture.Dir)
+
+	if err == nil || !strings.Contains(err.Error(), "attempt "+attempt.AttemptID+" has not started yet") {
+		t.Fatalf("RebuildSchedulerView error = %v", err)
+	}
+}
+
 func TestBuildSchedulerViewRejectsStaleReadSet(t *testing.T) {
 	fixture := newOnePlanWorkspaceFixture(t)
 	lock, err := BuildLock(fixture.Dir, fixture.Manifest)
