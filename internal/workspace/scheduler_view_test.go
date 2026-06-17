@@ -127,6 +127,9 @@ func TestRebuildSchedulerViewRejectsAbandonedAttemptTransition(t *testing.T) {
 		Payload: map[string]any{
 			eventPayloadMergeUnitIDKey: "foundation:story-a",
 			eventPayloadAttemptIDKey:   attempt.AttemptID,
+			eventPayloadFromKey:        MergeUnitPending,
+			eventPayloadToKey:          MergeUnitInProgress,
+			eventPayloadEvidenceKey:    map[string]any{evidenceWorktreeKey: attempt.Worktree},
 		},
 		WriteSet: []string{MergeUnitResource("foundation:story-a")},
 		Now:      fixedJournalTime("2026-06-17T10:03:00Z"),
@@ -192,6 +195,9 @@ func TestRebuildSchedulerViewRejectsStaleAttemptTransition(t *testing.T) {
 		Payload: map[string]any{
 			eventPayloadMergeUnitIDKey: "foundation:story-a",
 			eventPayloadAttemptIDKey:   first.AttemptID,
+			eventPayloadFromKey:        MergeUnitPending,
+			eventPayloadToKey:          MergeUnitCompleted,
+			eventPayloadEvidenceKey:    map[string]any{evidenceCommitSHAKey: "commit-sha-old"},
 		},
 		WriteSet: []string{MergeUnitResource("foundation:story-a")},
 		Now:      fixedJournalTime("2026-06-17T10:04:00Z"),
@@ -206,7 +212,7 @@ func TestRebuildSchedulerViewRejectsStaleAttemptTransition(t *testing.T) {
 	}
 }
 
-func TestRebuildSchedulerViewDiscardsLifecycleFromAbandonedAttempt(t *testing.T) {
+func TestRebuildSchedulerViewRejectsUnsupportedAttemptTransition(t *testing.T) {
 	fixture := newOnePlanWorkspaceFixture(t)
 	writeWorkspaceLock(t, fixture.Dir)
 	claim, err := Next(NextOptions{
@@ -235,11 +241,71 @@ func TestRebuildSchedulerViewDiscardsLifecycleFromAbandonedAttempt(t *testing.T)
 		Payload: map[string]any{
 			eventPayloadMergeUnitIDKey: "foundation:story-a",
 			eventPayloadAttemptIDKey:   attempt.AttemptID,
+			eventPayloadFromKey:        MergeUnitPending,
+			eventPayloadToKey:          MergeUnitCompleted,
+			eventPayloadEvidenceKey:    map[string]any{evidenceCommitSHAKey: "commit-sha-1"},
 		},
 		WriteSet: []string{MergeUnitResource("foundation:story-a")},
 		Now:      fixedJournalTime("2026-06-17T10:02:00Z"),
 	}); err != nil {
-		t.Fatalf("AppendEvent completed: %v", err)
+		t.Fatalf("AppendEvent transition: %v", err)
+	}
+
+	_, err = RebuildSchedulerView(fixture.Dir)
+
+	if err == nil || !strings.Contains(err.Error(), "unsupported workspace transition: pending -> completed") {
+		t.Fatalf("RebuildSchedulerView error = %v", err)
+	}
+}
+
+func TestRebuildSchedulerViewDiscardsLifecycleFromAbandonedAttempt(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	writeWorkspaceLock(t, fixture.Dir)
+	claim, err := Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	attempt, err := StartAttempt(AttemptStartOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  "foundation:story-a",
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		BaseSHA:      "base-sha-1",
+		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("StartAttempt: %v", err)
+	}
+	if _, err := Transition(TransitionOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  "foundation:story-a",
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		From:         MergeUnitPending,
+		To:           MergeUnitInProgress,
+		Evidence:     map[string]any{evidenceWorktreeKey: attempt.Worktree},
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	}); err != nil {
+		t.Fatalf("Transition start: %v", err)
+	}
+	if _, err := Transition(TransitionOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  "foundation:story-a",
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		From:         MergeUnitInProgress,
+		To:           MergeUnitCompleted,
+		Evidence:     map[string]any{evidenceCommitSHAKey: "commit-sha-1"},
+		Now:          fixedJournalTime("2026-06-17T10:02:30Z"),
+	}); err != nil {
+		t.Fatalf("Transition completed: %v", err)
 	}
 	if _, err := AbandonAttempt(AttemptAbandonOptions{
 		WorkspaceDir: fixture.Dir,

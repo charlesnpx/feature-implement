@@ -227,9 +227,43 @@ func updateMergeUnitStatus(unitByID map[string]*SchedulerMergeUnitView, attempts
 	if err != nil {
 		return err
 	}
+	if err := validateTransitionEventPayload(event, unit.Status, status, attempts.Current(unitID)); err != nil {
+		return err
+	}
 	unit.Status = status
 	lifecycles.RecordTransition(unitID, attemptID)
 	return nil
+}
+
+func validateTransitionEventPayload(event JournalEvent, currentStatus string, targetStatus string, attempt *attemptSnapshot) error {
+	from, to, evidence, ok, err := eventTransitionPayload(event)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		if attempt != nil {
+			return fmt.Errorf("scheduler event %s missing transition payload", event.ID)
+		}
+		return nil
+	}
+	if from != currentStatus {
+		return fmt.Errorf("scheduler event %s transition from %s does not match current lifecycle %s", event.ID, from, currentStatus)
+	}
+	if to != targetStatus {
+		return fmt.Errorf("scheduler event %s transition to %s does not match event target %s", event.ID, to, targetStatus)
+	}
+	eventType, err := transitionEventType(from, to)
+	if err != nil {
+		return err
+	}
+	if eventType != event.Type {
+		return fmt.Errorf("scheduler event %s type %s does not match transition %s", event.ID, event.Type, eventType)
+	}
+	if attempt == nil {
+		return fmt.Errorf("scheduler event %s cannot validate transition evidence without an active attempt", event.ID)
+	}
+	_, err = normalizeTransitionEvidence(from, to, evidence, *attempt)
+	return err
 }
 
 type lifecycleTracker struct {

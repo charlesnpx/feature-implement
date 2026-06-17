@@ -56,7 +56,7 @@ func usage(w io.Writer) {
   feature validate <plan-dir> [--write-lock] [--json]
   feature status <plan-dir> [--json]
   feature implement next|start|commit|push|open-pr|review|merge|cleanup <plan-dir> [--merge-unit <id>] [--write-state] [metadata flags] [--json]
-  feature workspace init|validate|status|next|heartbeat|release|recover|attempt [args]
+  feature workspace init|validate|status|next|heartbeat|release|recover|attempt|transition [args]
   feature version`)
 }
 
@@ -301,7 +301,7 @@ func implementCommand(args []string) error {
 
 func workspaceCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("workspace requires subcommand: init, validate, status, next, heartbeat, release, recover, or attempt")
+		return fmt.Errorf("workspace requires subcommand: init, validate, status, next, heartbeat, release, recover, attempt, or transition")
 	}
 	action := args[0]
 	if isHelpCommand(action) {
@@ -330,6 +330,8 @@ func workspaceCommand(args []string) error {
 		return workspaceRecover(args[1:])
 	case "attempt":
 		return workspaceAttempt(args[1:])
+	case "transition":
+		return workspaceTransition(args[1:])
 	default:
 		return workspace.ErrNotImplemented(action)
 	}
@@ -533,6 +535,48 @@ func writeWorkspaceRecoverText(result workspace.RecoverResult) {
 	}
 }
 
+func workspaceTransition(args []string) error {
+	fs := flag.NewFlagSet("workspace transition", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	mergeUnitID := fs.String("merge-unit", "", "Merge unit ID")
+	attemptID := fs.String("attempt", "", "Attempt ID")
+	agentID := fs.String("agent", "", "Agent ID that owns the lease")
+	leaseID := fs.String("lease", "", "Lease ID")
+	from := fs.String("from", "", "Expected current lifecycle")
+	to := fs.String("to", "", "Target lifecycle")
+	var evidence evidenceFlags
+	fs.Var(&evidence, "evidence", "Transition evidence as key=value; repeatable")
+	asJSON := fs.Bool("json", false, "Emit JSON result")
+	if err := parsePermissive(fs, args, "merge-unit", "attempt", "agent", "lease", "from", "to", "evidence"); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("workspace transition requires <workspace-dir>")
+	}
+	parsedEvidence, err := parseEvidenceFlags(evidence)
+	if err != nil {
+		return err
+	}
+	result, err := workspace.Transition(workspace.TransitionOptions{
+		WorkspaceDir: fs.Arg(0),
+		MergeUnitID:  *mergeUnitID,
+		AttemptID:    *attemptID,
+		AgentID:      *agentID,
+		LeaseID:      *leaseID,
+		From:         *from,
+		To:           *to,
+		Evidence:     parsedEvidence,
+	})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(result)
+	}
+	fmt.Printf("transitioned %s attempt=%s from=%s to=%s event=%s\n", result.MergeUnitID, result.AttemptID, result.From, result.To, result.EventType)
+	return nil
+}
+
 func workspaceAttempt(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("workspace attempt requires subcommand: start or abandon")
@@ -661,6 +705,37 @@ func parsePermissive(fs *flag.FlagSet, args []string, valueFlags ...string) erro
 	return fs.Parse(append(flags, positionals...))
 }
 
+type evidenceFlags []string
+
+func (f *evidenceFlags) String() string {
+	return strings.Join(*f, ",")
+}
+
+func (f *evidenceFlags) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
+
+func parseEvidenceFlags(values []string) (map[string]any, error) {
+	evidence := map[string]any{}
+	for _, value := range values {
+		key, text, ok := strings.Cut(value, "=")
+		if !ok {
+			return nil, fmt.Errorf("--evidence must use key=value")
+		}
+		key = strings.TrimSpace(key)
+		text = strings.TrimSpace(text)
+		if key == "" || text == "" {
+			return nil, fmt.Errorf("--evidence must use non-empty key=value")
+		}
+		if _, exists := evidence[key]; exists {
+			return nil, fmt.Errorf("duplicate evidence key: %s", key)
+		}
+		evidence[key] = text
+	}
+	return evidence, nil
+}
+
 func reorderFlags(args []string, valueFlags ...string) ([]string, []string) {
 	valueFlag := map[string]bool{}
 	for _, name := range valueFlags {
@@ -767,6 +842,7 @@ func usageWorkspace(w io.Writer) {
   feature workspace recover <workspace-dir> [--json]
   feature workspace attempt start <workspace-dir> --merge-unit <id> --agent <id> --lease <id> --base-sha <sha> [--mode fresh-from-base] [--json]
   feature workspace attempt abandon <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --reason <text> [--json]
+  feature workspace transition <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --from <status> --to <status> --evidence <key=value> [--evidence <key=value>] [--json]
 
 Coordinates validated feature plans through a workspace-level orchestration layer.`)
 }
@@ -808,6 +884,11 @@ Releases an active lease owned by an agent.`)
   feature workspace recover <workspace-dir> [--json]
 
 Recovers expired leases and rebuilds the scheduler view.`)
+	case "transition":
+		fmt.Fprintln(w, `Usage:
+  feature workspace transition <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --from <status> --to <status> --evidence <key=value> [--evidence <key=value>] [--json]
+
+Records local lifecycle movement for the current active attempt.`)
 	case "attempt":
 		usageWorkspaceAttempt(w)
 	default:
