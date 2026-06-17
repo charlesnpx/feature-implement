@@ -197,6 +197,34 @@ func TestAppendEventRejectsTrailingJournalData(t *testing.T) {
 	}
 }
 
+func TestAppendEventRejectsBlankJournalLine(t *testing.T) {
+	workspaceDir := t.TempDir()
+	if _, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: workspaceDir,
+		Type:         "workspace.created",
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent first: %v", err)
+	}
+	b, err := os.ReadFile(EventsPath(workspaceDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(EventsPath(workspaceDir), append(b, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = AppendEvent(AppendEventOptions{
+		WorkspaceDir: workspaceDir,
+		Type:         "workspace.validated",
+		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "blank journal line") {
+		t.Fatalf("AppendEvent error = %v", err)
+	}
+}
+
 func TestAppendEventRejectsCorruptJSONL(t *testing.T) {
 	workspaceDir := t.TempDir()
 	if err := os.MkdirAll(StateDir(workspaceDir), 0o755); err != nil {

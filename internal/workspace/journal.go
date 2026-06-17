@@ -139,17 +139,17 @@ func readJournalEvents(path string) ([]JournalEvent, error) {
 			break
 		}
 		lineNo++
-		if event, ok, err := parseJournalLine(path, lineNo, raw); err != nil {
+		event, err := parseJournalLine(path, lineNo, raw)
+		if err != nil {
 			return nil, err
-		} else if ok {
-			if len(events) == 0 && event.PreviousHash != zeroEventHash {
-				return nil, fmt.Errorf("parse %s line %d: previous hash mismatch", filepath.Base(path), lineNo)
-			}
-			if len(events) > 0 && event.PreviousHash != events[len(events)-1].EventHash {
-				return nil, fmt.Errorf("parse %s line %d: previous hash mismatch", filepath.Base(path), lineNo)
-			}
-			events = append(events, event)
 		}
+		if len(events) == 0 && event.PreviousHash != zeroEventHash {
+			return nil, fmt.Errorf("parse %s line %d: previous hash mismatch", filepath.Base(path), lineNo)
+		}
+		if len(events) > 0 && event.PreviousHash != events[len(events)-1].EventHash {
+			return nil, fmt.Errorf("parse %s line %d: previous hash mismatch", filepath.Base(path), lineNo)
+		}
+		events = append(events, event)
 		if errors.Is(readErr, io.EOF) {
 			break
 		}
@@ -157,30 +157,31 @@ func readJournalEvents(path string) ([]JournalEvent, error) {
 	return events, nil
 }
 
-func parseJournalLine(path string, lineNo int, raw string) (JournalEvent, bool, error) {
-	line := strings.TrimSpace(raw)
-	if line == "" {
-		return JournalEvent{}, false, nil
+func parseJournalLine(path string, lineNo int, raw string) (JournalEvent, error) {
+	line := strings.TrimRight(raw, "\r\n")
+	if strings.TrimSpace(line) == "" {
+		return JournalEvent{}, fmt.Errorf("parse %s line %d: blank journal line", filepath.Base(path), lineNo)
 	}
+	line = strings.TrimSpace(line)
 	var event JournalEvent
 	decoder := json.NewDecoder(strings.NewReader(line))
 	decoder.UseNumber()
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&event); err != nil {
-		return JournalEvent{}, false, fmt.Errorf("parse %s line %d: %w", filepath.Base(path), lineNo, err)
+		return JournalEvent{}, fmt.Errorf("parse %s line %d: %w", filepath.Base(path), lineNo, err)
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); err != io.EOF {
-		return JournalEvent{}, false, fmt.Errorf("parse %s line %d: trailing data", filepath.Base(path), lineNo)
+		return JournalEvent{}, fmt.Errorf("parse %s line %d: trailing data", filepath.Base(path), lineNo)
 	}
 	eventHash, err := hashJournalEvent(event)
 	if err != nil {
-		return JournalEvent{}, false, fmt.Errorf("parse %s line %d: %w", filepath.Base(path), lineNo, err)
+		return JournalEvent{}, fmt.Errorf("parse %s line %d: %w", filepath.Base(path), lineNo, err)
 	}
 	if event.EventHash != eventHash {
-		return JournalEvent{}, false, fmt.Errorf("parse %s line %d: event hash mismatch", filepath.Base(path), lineNo)
+		return JournalEvent{}, fmt.Errorf("parse %s line %d: event hash mismatch", filepath.Base(path), lineNo)
 	}
-	return event, true, nil
+	return event, nil
 }
 
 func appendJournalEvent(path string, event JournalEvent) error {
