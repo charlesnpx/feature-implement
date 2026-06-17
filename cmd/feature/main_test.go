@@ -21,6 +21,7 @@ func TestHelpCommandsExitSuccessfully(t *testing.T) {
 		{"workspace", "init", "--help"},
 		{"workspace", "validate", "--help"},
 		{"workspace", "status", "--help"},
+		{"workspace", "next", "--help"},
 	}
 	for _, args := range tests {
 		stdout, stderr, err := runFeature(t, args...)
@@ -73,6 +74,7 @@ func TestWorkspaceCommandShell(t *testing.T) {
 		"feature workspace init",
 		"feature workspace validate",
 		"feature workspace status",
+		"feature workspace next",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("workspace help missing %q:\n%s", want, stdout)
@@ -245,6 +247,70 @@ func TestWorkspaceStatusCommandInvalidLockFailsClearly(t *testing.T) {
 	}
 	if strings.Contains(stdout, "Usage:") || strings.Contains(stderr, "Usage:") {
 		t.Fatalf("invalid lock should not print usage:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+}
+
+func TestWorkspaceNextCommandClaimsReadyMergeUnit(t *testing.T) {
+	workspaceDir := workspaceWithPlanLocks(t)
+	if _, stderr, err := runFeature(t, "workspace", "validate", workspaceDir, "--write-lock", "--json"); err != nil {
+		t.Fatalf("feature workspace validate failed: %v\nstderr=%s", err, stderr)
+	}
+
+	stdout, stderr, err := runFeature(t, "workspace", "next", workspaceDir, "--agent", "worker-a", "--claim", "--json")
+	if err != nil {
+		t.Fatalf("feature workspace next failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var result struct {
+		Status         string `json:"status"`
+		WorkspaceID    string `json:"workspace_id"`
+		BaseRef        string `json:"base_ref"`
+		MergeUnitID    string `json:"merge_unit_id"`
+		LeaseID        string `json:"lease_id"`
+		AgentID        string `json:"agent_id"`
+		LeaseExpiresAt string `json:"lease_expires_at"`
+		Lifecycle      string `json:"lifecycle"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("stdout is not workspace next JSON: %v\n%s", err, stdout)
+	}
+	if result.Status != "claimed" || result.WorkspaceID != "workspace-a" || result.BaseRef != "workspace-orchestration" {
+		t.Fatalf("claim metadata = %+v", result)
+	}
+	if result.MergeUnitID != "foundation:story-a" || result.AgentID != "worker-a" || result.Lifecycle != "pending" {
+		t.Fatalf("claim result = %+v", result)
+	}
+	if result.LeaseID == "" || result.LeaseExpiresAt == "" {
+		t.Fatalf("claim should include lease details: %+v", result)
+	}
+
+	stdout, stderr, err = runFeature(t, "workspace", "next", workspaceDir, "--agent", "worker-b", "--claim", "--json")
+	if err != nil {
+		t.Fatalf("second feature workspace next failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var second struct {
+		Status      string `json:"status"`
+		MergeUnitID string `json:"merge_unit_id,omitempty"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &second); err != nil {
+		t.Fatalf("second stdout is not workspace next JSON: %v\n%s", err, stdout)
+	}
+	if second.Status != "none" || second.MergeUnitID != "" {
+		t.Fatalf("active lease should prevent duplicate claim: %+v", second)
+	}
+}
+
+func TestWorkspaceNextCommandRequiresClaimAgent(t *testing.T) {
+	workspaceDir := workspaceWithPlanLocks(t)
+	if _, stderr, err := runFeature(t, "workspace", "validate", workspaceDir, "--write-lock", "--json"); err != nil {
+		t.Fatalf("feature workspace validate failed: %v\nstderr=%s", err, stderr)
+	}
+
+	stdout, stderr, err := runFeature(t, "workspace", "next", workspaceDir, "--claim")
+	if err == nil {
+		t.Fatalf("feature workspace next --claim should require --agent")
+	}
+	if !strings.Contains(stderr, "workspace next --claim requires --agent") {
+		t.Fatalf("expected missing agent error:\nstdout=%s\nstderr=%s", stdout, stderr)
 	}
 }
 

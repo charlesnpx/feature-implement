@@ -2,7 +2,7 @@ package workspace
 
 import "fmt"
 
-var SupportedActions = []string{"init", "validate", "status"}
+var SupportedActions = []string{"init", "validate", "status", "next"}
 
 func IsSupportedAction(action string) bool {
 	for _, supported := range SupportedActions {
