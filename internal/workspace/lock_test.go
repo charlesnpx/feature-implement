@@ -8,9 +8,9 @@ import (
 )
 
 func TestValidateWritesDeterministicWorkspaceLock(t *testing.T) {
-	workspaceDir := workspaceWithPlanLocks(t)
+	fixture := newMultiPlanWorkspaceFixture(t)
 
-	first, err := Validate(ValidateOptions{WorkspaceDir: workspaceDir, WriteLock: true})
+	first, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir, WriteLock: true})
 	if err != nil {
 		t.Fatalf("Validate first: %v", err)
 	}
@@ -18,7 +18,7 @@ func TestValidateWritesDeterministicWorkspaceLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := Validate(ValidateOptions{WorkspaceDir: workspaceDir, WriteLock: true})
+	second, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir, WriteLock: true})
 	if err != nil {
 		t.Fatalf("Validate second: %v", err)
 	}
@@ -53,27 +53,27 @@ func TestValidateWritesDeterministicWorkspaceLock(t *testing.T) {
 }
 
 func TestValidateDoesNotWriteLockWithoutFlag(t *testing.T) {
-	workspaceDir := workspaceWithPlanLocks(t)
+	fixture := newMultiPlanWorkspaceFixture(t)
 
-	result, err := Validate(ValidateOptions{WorkspaceDir: workspaceDir})
+	result, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir})
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 	if result.LockPath != "" {
 		t.Fatalf("lock path should be empty without write flag: %+v", result)
 	}
-	if _, err := os.Stat(filepath.Join(workspaceDir, LockFileName)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(fixture.Dir, LockFileName)); !os.IsNotExist(err) {
 		t.Fatalf("lock should not be written without flag: %v", err)
 	}
 }
 
 func TestValidateReportsMissingPlanLock(t *testing.T) {
-	workspaceDir := workspaceWithPlanLocks(t)
-	if err := os.Remove(filepath.Join(workspaceDir, "plans", "sources", planLockFileName)); err != nil {
+	fixture := newMultiPlanWorkspaceFixture(t)
+	if err := os.Remove(filepath.Join(fixture.Plans["sources"], planLockFileName)); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := Validate(ValidateOptions{WorkspaceDir: workspaceDir})
+	_, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir})
 
 	if err == nil || !strings.Contains(err.Error(), "plan sources lock") {
 		t.Fatalf("Validate error = %v", err)
@@ -81,26 +81,13 @@ func TestValidateReportsMissingPlanLock(t *testing.T) {
 }
 
 func TestValidateRejectsUnknownWorkspaceDependencyEndpoint(t *testing.T) {
-	workspaceDir := workspaceWithPlanLocks(t)
-	manifest := `schema_version: 1
-id: workspace-a
-repo: .
-base_ref: workspace-orchestration
-remote: origin
-plans:
-  - id: foundation
-    path: plans/foundation
-  - id: sources
-    path: plans/sources
-dependencies:
-  - before: foundation:story-a
-    after: sources:missing
-`
-	if err := os.WriteFile(filepath.Join(workspaceDir, ManifestFileName), []byte(manifest), 0o644); err != nil {
-		t.Fatal(err)
+	fixture := newMultiPlanWorkspaceFixture(t)
+	fixture.Manifest.Dependencies = []WorkspaceDependency{
+		{Before: "foundation:story-a", After: "sources:missing"},
 	}
+	writeWorkspaceManifest(t, fixture.Dir, fixture.Manifest)
 
-	_, err := Validate(ValidateOptions{WorkspaceDir: workspaceDir})
+	_, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir})
 
 	if err == nil || !strings.Contains(err.Error(), "dependency 1 after: unknown merge unit sources:missing") {
 		t.Fatalf("Validate error = %v", err)
@@ -108,10 +95,12 @@ dependencies:
 }
 
 func TestBuildLockRejectsDuplicateGlobalMergeUnitIDs(t *testing.T) {
-	workspaceDir := workspaceWithPlanLocks(t)
-	writePlanLock(t, workspaceDir, "foundation", foundationPlanLockWithDuplicateUnit())
+	fixture := newMultiPlanWorkspaceFixture(t)
+	lock := readFixturePlanLock(t, fixture.Plans["foundation"])
+	lock.MergeUnits = append(lock.MergeUnits, lock.MergeUnits[0])
+	writeFixturePlanLock(t, fixture.Plans["foundation"], lock)
 
-	_, err := BuildLock(workspaceDir, mustReadWorkspaceManifest(t, workspaceDir))
+	_, err := BuildLock(fixture.Dir, mustReadWorkspaceManifest(t, fixture.Dir))
 
 	if err == nil || !strings.Contains(err.Error(), "duplicate global merge unit id foundation:story-a") {
 		t.Fatalf("BuildLock error = %v", err)
@@ -119,106 +108,21 @@ func TestBuildLockRejectsDuplicateGlobalMergeUnitIDs(t *testing.T) {
 }
 
 func TestBuildLockHashesCanonicalPlanLockJSON(t *testing.T) {
-	workspaceDir := workspaceWithPlanLocks(t)
-	compact, err := BuildLock(workspaceDir, mustReadWorkspaceManifest(t, workspaceDir))
+	fixture := newMultiPlanWorkspaceFixture(t)
+	lock := readFixturePlanLock(t, fixture.Plans["foundation"])
+	writeCompactFixturePlanLock(t, fixture.Plans["foundation"], lock)
+	compact, err := BuildLock(fixture.Dir, mustReadWorkspaceManifest(t, fixture.Dir))
 	if err != nil {
 		t.Fatalf("BuildLock compact: %v", err)
 	}
-	writePlanLock(t, workspaceDir, "foundation", foundationPlanLockFormatted())
-	formatted, err := BuildLock(workspaceDir, mustReadWorkspaceManifest(t, workspaceDir))
+	writeFixturePlanLock(t, fixture.Plans["foundation"], lock)
+	formatted, err := BuildLock(fixture.Dir, mustReadWorkspaceManifest(t, fixture.Dir))
 	if err != nil {
 		t.Fatalf("BuildLock formatted: %v", err)
 	}
 	if compact.Plans[0].LockHash != formatted.Plans[0].LockHash {
 		t.Fatalf("canonical hash changed: %s != %s", compact.Plans[0].LockHash, formatted.Plans[0].LockHash)
 	}
-}
-
-func workspaceWithPlanLocks(t *testing.T) string {
-	t.Helper()
-	workspaceDir := t.TempDir()
-	writePlanLock(t, workspaceDir, "foundation", foundationPlanLockCompact())
-	writePlanLock(t, workspaceDir, "sources", sourcesPlanLockCompact())
-	manifest := `schema_version: 1
-id: workspace-a
-repo: .
-base_ref: workspace-orchestration
-remote: origin
-plans:
-  - id: foundation
-    path: plans/foundation
-  - id: sources
-    path: plans/sources
-dependencies:
-  - before: foundation:story-a
-    after: sources:story-b
-`
-	if err := os.WriteFile(filepath.Join(workspaceDir, ManifestFileName), []byte(manifest), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return workspaceDir
-}
-
-func writePlanLock(t *testing.T, workspaceDir string, planID string, content string) {
-	t.Helper()
-	planDir := filepath.Join(workspaceDir, "plans", planID)
-	if err := os.MkdirAll(planDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(planDir, planLockFileName), []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func foundationPlanLockCompact() string {
-	return `{"schema_version":1,"manifest_id":"foundation","title":"Foundation","epics":[{"id":"epic-foundation","number":1,"name":"Epic","features":[{"id":"feature-foundation","number":1,"name":"Feature","stories":[{"id":"story-a","number":1,"name":"Story A"}]}]}],"merge_units":[{"id":"story-a","name":"Story A","story_ids":["story-a"]}]}`
-}
-
-func foundationPlanLockFormatted() string {
-	return `{
-  "schema_version": 1,
-  "manifest_id": "foundation",
-  "title": "Foundation",
-  "epics": [
-    {
-      "id": "epic-foundation",
-      "number": 1,
-      "name": "Epic",
-      "features": [
-        {
-          "id": "feature-foundation",
-          "number": 1,
-          "name": "Feature",
-          "stories": [
-            {
-              "id": "story-a",
-              "number": 1,
-              "name": "Story A"
-            }
-          ]
-        }
-      ]
-    }
-  ],
-  "merge_units": [
-    {
-      "id": "story-a",
-      "name": "Story A",
-      "story_ids": [
-        "story-a"
-      ]
-    }
-  ]
-}
-`
-}
-
-func foundationPlanLockWithDuplicateUnit() string {
-	return `{"schema_version":1,"manifest_id":"foundation","title":"Foundation","epics":[{"id":"epic-foundation","number":1,"name":"Epic","features":[{"id":"feature-foundation","number":1,"name":"Feature","stories":[{"id":"story-a","number":1,"name":"Story A"}]}]}],"merge_units":[{"id":"story-a","name":"Story A","story_ids":["story-a"]},{"id":"story-a","name":"Story A Again","story_ids":["story-a"]}]}`
-}
-
-func sourcesPlanLockCompact() string {
-	return `{"schema_version":1,"manifest_id":"sources","title":"Sources","epics":[{"id":"epic-sources","number":1,"name":"Epic","features":[{"id":"feature-sources","number":1,"name":"Feature","stories":[{"id":"story-b","number":1,"name":"Story B"}]}]}],"merge_units":[{"id":"story-b","name":"Story B","story_ids":["story-b"]}]}`
 }
 
 func mustReadWorkspaceManifest(t *testing.T, workspaceDir string) WorkspaceManifest {
