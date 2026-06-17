@@ -17,6 +17,10 @@ func TestHelpCommandsExitSuccessfully(t *testing.T) {
 		{"plan", "materialize", "--help"},
 		{"validate", "--help"},
 		{"implement", "push", "--help"},
+		{"workspace", "--help"},
+		{"workspace", "init", "--help"},
+		{"workspace", "validate", "--help"},
+		{"workspace", "status", "--help"},
 	}
 	for _, args := range tests {
 		stdout, stderr, err := runFeature(t, args...)
@@ -57,6 +61,27 @@ func TestInvalidImplementActionHelpFails(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "unsupported implement action: frobnicate") {
 		t.Fatalf("expected unsupported action error:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+}
+
+func TestWorkspaceCommandShell(t *testing.T) {
+	stdout, stderr, err := runFeature(t, "workspace", "frobnicate")
+	if err == nil {
+		t.Fatalf("invalid workspace action should fail")
+	}
+	if !strings.Contains(stderr, "unsupported workspace action: frobnicate") {
+		t.Fatalf("expected unsupported workspace action error:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+
+	stdout, stderr, err = runFeature(t, "workspace", "init", "--manifest", "feature.workspace.yaml")
+	if err == nil {
+		t.Fatalf("workspace init stub should fail until implemented")
+	}
+	if !strings.Contains(stderr, "workspace init is not implemented yet") {
+		t.Fatalf("expected init stub error:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+	if strings.Contains(stdout, "Usage:") || strings.Contains(stderr, "Usage:") {
+		t.Fatalf("workspace init stub should not print usage:\nstdout=%s\nstderr=%s", stdout, stderr)
 	}
 }
 

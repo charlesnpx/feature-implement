@@ -10,6 +10,7 @@ import (
 
 	"github.com/charlesnpx/feature-implement/internal/install"
 	"github.com/charlesnpx/feature-implement/internal/plan"
+	"github.com/charlesnpx/feature-implement/internal/workspace"
 )
 
 var Version = "dev"
@@ -31,6 +32,8 @@ func main() {
 		err = statusCommand(os.Args[2:])
 	case "implement":
 		err = implementCommand(os.Args[2:])
+	case "workspace":
+		err = workspaceCommand(os.Args[2:])
 	case "version":
 		fmt.Println(Version)
 	case "-h", "--help", "help":
@@ -53,6 +56,7 @@ func usage(w io.Writer) {
   feature validate <plan-dir> [--write-lock] [--json]
   feature status <plan-dir> [--json]
   feature implement next|start|commit|push|open-pr|review|merge|cleanup <plan-dir> [--merge-unit <id>] [--write-state] [metadata flags] [--json]
+  feature workspace init|validate|status [args]
   feature version`)
 }
 
@@ -295,6 +299,25 @@ func implementCommand(args []string) error {
 	return nil
 }
 
+func workspaceCommand(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("workspace requires subcommand: init, validate, or status")
+	}
+	action := args[0]
+	if isHelpCommand(action) {
+		usageWorkspace(os.Stdout)
+		return nil
+	}
+	if !workspace.IsSupportedAction(action) {
+		return fmt.Errorf("unsupported workspace action: %s", action)
+	}
+	if hasHelpFlag(args[1:]) {
+		usageWorkspaceAction(os.Stdout, action)
+		return nil
+	}
+	return workspace.ErrNotImplemented(action)
+}
+
 func writeJSON(value any) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetEscapeHTML(false)
@@ -421,4 +444,35 @@ func usageImplementAction(w io.Writer, action string) {
 
 Reads feature.plan.lock.json and returns the guarded next action for the selected merge unit.
 `, action)
+}
+
+func usageWorkspace(w io.Writer) {
+	fmt.Fprintln(w, `Usage:
+  feature workspace init --manifest <file> [--write-lock] [--json]
+  feature workspace validate <workspace-dir> [--write-lock] [--json]
+  feature workspace status <workspace-dir> [--json]
+
+Coordinates validated feature plans through a workspace-level orchestration layer.`)
+}
+
+func usageWorkspaceAction(w io.Writer, action string) {
+	switch action {
+	case "init":
+		fmt.Fprintln(w, `Usage:
+  feature workspace init --manifest <file> [--write-lock] [--json]
+
+Initializes a feature workspace from feature.workspace.yaml.`)
+	case "validate":
+		fmt.Fprintln(w, `Usage:
+  feature workspace validate <workspace-dir> [--write-lock] [--json]
+
+Validates a feature workspace and optionally writes feature.workspace.lock.json.`)
+	case "status":
+		fmt.Fprintln(w, `Usage:
+  feature workspace status <workspace-dir> [--json]
+
+Reports feature workspace scheduler status.`)
+	default:
+		usageWorkspace(w)
+	}
 }
