@@ -3,6 +3,7 @@ package workspace
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -13,6 +14,7 @@ const (
 	EventLeaseGranted   = "lease.granted"
 	EventLeaseHeartbeat = "lease.heartbeat"
 	EventLeaseReleased  = "lease.released"
+	EventLeaseRecovered = "lease.recovered"
 
 	eventPayloadLeaseIDKey        = "lease_id"
 	eventPayloadAgentIDKey        = "agent_id"
@@ -57,6 +59,31 @@ type LeaseResult struct {
 	AgentID        string `json:"agent_id"`
 	LeaseExpiresAt string `json:"lease_expires_at,omitempty"`
 	Lifecycle      string `json:"lifecycle"`
+}
+
+type RecoverOptions struct {
+	WorkspaceDir string
+	Now          func() time.Time
+}
+
+type RecoverResult struct {
+	Status         string               `json:"status"`
+	WorkspaceDir   string               `json:"workspace_dir"`
+	WorkspaceID    string               `json:"workspace_id"`
+	BaseRef        string               `json:"base_ref"`
+	ViewPath       string               `json:"view_path"`
+	Recovered      []RecoveredLeaseView `json:"recovered"`
+	RecoveredCount int                  `json:"recovered_count"`
+	Ready          []string             `json:"ready"`
+	Leased         []string             `json:"leased"`
+	Counts         map[string]int       `json:"counts"`
+}
+
+type RecoveredLeaseView struct {
+	MergeUnitID    string `json:"merge_unit_id"`
+	LeaseID        string `json:"lease_id"`
+	AgentID        string `json:"agent_id"`
+	LeaseExpiresAt string `json:"lease_expires_at"`
 }
 
 type activeLeaseSnapshot struct {
@@ -187,6 +214,59 @@ func Release(opts LeaseOptions) (LeaseResult, error) {
 	}, nil
 }
 
+func Recover(opts RecoverOptions) (RecoverResult, error) {
+	if opts.WorkspaceDir == "" {
+		return RecoverResult{}, fmt.Errorf("workspace recover requires <workspace-dir>")
+	}
+	now := time.Now
+	if opts.Now != nil {
+		now = opts.Now
+	}
+	recoveredAt := now()
+	state, err := loadLeaseOperationState(opts.WorkspaceDir, recoveredAt)
+	if err != nil {
+		return RecoverResult{}, err
+	}
+	expiredLeases, err := expiredLeaseSnapshots(state.Events, recoveredAt)
+	if err != nil {
+		return RecoverResult{}, err
+	}
+	recovered := []RecoveredLeaseView{}
+	for _, lease := range expiredLeases {
+		if err := appendLeaseEvent(opts.WorkspaceDir, EventLeaseRecovered, lease, "", state.Revisions, recoveredAt); err != nil {
+			return RecoverResult{}, err
+		}
+		leaseResource := LeaseResource(lease.MergeUnitID)
+		state.Revisions[leaseResource]++
+		recovered = append(recovered, RecoveredLeaseView{
+			MergeUnitID:    lease.MergeUnitID,
+			LeaseID:        lease.LeaseID,
+			AgentID:        lease.AgentID,
+			LeaseExpiresAt: lease.LeaseExpiresAt.UTC().Format(time.RFC3339Nano),
+		})
+	}
+	view, err := rebuildSchedulerViewAt(opts.WorkspaceDir, recoveredAt)
+	if err != nil {
+		return RecoverResult{}, err
+	}
+	status := "unchanged"
+	if len(recovered) > 0 {
+		status = "recovered"
+	}
+	return RecoverResult{
+		Status:         status,
+		WorkspaceDir:   opts.WorkspaceDir,
+		WorkspaceID:    view.WorkspaceID,
+		BaseRef:        view.BaseRef,
+		ViewPath:       SchedulerViewPath(opts.WorkspaceDir),
+		Recovered:      recovered,
+		RecoveredCount: len(recovered),
+		Ready:          append([]string{}, view.Ready...),
+		Leased:         append([]string{}, view.Leased...),
+		Counts:         cloneCounts(view.Counts),
+	}, nil
+}
+
 func claimReadyMergeUnit(opts NextOptions, view SchedulerView, unit SchedulerMergeUnitView, claimedAt time.Time, leaseDuration time.Duration, revisions map[string]int) (NextResult, error) {
 	expiresAt := claimedAt.Add(leaseDuration).UTC().Format(time.RFC3339Nano)
 	leaseID := fmt.Sprintf("%s:%s:%d", unit.ID, opts.AgentID, claimedAt.UTC().UnixNano())
@@ -230,6 +310,7 @@ func claimReadyMergeUnit(opts NextOptions, view SchedulerView, unit SchedulerMer
 
 type leaseOperationState struct {
 	View         SchedulerView
+	Events       []JournalEvent
 	Revisions    map[string]int
 	ActiveLeases map[string]activeLeaseSnapshot
 	UnitByID     map[string]*SchedulerMergeUnitView
@@ -277,6 +358,7 @@ func loadLeaseOperationState(workspaceDir string, observedAt time.Time) (leaseOp
 	}
 	return leaseOperationState{
 		View:         view,
+		Events:       events,
 		Revisions:    revisions,
 		ActiveLeases: activeLeases,
 		UnitByID:     schedulerUnitByID(view),
@@ -334,6 +416,35 @@ func schedulerUnitByID(view SchedulerView) map[string]*SchedulerMergeUnitView {
 }
 
 func activeLeaseSnapshots(events []JournalEvent, now time.Time) (map[string]activeLeaseSnapshot, error) {
+	leases, err := openLeaseSnapshots(events)
+	if err != nil {
+		return nil, err
+	}
+	active := map[string]activeLeaseSnapshot{}
+	for mergeUnitID, lease := range leases {
+		if now.Before(lease.LeaseExpiresAt) {
+			active[mergeUnitID] = lease
+		}
+	}
+	return active, nil
+}
+
+func expiredLeaseSnapshots(events []JournalEvent, now time.Time) ([]activeLeaseSnapshot, error) {
+	leases, err := openLeaseSnapshots(events)
+	if err != nil {
+		return nil, err
+	}
+	expired := []activeLeaseSnapshot{}
+	for _, lease := range leases {
+		if !now.Before(lease.LeaseExpiresAt) {
+			expired = append(expired, lease)
+		}
+	}
+	sortLeaseSnapshots(expired)
+	return expired, nil
+}
+
+func openLeaseSnapshots(events []JournalEvent) (map[string]activeLeaseSnapshot, error) {
 	leases := map[string]activeLeaseSnapshot{}
 	for _, event := range events {
 		switch event.Type {
@@ -343,7 +454,7 @@ func activeLeaseSnapshots(events []JournalEvent, now time.Time) (map[string]acti
 				return nil, err
 			}
 			leases[lease.MergeUnitID] = lease
-		case EventLeaseReleased:
+		case EventLeaseReleased, EventLeaseRecovered:
 			lease, err := eventReleasedLeasePayload(event)
 			if err != nil {
 				return nil, err
@@ -356,13 +467,16 @@ func activeLeaseSnapshots(events []JournalEvent, now time.Time) (map[string]acti
 			continue
 		}
 	}
-	active := map[string]activeLeaseSnapshot{}
-	for mergeUnitID, lease := range leases {
-		if now.Before(lease.LeaseExpiresAt) {
-			active[mergeUnitID] = lease
+	return leases, nil
+}
+
+func sortLeaseSnapshots(leases []activeLeaseSnapshot) {
+	sort.Slice(leases, func(i, j int) bool {
+		if leases[i].MergeUnitID != leases[j].MergeUnitID {
+			return leases[i].MergeUnitID < leases[j].MergeUnitID
 		}
-	}
-	return active, nil
+		return leases[i].LeaseID < leases[j].LeaseID
+	})
 }
 
 func eventLeasePayload(event JournalEvent) (activeLeaseSnapshot, error) {

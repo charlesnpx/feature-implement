@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	workspacepkg "github.com/charlesnpx/feature-implement/internal/workspace"
 )
 
 func TestHelpCommandsExitSuccessfully(t *testing.T) {
@@ -24,6 +27,7 @@ func TestHelpCommandsExitSuccessfully(t *testing.T) {
 		{"workspace", "next", "--help"},
 		{"workspace", "heartbeat", "--help"},
 		{"workspace", "release", "--help"},
+		{"workspace", "recover", "--help"},
 	}
 	for _, args := range tests {
 		stdout, stderr, err := runFeature(t, args...)
@@ -79,6 +83,7 @@ func TestWorkspaceCommandShell(t *testing.T) {
 		"feature workspace next",
 		"feature workspace heartbeat",
 		"feature workspace release",
+		"feature workspace recover",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("workspace help missing %q:\n%s", want, stdout)
@@ -385,6 +390,57 @@ func TestWorkspaceLeaseCommandsHeartbeatAndRelease(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRecoverCommandJSON(t *testing.T) {
+	workspaceDir := workspaceWithPlanLocks(t)
+	if _, stderr, err := runFeature(t, "workspace", "validate", workspaceDir, "--write-lock", "--json"); err != nil {
+		t.Fatalf("feature workspace validate failed: %v\nstderr=%s", err, stderr)
+	}
+	if _, err := workspacepkg.AppendEvent(workspacepkg.AppendEventOptions{
+		WorkspaceDir: workspaceDir,
+		Type:         workspacepkg.EventLeaseGranted,
+		Payload: map[string]any{
+			"merge_unit_id":    "foundation:story-a",
+			"lease_id":         "lease-expired",
+			"agent_id":         "worker-a",
+			"lease_expires_at": "2000-01-01T00:01:00Z",
+		},
+		WriteSet: []string{
+			workspacepkg.LeaseResource("foundation:story-a"),
+			workspacepkg.MergeUnitResource("foundation:story-a"),
+		},
+		Now: fixedFeatureTime("2000-01-01T00:00:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent expired lease: %v", err)
+	}
+
+	stdout, stderr, err := runFeature(t, "workspace", "recover", workspaceDir, "--json")
+	if err != nil {
+		t.Fatalf("feature workspace recover failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var result struct {
+		Status         string `json:"status"`
+		RecoveredCount int    `json:"recovered_count"`
+		Recovered      []struct {
+			MergeUnitID string `json:"merge_unit_id"`
+			LeaseID     string `json:"lease_id"`
+			AgentID     string `json:"agent_id"`
+		} `json:"recovered"`
+		Ready []string `json:"ready"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("recover stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if result.Status != "recovered" || result.RecoveredCount != 1 {
+		t.Fatalf("recover result = %+v", result)
+	}
+	if len(result.Recovered) != 1 || result.Recovered[0].LeaseID != "lease-expired" || result.Recovered[0].AgentID != "worker-a" {
+		t.Fatalf("recovered leases = %+v", result.Recovered)
+	}
+	if len(result.Ready) != 1 || result.Ready[0] != "foundation:story-a" {
+		t.Fatalf("ready = %+v", result.Ready)
+	}
+}
+
 func TestPlanExampleAndSchemaCommands(t *testing.T) {
 	stdout, stderr, err := runFeature(t, "plan", "example")
 	if err != nil {
@@ -404,6 +460,16 @@ func TestPlanExampleAndSchemaCommands(t *testing.T) {
 	}
 	if schema["title"] != "feature.plan.yaml" {
 		t.Fatalf("unexpected schema title: %+v", schema["title"])
+	}
+}
+
+func fixedFeatureTime(value string) func() time.Time {
+	return func() time.Time {
+		parsed, err := time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			panic(err)
+		}
+		return parsed
 	}
 }
 

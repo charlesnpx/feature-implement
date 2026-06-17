@@ -58,6 +58,10 @@ func SchedulerViewPath(workspaceDir string) string {
 }
 
 func RebuildSchedulerView(workspaceDir string) (SchedulerView, error) {
+	return rebuildSchedulerViewAt(workspaceDir, time.Now())
+}
+
+func rebuildSchedulerViewAt(workspaceDir string, now time.Time) (SchedulerView, error) {
 	lock, err := readWorkspaceLock(filepath.Join(workspaceDir, LockFileName))
 	if err != nil {
 		return SchedulerView{}, err
@@ -66,7 +70,7 @@ func RebuildSchedulerView(workspaceDir string) (SchedulerView, error) {
 	if err != nil {
 		return SchedulerView{}, err
 	}
-	view, err := BuildSchedulerView(lock, events)
+	view, err := buildSchedulerViewAt(lock, events, now)
 	if err != nil {
 		return SchedulerView{}, err
 	}
@@ -147,7 +151,7 @@ func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, event Jour
 	switch event.Type {
 	case EventWorkspaceCreated, EventWorkspaceValidated:
 		return nil
-	case EventLeaseGranted, EventLeaseHeartbeat, EventLeaseReleased:
+	case EventLeaseGranted, EventLeaseHeartbeat, EventLeaseReleased, EventLeaseRecovered:
 		return nil
 	case EventMergeUnitStarted:
 		return updateMergeUnitStatus(unitByID, event, MergeUnitInProgress)
