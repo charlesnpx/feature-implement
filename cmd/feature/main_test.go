@@ -116,6 +116,12 @@ func TestWorkspaceValidateCommandWritesLock(t *testing.T) {
 				ID       string `json:"id"`
 				LockHash string `json:"lock_hash"`
 			} `json:"plans"`
+			MergeUnits []struct {
+				ID          string   `json:"id"`
+				PlanID      string   `json:"plan_id"`
+				MergeUnitID string   `json:"merge_unit_id"`
+				StoryIDs    []string `json:"story_ids"`
+			} `json:"merge_units"`
 		} `json:"lock"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
@@ -129,6 +135,9 @@ func TestWorkspaceValidateCommandWritesLock(t *testing.T) {
 	}
 	if len(result.Lock.Plans) != 1 || result.Lock.Plans[0].ID != "foundation" || result.Lock.Plans[0].LockHash == "" {
 		t.Fatalf("lock plans = %+v", result.Lock.Plans)
+	}
+	if len(result.Lock.MergeUnits) != 1 || result.Lock.MergeUnits[0].ID != "foundation:story-a" {
+		t.Fatalf("lock merge units = %+v", result.Lock.MergeUnits)
 	}
 	if _, err := os.Stat(result.LockPath); err != nil {
 		t.Fatalf("expected lock file: %v", err)
@@ -164,7 +173,7 @@ func workspaceWithPlanLocks(t *testing.T) string {
 	if err := os.MkdirAll(planDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	lock := `{"schema_version":1,"manifest_id":"foundation"}`
+	lock := `{"schema_version":1,"manifest_id":"foundation","title":"Foundation","epics":[{"id":"epic-foundation","number":1,"name":"Epic","features":[{"id":"feature-foundation","number":1,"name":"Feature","stories":[{"id":"story-a","number":1,"name":"Story A"}]}]}],"merge_units":[{"id":"story-a","name":"Story A","story_ids":["story-a"]}]}`
 	if err := os.WriteFile(filepath.Join(planDir, "feature.plan.lock.json"), []byte(lock), 0o644); err != nil {
 		t.Fatal(err)
 	}
