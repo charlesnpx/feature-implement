@@ -56,7 +56,7 @@ func usage(w io.Writer) {
   feature validate <plan-dir> [--write-lock] [--json]
   feature status <plan-dir> [--json]
   feature implement next|start|commit|push|open-pr|review|merge|cleanup <plan-dir> [--merge-unit <id>] [--write-state] [metadata flags] [--json]
-  feature workspace init|validate|status|next|heartbeat|release|recover [args]
+  feature workspace init|validate|status|next|heartbeat|release|recover|attempt [args]
   feature version`)
 }
 
@@ -301,7 +301,7 @@ func implementCommand(args []string) error {
 
 func workspaceCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("workspace requires subcommand: init, validate, status, next, heartbeat, release, or recover")
+		return fmt.Errorf("workspace requires subcommand: init, validate, status, next, heartbeat, release, recover, or attempt")
 	}
 	action := args[0]
 	if isHelpCommand(action) {
@@ -311,7 +311,7 @@ func workspaceCommand(args []string) error {
 	if !workspace.IsSupportedAction(action) {
 		return fmt.Errorf("unsupported workspace action: %s", action)
 	}
-	if hasHelpFlag(args[1:]) {
+	if action != "attempt" && hasHelpFlag(args[1:]) {
 		usageWorkspaceAction(os.Stdout, action)
 		return nil
 	}
@@ -328,6 +328,8 @@ func workspaceCommand(args []string) error {
 		return workspaceRelease(args[1:])
 	case "recover":
 		return workspaceRecover(args[1:])
+	case "attempt":
+		return workspaceAttempt(args[1:])
 	default:
 		return workspace.ErrNotImplemented(action)
 	}
@@ -531,6 +533,58 @@ func writeWorkspaceRecoverText(result workspace.RecoverResult) {
 	}
 }
 
+func workspaceAttempt(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("workspace attempt requires subcommand: start")
+	}
+	action := args[0]
+	if isHelpCommand(action) {
+		usageWorkspaceAttempt(os.Stdout)
+		return nil
+	}
+	if action != "start" {
+		return fmt.Errorf("unsupported workspace attempt action: %s", action)
+	}
+	if hasHelpFlag(args[1:]) {
+		usageWorkspaceAttemptStart(os.Stdout)
+		return nil
+	}
+	return workspaceAttemptStart(args[1:])
+}
+
+func workspaceAttemptStart(args []string) error {
+	fs := flag.NewFlagSet("workspace attempt start", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	mergeUnitID := fs.String("merge-unit", "", "Merge unit ID")
+	agentID := fs.String("agent", "", "Agent ID that owns the lease")
+	leaseID := fs.String("lease", "", "Lease ID")
+	baseSHA := fs.String("base-sha", "", "Base commit SHA")
+	mode := fs.String("mode", "", "Start mode; defaults to fresh-from-base")
+	asJSON := fs.Bool("json", false, "Emit JSON result")
+	if err := parsePermissive(fs, args, "merge-unit", "agent", "lease", "base-sha", "mode"); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("workspace attempt start requires <workspace-dir>")
+	}
+	result, err := workspace.StartAttempt(workspace.AttemptStartOptions{
+		WorkspaceDir: fs.Arg(0),
+		MergeUnitID:  *mergeUnitID,
+		AgentID:      *agentID,
+		LeaseID:      *leaseID,
+		BaseSHA:      *baseSHA,
+		Mode:         *mode,
+	})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(result)
+	}
+	fmt.Printf("started %s attempt=%s branch=%s worktree=%s mode=%s\n", result.MergeUnitID, result.AttemptID, result.Branch, result.Worktree, result.Mode)
+	return nil
+}
+
 func writeJSON(value any) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetEscapeHTML(false)
@@ -668,6 +722,7 @@ func usageWorkspace(w io.Writer) {
   feature workspace heartbeat <workspace-dir> --agent <id> --lease <id> [--json]
   feature workspace release <workspace-dir> --agent <id> --lease <id> [--json]
   feature workspace recover <workspace-dir> [--json]
+  feature workspace attempt start <workspace-dir> --merge-unit <id> --agent <id> --lease <id> --base-sha <sha> [--mode fresh-from-base] [--json]
 
 Coordinates validated feature plans through a workspace-level orchestration layer.`)
 }
@@ -709,7 +764,23 @@ Releases an active lease owned by an agent.`)
   feature workspace recover <workspace-dir> [--json]
 
 Recovers expired leases and rebuilds the scheduler view.`)
+	case "attempt":
+		usageWorkspaceAttempt(w)
 	default:
 		usageWorkspace(w)
 	}
+}
+
+func usageWorkspaceAttempt(w io.Writer) {
+	fmt.Fprintln(w, `Usage:
+  feature workspace attempt start <workspace-dir> --merge-unit <id> --agent <id> --lease <id> --base-sha <sha> [--mode fresh-from-base] [--json]
+
+Manages concrete workspace implementation attempts.`)
+}
+
+func usageWorkspaceAttemptStart(w io.Writer) {
+	fmt.Fprintln(w, `Usage:
+  feature workspace attempt start <workspace-dir> --merge-unit <id> --agent <id> --lease <id> --base-sha <sha> [--mode fresh-from-base] [--json]
+
+Starts a fresh-from-base attempt for a leased merge unit.`)
 }

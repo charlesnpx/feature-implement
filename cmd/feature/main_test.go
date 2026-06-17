@@ -28,6 +28,8 @@ func TestHelpCommandsExitSuccessfully(t *testing.T) {
 		{"workspace", "heartbeat", "--help"},
 		{"workspace", "release", "--help"},
 		{"workspace", "recover", "--help"},
+		{"workspace", "attempt", "--help"},
+		{"workspace", "attempt", "start", "--help"},
 	}
 	for _, args := range tests {
 		stdout, stderr, err := runFeature(t, args...)
@@ -84,6 +86,7 @@ func TestWorkspaceCommandShell(t *testing.T) {
 		"feature workspace heartbeat",
 		"feature workspace release",
 		"feature workspace recover",
+		"feature workspace attempt",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("workspace help missing %q:\n%s", want, stdout)
@@ -438,6 +441,62 @@ func TestWorkspaceRecoverCommandJSON(t *testing.T) {
 	}
 	if len(result.Ready) != 1 || result.Ready[0] != "foundation:story-a" {
 		t.Fatalf("ready = %+v", result.Ready)
+	}
+}
+
+func TestWorkspaceAttemptStartCommandJSON(t *testing.T) {
+	workspaceDir := workspaceWithPlanLocks(t)
+	if _, stderr, err := runFeature(t, "workspace", "validate", workspaceDir, "--write-lock", "--json"); err != nil {
+		t.Fatalf("feature workspace validate failed: %v\nstderr=%s", err, stderr)
+	}
+	stdout, stderr, err := runFeature(t, "workspace", "next", workspaceDir, "--agent", "worker-a", "--claim", "--json")
+	if err != nil {
+		t.Fatalf("feature workspace next failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var claim struct {
+		MergeUnitID string `json:"merge_unit_id"`
+		LeaseID     string `json:"lease_id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &claim); err != nil {
+		t.Fatalf("claim stdout is not JSON: %v\n%s", err, stdout)
+	}
+
+	stdout, stderr, err = runFeature(t,
+		"workspace", "attempt", "start", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--agent", "worker-a",
+		"--lease", claim.LeaseID,
+		"--base-sha", "base-sha-cli",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace attempt start failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var attempt struct {
+		Status        string `json:"status"`
+		MergeUnitID   string `json:"merge_unit_id"`
+		AttemptID     string `json:"attempt_id"`
+		AttemptNumber int    `json:"attempt_number"`
+		Branch        string `json:"branch"`
+		Worktree      string `json:"worktree"`
+		BaseRef       string `json:"base_ref"`
+		BaseSHA       string `json:"base_sha"`
+		Mode          string `json:"mode"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &attempt); err != nil {
+		t.Fatalf("attempt stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if attempt.Status != "started" || attempt.MergeUnitID != "foundation:story-a" || attempt.AttemptID != "foundation:story-a:attempt-1" {
+		t.Fatalf("attempt result = %+v", attempt)
+	}
+	if attempt.AttemptNumber != 1 || attempt.BaseRef != "workspace-orchestration" || attempt.BaseSHA != "base-sha-cli" || attempt.Mode != "fresh-from-base" {
+		t.Fatalf("attempt metadata = %+v", attempt)
+	}
+	if attempt.Branch != "feature/workspace-a/foundation/story-a/attempt-1" {
+		t.Fatalf("branch = %q", attempt.Branch)
+	}
+	if !strings.Contains(attempt.Worktree, filepath.Join("state", "worktrees", "workspace-a", "foundation", "story-a", "attempt-1")) {
+		t.Fatalf("worktree = %q", attempt.Worktree)
 	}
 }
 
