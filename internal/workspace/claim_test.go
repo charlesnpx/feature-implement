@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -193,6 +194,72 @@ func TestNextPreventsDuplicateActiveClaim(t *testing.T) {
 	}
 	if third.Status != "none" {
 		t.Fatalf("all ready units have active leases: %+v", third)
+	}
+}
+
+func TestNextConcurrentClaimsAreUnique(t *testing.T) {
+	for run := 0; run < 20; run++ {
+		fixture := newIndependentDAGFixture(t).Workspace
+		writeWorkspaceLock(t, fixture.Dir)
+
+		const workers = 12
+		var wg sync.WaitGroup
+		results := make(chan NextResult, workers)
+		errors := make(chan error, workers)
+		for i := 0; i < workers; i++ {
+			i := i
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				result, err := Next(NextOptions{
+					WorkspaceDir: fixture.Dir,
+					AgentID:      "worker-" + string(rune('a'+i)),
+					Claim:        true,
+				})
+				if err != nil {
+					errors <- err
+					return
+				}
+				results <- result
+			}()
+		}
+		wg.Wait()
+		close(results)
+		close(errors)
+		for err := range errors {
+			t.Fatalf("run %d concurrent Next error: %v", run, err)
+		}
+		claimed := map[string]string{}
+		noneCount := 0
+		for result := range results {
+			if result.Status == "none" {
+				noneCount++
+				continue
+			}
+			if result.Status != "claimed" {
+				t.Fatalf("run %d unexpected result = %+v", run, result)
+			}
+			if prior := claimed[result.MergeUnitID]; prior != "" {
+				t.Fatalf("run %d duplicate claim for %s by %s and %s", run, result.MergeUnitID, prior, result.AgentID)
+			}
+			claimed[result.MergeUnitID] = result.AgentID
+		}
+		if len(claimed) != 2 || noneCount != workers-2 {
+			t.Fatalf("run %d claimed=%+v none=%d", run, claimed, noneCount)
+		}
+		revisions, err := ResourceRevisions(fixture.Dir)
+		if err != nil {
+			t.Fatalf("run %d ResourceRevisions: %v", run, err)
+		}
+		for _, id := range []string{"foundation:story-a", "sources:story-b"} {
+			if revisions[LeaseResource(id)] != 1 || revisions[MergeUnitResource(id)] != 1 {
+				t.Fatalf("run %d revisions for %s = %+v", run, id, revisions)
+			}
+		}
+		events := readTestJournalEvents(t, fixture.Dir)
+		if len(events) != 2 {
+			t.Fatalf("run %d events = %+v", run, events)
+		}
 	}
 }
 
@@ -1519,5 +1586,8 @@ func TestTransitionRejectsStaleCASSnapshot(t *testing.T) {
 	var stale StaleResourceError
 	if !errors.As(err, &stale) || stale.Resource != MergeUnitResource("foundation:story-a") {
 		t.Fatalf("transition should reject stale CAS snapshot: %v", err)
+	}
+	if got := len(readTestJournalEvents(t, fixture.Dir)); got != 3 {
+		t.Fatalf("stale transition should not append journal event; got %d events", got)
 	}
 }
