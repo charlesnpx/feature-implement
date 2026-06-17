@@ -24,6 +24,9 @@ func TestImplementLifecycleRecordsStateAndAdvances(t *testing.T) {
 	if start.Branch != "feature/sample-migration-plan/story-current-state" {
 		t.Fatalf("branch = %q", start.Branch)
 	}
+	if start.StoryProgressLabel != "(Story 1/2)" {
+		t.Fatalf("story progress = %q", start.StoryProgressLabel)
+	}
 	wantStartCommand := "git worktree add -b feature/sample-migration-plan/story-current-state " + filepath.Join(planDir, "worktrees", "story-current-state") + " main"
 	if len(start.Commands) != 1 || start.Commands[0] != wantStartCommand {
 		t.Fatalf("start commands = %#v", start.Commands)
@@ -59,6 +62,9 @@ func TestImplementLifecycleRecordsStateAndAdvances(t *testing.T) {
 	if next.MergeUnit != "story-target-plan" || next.State.Status != MergeUnitPending {
 		t.Fatalf("next = %+v", next)
 	}
+	if next.StoryProgressLabel != "(Story 2/2)" {
+		t.Fatalf("next story progress = %q", next.StoryProgressLabel)
+	}
 
 	lock := readTestLock(t, planDir)
 	if lock.State.SchemaVersion != runtimeStateSchemaVersion {
@@ -69,6 +75,48 @@ func TestImplementLifecycleRecordsStateAndAdvances(t *testing.T) {
 	}
 	if lock.State.MergeUnits[0].PRNumber != 42 || lock.State.MergeUnits[0].PRURL == "" || lock.State.MergeUnits[0].MergeCommit != "merge-sha" {
 		t.Fatalf("state metadata missing: %+v", lock.State.MergeUnits[0])
+	}
+}
+
+func TestImplementNextReportsMultiStoryProgress(t *testing.T) {
+	planDir := t.TempDir()
+	lock := Lock{
+		SchemaVersion: 1,
+		ManifestID:    "multi-story",
+		Title:         "Multi Story",
+		Epics: []Epic{{
+			ID:     "epic-a",
+			Number: 1,
+			Name:   "Epic A",
+			Features: []Feature{{
+				ID:     "feature-a",
+				Number: 1,
+				Name:   "Feature A",
+				Stories: []Story{
+					{ID: "story-a", Number: 1, Name: "Story A"},
+					{ID: "story-b", Number: 2, Name: "Story B"},
+					{ID: "story-c", Number: 3, Name: "Story C"},
+				},
+			}},
+		}},
+		MergeUnits: []MergeUnit{
+			{ID: "unit-ab", Name: "Unit AB", StoryIDs: []string{"story-a", "story-b"}, AllowFeatureLevelPR: true},
+			{ID: "unit-c", Name: "Unit C", StoryIDs: []string{"story-c"}},
+		},
+	}
+	if err := writeLock(planDir, lock); err != nil {
+		t.Fatal(err)
+	}
+
+	next, err := Implement(ImplementOptions{PlanDir: planDir, Action: "next"})
+	if err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	if next.MergeUnit != "unit-ab" {
+		t.Fatalf("merge unit = %q", next.MergeUnit)
+	}
+	if next.StoryProgressLabel != "(Stories 1-2/3)" {
+		t.Fatalf("story progress = %q", next.StoryProgressLabel)
 	}
 }
 

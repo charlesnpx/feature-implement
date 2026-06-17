@@ -85,6 +85,22 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			}
 		}
 	}
+	codexFeatureSkill := filepath.Join(stage, ".codex", "skills", "feature", "SKILL.md")
+	b, err := os.ReadFile(codexFeatureSkill)
+	if err != nil {
+		t.Fatalf("read staged codex feature skill %s: %v", codexFeatureSkill, err)
+	}
+	codexFeatureContent := string(b)
+	for _, want := range []string{
+		"Do not use `pr:review:local:no-file`",
+		"maximum of 10 fresh-review iterations",
+		"re-run `feature plan materialize`",
+		"Stop only when a fresh reviewer returns no findings worth addressing",
+	} {
+		if !strings.Contains(codexFeatureContent, want) {
+			t.Fatalf("staged codex feature skill missing %q", want)
+		}
+	}
 	for _, path := range []string{
 		filepath.Join(stage, ".codex", "skills", "feature:implement", "SKILL.md"),
 		filepath.Join(stage, ".claude", "skills", "feature:implement", "SKILL.md"),
@@ -100,10 +116,7 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"review the opened PR",
 			"branch-diff review only when PR creation is not approved",
 			"maximum of 10 fresh-review iterations",
-			"keep that reviewer agent alive",
-			"changed file list",
-			"do not commit yet",
-			"spawn a fresh subagent to review the updated PR",
+			"subagent to review the updated PR",
 			"stop and report the remaining findings instead of merging",
 			"only after the final reviewed branch has been pushed",
 			"feature implement cleanup",
@@ -119,22 +132,35 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 		}
 	}
 	codexImplementSkill := filepath.Join(stage, ".codex", "skills", "feature:implement", "SKILL.md")
-	b, err := os.ReadFile(codexImplementSkill)
+	b, err = os.ReadFile(codexImplementSkill)
 	if err != nil {
 		t.Fatalf("read staged codex implement skill %s: %v", codexImplementSkill, err)
 	}
-	content := string(b)
+	codexImplementContent := string(b)
 	for _, want := range []string{
 		"active Codex Skills list includes `pr:review:no-file`",
+		"`story_progress_label`",
+		"(Story 4/16)",
+		"clear title and description that includes the active `story_progress_label`",
 		"implementation worktree/repository path",
 		"`$pr:review:no-file <pr-number>`",
 		"generic Codex PR-review subagent",
-		"selected from a no-file review",
-		"that fresh no-file review is the confirmation mechanism",
+		"close that reviewer subagent",
+		"Do not send addressed findings back to the previous reviewer",
+		"fresh review of the pushed branch is the confirmation mechanism",
 		"same skill-selection rule",
 	} {
-		if !strings.Contains(content, want) {
+		if !strings.Contains(codexImplementContent, want) {
 			t.Fatalf("staged codex implement skill missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"keep that reviewer agent alive",
+		"changed file list, and relevant local diff",
+		"ask whether the patch resolves its specific concerns",
+	} {
+		if strings.Contains(codexImplementContent, forbidden) {
+			t.Fatalf("staged codex implement skill still contains removed reviewer-confirmation wording %q", forbidden)
 		}
 	}
 }

@@ -167,6 +167,9 @@ func TestImplementLifecycleWriteStateCommands(t *testing.T) {
 	if !strings.Contains(stdout, `"merge_unit":"story-target-plan"`) {
 		t.Fatalf("next did not advance:\n%s", stdout)
 	}
+	if !strings.Contains(stdout, `"story_progress_label":"(Story 2/2)"`) {
+		t.Fatalf("next did not report story progress:\n%s", stdout)
+	}
 }
 
 func TestHelperProcess(t *testing.T) {

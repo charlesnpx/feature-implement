@@ -41,6 +41,8 @@ Lifecycle write steps use immutable lock transitions: each `--write-state` comma
 
 `feature:implement` creates one temporary worktree for the active merge unit under `<plan-dir>/worktrees/<merge-unit-id>`. After the PR is merged and local `main` is updated, remove that worktree and record `feature implement cleanup ... --write-state`. Remote branch deletion is separate and still requires both merge policy allowance and explicit approval.
 
+`feature implement ... --json` results for a selected merge unit include `story_progress_label`, such as `(Story 4/16)` or `(Stories 4-5/16)`, derived from the ordered stories in `feature.plan.lock.json`.
+
 When `$feature` or `/feature` needs to draft the temporary `feature.plan.yaml`, it should stage that scratch manifest under the user-provided output folder, `~/tmp` when it exists, or the system temp directory. It should not write scratch manifests into the current repository root unless that repo root was explicitly supplied as the output folder.
 
 ## Manifest Contract

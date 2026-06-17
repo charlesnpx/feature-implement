@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -28,14 +30,15 @@ type ImplementOptions struct {
 }
 
 type ImplementResult struct {
-	Status    string          `json:"status"`
-	Action    string          `json:"action"`
-	MergeUnit string          `json:"merge_unit,omitempty"`
-	Branch    string          `json:"branch,omitempty"`
-	Worktree  string          `json:"worktree,omitempty"`
-	State     *MergeUnitState `json:"state,omitempty"`
-	Commands  []string        `json:"commands,omitempty"`
-	Message   string          `json:"message,omitempty"`
+	Status             string          `json:"status"`
+	Action             string          `json:"action"`
+	MergeUnit          string          `json:"merge_unit,omitempty"`
+	StoryProgressLabel string          `json:"story_progress_label,omitempty"`
+	Branch             string          `json:"branch,omitempty"`
+	Worktree           string          `json:"worktree,omitempty"`
+	State              *MergeUnitState `json:"state,omitempty"`
+	Commands           []string        `json:"commands,omitempty"`
+	Message            string          `json:"message,omitempty"`
 }
 
 func Implement(opts ImplementOptions) (ImplementResult, error) {
@@ -54,6 +57,7 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 	if !hasUnit(lock, unitID) {
 		return ImplementResult{}, fmt.Errorf("unknown merge unit: %s", unitID)
 	}
+	progressLabel := storyProgressLabel(lock, unitID)
 	if opts.Action != "next" {
 		var err error
 		lock, _, _, err = validateMergeUnitTransition(lock, unitID, opts.Action)
@@ -64,19 +68,20 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 	switch opts.Action {
 	case "next":
 		state, _ := mergeUnitState(lock, unitID)
-		return ImplementResult{Status: "ready", Action: opts.Action, MergeUnit: unitID, State: &state}, nil
+		return ImplementResult{Status: "ready", Action: opts.Action, MergeUnit: unitID, StoryProgressLabel: progressLabel, State: &state}, nil
 	case "start":
 		branch := firstNonBlank(opts.Branch, defaultBranchName(lock, unitID))
 		worktree := firstNonBlank(opts.Worktree, defaultWorktreePath(opts.PlanDir, unitID))
 		baseRef := firstNonBlank(lock.BaseRef, "main")
 		result := ImplementResult{
-			Status:    "planned",
-			Action:    opts.Action,
-			MergeUnit: unitID,
-			Branch:    branch,
-			Worktree:  worktree,
-			Commands:  []string{fmt.Sprintf("git worktree add -b %s %s %s", shellQuote(branch), shellQuote(worktree), shellQuote(baseRef))},
-			Message:   "runtime preflight and worktree creation are required before implementation; use --write-state after the worktree exists",
+			Status:             "planned",
+			Action:             opts.Action,
+			MergeUnit:          unitID,
+			StoryProgressLabel: progressLabel,
+			Branch:             branch,
+			Worktree:           worktree,
+			Commands:           []string{fmt.Sprintf("git worktree add -b %s %s %s", shellQuote(branch), shellQuote(worktree), shellQuote(baseRef))},
+			Message:            "runtime preflight and worktree creation are required before implementation; use --write-state after the worktree exists",
 		}
 		if opts.WriteState {
 			if strings.TrimSpace(opts.BaseSHA) == "" {
@@ -93,7 +98,7 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 	case "commit":
 		state, _ := mergeUnitState(lock, unitID)
 		worktree := firstNonBlank(state.Worktree, opts.Worktree, defaultWorktreePath(opts.PlanDir, unitID))
-		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{
+		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, StoryProgressLabel: progressLabel, Commands: []string{
 			fmt.Sprintf("git -C %s status --short", shellQuote(worktree)),
 			fmt.Sprintf("git -C %s add .", shellQuote(worktree)),
 			fmt.Sprintf("git -C %s commit", shellQuote(worktree)),
@@ -116,7 +121,7 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 		worktree := firstNonBlank(state.Worktree, opts.Worktree, defaultWorktreePath(opts.PlanDir, unitID))
 		branch := firstNonBlank(state.Branch, opts.Branch, defaultBranchName(lock, unitID))
 		remote := firstNonBlank(lock.Remote, "origin")
-		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{fmt.Sprintf("git -C %s push -u %s %s", shellQuote(worktree), shellQuote(remote), shellQuote("HEAD:"+branch))}}
+		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, StoryProgressLabel: progressLabel, Commands: []string{fmt.Sprintf("git -C %s push -u %s %s", shellQuote(worktree), shellQuote(remote), shellQuote("HEAD:"+branch))}}
 		if opts.WriteState {
 			return writeTransition(opts.PlanDir, lock, unitID, opts.Action, result, func(state *MergeUnitState) {
 				state.Status = MergeUnitPushed
@@ -131,7 +136,7 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 		worktree := firstNonBlank(state.Worktree, opts.Worktree, defaultWorktreePath(opts.PlanDir, unitID))
 		branch := firstNonBlank(state.Branch, opts.Branch, defaultBranchName(lock, unitID))
 		baseRef := firstNonBlank(lock.BaseRef, "main")
-		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{fmt.Sprintf("cd %s && gh pr create --base %s --head %s", shellQuote(worktree), shellQuote(baseRef), shellQuote(branch))}}
+		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, StoryProgressLabel: progressLabel, Commands: []string{fmt.Sprintf("cd %s && gh pr create --base %s --head %s", shellQuote(worktree), shellQuote(baseRef), shellQuote(branch))}}
 		if opts.WriteState {
 			if opts.PRNumber <= 0 {
 				return ImplementResult{}, fmt.Errorf("open-pr --write-state requires --pr")
@@ -147,7 +152,7 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 		}
 		return result, nil
 	case "review":
-		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{"spawn PR review subagent", "apply useful findings"}}
+		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, StoryProgressLabel: progressLabel, Commands: []string{"spawn PR review subagent", "apply useful findings"}}
 		if opts.WriteState {
 			if opts.ReviewStatus != "passed" && opts.ReviewStatus != "changes-applied" {
 				return ImplementResult{}, fmt.Errorf("review --write-state requires --review-status passed|changes-applied")
@@ -171,7 +176,7 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 		if prTarget == "" {
 			return ImplementResult{}, fmt.Errorf("merge requires recorded PR number or URL; run open-pr --write-state first")
 		}
-		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{fmt.Sprintf("gh pr merge %s --merge", shellQuote(prTarget))}}
+		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, StoryProgressLabel: progressLabel, Commands: []string{fmt.Sprintf("gh pr merge %s --merge", shellQuote(prTarget))}}
 		if opts.WriteState {
 			if strings.TrimSpace(opts.MergeCommit) == "" {
 				return ImplementResult{}, fmt.Errorf("merge --write-state requires --merge-commit")
@@ -188,7 +193,7 @@ func Implement(opts ImplementOptions) (ImplementResult, error) {
 		worktree := firstNonBlank(state.Worktree, opts.Worktree, defaultWorktreePath(opts.PlanDir, unitID))
 		branch := firstNonBlank(state.Branch, opts.Branch, defaultBranchName(lock, unitID))
 		remote := firstNonBlank(lock.Remote, "origin")
-		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, Commands: []string{fmt.Sprintf("git worktree remove %s", shellQuote(worktree))}}
+		result := ImplementResult{Status: "planned", Action: opts.Action, MergeUnit: unitID, StoryProgressLabel: progressLabel, Commands: []string{fmt.Sprintf("git worktree remove %s", shellQuote(worktree))}}
 		if lock.MergePolicy.DeleteBranchAllowed && opts.AllowDeleteBranch {
 			result.Commands = append(result.Commands, fmt.Sprintf("git push %s --delete %s", shellQuote(remote), shellQuote(branch)))
 		}
@@ -265,6 +270,58 @@ func firstPositive(values ...int) int {
 		}
 	}
 	return 0
+}
+
+func storyProgressLabel(lock Lock, unitID string) string {
+	storyIndex := map[string]int{}
+	total := 0
+	for _, epic := range lock.Epics {
+		for _, feature := range epic.Features {
+			for _, story := range feature.Stories {
+				total++
+				storyIndex[story.ID] = total
+			}
+		}
+	}
+	if total == 0 {
+		return ""
+	}
+	var indexes []int
+	for _, unit := range lock.MergeUnits {
+		if unit.ID != unitID {
+			continue
+		}
+		for _, storyID := range unit.StoryIDs {
+			if index := storyIndex[storyID]; index > 0 {
+				indexes = append(indexes, index)
+			}
+		}
+		break
+	}
+	if len(indexes) == 0 {
+		return ""
+	}
+	sort.Ints(indexes)
+	if len(indexes) == 1 {
+		return fmt.Sprintf("(Story %d/%d)", indexes[0], total)
+	}
+	if contiguous(indexes) {
+		return fmt.Sprintf("(Stories %d-%d/%d)", indexes[0], indexes[len(indexes)-1], total)
+	}
+	parts := make([]string, 0, len(indexes))
+	for _, index := range indexes {
+		parts = append(parts, strconv.Itoa(index))
+	}
+	return fmt.Sprintf("(Stories %s/%d)", strings.Join(parts, ","), total)
+}
+
+func contiguous(values []int) bool {
+	for i := 1; i < len(values); i++ {
+		if values[i] != values[i-1]+1 {
+			return false
+		}
+	}
+	return true
 }
 
 func shellQuote(value string) string {
