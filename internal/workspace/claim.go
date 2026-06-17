@@ -113,7 +113,7 @@ func claimReadyMergeUnit(opts NextOptions, view SchedulerView, unit SchedulerMer
 			leaseResource:     revisions[leaseResource],
 			mergeUnitResource: revisions[mergeUnitResource],
 		},
-		WriteSet: []string{leaseResource},
+		WriteSet: []string{leaseResource, mergeUnitResource},
 		Now:      func() time.Time { return claimedAt },
 	}); err != nil {
 		return NextResult{}, err

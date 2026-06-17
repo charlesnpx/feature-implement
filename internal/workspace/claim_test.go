@@ -45,7 +45,18 @@ func TestNextClaimsFirstReadyMergeUnitDeterministically(t *testing.T) {
 		event.Payload[eventPayloadLeaseExpiresAtKey] != result.LeaseExpiresAt {
 		t.Fatalf("event payload = %+v", event.Payload)
 	}
-	if !reflect.DeepEqual(event.WriteSet, []string{LeaseResource("foundation:story-a")}) {
+	wantReadSet := map[string]int{
+		LeaseResource("foundation:story-a"):     0,
+		MergeUnitResource("foundation:story-a"): 0,
+	}
+	if !reflect.DeepEqual(event.ReadSet, wantReadSet) {
+		t.Fatalf("event read set = %+v", event.ReadSet)
+	}
+	wantWriteSet := []string{
+		LeaseResource("foundation:story-a"),
+		MergeUnitResource("foundation:story-a"),
+	}
+	if !reflect.DeepEqual(event.WriteSet, wantWriteSet) {
 		t.Fatalf("event write set = %+v", event.WriteSet)
 	}
 }
