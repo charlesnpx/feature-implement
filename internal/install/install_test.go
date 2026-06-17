@@ -129,8 +129,8 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 		"implementation worktree/repository path",
 		"`$pr:review:no-file <pr-number>`",
 		"generic Codex PR-review subagent",
-		"When using `pr:review:no-file`, apply selected fixes locally",
-		"fresh no-file review returns no findings worth addressing",
+		"selected from a no-file review",
+		"that fresh no-file review is the confirmation mechanism",
 		"same skill-selection rule",
 	} {
 		if !strings.Contains(content, want) {
