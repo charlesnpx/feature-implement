@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -463,5 +464,111 @@ func TestSchedulerViewReflectsActiveLeaseState(t *testing.T) {
 	unit := findSchedulerUnit(t, view, "foundation:story-a")
 	if unit.ActiveLease == nil || unit.ActiveLease.LeaseID != claim.LeaseID || unit.ActiveLease.AgentID != "worker-a" {
 		t.Fatalf("active lease = %+v", unit.ActiveLease)
+	}
+}
+
+func TestRecoverMarksExpiredLeaseAndMakesUnitClaimable(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	writeWorkspaceLock(t, fixture.Dir)
+	claim, err := Next(NextOptions{
+		WorkspaceDir:  fixture.Dir,
+		AgentID:       "worker-a",
+		Claim:         true,
+		LeaseDuration: time.Minute,
+		Now:           fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+
+	recovered, err := Recover(RecoverOptions{
+		WorkspaceDir: fixture.Dir,
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if recovered.Status != "recovered" || recovered.RecoveredCount != 1 {
+		t.Fatalf("recover result = %+v", recovered)
+	}
+	if len(recovered.Recovered) != 1 || recovered.Recovered[0].LeaseID != claim.LeaseID {
+		t.Fatalf("recovered leases = %+v", recovered.Recovered)
+	}
+	events := readTestJournalEvents(t, fixture.Dir)
+	last := events[len(events)-1]
+	if last.Type != EventLeaseRecovered || last.Payload[eventPayloadLeaseIDKey] != claim.LeaseID {
+		t.Fatalf("recovery event = %+v", last)
+	}
+
+	next, err := Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-b",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:03:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next after recover: %v", err)
+	}
+	if next.Status != "claimed" || next.MergeUnitID != "foundation:story-a" || next.AgentID != "worker-b" {
+		t.Fatalf("recovered unit should be claimable: %+v", next)
+	}
+}
+
+func TestRecoverPreservesActiveLease(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	writeWorkspaceLock(t, fixture.Dir)
+	claim, err := Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+
+	recovered, err := Recover(RecoverOptions{
+		WorkspaceDir: fixture.Dir,
+		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if recovered.Status != "unchanged" || recovered.RecoveredCount != 0 {
+		t.Fatalf("active lease should not recover: %+v", recovered)
+	}
+	if !reflect.DeepEqual(recovered.Leased, []string{"foundation:story-a"}) || len(recovered.Ready) != 0 {
+		t.Fatalf("view state = ready %+v leased %+v", recovered.Ready, recovered.Leased)
+	}
+	events := readTestJournalEvents(t, fixture.Dir)
+	if len(events) != 1 || events[0].Payload[eventPayloadLeaseIDKey] != claim.LeaseID {
+		t.Fatalf("recover should not append history for active lease: %+v", events)
+	}
+}
+
+func TestRecoverRebuildsSchedulerViewWithoutHistoryChange(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	writeWorkspaceLock(t, fixture.Dir)
+
+	recovered, err := Recover(RecoverOptions{
+		WorkspaceDir: fixture.Dir,
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if recovered.Status != "unchanged" || recovered.RecoveredCount != 0 {
+		t.Fatalf("recover result = %+v", recovered)
+	}
+	if _, err := os.Stat(SchedulerViewPath(fixture.Dir)); err != nil {
+		t.Fatalf("scheduler view was not rebuilt: %v", err)
+	}
+	if _, err := os.Stat(EventsPath(fixture.Dir)); err == nil {
+		events := readTestJournalEvents(t, fixture.Dir)
+		if len(events) != 0 {
+			t.Fatalf("view-only recovery should not append events: %+v", events)
+		}
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat events: %v", err)
 	}
 }

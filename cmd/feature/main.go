@@ -56,7 +56,7 @@ func usage(w io.Writer) {
   feature validate <plan-dir> [--write-lock] [--json]
   feature status <plan-dir> [--json]
   feature implement next|start|commit|push|open-pr|review|merge|cleanup <plan-dir> [--merge-unit <id>] [--write-state] [metadata flags] [--json]
-  feature workspace init|validate|status|next|heartbeat|release [args]
+  feature workspace init|validate|status|next|heartbeat|release|recover [args]
   feature version`)
 }
 
@@ -301,7 +301,7 @@ func implementCommand(args []string) error {
 
 func workspaceCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("workspace requires subcommand: init, validate, status, next, heartbeat, or release")
+		return fmt.Errorf("workspace requires subcommand: init, validate, status, next, heartbeat, release, or recover")
 	}
 	action := args[0]
 	if isHelpCommand(action) {
@@ -326,6 +326,8 @@ func workspaceCommand(args []string) error {
 		return workspaceHeartbeat(args[1:])
 	case "release":
 		return workspaceRelease(args[1:])
+	case "recover":
+		return workspaceRecover(args[1:])
 	default:
 		return workspace.ErrNotImplemented(action)
 	}
@@ -498,6 +500,37 @@ func writeWorkspaceLeaseText(result workspace.LeaseResult) {
 	fmt.Printf("released %s lease=%s agent=%s lifecycle=%s\n", result.MergeUnitID, result.LeaseID, result.AgentID, result.Lifecycle)
 }
 
+func workspaceRecover(args []string) error {
+	fs := flag.NewFlagSet("workspace recover", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	asJSON := fs.Bool("json", false, "Emit JSON result")
+	if err := parsePermissive(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("workspace recover requires <workspace-dir>")
+	}
+	result, err := workspace.Recover(workspace.RecoverOptions{WorkspaceDir: fs.Arg(0)})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(result)
+	}
+	writeWorkspaceRecoverText(result)
+	return nil
+}
+
+func writeWorkspaceRecoverText(result workspace.RecoverResult) {
+	fmt.Printf("recovered %d leases\n", result.RecoveredCount)
+	if len(result.Ready) > 0 {
+		fmt.Printf("ready %s\n", strings.Join(result.Ready, ", "))
+	}
+	if len(result.Leased) > 0 {
+		fmt.Printf("leased %s\n", strings.Join(result.Leased, ", "))
+	}
+}
+
 func writeJSON(value any) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetEscapeHTML(false)
@@ -634,6 +667,7 @@ func usageWorkspace(w io.Writer) {
   feature workspace next <workspace-dir> --agent <id> --claim [--json]
   feature workspace heartbeat <workspace-dir> --agent <id> --lease <id> [--json]
   feature workspace release <workspace-dir> --agent <id> --lease <id> [--json]
+  feature workspace recover <workspace-dir> [--json]
 
 Coordinates validated feature plans through a workspace-level orchestration layer.`)
 }
@@ -670,6 +704,11 @@ Extends an active lease owned by an agent.`)
   feature workspace release <workspace-dir> --agent <id> --lease <id> [--json]
 
 Releases an active lease owned by an agent.`)
+	case "recover":
+		fmt.Fprintln(w, `Usage:
+  feature workspace recover <workspace-dir> [--json]
+
+Recovers expired leases and rebuilds the scheduler view.`)
 	default:
 		usageWorkspace(w)
 	}
