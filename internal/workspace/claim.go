@@ -178,6 +178,7 @@ type activeLeaseSnapshot struct {
 	MergeUnitID    string
 	LeaseID        string
 	AgentID        string
+	LeaseStartedAt time.Time
 	LeaseExpiresAt time.Time
 }
 
@@ -1263,6 +1264,10 @@ func eventLeasePayload(event JournalEvent) (activeLeaseSnapshot, error) {
 	if err != nil {
 		return activeLeaseSnapshot{}, err
 	}
+	startedAt, err := eventTimestamp(event)
+	if err != nil {
+		return activeLeaseSnapshot{}, err
+	}
 	expiresAtText, err := eventStringPayload(event, eventPayloadLeaseExpiresAtKey)
 	if err != nil {
 		return activeLeaseSnapshot{}, err
@@ -1271,8 +1276,17 @@ func eventLeasePayload(event JournalEvent) (activeLeaseSnapshot, error) {
 	if err != nil {
 		return activeLeaseSnapshot{}, fmt.Errorf("scheduler event %s payload %s must be RFC3339Nano: %w", event.ID, eventPayloadLeaseExpiresAtKey, err)
 	}
+	lease.LeaseStartedAt = startedAt
 	lease.LeaseExpiresAt = expiresAt
 	return lease, nil
+}
+
+func eventTimestamp(event JournalEvent) (time.Time, error) {
+	timestamp, err := time.Parse(time.RFC3339Nano, event.Timestamp)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("scheduler event %s timestamp must be RFC3339Nano: %w", event.ID, err)
+	}
+	return timestamp, nil
 }
 
 func eventReleasedLeasePayload(event JournalEvent) (activeLeaseSnapshot, error) {

@@ -96,14 +96,42 @@ func TestNextSkipsBlockedDependencies(t *testing.T) {
 		t.Fatalf("blocked dependencies should produce no claim before completion: %+v", second)
 	}
 
-	if _, err := AppendEvent(AppendEventOptions{
+	attempt, err := StartAttempt(AttemptStartOptions{
 		WorkspaceDir: fixture.Dir,
-		Type:         EventMergeUnitCompleted,
-		Payload:      map[string]any{eventPayloadMergeUnitIDKey: "foundation:story-a"},
-		WriteSet:     []string{MergeUnitResource("foundation:story-a")},
+		MergeUnitID:  "foundation:story-a",
+		AgentID:      "worker-a",
+		LeaseID:      first.LeaseID,
+		BaseSHA:      "base-sha-1",
 		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("StartAttempt: %v", err)
+	}
+	if _, err := Transition(TransitionOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  "foundation:story-a",
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      first.LeaseID,
+		From:         MergeUnitPending,
+		To:           MergeUnitInProgress,
+		Evidence:     map[string]any{evidenceWorktreeKey: attempt.Worktree},
+		Now:          fixedJournalTime("2026-06-17T10:02:30Z"),
 	}); err != nil {
-		t.Fatalf("AppendEvent completion: %v", err)
+		t.Fatalf("Transition start: %v", err)
+	}
+	if _, err := Transition(TransitionOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  "foundation:story-a",
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      first.LeaseID,
+		From:         MergeUnitInProgress,
+		To:           MergeUnitCompleted,
+		Evidence:     map[string]any{evidenceCommitSHAKey: "commit-sha-1"},
+		Now:          fixedJournalTime("2026-06-17T10:02:45Z"),
+	}); err != nil {
+		t.Fatalf("Transition complete: %v", err)
 	}
 	third, err := Next(NextOptions{
 		WorkspaceDir: fixture.Dir,
@@ -120,8 +148,8 @@ func TestNextSkipsBlockedDependencies(t *testing.T) {
 	events := readTestJournalEvents(t, fixture.Dir)
 	thirdEvent := events[len(events)-1]
 	dependencyResource := MergeUnitResource("foundation:story-a")
-	if got := thirdEvent.ReadSet[dependencyResource]; got != 2 {
-		t.Fatalf("dependency read set revision = %d, want 2; read_set=%+v", got, thirdEvent.ReadSet)
+	if got := thirdEvent.ReadSet[dependencyResource]; got != 4 {
+		t.Fatalf("dependency read set revision = %d, want 4; read_set=%+v", got, thirdEvent.ReadSet)
 	}
 }
 
@@ -298,14 +326,29 @@ func TestReleaseDoesNotMakeAdvancedLifecycleClaimable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Next: %v", err)
 	}
-	if _, err := AppendEvent(AppendEventOptions{
+	attempt, err := StartAttempt(AttemptStartOptions{
 		WorkspaceDir: fixture.Dir,
-		Type:         EventMergeUnitStarted,
-		Payload:      map[string]any{eventPayloadMergeUnitIDKey: "foundation:story-a"},
-		WriteSet:     []string{MergeUnitResource("foundation:story-a")},
+		MergeUnitID:  "foundation:story-a",
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		BaseSHA:      "base-sha-1",
 		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("StartAttempt: %v", err)
+	}
+	if _, err := Transition(TransitionOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  "foundation:story-a",
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		From:         MergeUnitPending,
+		To:           MergeUnitInProgress,
+		Evidence:     map[string]any{evidenceWorktreeKey: attempt.Worktree},
+		Now:          fixedJournalTime("2026-06-17T10:01:30Z"),
 	}); err != nil {
-		t.Fatalf("AppendEvent start: %v", err)
+		t.Fatalf("Transition start: %v", err)
 	}
 
 	released, err := Release(LeaseOptions{

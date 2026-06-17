@@ -102,6 +102,9 @@ func BuildSchedulerView(lock WorkspaceLock, events []JournalEvent) (SchedulerVie
 }
 
 func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Time) (SchedulerView, error) {
+	if _, err := replayResourceRevisions(events); err != nil {
+		return SchedulerView{}, err
+	}
 	view := SchedulerView{
 		SchemaVersion: 1,
 		WorkspaceID:   lock.WorkspaceID,
@@ -124,8 +127,9 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 	}
 	attempts := newAttemptTracker()
 	lifecycles := newLifecycleTracker()
+	leases := newLeaseTracker()
 	for _, event := range events {
-		if err := applySchedulerEvent(unitByID, attempts, lifecycles, event); err != nil {
+		if err := applySchedulerEvent(unitByID, attempts, lifecycles, leases, event); err != nil {
 			return SchedulerView{}, err
 		}
 	}
@@ -177,20 +181,22 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 	return view, nil
 }
 
-func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, attempts *attemptTracker, lifecycles *lifecycleTracker, event JournalEvent) error {
+func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, attempts *attemptTracker, lifecycles *lifecycleTracker, leases *leaseTracker, event JournalEvent) error {
 	switch event.Type {
 	case EventWorkspaceCreated, EventWorkspaceValidated:
 		return nil
-	case EventLeaseGranted, EventLeaseHeartbeat, EventLeaseReleased, EventLeaseRecovered, EventAttemptStarted:
+	case EventLeaseGranted, EventLeaseHeartbeat, EventLeaseReleased, EventLeaseRecovered:
+		return leases.Apply(event)
+	case EventAttemptStarted:
 		return attempts.Apply(event)
 	case EventAttemptAbandoned:
 		return abandonSchedulerAttempt(unitByID, attempts, lifecycles, event)
 	case EventMergeUnitStarted:
-		return updateMergeUnitStatus(unitByID, attempts, lifecycles, event, MergeUnitInProgress)
+		return updateMergeUnitStatus(unitByID, attempts, lifecycles, leases, event, MergeUnitInProgress)
 	case EventMergeUnitCompleted:
-		return updateMergeUnitStatus(unitByID, attempts, lifecycles, event, MergeUnitCompleted)
+		return updateMergeUnitStatus(unitByID, attempts, lifecycles, leases, event, MergeUnitCompleted)
 	case EventMergeUnitFailed:
-		return updateMergeUnitStatus(unitByID, attempts, lifecycles, event, MergeUnitFailed)
+		return updateMergeUnitStatus(unitByID, attempts, lifecycles, leases, event, MergeUnitFailed)
 	default:
 		return fmt.Errorf("unknown scheduler event type %q", event.Type)
 	}
@@ -214,7 +220,7 @@ func abandonSchedulerAttempt(unitByID map[string]*SchedulerMergeUnitView, attemp
 	return nil
 }
 
-func updateMergeUnitStatus(unitByID map[string]*SchedulerMergeUnitView, attempts *attemptTracker, lifecycles *lifecycleTracker, event JournalEvent, status string) error {
+func updateMergeUnitStatus(unitByID map[string]*SchedulerMergeUnitView, attempts *attemptTracker, lifecycles *lifecycleTracker, leases *leaseTracker, event JournalEvent, status string) error {
 	unitID, err := eventStringPayload(event, eventPayloadMergeUnitIDKey)
 	if err != nil {
 		return err
@@ -227,7 +233,11 @@ func updateMergeUnitStatus(unitByID map[string]*SchedulerMergeUnitView, attempts
 	if err != nil {
 		return err
 	}
-	if err := validateTransitionEventPayload(event, unit.Status, status, attempts.Current(unitID)); err != nil {
+	occurredAt, err := eventTimestamp(event)
+	if err != nil {
+		return err
+	}
+	if err := validateTransitionEventPayload(event, unit.Status, status, attempts.Current(unitID), leases.ActiveAt(unitID, occurredAt)); err != nil {
 		return err
 	}
 	unit.Status = status
@@ -235,16 +245,13 @@ func updateMergeUnitStatus(unitByID map[string]*SchedulerMergeUnitView, attempts
 	return nil
 }
 
-func validateTransitionEventPayload(event JournalEvent, currentStatus string, targetStatus string, attempt *attemptSnapshot) error {
+func validateTransitionEventPayload(event JournalEvent, currentStatus string, targetStatus string, attempt *attemptSnapshot, activeLease *activeLeaseSnapshot) error {
 	from, to, evidence, ok, err := eventTransitionPayload(event)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		if attempt != nil {
-			return fmt.Errorf("scheduler event %s missing transition payload", event.ID)
-		}
-		return nil
+		return fmt.Errorf("scheduler event %s missing transition payload", event.ID)
 	}
 	if from != currentStatus {
 		return fmt.Errorf("scheduler event %s transition from %s does not match current lifecycle %s", event.ID, from, currentStatus)
@@ -260,7 +267,7 @@ func validateTransitionEventPayload(event JournalEvent, currentStatus string, ta
 		return fmt.Errorf("scheduler event %s type %s does not match transition %s", event.ID, event.Type, eventType)
 	}
 	if attempt == nil {
-		return fmt.Errorf("scheduler event %s cannot validate transition evidence without an active attempt", event.ID)
+		return fmt.Errorf("scheduler event %s cannot advance lifecycle without an active attempt", event.ID)
 	}
 	agentID, err := eventStringPayload(event, eventPayloadAgentIDKey)
 	if err != nil {
@@ -270,11 +277,54 @@ func validateTransitionEventPayload(event JournalEvent, currentStatus string, ta
 	if err != nil {
 		return err
 	}
+	if activeLease == nil || activeLease.LeaseID != leaseID || activeLease.AgentID != agentID {
+		return fmt.Errorf("scheduler event %s transition lease %s is not active for agent %s", event.ID, leaseID, agentID)
+	}
 	if err := validateAttemptLeaseOwner(attempt.AttemptID, attempt.AgentID, attempt.LeaseID, agentID, leaseID); err != nil {
 		return fmt.Errorf("scheduler event %s: %w", event.ID, err)
 	}
 	_, err = normalizeTransitionEvidence(from, to, evidence, *attempt)
 	return err
+}
+
+type leaseTracker struct {
+	leases map[string]activeLeaseSnapshot
+}
+
+func newLeaseTracker() *leaseTracker {
+	return &leaseTracker{leases: map[string]activeLeaseSnapshot{}}
+}
+
+func (t *leaseTracker) Apply(event JournalEvent) error {
+	switch event.Type {
+	case EventLeaseGranted, EventLeaseHeartbeat:
+		lease, err := eventLeasePayload(event)
+		if err != nil {
+			return err
+		}
+		t.leases[lease.MergeUnitID] = lease
+	case EventLeaseReleased, EventLeaseRecovered:
+		lease, err := eventReleasedLeasePayload(event)
+		if err != nil {
+			return err
+		}
+		current := t.leases[lease.MergeUnitID]
+		if current.LeaseID == lease.LeaseID {
+			delete(t.leases, lease.MergeUnitID)
+		}
+	}
+	return nil
+}
+
+func (t *leaseTracker) ActiveAt(mergeUnitID string, occurredAt time.Time) *activeLeaseSnapshot {
+	lease, ok := t.leases[mergeUnitID]
+	if !ok {
+		return nil
+	}
+	if occurredAt.Before(lease.LeaseStartedAt) || !occurredAt.Before(lease.LeaseExpiresAt) {
+		return nil
+	}
+	return &lease
 }
 
 type lifecycleTracker struct {
