@@ -115,21 +115,22 @@ type AttemptAbandonOptions struct {
 }
 
 type AttemptResult struct {
-	Status        string `json:"status"`
-	WorkspaceDir  string `json:"workspace_dir"`
-	WorkspaceID   string `json:"workspace_id"`
-	BaseRef       string `json:"base_ref"`
-	MergeUnitID   string `json:"merge_unit_id"`
-	AttemptID     string `json:"attempt_id"`
-	AttemptNumber int    `json:"attempt_number"`
-	AgentID       string `json:"agent_id"`
-	LeaseID       string `json:"lease_id"`
-	Branch        string `json:"branch"`
-	Worktree      string `json:"worktree"`
-	BaseSHA       string `json:"base_sha"`
-	Mode          string `json:"mode"`
-	Lifecycle     string `json:"lifecycle"`
-	Reason        string `json:"reason,omitempty"`
+	Status        string   `json:"status"`
+	WorkspaceDir  string   `json:"workspace_dir"`
+	WorkspaceID   string   `json:"workspace_id"`
+	BaseRef       string   `json:"base_ref"`
+	MergeUnitID   string   `json:"merge_unit_id"`
+	AttemptID     string   `json:"attempt_id"`
+	AttemptNumber int      `json:"attempt_number"`
+	AgentID       string   `json:"agent_id"`
+	LeaseID       string   `json:"lease_id"`
+	Branch        string   `json:"branch"`
+	Worktree      string   `json:"worktree"`
+	BaseSHA       string   `json:"base_sha"`
+	Mode          string   `json:"mode"`
+	Lifecycle     string   `json:"lifecycle"`
+	Reason        string   `json:"reason,omitempty"`
+	Commands      []string `json:"commands,omitempty"`
 }
 
 type RecoveredLeaseView struct {
@@ -362,6 +363,7 @@ func StartAttempt(opts AttemptStartOptions) (AttemptResult, error) {
 	attemptID := fmt.Sprintf("%s:attempt-%d", opts.MergeUnitID, nextNumber)
 	branch := attemptBranchName(state.View.WorkspaceID, unit.PlanID, unit.MergeUnitID, nextNumber)
 	worktree := attemptWorktreePath(opts.WorkspaceDir, state.View.WorkspaceID, unit.PlanID, unit.MergeUnitID, nextNumber)
+	commands := attemptWorktreeCommands(branch, worktree, state.View.BaseRef)
 	mergeUnitResource := MergeUnitResource(opts.MergeUnitID)
 	if _, err := AppendEvent(AppendEventOptions{
 		WorkspaceDir: opts.WorkspaceDir,
@@ -402,6 +404,7 @@ func StartAttempt(opts AttemptStartOptions) (AttemptResult, error) {
 		BaseSHA:       opts.BaseSHA,
 		Mode:          opts.Mode,
 		Lifecycle:     unit.Status,
+		Commands:      commands,
 	}, nil
 }
 
@@ -986,6 +989,10 @@ func attemptBranchName(workspaceID string, planID string, mergeUnitID string, at
 
 func attemptWorktreePath(workspaceDir string, workspaceID string, planID string, mergeUnitID string, attemptNumber int) string {
 	return filepath.Join(StateDir(workspaceDir), "worktrees", workspaceID, planID, mergeUnitID, fmt.Sprintf("attempt-%d", attemptNumber))
+}
+
+func attemptWorktreeCommands(branch string, worktree string, baseRef string) []string {
+	return []string{fmt.Sprintf("git worktree add -b %s %s %s", shellQuote(branch), shellQuote(worktree), shellQuote(baseRef))}
 }
 
 func eventLeasePayload(event JournalEvent) (activeLeaseSnapshot, error) {
