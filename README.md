@@ -39,11 +39,19 @@ feature implement cleanup <plan-dir> --merge-unit <id> --write-state --json
 `feature validate` writes `feature.plan.lock.json`; implementation commands consume that validated snapshot rather than live-edited Markdown.
 Lifecycle write steps use immutable lock transitions: each `--write-state` command reads the current lock, returns a new ordered merge-unit state snapshot, and writes that snapshot back to `feature.plan.lock.json`. Existing v1 lock files with map-shaped state are migrated on the next state write.
 
-`feature:implement` creates one temporary worktree for the active merge unit under `<plan-dir>/worktrees/<merge-unit-id>`. After the PR is merged and local `main` is updated, remove that worktree and record `feature implement cleanup ... --write-state`. Remote branch deletion is separate and still requires both merge policy allowance and explicit approval.
+`feature:implement` creates one temporary worktree for the active merge unit under `<plan-dir>/worktrees/<merge-unit-id>`. After the PR is merged and the local checkout of the plan `base_ref` is updated, remove that worktree and record `feature implement cleanup ... --write-state`. Remote branch deletion is separate and still requires both merge policy allowance and explicit approval.
 
 `feature implement ... --json` results for a selected merge unit include `story_progress_label`, such as `(Story 4/16)` or `(Stories 4-5/16)`, derived from the ordered stories in `feature.plan.lock.json`.
 
 When `$feature` or `/feature` needs to draft the temporary `feature.plan.yaml`, it should stage that scratch manifest under the user-provided output folder, `~/tmp` when it exists, or the system temp directory. It should not write scratch manifests into the current repository root unless that repo root was explicitly supplied as the output folder.
+
+## Direct Implement Versus Workspace Attempts
+
+Use `feature implement` directly for the normal single-plan flow. It owns the active merge-unit lifecycle in `feature.plan.lock.json`, creates one temporary worktree for that merge unit, opens a PR against the plan `base_ref`, and records commit, PR, review, merge, and cleanup metadata in the plan lock.
+
+Use `feature workspace` when several validated plans need to run on a shared long-running integration branch. A workspace has its own `feature.workspace.yaml`, `feature.workspace.lock.json`, scheduler view, and event journal. Workspace claims, leases, attempts, worktree commands, and lifecycle transitions are recorded in workspace state, not in the referenced plans' `feature.plan.lock.json` files.
+
+Workspace-managed workers should claim a merge unit with `feature workspace next --claim`, start an attempt with `feature workspace attempt start`, create the planned branch/worktree from the workspace `base_ref`, and record local lifecycle movement with `feature workspace transition`. External writes such as push, PR creation, review, merge, and cleanup still belong to the guarded implementation workflow and should target the workspace integration branch.
 
 ## Manifest Contract
 
