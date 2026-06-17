@@ -402,13 +402,13 @@ func TestWorkspaceRecoverCommandJSON(t *testing.T) {
 			"merge_unit_id":    "foundation:story-a",
 			"lease_id":         "lease-expired",
 			"agent_id":         "worker-a",
-			"lease_expires_at": "2026-06-17T10:01:00Z",
+			"lease_expires_at": "2000-01-01T00:01:00Z",
 		},
 		WriteSet: []string{
 			workspacepkg.LeaseResource("foundation:story-a"),
 			workspacepkg.MergeUnitResource("foundation:story-a"),
 		},
-		Now: fixedFeatureTime("2026-06-17T10:00:00Z"),
+		Now: fixedFeatureTime("2000-01-01T00:00:00Z"),
 	}); err != nil {
 		t.Fatalf("AppendEvent expired lease: %v", err)
 	}
