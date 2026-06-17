@@ -22,6 +22,8 @@ func TestHelpCommandsExitSuccessfully(t *testing.T) {
 		{"workspace", "validate", "--help"},
 		{"workspace", "status", "--help"},
 		{"workspace", "next", "--help"},
+		{"workspace", "heartbeat", "--help"},
+		{"workspace", "release", "--help"},
 	}
 	for _, args := range tests {
 		stdout, stderr, err := runFeature(t, args...)
@@ -75,6 +77,8 @@ func TestWorkspaceCommandShell(t *testing.T) {
 		"feature workspace validate",
 		"feature workspace status",
 		"feature workspace next",
+		"feature workspace heartbeat",
+		"feature workspace release",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("workspace help missing %q:\n%s", want, stdout)
@@ -311,6 +315,73 @@ func TestWorkspaceNextCommandRequiresClaimAgent(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "workspace next --claim requires --agent") {
 		t.Fatalf("expected missing agent error:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+}
+
+func TestWorkspaceLeaseCommandsHeartbeatAndRelease(t *testing.T) {
+	workspaceDir := workspaceWithPlanLocks(t)
+	if _, stderr, err := runFeature(t, "workspace", "validate", workspaceDir, "--write-lock", "--json"); err != nil {
+		t.Fatalf("feature workspace validate failed: %v\nstderr=%s", err, stderr)
+	}
+
+	stdout, stderr, err := runFeature(t, "workspace", "next", workspaceDir, "--agent", "worker-a", "--claim", "--json")
+	if err != nil {
+		t.Fatalf("feature workspace next failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var claim struct {
+		MergeUnitID string `json:"merge_unit_id"`
+		LeaseID     string `json:"lease_id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &claim); err != nil {
+		t.Fatalf("claim stdout is not JSON: %v\n%s", err, stdout)
+	}
+
+	stdout, stderr, err = runFeature(t, "workspace", "heartbeat", workspaceDir, "--agent", "worker-a", "--lease", claim.LeaseID, "--json")
+	if err != nil {
+		t.Fatalf("feature workspace heartbeat failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var heartbeat struct {
+		Status      string `json:"status"`
+		MergeUnitID string `json:"merge_unit_id"`
+		LeaseID     string `json:"lease_id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &heartbeat); err != nil {
+		t.Fatalf("heartbeat stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if heartbeat.Status != "extended" || heartbeat.MergeUnitID != claim.MergeUnitID || heartbeat.LeaseID != claim.LeaseID {
+		t.Fatalf("heartbeat result = %+v", heartbeat)
+	}
+
+	stdout, stderr, err = runFeature(t, "workspace", "release", workspaceDir, "--agent", "worker-a", "--lease", claim.LeaseID, "--json")
+	if err != nil {
+		t.Fatalf("feature workspace release failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var released struct {
+		Status      string `json:"status"`
+		MergeUnitID string `json:"merge_unit_id"`
+		LeaseID     string `json:"lease_id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &released); err != nil {
+		t.Fatalf("release stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if released.Status != "released" || released.MergeUnitID != claim.MergeUnitID || released.LeaseID != claim.LeaseID {
+		t.Fatalf("release result = %+v", released)
+	}
+
+	stdout, stderr, err = runFeature(t, "workspace", "next", workspaceDir, "--agent", "worker-b", "--claim", "--json")
+	if err != nil {
+		t.Fatalf("feature workspace next after release failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var next struct {
+		Status      string `json:"status"`
+		MergeUnitID string `json:"merge_unit_id"`
+		AgentID     string `json:"agent_id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &next); err != nil {
+		t.Fatalf("next stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if next.Status != "claimed" || next.MergeUnitID != claim.MergeUnitID || next.AgentID != "worker-b" {
+		t.Fatalf("released merge unit was not claimable: %+v", next)
 	}
 }
 

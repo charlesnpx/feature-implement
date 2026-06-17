@@ -4,7 +4,9 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestNextClaimsFirstReadyMergeUnitDeterministically(t *testing.T) {
@@ -201,5 +203,225 @@ func TestClaimReadyMergeUnitRejectsStaleSnapshot(t *testing.T) {
 	}
 	if stale.Resource != MergeUnitResource("foundation:story-a") || stale.Expected != 0 || stale.Observed != 1 {
 		t.Fatalf("stale error = %+v", stale)
+	}
+}
+
+func TestHeartbeatExtendsOwningActiveLease(t *testing.T) {
+	fixture := newIndependentDAGFixture(t).Workspace
+	writeWorkspaceLock(t, fixture.Dir)
+	claim, err := Next(NextOptions{
+		WorkspaceDir:  fixture.Dir,
+		AgentID:       "worker-a",
+		Claim:         true,
+		LeaseDuration: 10 * time.Minute,
+		Now:           fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+
+	heartbeat, err := Heartbeat(LeaseOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Now:          fixedJournalTime("2026-06-17T10:05:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	if heartbeat.Status != "extended" || heartbeat.LeaseID != claim.LeaseID || heartbeat.AgentID != "worker-a" {
+		t.Fatalf("heartbeat result = %+v", heartbeat)
+	}
+	if heartbeat.LeaseExpiresAt != "2026-06-17T10:35:00Z" {
+		t.Fatalf("heartbeat expiry = %q", heartbeat.LeaseExpiresAt)
+	}
+	events := readTestJournalEvents(t, fixture.Dir)
+	event := events[len(events)-1]
+	if event.Type != EventLeaseHeartbeat {
+		t.Fatalf("heartbeat event type = %q", event.Type)
+	}
+	if event.Payload[eventPayloadLeaseExpiresAtKey] != heartbeat.LeaseExpiresAt {
+		t.Fatalf("heartbeat payload = %+v", event.Payload)
+	}
+}
+
+func TestReleaseMakesPendingMergeUnitClaimableAgain(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	writeWorkspaceLock(t, fixture.Dir)
+	claim, err := Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+
+	released, err := Release(LeaseOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if released.Status != "released" || released.Lifecycle != MergeUnitPending {
+		t.Fatalf("release result = %+v", released)
+	}
+
+	next, err := Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-b",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next after release: %v", err)
+	}
+	if next.Status != "claimed" || next.MergeUnitID != "foundation:story-a" || next.AgentID != "worker-b" {
+		t.Fatalf("released unit should be claimable again: %+v", next)
+	}
+}
+
+func TestReleaseDoesNotMakeAdvancedLifecycleClaimable(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	writeWorkspaceLock(t, fixture.Dir)
+	claim, err := Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if _, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: fixture.Dir,
+		Type:         EventMergeUnitStarted,
+		Payload:      map[string]any{eventPayloadMergeUnitIDKey: "foundation:story-a"},
+		WriteSet:     []string{MergeUnitResource("foundation:story-a")},
+		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent start: %v", err)
+	}
+
+	released, err := Release(LeaseOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if released.Lifecycle != MergeUnitInProgress {
+		t.Fatalf("release lifecycle = %+v", released)
+	}
+
+	next, err := Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-b",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:03:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next after release: %v", err)
+	}
+	if next.Status != "none" {
+		t.Fatalf("advanced lifecycle should not be claimable: %+v", next)
+	}
+}
+
+func TestLeaseOperationsRejectWrongLeaseAndAgent(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	writeWorkspaceLock(t, fixture.Dir)
+	claim, err := Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+
+	_, err = Heartbeat(LeaseOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		LeaseID:      "wrong-lease",
+		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "active lease not found: wrong-lease") {
+		t.Fatalf("wrong lease error = %v", err)
+	}
+
+	_, err = Release(LeaseOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-b",
+		LeaseID:      claim.LeaseID,
+		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "is owned by agent worker-a, not worker-b") {
+		t.Fatalf("wrong agent error = %v", err)
+	}
+}
+
+func TestHeartbeatRejectsExpiredLease(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	writeWorkspaceLock(t, fixture.Dir)
+	claim, err := Next(NextOptions{
+		WorkspaceDir:  fixture.Dir,
+		AgentID:       "worker-a",
+		Claim:         true,
+		LeaseDuration: time.Minute,
+		Now:           fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+
+	_, err = Heartbeat(LeaseOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "active lease not found") {
+		t.Fatalf("expired heartbeat error = %v", err)
+	}
+}
+
+func TestSchedulerViewReflectsActiveLeaseState(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	writeWorkspaceLock(t, fixture.Dir)
+	claim, err := Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	lock, err := readWorkspaceLock(filepath.Join(fixture.Dir, LockFileName))
+	if err != nil {
+		t.Fatalf("readWorkspaceLock: %v", err)
+	}
+	events := readTestJournalEvents(t, fixture.Dir)
+	view, err := buildSchedulerViewAt(lock, events, fixedJournalTime("2026-06-17T10:01:00Z")())
+	if err != nil {
+		t.Fatalf("buildSchedulerViewAt: %v", err)
+	}
+	if len(view.Ready) != 0 {
+		t.Fatalf("leased unit should not be ready: %+v", view.Ready)
+	}
+	if !reflect.DeepEqual(view.Leased, []string{"foundation:story-a"}) {
+		t.Fatalf("leased = %+v", view.Leased)
+	}
+	unit := findSchedulerUnit(t, view, "foundation:story-a")
+	if unit.ActiveLease == nil || unit.ActiveLease.LeaseID != claim.LeaseID || unit.ActiveLease.AgentID != "worker-a" {
+		t.Fatalf("active lease = %+v", unit.ActiveLease)
 	}
 }
