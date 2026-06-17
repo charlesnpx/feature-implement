@@ -640,6 +640,164 @@ func TestWorkspaceTransitionCommandJSON(t *testing.T) {
 	}
 }
 
+func TestWorkspaceCLISmokeRebuildsStatusFromJournal(t *testing.T) {
+	workspaceDir := workspaceWithTwoPlanLocks(t)
+	stdout, stderr, err := runFeature(t, "workspace", "validate", workspaceDir, "--write-lock", "--json")
+	if err != nil {
+		t.Fatalf("feature workspace validate failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var validated struct {
+		Status string `json:"status"`
+		Lock   struct {
+			Plans []struct {
+				ID string `json:"id"`
+			} `json:"plans"`
+			MergeUnits []struct {
+				ID           string   `json:"id"`
+				Dependencies []string `json:"dependencies,omitempty"`
+			} `json:"merge_units"`
+		} `json:"lock"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &validated); err != nil {
+		t.Fatalf("validate stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if validated.Status != "valid" || len(validated.Lock.Plans) != 2 || len(validated.Lock.MergeUnits) != 2 {
+		t.Fatalf("validated workspace = %+v", validated)
+	}
+
+	stdout, stderr, err = runFeature(t, "workspace", "status", workspaceDir, "--json")
+	if err != nil {
+		t.Fatalf("feature workspace status failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var initialStatus struct {
+		Ready      []string `json:"ready"`
+		Blocked    []string `json:"blocked"`
+		MergeUnits []struct {
+			ID        string   `json:"id"`
+			Status    string   `json:"status"`
+			BlockedBy []string `json:"blocked_by,omitempty"`
+		} `json:"merge_units"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &initialStatus); err != nil {
+		t.Fatalf("initial status stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if strings.Join(initialStatus.Ready, ",") != "foundation:story-a" || strings.Join(initialStatus.Blocked, ",") != "sources:story-b" {
+		t.Fatalf("initial ready/blocked = ready %+v blocked %+v", initialStatus.Ready, initialStatus.Blocked)
+	}
+
+	stdout, stderr, err = runFeature(t, "workspace", "next", workspaceDir, "--agent", "worker-a", "--claim", "--json")
+	if err != nil {
+		t.Fatalf("feature workspace next failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var claim struct {
+		MergeUnitID string `json:"merge_unit_id"`
+		LeaseID     string `json:"lease_id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &claim); err != nil {
+		t.Fatalf("claim stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if claim.MergeUnitID != "foundation:story-a" || claim.LeaseID == "" {
+		t.Fatalf("claim = %+v", claim)
+	}
+
+	stdout, stderr, err = runFeature(t,
+		"workspace", "attempt", "start", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--agent", "worker-a",
+		"--lease", claim.LeaseID,
+		"--base-sha", "base-sha-cli",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace attempt start failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var attempt struct {
+		AttemptID string `json:"attempt_id"`
+		Worktree  string `json:"worktree"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &attempt); err != nil {
+		t.Fatalf("attempt stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if attempt.AttemptID == "" || attempt.Worktree == "" {
+		t.Fatalf("attempt = %+v", attempt)
+	}
+
+	if stdout, stderr, err = runFeature(t,
+		"workspace", "transition", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--attempt", attempt.AttemptID,
+		"--agent", "worker-a",
+		"--lease", claim.LeaseID,
+		"--from", "pending",
+		"--to", "in_progress",
+		"--evidence", "worktree="+attempt.Worktree,
+		"--json",
+	); err != nil {
+		t.Fatalf("feature workspace transition start failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	stdout, stderr, err = runFeature(t,
+		"workspace", "transition", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--attempt", attempt.AttemptID,
+		"--agent", "worker-a",
+		"--lease", claim.LeaseID,
+		"--from", "in_progress",
+		"--to", "completed",
+		"--evidence", "commit_sha=commit-sha-cli",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace transition complete failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var completed struct {
+		Status    string `json:"status"`
+		EventType string `json:"event_type"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &completed); err != nil {
+		t.Fatalf("completed transition stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if completed.Status != "transitioned" || completed.EventType != "merge_unit.completed" {
+		t.Fatalf("completed transition = %+v", completed)
+	}
+
+	viewPath := filepath.Join(workspaceDir, "state", "scheduler.view.json")
+	if err := os.Remove(viewPath); err != nil {
+		t.Fatalf("remove scheduler view: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspaceDir, "state", "events.jsonl")); err != nil {
+		t.Fatalf("expected workspace event journal: %v", err)
+	}
+
+	stdout, stderr, err = runFeature(t, "workspace", "status", workspaceDir, "--json")
+	if err != nil {
+		t.Fatalf("feature workspace status rebuild failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var rebuilt struct {
+		Ready      []string       `json:"ready"`
+		Counts     map[string]int `json:"counts"`
+		MergeUnits []struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"merge_units"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &rebuilt); err != nil {
+		t.Fatalf("rebuilt status stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if _, err := os.Stat(viewPath); err != nil {
+		t.Fatalf("expected rebuilt scheduler view: %v", err)
+	}
+	if rebuilt.Counts["completed"] != 1 || rebuilt.Counts["pending"] != 1 || strings.Join(rebuilt.Ready, ",") != "sources:story-b" {
+		t.Fatalf("rebuilt status = %+v", rebuilt)
+	}
+	statusByID := map[string]string{}
+	for _, unit := range rebuilt.MergeUnits {
+		statusByID[unit.ID] = unit.Status
+	}
+	if statusByID["foundation:story-a"] != "completed" || statusByID["sources:story-b"] != "pending" {
+		t.Fatalf("rebuilt merge unit statuses = %+v", statusByID)
+	}
+}
+
 func TestPlanExampleAndSchemaCommands(t *testing.T) {
 	stdout, stderr, err := runFeature(t, "plan", "example")
 	if err != nil {
@@ -691,6 +849,42 @@ remote: origin
 plans:
   - id: foundation
     path: plans/foundation
+`
+	if err := os.WriteFile(filepath.Join(workspaceDir, "feature.workspace.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return workspaceDir
+}
+
+func workspaceWithTwoPlanLocks(t *testing.T) string {
+	t.Helper()
+	workspaceDir := t.TempDir()
+	plans := map[string]string{
+		"foundation": `{"schema_version":1,"manifest_id":"foundation","title":"Foundation","epics":[{"id":"epic-foundation","number":1,"name":"Epic","features":[{"id":"feature-foundation","number":1,"name":"Feature","stories":[{"id":"story-a","number":1,"name":"Story A"}]}]}],"merge_units":[{"id":"story-a","name":"Story A","story_ids":["story-a"]}]}`,
+		"sources":    `{"schema_version":1,"manifest_id":"sources","title":"Sources","epics":[{"id":"epic-sources","number":1,"name":"Epic","features":[{"id":"feature-sources","number":1,"name":"Feature","stories":[{"id":"story-b","number":1,"name":"Story B"}]}]}],"merge_units":[{"id":"story-b","name":"Story B","story_ids":["story-b"]}]}`,
+	}
+	for id, lock := range plans {
+		planDir := filepath.Join(workspaceDir, "plans", id)
+		if err := os.MkdirAll(planDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(planDir, "feature.plan.lock.json"), []byte(lock), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest := `schema_version: 1
+id: workspace-a
+repo: .
+base_ref: workspace-orchestration
+remote: origin
+plans:
+  - id: foundation
+    path: plans/foundation
+  - id: sources
+    path: plans/sources
+dependencies:
+  - before: foundation:story-a
+    after: sources:story-b
 `
 	if err := os.WriteFile(filepath.Join(workspaceDir, "feature.workspace.yaml"), []byte(manifest), 0o644); err != nil {
 		t.Fatal(err)
