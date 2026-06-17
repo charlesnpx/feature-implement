@@ -56,7 +56,7 @@ func usage(w io.Writer) {
   feature validate <plan-dir> [--write-lock] [--json]
   feature status <plan-dir> [--json]
   feature implement next|start|commit|push|open-pr|review|merge|cleanup <plan-dir> [--merge-unit <id>] [--write-state] [metadata flags] [--json]
-  feature workspace init|validate|status|next [args]
+  feature workspace init|validate|status|next|heartbeat|release [args]
   feature version`)
 }
 
@@ -301,7 +301,7 @@ func implementCommand(args []string) error {
 
 func workspaceCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("workspace requires subcommand: init, validate, status, or next")
+		return fmt.Errorf("workspace requires subcommand: init, validate, status, next, heartbeat, or release")
 	}
 	action := args[0]
 	if isHelpCommand(action) {
@@ -322,6 +322,10 @@ func workspaceCommand(args []string) error {
 		return workspaceStatus(args[1:])
 	case "next":
 		return workspaceNext(args[1:])
+	case "heartbeat":
+		return workspaceHeartbeat(args[1:])
+	case "release":
+		return workspaceRelease(args[1:])
 	default:
 		return workspace.ErrNotImplemented(action)
 	}
@@ -444,6 +448,54 @@ func writeWorkspaceNextText(result workspace.NextResult) {
 		result.LeaseExpiresAt,
 		result.Lifecycle,
 	)
+}
+
+func workspaceHeartbeat(args []string) error {
+	return workspaceLeaseCommand("heartbeat", args)
+}
+
+func workspaceRelease(args []string) error {
+	return workspaceLeaseCommand("release", args)
+}
+
+func workspaceLeaseCommand(action string, args []string) error {
+	fs := flag.NewFlagSet("workspace "+action, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	agentID := fs.String("agent", "", "Agent ID that owns the lease")
+	leaseID := fs.String("lease", "", "Lease ID")
+	asJSON := fs.Bool("json", false, "Emit JSON result")
+	if err := parsePermissive(fs, args, "agent", "lease"); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("workspace %s requires <workspace-dir>", action)
+	}
+	opts := workspace.LeaseOptions{WorkspaceDir: fs.Arg(0), AgentID: *agentID, LeaseID: *leaseID}
+	var (
+		result workspace.LeaseResult
+		err    error
+	)
+	if action == "heartbeat" {
+		result, err = workspace.Heartbeat(opts)
+	} else {
+		result, err = workspace.Release(opts)
+	}
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(result)
+	}
+	writeWorkspaceLeaseText(result)
+	return nil
+}
+
+func writeWorkspaceLeaseText(result workspace.LeaseResult) {
+	if result.Status == "extended" {
+		fmt.Printf("extended %s lease=%s agent=%s expires_at=%s lifecycle=%s\n", result.MergeUnitID, result.LeaseID, result.AgentID, result.LeaseExpiresAt, result.Lifecycle)
+		return
+	}
+	fmt.Printf("released %s lease=%s agent=%s lifecycle=%s\n", result.MergeUnitID, result.LeaseID, result.AgentID, result.Lifecycle)
 }
 
 func writeJSON(value any) error {
@@ -580,6 +632,8 @@ func usageWorkspace(w io.Writer) {
   feature workspace validate <workspace-dir> [--write-lock] [--json]
   feature workspace status <workspace-dir> [--json]
   feature workspace next <workspace-dir> --agent <id> --claim [--json]
+  feature workspace heartbeat <workspace-dir> --agent <id> --lease <id> [--json]
+  feature workspace release <workspace-dir> --agent <id> --lease <id> [--json]
 
 Coordinates validated feature plans through a workspace-level orchestration layer.`)
 }
@@ -606,6 +660,16 @@ Reports feature workspace scheduler status.`)
   feature workspace next <workspace-dir> --agent <id> --claim [--json]
 
 Claims the next dependency-ready workspace merge unit for an agent.`)
+	case "heartbeat":
+		fmt.Fprintln(w, `Usage:
+  feature workspace heartbeat <workspace-dir> --agent <id> --lease <id> [--json]
+
+Extends an active lease owned by an agent.`)
+	case "release":
+		fmt.Fprintln(w, `Usage:
+  feature workspace release <workspace-dir> --agent <id> --lease <id> [--json]
+
+Releases an active lease owned by an agent.`)
 	default:
 		usageWorkspace(w)
 	}
