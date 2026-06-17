@@ -159,6 +159,27 @@ func TestValidateManifestRejectsMalformedMergeUnitReferences(t *testing.T) {
 			},
 			wantErr: "contract gate core-contracts consumer 1",
 		},
+		{
+			name: "dependency unknown plan",
+			mutate: func(manifest *WorkspaceManifest) {
+				manifest.Dependencies[0].Before = "missing:story-a"
+			},
+			wantErr: "references unknown plan missing",
+		},
+		{
+			name: "contract producer unknown plan",
+			mutate: func(manifest *WorkspaceManifest) {
+				manifest.ContractGates[0].Producers = []string{"missing:story-a"}
+			},
+			wantErr: "references unknown plan missing",
+		},
+		{
+			name: "contract consumer unknown plan",
+			mutate: func(manifest *WorkspaceManifest) {
+				manifest.ContractGates[0].Consumers = []string{"missing:story-a"}
+			},
+			wantErr: "references unknown plan missing",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

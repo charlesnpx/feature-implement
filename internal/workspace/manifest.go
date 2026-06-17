@@ -106,10 +106,10 @@ func ValidateManifest(manifest WorkspaceManifest) error {
 		}
 	}
 	for i, dep := range manifest.Dependencies {
-		if _, err := ParseMergeUnitRef(dep.Before); err != nil {
+		if err := validateMergeUnitRef(dep.Before, planIDs); err != nil {
 			return fmt.Errorf("dependency %d before: %w", i+1, err)
 		}
-		if _, err := ParseMergeUnitRef(dep.After); err != nil {
+		if err := validateMergeUnitRef(dep.After, planIDs); err != nil {
 			return fmt.Errorf("dependency %d after: %w", i+1, err)
 		}
 	}
@@ -118,12 +118,12 @@ func ValidateManifest(manifest WorkspaceManifest) error {
 			return err
 		}
 		for i, producer := range gate.Producers {
-			if _, err := ParseMergeUnitRef(producer); err != nil {
+			if err := validateMergeUnitRef(producer, planIDs); err != nil {
 				return fmt.Errorf("contract gate %s producer %d: %w", gate.ID, i+1, err)
 			}
 		}
 		for i, consumer := range gate.Consumers {
-			if _, err := ParseMergeUnitRef(consumer); err != nil {
+			if err := validateMergeUnitRef(consumer, planIDs); err != nil {
 				return fmt.Errorf("contract gate %s consumer %d: %w", gate.ID, i+1, err)
 			}
 		}
@@ -149,6 +149,17 @@ func ParseMergeUnitRef(value string) (MergeUnitRef, error) {
 		return MergeUnitRef{}, err
 	}
 	return ref, nil
+}
+
+func validateMergeUnitRef(value string, planIDs map[string]bool) error {
+	ref, err := ParseMergeUnitRef(value)
+	if err != nil {
+		return err
+	}
+	if !planIDs[ref.PlanID] {
+		return fmt.Errorf("merge-unit ref %q references unknown plan %s", value, ref.PlanID)
+	}
+	return nil
 }
 
 func requireSafeID(id string, kind string) error {
