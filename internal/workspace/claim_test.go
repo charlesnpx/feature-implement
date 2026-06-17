@@ -1132,6 +1132,66 @@ func TestTransitionCompletesLocalLifecycleWithCommitEvidence(t *testing.T) {
 	}
 }
 
+func TestTransitionFailsLocalLifecycleWithReasonEvidence(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	writeWorkspaceLock(t, fixture.Dir)
+	claim, err := Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	attempt, err := StartAttempt(AttemptStartOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  "foundation:story-a",
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		BaseSHA:      "base-sha-1",
+		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("StartAttempt: %v", err)
+	}
+
+	failed, err := Transition(TransitionOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  "foundation:story-a",
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		From:         MergeUnitPending,
+		To:           MergeUnitFailed,
+		Evidence:     map[string]any{evidenceReasonKey: "tests failed"},
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Transition failed: %v", err)
+	}
+	if failed.EventType != EventMergeUnitFailed || failed.Evidence[evidenceReasonKey] != "tests failed" {
+		t.Fatalf("failed = %+v", failed)
+	}
+	events := readTestJournalEvents(t, fixture.Dir)
+	last := events[len(events)-1]
+	if last.Type != EventMergeUnitFailed {
+		t.Fatalf("transition event = %+v", last)
+	}
+	evidence, ok := last.Payload[eventPayloadEvidenceKey].(map[string]any)
+	if !ok || evidence[evidenceReasonKey] != "tests failed" {
+		t.Fatalf("transition evidence = %+v", last.Payload[eventPayloadEvidenceKey])
+	}
+	status, err := Status(fixture.Dir)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	unit := findSchedulerUnit(t, SchedulerView{MergeUnits: status.MergeUnits}, "foundation:story-a")
+	if unit.Status != MergeUnitFailed {
+		t.Fatalf("scheduler unit = %+v", unit)
+	}
+}
+
 func TestTransitionRejectsMissingLease(t *testing.T) {
 	fixture := newOnePlanWorkspaceFixture(t)
 	writeWorkspaceLock(t, fixture.Dir)
