@@ -99,6 +99,42 @@ func TestWorkspaceCommandShell(t *testing.T) {
 	}
 }
 
+func TestWorkspaceValidateCommandWritesLock(t *testing.T) {
+	workspaceDir := workspaceWithPlanLocks(t)
+
+	stdout, stderr, err := runFeature(t, "workspace", "validate", workspaceDir, "--write-lock", "--json")
+	if err != nil {
+		t.Fatalf("feature workspace validate failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var result struct {
+		Status   string `json:"status"`
+		LockPath string `json:"lock_path"`
+		Lock     struct {
+			WorkspaceID string `json:"workspace_id"`
+			BaseRef     string `json:"base_ref"`
+			Plans       []struct {
+				ID       string `json:"id"`
+				LockHash string `json:"lock_hash"`
+			} `json:"plans"`
+		} `json:"lock"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("stdout is not workspace validate JSON: %v\n%s", err, stdout)
+	}
+	if result.Status != "valid" || result.LockPath == "" {
+		t.Fatalf("result = %+v", result)
+	}
+	if result.Lock.WorkspaceID != "workspace-a" || result.Lock.BaseRef != "workspace-orchestration" {
+		t.Fatalf("lock metadata = %+v", result.Lock)
+	}
+	if len(result.Lock.Plans) != 1 || result.Lock.Plans[0].ID != "foundation" || result.Lock.Plans[0].LockHash == "" {
+		t.Fatalf("lock plans = %+v", result.Lock.Plans)
+	}
+	if _, err := os.Stat(result.LockPath); err != nil {
+		t.Fatalf("expected lock file: %v", err)
+	}
+}
+
 func TestPlanExampleAndSchemaCommands(t *testing.T) {
 	stdout, stderr, err := runFeature(t, "plan", "example")
 	if err != nil {
@@ -119,6 +155,32 @@ func TestPlanExampleAndSchemaCommands(t *testing.T) {
 	if schema["title"] != "feature.plan.yaml" {
 		t.Fatalf("unexpected schema title: %+v", schema["title"])
 	}
+}
+
+func workspaceWithPlanLocks(t *testing.T) string {
+	t.Helper()
+	workspaceDir := t.TempDir()
+	planDir := filepath.Join(workspaceDir, "plans", "foundation")
+	if err := os.MkdirAll(planDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lock := `{"schema_version":1,"manifest_id":"foundation"}`
+	if err := os.WriteFile(filepath.Join(planDir, "feature.plan.lock.json"), []byte(lock), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `schema_version: 1
+id: workspace-a
+repo: .
+base_ref: workspace-orchestration
+remote: origin
+plans:
+  - id: foundation
+    path: plans/foundation
+`
+	if err := os.WriteFile(filepath.Join(workspaceDir, "feature.workspace.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return workspaceDir
 }
 
 func TestDocumentedTrailingFlagsWork(t *testing.T) {

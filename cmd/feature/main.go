@@ -315,7 +315,32 @@ func workspaceCommand(args []string) error {
 		usageWorkspaceAction(os.Stdout, action)
 		return nil
 	}
+	if action == "validate" {
+		return workspaceValidate(args[1:])
+	}
 	return workspace.ErrNotImplemented(action)
+}
+
+func workspaceValidate(args []string) error {
+	fs := flag.NewFlagSet("workspace validate", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	writeLock := fs.Bool("write-lock", false, "Write feature.workspace.lock.json")
+	asJSON := fs.Bool("json", false, "Emit JSON result")
+	if err := parsePermissive(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("workspace validate requires <workspace-dir>")
+	}
+	result, err := workspace.Validate(workspace.ValidateOptions{WorkspaceDir: fs.Arg(0), WriteLock: *writeLock})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(result)
+	}
+	fmt.Println(result.Status)
+	return nil
 }
 
 func writeJSON(value any) error {
