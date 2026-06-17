@@ -533,6 +533,9 @@ func Transition(opts TransitionOptions) (TransitionResult, error) {
 	if err != nil {
 		return TransitionResult{}, err
 	}
+	if err := validateAttemptLeaseOwner(opts.AttemptID, current.AgentID, current.LeaseID, opts.AgentID, opts.LeaseID); err != nil {
+		return TransitionResult{}, err
+	}
 	eventType, err := transitionEventType(opts.From, opts.To)
 	if err != nil {
 		return TransitionResult{}, err
@@ -787,6 +790,16 @@ func requireCurrentAttempt(attempts map[string][]attemptSnapshot, mergeUnitID st
 		return attemptSnapshot{}, fmt.Errorf("attempt %s is not current active attempt %s", attemptID, current.AttemptID)
 	}
 	return *current, nil
+}
+
+func validateAttemptLeaseOwner(attemptID string, attemptAgentID string, attemptLeaseID string, agentID string, leaseID string) error {
+	if attemptLeaseID != leaseID {
+		return fmt.Errorf("attempt %s was started under lease %s, not %s", attemptID, attemptLeaseID, leaseID)
+	}
+	if attemptAgentID != agentID {
+		return fmt.Errorf("attempt %s is owned by agent %s, not %s", attemptID, attemptAgentID, agentID)
+	}
+	return nil
 }
 
 func appendLeaseEvent(workspaceDir string, eventType string, lease activeLeaseSnapshot, leaseExpiresAt string, revisions map[string]int, occurredAt time.Time) error {

@@ -262,6 +262,17 @@ func validateTransitionEventPayload(event JournalEvent, currentStatus string, ta
 	if attempt == nil {
 		return fmt.Errorf("scheduler event %s cannot validate transition evidence without an active attempt", event.ID)
 	}
+	agentID, err := eventStringPayload(event, eventPayloadAgentIDKey)
+	if err != nil {
+		return err
+	}
+	leaseID, err := eventStringPayload(event, eventPayloadLeaseIDKey)
+	if err != nil {
+		return err
+	}
+	if err := validateAttemptLeaseOwner(attempt.AttemptID, attempt.AgentID, attempt.LeaseID, agentID, leaseID); err != nil {
+		return fmt.Errorf("scheduler event %s: %w", event.ID, err)
+	}
 	_, err = normalizeTransitionEvidence(from, to, evidence, *attempt)
 	return err
 }
