@@ -263,6 +263,49 @@ func TestNextConcurrentClaimsAreUnique(t *testing.T) {
 	}
 }
 
+func TestNextDoesNotRetryPermanentJournalStaleReadSet(t *testing.T) {
+	fixture := newIndependentDAGFixture(t).Workspace
+	writeWorkspaceLock(t, fixture.Dir)
+	event := JournalEvent{
+		ID:           "evt-000000000001",
+		Timestamp:    "2026-06-17T10:00:00Z",
+		PreviousHash: zeroEventHash,
+		Type:         EventLeaseGranted,
+		Payload:      map[string]any{eventPayloadMergeUnitIDKey: "foundation:story-a"},
+		ReadSet:      map[string]int{MergeUnitResource("foundation:story-a"): 1},
+		WriteSet:     []string{LeaseResource("foundation:story-a")},
+	}
+	eventHash, err := hashJournalEvent(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.EventHash = eventHash
+	if err := os.MkdirAll(StateDir(fixture.Dir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendJournalEvent(EventsPath(fixture.Dir), event); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	})
+
+	var stale StaleResourceError
+	if !errors.As(err, &stale) || stale.Resource != MergeUnitResource("foundation:story-a") {
+		t.Fatalf("Next stale error = %v", err)
+	}
+	if strings.Contains(err.Error(), "did not stabilize") {
+		t.Fatalf("permanent stale read set was retried as a claim race: %v", err)
+	}
+	if got := len(readTestJournalEvents(t, fixture.Dir)); got != 1 {
+		t.Fatalf("permanent stale read set should not append journal event; got %d events", got)
+	}
+}
+
 func TestClaimReadyMergeUnitRejectsStaleSnapshot(t *testing.T) {
 	fixture := newIndependentDAGFixture(t).Workspace
 	writeWorkspaceLock(t, fixture.Dir)

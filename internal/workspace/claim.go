@@ -12,7 +12,7 @@ import (
 
 const (
 	DefaultLeaseDuration = 30 * time.Minute
-	nextClaimMaxAttempts = 20
+	nextClaimMaxAttempts = 100
 
 	EventLeaseGranted     = "lease.granted"
 	EventLeaseHeartbeat   = "lease.heartbeat"
@@ -222,11 +222,16 @@ func Next(opts NextOptions) (NextResult, error) {
 		if err == nil {
 			return result, nil
 		}
-		if !isRetryableClaimError(err) {
+		var retryable retryableClaimRaceError
+		if !errors.As(err, &retryable) {
 			return NextResult{}, err
 		}
-		lastRetryable = err
-		time.Sleep(time.Duration(attempt+1) * time.Millisecond)
+		lastRetryable = retryable.err
+		delay := attempt + 1
+		if delay > 10 {
+			delay = 10
+		}
+		time.Sleep(time.Duration(delay) * time.Millisecond)
 	}
 	if lastRetryable != nil {
 		return NextResult{}, fmt.Errorf("workspace next claim did not stabilize after %d attempts: %w", nextClaimMaxAttempts, lastRetryable)
@@ -275,7 +280,11 @@ func nextOnce(opts NextOptions, claimedAt time.Time, leaseDuration time.Duration
 		if unit == nil {
 			return NextResult{}, fmt.Errorf("ready merge unit %s missing from scheduler view", mergeUnitID)
 		}
-		return claimReadyMergeUnit(opts, view, *unit, claimedAt, leaseDuration, revisions)
+		result, err := claimReadyMergeUnit(opts, view, *unit, claimedAt, leaseDuration, revisions)
+		if err != nil && isRetryableClaimError(err) {
+			return NextResult{}, retryableClaimRaceError{err: err}
+		}
+		return result, err
 	}
 	return NextResult{
 		Status:       "none",
@@ -283,6 +292,18 @@ func nextOnce(opts NextOptions, claimedAt time.Time, leaseDuration time.Duration
 		WorkspaceID:  view.WorkspaceID,
 		BaseRef:      view.BaseRef,
 	}, nil
+}
+
+type retryableClaimRaceError struct {
+	err error
+}
+
+func (e retryableClaimRaceError) Error() string {
+	return e.err.Error()
+}
+
+func (e retryableClaimRaceError) Unwrap() error {
+	return e.err
 }
 
 func observedAtAfterEvents(events []JournalEvent, observedAt time.Time) (time.Time, error) {
