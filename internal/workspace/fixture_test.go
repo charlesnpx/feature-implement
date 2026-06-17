@@ -27,8 +27,13 @@ type workspaceFixtureSpec struct {
 }
 
 type workspaceFixturePlan struct {
+	ID      string
+	StoryID string
+	Stories []workspaceFixtureStory
+}
+
+type workspaceFixtureStory struct {
 	ID           string
-	StoryID      string
 	Dependencies []string
 }
 
@@ -145,8 +150,35 @@ func materializeFixturePlan(t *testing.T, workspaceDir string, baseRef string, s
 	if spec.ID == "" {
 		t.Fatal("fixture plan id is required")
 	}
-	if spec.StoryID == "" {
-		spec.StoryID = "story-a"
+	stories := spec.Stories
+	if len(stories) == 0 {
+		storyID := spec.StoryID
+		if storyID == "" {
+			storyID = "story-a"
+		}
+		stories = []workspaceFixtureStory{{ID: storyID}}
+	}
+	planStories := make([]plan.Story, 0, len(stories))
+	mergeUnits := make([]plan.MergeUnit, 0, len(stories))
+	for i, storySpec := range stories {
+		if storySpec.ID == "" {
+			t.Fatalf("fixture plan %s story %d id is required", spec.ID, i+1)
+		}
+		planStories = append(planStories, plan.Story{
+			ID:             storySpec.ID,
+			Number:         i + 1,
+			Name:           fixtureTitle(storySpec.ID),
+			Summary:        "Fixture story.",
+			Acceptance:     []string{"Acceptance."},
+			Implementation: []string{"Implementation."},
+			Testing:        []string{"Testing."},
+			Dependencies:   storySpec.Dependencies,
+		})
+		mergeUnits = append(mergeUnits, plan.MergeUnit{
+			ID:       storySpec.ID,
+			Name:     fixtureTitle(storySpec.ID),
+			StoryIDs: []string{storySpec.ID},
+		})
 	}
 	manifest := plan.Manifest{
 		SchemaVersion: 1,
@@ -165,23 +197,10 @@ func materializeFixturePlan(t *testing.T, workspaceDir string, baseRef string, s
 				Number:  1,
 				Name:    fixtureTitle(spec.ID) + " Feature",
 				Summary: "Fixture feature.",
-				Stories: []plan.Story{{
-					ID:             spec.StoryID,
-					Number:         1,
-					Name:           fixtureTitle(spec.StoryID),
-					Summary:        "Fixture story.",
-					Acceptance:     []string{"Acceptance."},
-					Implementation: []string{"Implementation."},
-					Testing:        []string{"Testing."},
-					Dependencies:   spec.Dependencies,
-				}},
+				Stories: planStories,
 			}},
 		}},
-		MergeUnits: []plan.MergeUnit{{
-			ID:       spec.StoryID,
-			Name:     fixtureTitle(spec.StoryID),
-			StoryIDs: []string{spec.StoryID},
-		}},
+		MergeUnits: mergeUnits,
 	}
 
 	manifestPath := filepath.Join(workspaceDir, spec.ID+".feature.plan.yaml")
