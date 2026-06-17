@@ -65,7 +65,21 @@ func TestInvalidImplementActionHelpFails(t *testing.T) {
 }
 
 func TestWorkspaceCommandShell(t *testing.T) {
-	stdout, stderr, err := runFeature(t, "workspace", "frobnicate")
+	stdout, stderr, err := runFeature(t, "workspace", "--help")
+	if err != nil {
+		t.Fatalf("feature workspace --help failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	for _, want := range []string{
+		"feature workspace init",
+		"feature workspace validate",
+		"feature workspace status",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("workspace help missing %q:\n%s", want, stdout)
+		}
+	}
+
+	stdout, stderr, err = runFeature(t, "workspace", "frobnicate")
 	if err == nil {
 		t.Fatalf("invalid workspace action should fail")
 	}
