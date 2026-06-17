@@ -118,6 +118,22 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			t.Fatalf("staged implement skill %s includes a non-state-recording push write step", path)
 		}
 	}
+	codexImplementSkill := filepath.Join(stage, ".codex", "skills", "feature:implement", "SKILL.md")
+	b, err := os.ReadFile(codexImplementSkill)
+	if err != nil {
+		t.Fatalf("read staged codex implement skill %s: %v", codexImplementSkill, err)
+	}
+	content := string(b)
+	for _, want := range []string{
+		"active Codex Skills list includes `pr:review:no-file`",
+		"`$pr:review:no-file <pr-number>`",
+		"generic Codex PR-review subagent",
+		"same skill-selection rule",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("staged codex implement skill missing %q", want)
+		}
+	}
 }
 
 func TestRunTargetFiltering(t *testing.T) {
