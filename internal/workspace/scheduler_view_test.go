@@ -206,6 +206,66 @@ func TestRebuildSchedulerViewRejectsStaleAttemptTransition(t *testing.T) {
 	}
 }
 
+func TestRebuildSchedulerViewDiscardsLifecycleFromAbandonedAttempt(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	writeWorkspaceLock(t, fixture.Dir)
+	claim, err := Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	attempt, err := StartAttempt(AttemptStartOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  "foundation:story-a",
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		BaseSHA:      "base-sha-1",
+		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("StartAttempt: %v", err)
+	}
+	if _, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: fixture.Dir,
+		Type:         EventMergeUnitCompleted,
+		Payload: map[string]any{
+			eventPayloadMergeUnitIDKey: "foundation:story-a",
+			eventPayloadAttemptIDKey:   attempt.AttemptID,
+		},
+		WriteSet: []string{MergeUnitResource("foundation:story-a")},
+		Now:      fixedJournalTime("2026-06-17T10:02:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent completed: %v", err)
+	}
+	if _, err := AbandonAttempt(AttemptAbandonOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  "foundation:story-a",
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Reason:       "completion was invalid",
+		Now:          fixedJournalTime("2026-06-17T10:03:00Z"),
+	}); err != nil {
+		t.Fatalf("AbandonAttempt: %v", err)
+	}
+
+	view, err := RebuildSchedulerView(fixture.Dir)
+	if err != nil {
+		t.Fatalf("RebuildSchedulerView: %v", err)
+	}
+	unit := findSchedulerUnit(t, view, "foundation:story-a")
+	if unit.Status != MergeUnitPending || unit.CurrentAttempt != nil {
+		t.Fatalf("abandoned attempt should not advance lifecycle: %+v", unit)
+	}
+	if view.Counts[MergeUnitCompleted] != 0 || view.Counts[MergeUnitPending] != 1 {
+		t.Fatalf("counts = %+v", view.Counts)
+	}
+}
+
 func TestRebuildSchedulerViewIsDeterministicAfterDelete(t *testing.T) {
 	fixture := newIndependentDAGFixture(t).Workspace
 	writeWorkspaceLock(t, fixture.Dir)
