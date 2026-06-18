@@ -142,6 +142,20 @@ func TestApprovalScopeMismatchAndMergeTargetValidation(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "merge approvals require") {
 		t.Fatalf("untargeted merge grant error = %v", err)
 	}
+	_, err = GrantApproval(ApprovalGrantOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Actions:      []string{"merge"},
+		Branch:       "workspace-orchestration",
+		ExpiresIn:    time.Hour,
+		Now:          fixedJournalTime("2026-06-17T10:02:30Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "merge approvals require") {
+		t.Fatalf("loose merge grant error = %v", err)
+	}
 	granted, err := GrantApproval(ApprovalGrantOptions{
 		WorkspaceDir: fixture.Dir,
 		MergeUnitID:  claim.MergeUnitID,
@@ -187,6 +201,80 @@ func TestApprovalScopeMismatchAndMergeTargetValidation(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "branch workspace-orchestration") {
 		t.Fatalf("mismatched consume error = %v", err)
+	}
+}
+
+func TestApprovalPRURLMatchesNumber(t *testing.T) {
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	granted, err := GrantApproval(ApprovalGrantOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Actions:      []string{"merge"},
+		PR:           "https://github.com/charlesnpx/feature-implement/pull/35",
+		HeadSHA:      "head-sha",
+		BaseSHA:      "base-sha",
+		ExpiresIn:    time.Hour,
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("GrantApproval: %v", err)
+	}
+	if granted.Approval.PR != "35" {
+		t.Fatalf("grant PR = %q", granted.Approval.PR)
+	}
+	check, err := CheckApproval(ApprovalCheckOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		Action:       "merge",
+		PR:           "35",
+		HeadSHA:      "head-sha",
+		BaseSHA:      "base-sha",
+		Now:          fixedJournalTime("2026-06-17T10:03:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("CheckApproval: %v", err)
+	}
+	if check.Status != "approved" || len(check.Approvals) != 1 || check.Approvals[0].ApprovalID != granted.Approval.ApprovalID {
+		t.Fatalf("check result = %+v", check)
+	}
+	consumed, err := ConsumeApproval(ApprovalConsumeOptions{
+		WorkspaceDir: fixture.Dir,
+		ApprovalID:   granted.Approval.ApprovalID,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		Action:       "merge",
+		PR:           "35",
+		HeadSHA:      "head-sha",
+		BaseSHA:      "base-sha",
+		Now:          fixedJournalTime("2026-06-17T10:04:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("ConsumeApproval: %v", err)
+	}
+	if consumed.Status != "consumed" || consumed.Approval.UsedCount != 1 {
+		t.Fatalf("consume result = %+v", consumed)
+	}
+}
+
+func TestApprovalRejectsNegativeMaxUses(t *testing.T) {
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	_, err := GrantApproval(ApprovalGrantOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Actions:      []string{"push"},
+		MaxUses:      -1,
+		ExpiresIn:    time.Hour,
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "--max-uses must be greater than zero") {
+		t.Fatalf("negative max uses error = %v", err)
 	}
 }
 

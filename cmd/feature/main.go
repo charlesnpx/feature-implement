@@ -916,6 +916,9 @@ func workspaceApproveGrant(args []string) error {
 	if fs.NArg() != 1 {
 		return fmt.Errorf("workspace approve grant requires <workspace-dir>")
 	}
+	if *maxUses <= 0 {
+		return fmt.Errorf("--max-uses must be greater than zero")
+	}
 	parsedExpiresIn, parsedExpiresAt, err := parseApprovalExpiry(*expiresIn, *expiresAt)
 	if err != nil {
 		return err
@@ -1385,7 +1388,7 @@ func usageWorkspaceApprove(w io.Writer) {
   feature workspace approve check <workspace-dir> --merge-unit <id> --attempt <id> --action <action> [--scope <scope>] [--pr <id>] [--branch <name>] [--head-sha <sha>] [--base-sha <sha>] [--json]
   feature workspace approve consume <workspace-dir> --approval <id> --merge-unit <id> --attempt <id> --action <action> [--scope <scope>] [--pr <id>] [--branch <name>] [--head-sha <sha>] [--base-sha <sha>] [--json]
 
-Grants, checks, and consumes scoped external-write approval capabilities.`)
+Grants, checks, and consumes scoped external-write approval capabilities. Merge approvals require a PR or branch plus head and base SHAs.`)
 }
 
 func usageWorkspaceApproveAction(w io.Writer, action string) {

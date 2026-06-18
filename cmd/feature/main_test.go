@@ -923,6 +923,23 @@ func TestWorkspaceApproveCommandGrantCheckConsumeJSON(t *testing.T) {
 	if granted.Status != "granted" || granted.Approval.ApprovalID == "" || granted.Approval.Branch != "feature/test" || granted.Approval.MaxUses != 1 || granted.Approval.Status != "active" {
 		t.Fatalf("grant result = %+v", granted)
 	}
+	stdout, stderr, err = runFeature(t,
+		"workspace", "approve", "grant", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--attempt", attempt.AttemptID,
+		"--agent", "worker-a",
+		"--lease", claim.LeaseID,
+		"--action", "push",
+		"--expires-in", "1h",
+		"--max-uses", "0",
+		"--json",
+	)
+	if err == nil {
+		t.Fatalf("feature workspace approve grant --max-uses 0 should fail\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+	if !strings.Contains(stderr, "--max-uses must be greater than zero") {
+		t.Fatalf("max uses error = %q", stderr)
+	}
 
 	stdout, stderr, err = runFeature(t,
 		"workspace", "approve", "check", workspaceDir,

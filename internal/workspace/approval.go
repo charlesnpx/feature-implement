@@ -374,15 +374,21 @@ func normalizeApprovalGrantOptions(opts ApprovalGrantOptions) (ApprovalGrantOpti
 	}
 	opts.Actions = actions
 	opts.Scope = normalizeApprovalScope(opts.Scope)
-	opts.PR = strings.TrimSpace(opts.PR)
+	opts.PR = normalizeApprovalPR(opts.PR)
 	opts.Branch = strings.TrimSpace(opts.Branch)
 	opts.HeadSHA = strings.TrimSpace(opts.HeadSHA)
 	opts.BaseSHA = strings.TrimSpace(opts.BaseSHA)
-	if opts.MaxUses <= 0 {
+	if opts.MaxUses == 0 {
 		opts.MaxUses = 1
 	}
-	if containsString(opts.Actions, "merge") && opts.PR == "" && opts.Branch == "" && opts.HeadSHA == "" && opts.BaseSHA == "" {
-		return ApprovalGrantOptions{}, time.Time{}, time.Time{}, fmt.Errorf("merge approvals require --pr, --branch, --head-sha, or --base-sha")
+	if opts.MaxUses < 0 {
+		return ApprovalGrantOptions{}, time.Time{}, time.Time{}, fmt.Errorf("--max-uses must be greater than zero")
+	}
+	if containsString(opts.Actions, "merge") {
+		hasTarget := opts.PR != "" || opts.Branch != ""
+		if !hasTarget || opts.HeadSHA == "" || opts.BaseSHA == "" {
+			return ApprovalGrantOptions{}, time.Time{}, time.Time{}, fmt.Errorf("merge approvals require --pr or --branch plus --head-sha and --base-sha")
+		}
 	}
 	now := time.Now
 	if opts.Now != nil {
@@ -419,7 +425,7 @@ func normalizeApprovalCheckOptions(opts ApprovalCheckOptions) (ApprovalCheckOpti
 		return ApprovalCheckOptions{}, time.Time{}, fmt.Errorf("workspace approve check requires --action")
 	}
 	opts.Scope = normalizeApprovalScope(opts.Scope)
-	opts.PR = strings.TrimSpace(opts.PR)
+	opts.PR = normalizeApprovalPR(opts.PR)
 	opts.Branch = strings.TrimSpace(opts.Branch)
 	opts.HeadSHA = strings.TrimSpace(opts.HeadSHA)
 	opts.BaseSHA = strings.TrimSpace(opts.BaseSHA)
@@ -492,6 +498,22 @@ func normalizeApprovalScope(scope string) string {
 		return "merge-unit"
 	}
 	return scope
+}
+
+func normalizeApprovalPR(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if before, number, ok := strings.Cut(value, "/pull/"); ok && strings.Contains(strings.ToLower(before), "github.com/") {
+		number, _, _ = strings.Cut(number, "/")
+		number, _, _ = strings.Cut(number, "?")
+		number, _, _ = strings.Cut(number, "#")
+		if number = strings.TrimSpace(number); number != "" {
+			return number
+		}
+	}
+	return value
 }
 
 func approvalID(mergeUnitID string, attemptID string, actions []string, scope string, pr string, branch string, headSHA string, baseSHA string, at time.Time) string {
