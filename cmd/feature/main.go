@@ -1912,6 +1912,7 @@ func usageWorkspace(w io.Writer) {
   feature workspace publish-refresh <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --approval <id> --expected-remote-sha <sha> [--branch <name>] [--remote <name>] [--worktree <path>] [--scope <scope>] [--json]
   feature workspace evaluate-gates <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> [--json]
   feature workspace gate override <workspace-dir> --merge-unit <id> --attempt <id> --gate <gate> --status retained_by_operator --reason <text> --input-hash <hash> --head-sha <sha> --base-sha <sha> --operator <id> (--expires-in <duration> | --expires-at <timestamp>) [--json]
+  feature workspace gate record <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --gate <review|security|test> --status <passed|blocked> --input-hash <hash> --head-sha <sha> --base-sha <sha> (--command <cmd> | --reviewer <id>) --summary <text> [--json]
   feature workspace queue enter <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> (--branch <name> | --pr <id>) --head-sha <sha> --base-sha <sha> [--approval <id>] [--scope <scope>] [--json]
   feature workspace attempt start <workspace-dir> --merge-unit <id> --agent <id> --lease <id> --base-sha <sha> [--mode fresh-from-base] [--json]
   feature workspace attempt abandon <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --reason <text> [--json]
