@@ -239,22 +239,167 @@ func TestWorkspaceInitCommandWritesLockAndView(t *testing.T) {
 	}
 }
 
-func TestWorkspaceInitCommandRequiresCanonicalManifest(t *testing.T) {
+func TestWorkspaceInitCommandCanonicalizesSameDirectoryManifest(t *testing.T) {
 	workspaceDir := workspaceWithPlanLocks(t)
+	canonicalPath := filepath.Join(workspaceDir, "feature.workspace.yaml")
+	manifestBytes, err := os.ReadFile(canonicalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(canonicalPath); err != nil {
+		t.Fatal(err)
+	}
 	nonCanonicalPath := filepath.Join(workspaceDir, "workspace.yaml")
-	if err := os.WriteFile(nonCanonicalPath, []byte("schema_version: 1\n"), 0o644); err != nil {
+	if err := os.WriteFile(nonCanonicalPath, manifestBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := runFeature(t, "workspace", "init", "--manifest", nonCanonicalPath, "--write-lock", "--json")
+	if err != nil {
+		t.Fatalf("feature workspace init failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var result struct {
+		Status         string `json:"status"`
+		WorkspaceDir   string `json:"workspace_dir"`
+		ManifestPath   string `json:"manifest_path"`
+		SourceManifest string `json:"source_manifest"`
+		LockPath       string `json:"lock_path"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("stdout is not workspace init JSON: %v\n%s", err, stdout)
+	}
+	if result.Status != "initialized" || result.WorkspaceDir != workspaceDir {
+		t.Fatalf("init result = %+v", result)
+	}
+	if result.ManifestPath != canonicalPath || result.SourceManifest != nonCanonicalPath {
+		t.Fatalf("manifest paths = %+v", result)
+	}
+	copiedBytes, err := os.ReadFile(canonicalPath)
+	if err != nil {
+		t.Fatalf("expected canonical manifest copy: %v", err)
+	}
+	if !bytes.Equal(copiedBytes, manifestBytes) {
+		t.Fatalf("canonical manifest copy changed contents:\n%s", copiedBytes)
+	}
+	if result.LockPath == "" {
+		t.Fatalf("init did not write lock: %+v", result)
+	}
+	var lock struct {
+		Plans []struct {
+			LockPath string `json:"lock_path"`
+		} `json:"plans"`
+	}
+	lockBytes, err := os.ReadFile(result.LockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(lockBytes, &lock); err != nil {
+		t.Fatalf("lock is not JSON: %v\n%s", err, lockBytes)
+	}
+	if len(lock.Plans) != 1 || lock.Plans[0].LockPath != filepath.Join(workspaceDir, "plans", "foundation", "feature.plan.lock.json") {
+		t.Fatalf("relative plan path was not resolved from manifest directory: %+v", lock.Plans)
+	}
+
+	stdout, stderr, err = runFeature(t, "workspace", "status", workspaceDir, "--json")
+	if err != nil {
+		t.Fatalf("feature workspace status failed after canonicalization: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+}
+
+func TestWorkspaceInitCommandDoesNotOverwriteCanonicalManifestOnFailure(t *testing.T) {
+	workspaceDir := workspaceWithPlanLocks(t)
+	canonicalPath := filepath.Join(workspaceDir, "feature.workspace.yaml")
+	canonicalBytes, err := os.ReadFile(canonicalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonCanonicalPath := filepath.Join(workspaceDir, "workspace.yaml")
+	invalidManifest := strings.Replace(string(canonicalBytes), "path: plans/foundation", "path: plans/missing", 1)
+	if err := os.WriteFile(nonCanonicalPath, []byte(invalidManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := runFeature(t, "workspace", "init", "--manifest", nonCanonicalPath, "--write-lock", "--json")
+	if err == nil {
+		t.Fatalf("feature workspace init should fail for missing plan lock")
+	}
+	if !strings.Contains(stderr, "plan foundation lock:") {
+		t.Fatalf("expected missing plan lock error:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+	afterBytes, err := os.ReadFile(canonicalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterBytes, canonicalBytes) {
+		t.Fatalf("failed init overwrote canonical manifest:\n%s", afterBytes)
+	}
+}
+
+func TestWorkspaceInitCommandRefusesDifferentCanonicalManifest(t *testing.T) {
+	workspaceDir := workspaceWithPlanLocks(t)
+	canonicalPath := filepath.Join(workspaceDir, "feature.workspace.yaml")
+	canonicalBytes, err := os.ReadFile(canonicalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonCanonicalPath := filepath.Join(workspaceDir, "workspace.yaml")
+	alternateManifest := strings.Replace(string(canonicalBytes), "remote: origin", "remote: upstream", 1)
+	if err := os.WriteFile(nonCanonicalPath, []byte(alternateManifest), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	stdout, stderr, err := runFeature(t, "workspace", "init", "--manifest", nonCanonicalPath, "--json")
 	if err == nil {
-		t.Fatalf("feature workspace init should reject non-canonical manifest")
+		t.Fatalf("feature workspace init should refuse different canonical manifest")
 	}
-	if !strings.Contains(stderr, "workspace init requires --manifest to point to feature.workspace.yaml") {
-		t.Fatalf("expected canonical manifest error:\nstdout=%s\nstderr=%s", stdout, stderr)
+	if !strings.Contains(stderr, "refused to overwrite existing feature.workspace.yaml with different contents") {
+		t.Fatalf("expected overwrite refusal:\nstdout=%s\nstderr=%s", stdout, stderr)
 	}
-	if strings.Contains(stdout, "Usage:") || strings.Contains(stderr, "Usage:") {
-		t.Fatalf("canonical manifest error should not print usage:\nstdout=%s\nstderr=%s", stdout, stderr)
+	afterBytes, err := os.ReadFile(canonicalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterBytes, canonicalBytes) {
+		t.Fatalf("overwrite refusal changed canonical manifest:\n%s", afterBytes)
+	}
+}
+
+func TestWorkspaceInitCommandRefusesSymlinkedCanonicalManifest(t *testing.T) {
+	workspaceDir := workspaceWithPlanLocks(t)
+	canonicalPath := filepath.Join(workspaceDir, "feature.workspace.yaml")
+	canonicalBytes, err := os.ReadFile(canonicalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(canonicalPath); err != nil {
+		t.Fatal(err)
+	}
+	linkTarget := filepath.Join(workspaceDir, "outside.yaml")
+	linkTargetBytes := []byte("do not overwrite\n")
+	if err := os.WriteFile(linkTarget, linkTargetBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(linkTarget, canonicalPath); err != nil {
+		t.Fatal(err)
+	}
+	nonCanonicalPath := filepath.Join(workspaceDir, "workspace.yaml")
+	if err := os.WriteFile(nonCanonicalPath, canonicalBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := runFeature(t, "workspace", "init", "--manifest", nonCanonicalPath, "--json")
+	if err == nil {
+		t.Fatalf("feature workspace init should refuse symlinked canonical manifest")
+	}
+	if !strings.Contains(stderr, "refused to overwrite existing non-regular feature.workspace.yaml") {
+		t.Fatalf("expected non-regular manifest error:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+	afterTargetBytes, err := os.ReadFile(linkTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterTargetBytes, linkTargetBytes) {
+		t.Fatalf("symlink target was overwritten:\n%s", afterTargetBytes)
 	}
 }
 
