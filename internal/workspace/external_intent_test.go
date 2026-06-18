@@ -81,11 +81,12 @@ func TestReserveExternalIntentSupportsStoryActions(t *testing.T) {
 		branch string
 		pr     string
 		target string
+		ref    string
 	}{
-		{name: "push", action: ExternalActionPush, branch: "feature/test", target: "branch:feature/test"},
-		{name: "open-pr", action: ExternalActionOpenPR, branch: "feature/test", target: "branch:feature/test"},
-		{name: "remote-delete", action: ExternalActionRemoteDelete, branch: "feature/test", target: "branch:feature/test"},
-		{name: "merge", action: ExternalActionMerge, pr: "35", target: "pr:35"},
+		{name: "push", action: ExternalActionPush, branch: "feature/test", target: "branch:feature/test", ref: "feature/test"},
+		{name: "open-pr", action: ExternalActionOpenPR, branch: "feature/test", target: "branch:feature/test", ref: "feature/test"},
+		{name: "remote-delete", action: ExternalActionRemoteDelete, branch: "feature/test", target: "branch:feature/test", ref: "feature/test"},
+		{name: "merge", action: ExternalActionMerge, pr: "35", target: "pr:35", ref: "workspace-orchestration"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -111,8 +112,8 @@ func TestReserveExternalIntentSupportsStoryActions(t *testing.T) {
 				t.Fatalf("intent = %+v", result.Intent)
 			}
 			assertContainsString(t, result.Intent.AffectedResources, ProviderTargetResource(tt.action+":"+tt.target))
-			if tt.branch != "" {
-				assertContainsString(t, result.Intent.AffectedResources, RemoteRefResource(tt.branch))
+			if tt.ref != "" {
+				assertContainsString(t, result.Intent.AffectedResources, RemoteRefResource(tt.ref))
 			}
 		})
 	}

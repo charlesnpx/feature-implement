@@ -134,7 +134,7 @@ func ReserveExternalIntent(opts ExternalIntentReserveOptions) (ExternalIntentRes
 	}
 	identity := deriveExternalIntentIdentity(state.View.WorkspaceID, opts, target)
 	intentResource := ExternalIntentResource(identity.intentID)
-	affectedResources := externalIntentAffectedResources(opts, target)
+	affectedResources := externalIntentAffectedResources(opts, target, state.View.BaseRef)
 	readSet := map[string]int{
 		LeaseResource(opts.MergeUnitID):     state.Revisions[LeaseResource(opts.MergeUnitID)],
 		MergeUnitResource(opts.MergeUnitID): state.Revisions[MergeUnitResource(opts.MergeUnitID)],
@@ -281,13 +281,17 @@ func deriveExternalIntentIdentity(workspaceID string, opts ExternalIntentReserve
 	return externalIntentIdentity{intentID: "intent-" + key[:24], idempotencyKey: key}
 }
 
-func externalIntentAffectedResources(opts ExternalIntentReserveOptions, target string) []string {
+func externalIntentAffectedResources(opts ExternalIntentReserveOptions, target string, baseRef string) []string {
 	resources := []string{
 		MergeUnitResource(opts.MergeUnitID),
 		ProviderTargetResource(opts.Action + ":" + target),
 	}
-	if opts.Branch != "" {
-		resources = append(resources, RemoteRefResource(opts.Branch))
+	remoteRef := opts.Branch
+	if opts.Action == ExternalActionMerge && opts.PR != "" {
+		remoteRef = strings.TrimSpace(baseRef)
+	}
+	if remoteRef != "" {
+		resources = append(resources, RemoteRefResource(remoteRef))
 	}
 	sort.Strings(resources)
 	return resources
