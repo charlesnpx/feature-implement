@@ -835,7 +835,7 @@ func TestStartAttemptRecordsFirstAttempt(t *testing.T) {
 	if attempt.BaseRef != fixtureWorkspaceBaseRef || attempt.BaseSHA != "base-sha-1" || attempt.Mode != "fresh-from-base" {
 		t.Fatalf("base/mode metadata = %+v", attempt)
 	}
-	wantCommand := "git worktree add -b feature/workspace-a/foundation/story-a/attempt-1 " + wantWorktree + " workspace-orchestration"
+	wantCommand := "git worktree add -b feature/workspace-a/foundation/story-a/attempt-1 " + wantWorktree + " base-sha-1"
 	if len(attempt.Commands) != 1 || attempt.Commands[0] != wantCommand {
 		t.Fatalf("commands = %+v, want %q", attempt.Commands, wantCommand)
 	}
@@ -919,7 +919,7 @@ func TestStartAttemptQuotesWorktreeCommandWithSpaces(t *testing.T) {
 		t.Fatalf("StartAttempt: %v", err)
 	}
 	wantWorktree := filepath.Join(workspaceDir, "state", "worktrees", "workspace-a", "foundation", "story-a", "attempt-1")
-	wantCommand := "git worktree add -b feature/workspace-a/foundation/story-a/attempt-1 '" + wantWorktree + "' workspace-orchestration"
+	wantCommand := "git worktree add -b feature/workspace-a/foundation/story-a/attempt-1 '" + wantWorktree + "' base-sha-1"
 	if len(attempt.Commands) != 1 || attempt.Commands[0] != wantCommand {
 		t.Fatalf("commands = %+v, want %q", attempt.Commands, wantCommand)
 	}
