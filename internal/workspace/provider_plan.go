@@ -129,7 +129,7 @@ func PlanExternalProviderCommand(opts ExternalProviderPlanOptions) (ExternalProv
 	if err != nil {
 		return ExternalProviderPlanResult{}, err
 	}
-	plannedIntent := externalIntentView(reserveOpts, identity, target, affectedResources)
+	plannedIntent := externalIntentView(reserveOpts, identity, target, affectedResources, nil)
 	plannedIntent.Status = "planned"
 	return ExternalProviderPlanResult{
 		Status:       "planned",

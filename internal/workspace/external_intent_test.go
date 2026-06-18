@@ -134,7 +134,6 @@ func TestReserveExternalIntentSupportsStoryActions(t *testing.T) {
 		{name: "push", action: ExternalActionPush, branch: "feature/test", target: "branch:feature/test", ref: "feature/test"},
 		{name: "open-pr", action: ExternalActionOpenPR, branch: "feature/test", target: "branch:feature/test", ref: "feature/test"},
 		{name: "remote-delete", action: ExternalActionRemoteDelete, branch: "feature/test", target: "branch:feature/test", ref: "feature/test"},
-		{name: "merge", action: ExternalActionMerge, pr: "35", target: "pr:35", ref: "workspace-orchestration"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -841,20 +840,36 @@ func TestUnresolvedExternalIntentFreezesStatusAndBlocksOverlappingIntent(t *test
 }
 
 func TestAmbiguousMergeFreezeRequiresOperatorReconciliation(t *testing.T) {
-	fixture, claim, attempt, approval := newExternalIntentFixture(t, ExternalActionMerge)
-	startExternalIntentLifecycle(t, fixture, claim, attempt)
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	ready := prepareMergeReadinessWithFreshApproval(t, fixture, claim, attempt, "35", "", "head-sha", "base-sha", "2026-06-17T10")
+	if _, err := queueMergeReadyAttempt(t, ready, "35", "", "2026-06-17T10:17:00Z"); err != nil {
+		t.Fatalf("QueueMergeUnit: %v", err)
+	}
+	if _, err := Transition(TransitionOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		From:         MergeUnitPending,
+		To:           MergeUnitInProgress,
+		Evidence:     map[string]any{evidenceWorktreeKey: attempt.Worktree},
+		Now:          fixedJournalTime("2026-06-17T10:17:30Z"),
+	}); err != nil {
+		t.Fatalf("Transition start: %v", err)
+	}
 	reserved, err := ReserveExternalIntent(ExternalIntentReserveOptions{
 		WorkspaceDir:     fixture.Dir,
 		MergeUnitID:      claim.MergeUnitID,
 		AttemptID:        attempt.AttemptID,
 		AgentID:          "worker-a",
 		LeaseID:          claim.LeaseID,
-		ApprovalID:       approval.Approval.ApprovalID,
+		ApprovalID:       ready.Approval.Approval.ApprovalID,
 		Action:           ExternalActionMerge,
 		PR:               "35",
 		RequestedHeadSHA: "head-sha",
 		ExpectedBaseSHA:  "base-sha",
-		Now:              fixedJournalTime("2026-06-17T10:04:00Z"),
+		Now:              fixedJournalTime("2026-06-17T10:18:00Z"),
 	})
 	if err != nil {
 		t.Fatalf("ReserveExternalIntent: %v", err)
@@ -869,7 +884,7 @@ func TestAmbiguousMergeFreezeRequiresOperatorReconciliation(t *testing.T) {
 		Status:         ExternalResultAmbiguous,
 		PolicyAccepted: true,
 		Details:        "provider timeout after merge request",
-		Now:            fixedJournalTime("2026-06-17T10:05:00Z"),
+		Now:            fixedJournalTime("2026-06-17T10:19:00Z"),
 	})
 	if err != nil {
 		t.Fatalf("RecordExternalIntentResult: %v", err)
@@ -898,7 +913,7 @@ func TestAmbiguousMergeFreezeRequiresOperatorReconciliation(t *testing.T) {
 			evidenceCommitSHAKey:        "commit-sha-1",
 			evidenceExternalIntentIDKey: reserved.Intent.IntentID,
 		},
-		Now: fixedJournalTime("2026-06-17T10:06:00Z"),
+		Now: fixedJournalTime("2026-06-17T10:20:00Z"),
 	})
 	if err == nil || !strings.Contains(err.Error(), "requires operator_reconcile") {
 		t.Fatalf("ambiguous transition error = %v", err)
@@ -909,7 +924,7 @@ func TestAmbiguousMergeFreezeRequiresOperatorReconciliation(t *testing.T) {
 		IntentID:     reserved.Intent.IntentID,
 		Operator:     "operator-a",
 		Details:      "confirmed merge completed remotely",
-		Now:          fixedJournalTime("2026-06-17T10:07:00Z"),
+		Now:          fixedJournalTime("2026-06-17T10:21:00Z"),
 	})
 	if err != nil {
 		t.Fatalf("ReconcileExternalIntent: %v", err)
@@ -937,7 +952,7 @@ func TestAmbiguousMergeFreezeRequiresOperatorReconciliation(t *testing.T) {
 			evidenceCommitSHAKey:        "commit-sha-1",
 			evidenceExternalIntentIDKey: reserved.Intent.IntentID,
 		},
-		Now: fixedJournalTime("2026-06-17T10:08:00Z"),
+		Now: fixedJournalTime("2026-06-17T10:22:00Z"),
 	})
 	if err != nil {
 		t.Fatalf("Transition after reconcile: %v", err)
