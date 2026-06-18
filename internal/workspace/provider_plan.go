@@ -125,12 +125,14 @@ func PlanExternalProviderCommand(opts ExternalProviderPlanOptions) (ExternalProv
 	if err != nil {
 		return ExternalProviderPlanResult{}, err
 	}
+	plannedIntent := externalIntentView(reserveOpts, identity, target, affectedResources)
+	plannedIntent.Status = "planned"
 	return ExternalProviderPlanResult{
 		Status:       "planned",
 		WorkspaceDir: reserveOpts.WorkspaceDir,
 		WorkspaceID:  state.View.WorkspaceID,
 		BaseRef:      state.View.BaseRef,
-		Intent:       externalIntentView(reserveOpts, identity, target, affectedResources),
+		Intent:       plannedIntent,
 		Plan:         plan,
 	}, nil
 }
@@ -255,9 +257,9 @@ func providerCommand(opts ExternalIntentReserveOptions, worktree string, remote 
 		if target == "" {
 			target = opts.Branch
 		}
-		return fmt.Sprintf("gh pr merge %s --merge", shellQuote(target)), nil
+		return strings.Join([]string{"cd", shellQuote(worktree), "&&", "gh pr merge", shellQuote(target), "--merge"}, " "), nil
 	case ExternalActionRemoteDelete:
-		return fmt.Sprintf("git push %s --delete %s", shellQuote(remote), shellQuote(opts.Branch)), nil
+		return fmt.Sprintf("git -C %s push %s --delete %s", shellQuote(worktree), shellQuote(remote), shellQuote(opts.Branch)), nil
 	default:
 		return "", fmt.Errorf("unsupported external provider action: %s", opts.Action)
 	}

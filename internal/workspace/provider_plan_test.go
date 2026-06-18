@@ -29,6 +29,9 @@ func TestPlanExternalProviderPushCommands(t *testing.T) {
 	if planned.Status != "planned" || planned.Intent.IntentID == "" || planned.Intent.IdempotencyKey == "" {
 		t.Fatalf("planned = %+v", planned)
 	}
+	if planned.Intent.Status != "planned" {
+		t.Fatalf("intent status = %s, want planned", planned.Intent.Status)
+	}
 	if got := len(readTestJournalEvents(t, fixture.Dir)); got != before {
 		t.Fatalf("planning appended events: got %d want %d", got, before)
 	}
@@ -113,7 +116,8 @@ func TestPlanExternalProviderMergeAndRemoteDeleteCommands(t *testing.T) {
 		if err != nil {
 			t.Fatalf("PlanExternalProviderCommand merge: %v", err)
 		}
-		if planned.Plan.ProviderCommand != "gh pr merge 35 --merge" {
+		wantProvider := "cd " + attempt.Worktree + " && gh pr merge 35 --merge"
+		if planned.Plan.ProviderCommand != wantProvider {
 			t.Fatalf("merge provider command = %s", planned.Plan.ProviderCommand)
 		}
 		if !strings.Contains(planned.Plan.ApprovalCommand, "--action merge") ||
@@ -141,7 +145,8 @@ func TestPlanExternalProviderMergeAndRemoteDeleteCommands(t *testing.T) {
 		if err != nil {
 			t.Fatalf("PlanExternalProviderCommand remote delete: %v", err)
 		}
-		if planned.Plan.ProviderCommand != "git push upstream --delete feature/test" {
+		wantProvider := "git -C " + attempt.Worktree + " push upstream --delete feature/test"
+		if planned.Plan.ProviderCommand != wantProvider {
 			t.Fatalf("remote delete provider command = %s", planned.Plan.ProviderCommand)
 		}
 		if !strings.Contains(planned.Plan.ApprovalCommand, "--action remote-delete") ||
