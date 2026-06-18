@@ -623,6 +623,9 @@ func Transition(opts TransitionOptions) (TransitionResult, error) {
 	if err != nil {
 		return TransitionResult{}, err
 	}
+	if err := validateResourcesNotFrozen(state.Events, state.ActiveLeases, []string{MergeUnitResource(opts.MergeUnitID)}, "workspace transition"); err != nil {
+		return TransitionResult{}, err
+	}
 	if opts.To == MergeUnitCompleted {
 		externalIntents, err := externalIntentSnapshots(state.Events)
 		if err != nil {

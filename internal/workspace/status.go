@@ -7,17 +7,18 @@ import (
 )
 
 type StatusResult struct {
-	Status          string                   `json:"status"`
-	WorkspaceDir    string                   `json:"workspace_dir"`
-	LockPath        string                   `json:"lock_path"`
-	ViewPath        string                   `json:"view_path"`
-	WorkspaceID     string                   `json:"workspace_id"`
-	BaseRef         string                   `json:"base_ref"`
-	TotalMergeUnits int                      `json:"total_merge_units"`
-	Counts          map[string]int           `json:"counts"`
-	Ready           []string                 `json:"ready"`
-	Blocked         []string                 `json:"blocked"`
-	MergeUnits      []SchedulerMergeUnitView `json:"merge_units"`
+	Status          string                     `json:"status"`
+	WorkspaceDir    string                     `json:"workspace_dir"`
+	LockPath        string                     `json:"lock_path"`
+	ViewPath        string                     `json:"view_path"`
+	WorkspaceID     string                     `json:"workspace_id"`
+	BaseRef         string                     `json:"base_ref"`
+	TotalMergeUnits int                        `json:"total_merge_units"`
+	Counts          map[string]int             `json:"counts"`
+	Ready           []string                   `json:"ready"`
+	Blocked         []string                   `json:"blocked"`
+	FrozenResources []ExternalIntentFreezeView `json:"frozen_resources,omitempty"`
+	MergeUnits      []SchedulerMergeUnitView   `json:"merge_units"`
 }
 
 func Status(workspaceDir string) (StatusResult, error) {
@@ -47,6 +48,7 @@ func Status(workspaceDir string) (StatusResult, error) {
 		Counts:          cloneCounts(view.Counts),
 		Ready:           append([]string{}, view.Ready...),
 		Blocked:         append([]string{}, view.Blocked...),
+		FrozenResources: append([]ExternalIntentFreezeView{}, view.FrozenResources...),
 		MergeUnits:      append([]SchedulerMergeUnitView{}, view.MergeUnits...),
 	}, nil
 }

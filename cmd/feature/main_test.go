@@ -45,6 +45,7 @@ func TestHelpCommandsExitSuccessfully(t *testing.T) {
 		{"workspace", "external", "intent", "--help"},
 		{"workspace", "external", "intent", "reserve", "--help"},
 		{"workspace", "external", "intent", "result", "--help"},
+		{"workspace", "external", "intent", "reconcile", "--help"},
 	}
 	for _, args := range tests {
 		stdout, stderr, err := runFeature(t, args...)
