@@ -58,7 +58,7 @@ func usage(w io.Writer) {
   feature validate <plan-dir> [--write-lock] [--json]
   feature status <plan-dir> [--json]
   feature implement next|start|commit|push|open-pr|review|merge|cleanup <plan-dir> [--merge-unit <id>] [--write-state] [metadata flags] [--json]
-  feature workspace init|validate|status|next|heartbeat|release|recover|refresh-branch|publish-refresh|evaluate-gates|gate|attempt|transition|contract|approve|external [args]
+  feature workspace init|validate|status|next|heartbeat|release|recover|refresh-branch|publish-refresh|evaluate-gates|gate|queue|attempt|transition|contract|approve|external [args]
   feature version`)
 }
 
@@ -303,7 +303,7 @@ func implementCommand(args []string) error {
 
 func workspaceCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("workspace requires subcommand: init, validate, status, next, heartbeat, release, recover, refresh-branch, publish-refresh, evaluate-gates, gate, attempt, transition, contract, approve, or external")
+		return fmt.Errorf("workspace requires subcommand: init, validate, status, next, heartbeat, release, recover, refresh-branch, publish-refresh, evaluate-gates, gate, queue, attempt, transition, contract, approve, or external")
 	}
 	action := args[0]
 	if isHelpCommand(action) {
@@ -313,7 +313,7 @@ func workspaceCommand(args []string) error {
 	if !workspace.IsSupportedAction(action) {
 		return fmt.Errorf("unsupported workspace action: %s", action)
 	}
-	if action != "attempt" && action != "contract" && action != "approve" && action != "external" && action != "gate" && hasHelpFlag(args[1:]) {
+	if action != "attempt" && action != "contract" && action != "approve" && action != "external" && action != "gate" && action != "queue" && hasHelpFlag(args[1:]) {
 		usageWorkspaceAction(os.Stdout, action)
 		return nil
 	}
@@ -338,6 +338,8 @@ func workspaceCommand(args []string) error {
 		return workspaceEvaluateGates(args[1:])
 	case "gate":
 		return workspaceGate(args[1:])
+	case "queue":
+		return workspaceQueue(args[1:])
 	case "attempt":
 		return workspaceAttempt(args[1:])
 	case "transition":
@@ -452,6 +454,75 @@ func workspaceGateOverride(args []string) error {
 		return writeJSON(result)
 	}
 	fmt.Printf("overrode %s gate=%s status=%s input_hash=%s expires_at=%s\n", result.Override.MergeUnitID, result.Override.Gate, result.Override.Status, result.Override.InputHash, result.Override.ExpiresAt)
+	return nil
+}
+
+func workspaceQueue(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("workspace queue requires subcommand: enter")
+	}
+	action := args[0]
+	if isHelpCommand(action) {
+		usageWorkspaceQueue(os.Stdout)
+		return nil
+	}
+	if action != "enter" {
+		return fmt.Errorf("unsupported workspace queue action: %s", action)
+	}
+	if hasHelpFlag(args[1:]) {
+		usageWorkspaceQueueAction(os.Stdout, action)
+		return nil
+	}
+	return workspaceQueueEnter(args[1:])
+}
+
+func workspaceQueueEnter(args []string) error {
+	fs := flag.NewFlagSet("workspace queue enter", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	mergeUnitID := fs.String("merge-unit", "", "Merge unit ID")
+	attemptID := fs.String("attempt", "", "Attempt ID")
+	agentID := fs.String("agent", "", "Agent ID that owns the lease")
+	leaseID := fs.String("lease", "", "Lease ID")
+	approvalID := fs.String("approval", "", "Approval ID")
+	scope := fs.String("scope", "", "Approval scope")
+	pr := fs.String("pr", "", "Pull request number or URL")
+	branch := fs.String("branch", "", "Branch target")
+	headSHA := fs.String("head-sha", "", "Approved head SHA")
+	baseSHA := fs.String("base-sha", "", "Approved base SHA")
+	asJSON := fs.Bool("json", false, "Emit JSON result")
+	if err := parsePermissive(fs, args, "merge-unit", "attempt", "agent", "lease", "approval", "scope", "pr", "branch", "head-sha", "base-sha"); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("workspace queue enter requires <workspace-dir>")
+	}
+	result, err := workspace.QueueMergeUnit(workspace.MergeQueueOptions{
+		WorkspaceDir: fs.Arg(0),
+		MergeUnitID:  *mergeUnitID,
+		AttemptID:    *attemptID,
+		AgentID:      *agentID,
+		LeaseID:      *leaseID,
+		ApprovalID:   *approvalID,
+		Scope:        *scope,
+		PR:           *pr,
+		Branch:       *branch,
+		HeadSHA:      *headSHA,
+		BaseSHA:      *baseSHA,
+	})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(result)
+	}
+	if result.Status == "blocked" {
+		fmt.Printf("queue blocked conditions=%d\n", len(result.BlockingConditions))
+		for _, condition := range result.BlockingConditions {
+			fmt.Printf("blocked type=%s resource=%s status=%s required_action=%s\n", condition.Type, condition.Resource, condition.Status, condition.RequiredAction)
+		}
+		return nil
+	}
+	fmt.Printf("queued %s attempt=%s position=%d approval=%s\n", result.Queue.MergeUnitID, result.Queue.AttemptID, result.Queue.Position, result.Queue.ApprovalID)
 	return nil
 }
 
@@ -1700,6 +1771,7 @@ func usageWorkspace(w io.Writer) {
   feature workspace publish-refresh <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --approval <id> --expected-remote-sha <sha> [--branch <name>] [--remote <name>] [--worktree <path>] [--scope <scope>] [--json]
   feature workspace evaluate-gates <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> [--json]
   feature workspace gate override <workspace-dir> --merge-unit <id> --attempt <id> --gate <gate> --status retained_by_operator --reason <text> --input-hash <hash> --head-sha <sha> --base-sha <sha> --operator <id> (--expires-in <duration> | --expires-at <timestamp>) [--json]
+  feature workspace queue enter <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> (--branch <name> | --pr <id>) --head-sha <sha> --base-sha <sha> [--approval <id>] [--scope <scope>] [--json]
   feature workspace attempt start <workspace-dir> --merge-unit <id> --agent <id> --lease <id> --base-sha <sha> [--mode fresh-from-base] [--json]
   feature workspace attempt abandon <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --reason <text> [--json]
   feature workspace transition <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --from <status> --to <status> --evidence <key=value> [--evidence <key=value>] [--json]
@@ -1769,6 +1841,8 @@ Plans an approved force-with-lease publish of the latest successful local refres
 Computes and records attempt-scoped review, contract, security, test, and merge approval gates.`)
 	case "gate":
 		usageWorkspaceGate(w)
+	case "queue":
+		usageWorkspaceQueue(w)
 	case "transition":
 		fmt.Fprintln(w, `Usage:
   feature workspace transition <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --from <status> --to <status> --evidence <key=value> [--evidence <key=value>] [--json]
@@ -1803,6 +1877,25 @@ func usageWorkspaceGateAction(w io.Writer, action string) {
 Records a retained_by_operator override for an overridable gate.`)
 	default:
 		usageWorkspaceGate(w)
+	}
+}
+
+func usageWorkspaceQueue(w io.Writer) {
+	fmt.Fprintln(w, `Usage:
+  feature workspace queue enter <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> (--branch <name> | --pr <id>) --head-sha <sha> --base-sha <sha> [--approval <id>] [--scope <scope>] [--json]
+
+Adds an attempt to the CAS-protected global merge queue after dependencies, contracts, gates, approvals, and blocking conditions are clear.`)
+}
+
+func usageWorkspaceQueueAction(w io.Writer, action string) {
+	switch action {
+	case "enter":
+		fmt.Fprintln(w, `Usage:
+  feature workspace queue enter <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> (--branch <name> | --pr <id>) --head-sha <sha> --base-sha <sha> [--approval <id>] [--scope <scope>] [--json]
+
+Queues a ready attempt for merge using a current merge approval and current gate evaluation.`)
+	default:
+		usageWorkspaceQueue(w)
 	}
 }
 

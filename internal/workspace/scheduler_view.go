@@ -30,6 +30,7 @@ type SchedulerView struct {
 	WorkspaceID     string                     `json:"workspace_id"`
 	BaseRef         string                     `json:"base_ref"`
 	MergeUnits      []SchedulerMergeUnitView   `json:"merge_units"`
+	MergeQueue      []MergeQueueEntryView      `json:"merge_queue,omitempty"`
 	Counts          map[string]int             `json:"counts"`
 	Ready           []string                   `json:"ready"`
 	Blocked         []string                   `json:"blocked"`
@@ -50,6 +51,7 @@ type SchedulerMergeUnitView struct {
 	CurrentAttempt     *SchedulerAttemptView        `json:"current_attempt,omitempty"`
 	ContractBindings   []ContractBindingStatus      `json:"contract_bindings,omitempty"`
 	Approvals          []ApprovalView               `json:"approvals,omitempty"`
+	MergeQueue         *MergeQueueEntryView         `json:"merge_queue,omitempty"`
 }
 
 type SchedulerBlockingCondition struct {
@@ -64,6 +66,7 @@ type SchedulerBlockingCondition struct {
 	Status         string `json:"status,omitempty"`
 	RequiredAction string `json:"required_action,omitempty"`
 	EvidencePath   string `json:"evidence_path,omitempty"`
+	Gate           string `json:"gate,omitempty"`
 }
 
 type SchedulerLeaseView struct {
@@ -148,8 +151,9 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 	leases := newLeaseTracker()
 	externalIntents := newExternalIntentTracker()
 	refreshes := newRefreshTracker()
+	queues := newMergeQueueTracker()
 	for _, event := range events {
-		if err := applySchedulerEvent(unitByID, attempts, lifecycles, leases, externalIntents, refreshes, event); err != nil {
+		if err := applySchedulerEvent(unitByID, attempts, lifecycles, leases, externalIntents, refreshes, queues, event); err != nil {
 			return SchedulerView{}, err
 		}
 	}
@@ -210,24 +214,30 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 		if unit.Status == MergeUnitPending {
 			unit.BlockedBy = incompleteDependencies(unit.Dependencies, unitByID)
 			unit.BlockingConditions = schedulerBlockingConditions(unit.BlockedBy, unit.ContractBindings, freezesByResource[MergeUnitResource(unit.ID)], refreshConditions)
-			if unit.ActiveLease != nil {
-				continue
-			}
-			if len(unit.BlockingConditions) == 0 {
-				view.Ready = append(view.Ready, unit.ID)
-			} else {
-				view.Blocked = append(view.Blocked, unit.ID)
-			}
+		}
+	}
+	ensureLifecycleCounts(view.Counts)
+	if err := populateMergeQueue(&view, lock, events, unitByID, attempts, approvals, queues, now); err != nil {
+		return SchedulerView{}, err
+	}
+	for i := range view.MergeUnits {
+		unit := &view.MergeUnits[i]
+		if unit.Status != MergeUnitPending || unit.ActiveLease != nil || unit.MergeQueue != nil {
+			continue
+		}
+		if len(unit.BlockingConditions) == 0 {
+			view.Ready = append(view.Ready, unit.ID)
+		} else {
+			view.Blocked = append(view.Blocked, unit.ID)
 		}
 	}
 	sort.Strings(view.Ready)
 	sort.Strings(view.Blocked)
 	sort.Strings(view.Leased)
-	ensureLifecycleCounts(view.Counts)
 	return view, nil
 }
 
-func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, attempts *attemptTracker, lifecycles *lifecycleTracker, leases *leaseTracker, externalIntents *externalIntentTracker, refreshes *refreshTracker, event JournalEvent) error {
+func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, attempts *attemptTracker, lifecycles *lifecycleTracker, leases *leaseTracker, externalIntents *externalIntentTracker, refreshes *refreshTracker, queues *mergeQueueTracker, event JournalEvent) error {
 	switch event.Type {
 	case EventWorkspaceCreated, EventWorkspaceValidated:
 		return nil
@@ -257,6 +267,8 @@ func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, attempts *
 		return nil
 	case EventGateOverrideRecorded:
 		return validateGateOverrideEvent(event)
+	case EventMergeQueueEntered:
+		return queues.Apply(event)
 	default:
 		return fmt.Errorf("unknown scheduler event type %q", event.Type)
 	}
