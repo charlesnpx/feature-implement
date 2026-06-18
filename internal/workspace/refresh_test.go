@@ -43,6 +43,46 @@ func TestValidateRefreshBackupRefRejectsOptionLikeRef(t *testing.T) {
 	}
 }
 
+func TestRefreshInputChangesPayloadReplaysInMemory(t *testing.T) {
+	mergeUnitID := "foundation:story-a"
+	attemptID := "attempt-1"
+	resource := RefreshResource(mergeUnitID + ":" + attemptID)
+	baseResource := RefreshInputResource(mergeUnitID, attemptID, refreshInputBase)
+	event := JournalEvent{
+		ID:   "evt-refresh-inputs",
+		Type: EventBranchRefreshRecorded,
+		Payload: map[string]any{
+			eventPayloadMergeUnitIDKey:  mergeUnitID,
+			eventPayloadAttemptIDKey:    attemptID,
+			eventPayloadAgentIDKey:      "worker-a",
+			eventPayloadLeaseIDKey:      "lease-1",
+			eventPayloadStatusKey:       RefreshStatusSucceeded,
+			eventPayloadBranchKey:       "feature/story-a",
+			eventPayloadWorktreeKey:     "/tmp/story-a",
+			eventPayloadOldBaseKey:      "base-sha-1",
+			eventPayloadNewBaseKey:      "base-sha-2",
+			eventPayloadPreHeadKey:      "head-sha-1",
+			eventPayloadPostHeadKey:     "head-sha-1",
+			eventPayloadBackupRefKey:    "backup-ref",
+			eventPayloadEvidencePathKey: filepath.Join(StateDirName, "evidence", "refresh", "inputs.json"),
+			eventPayloadInputChangesKey: refreshInputChangesPayload([]RefreshInputChange{{
+				Input:    refreshInputBase,
+				OldValue: "base-sha-1",
+				NewValue: "base-sha-2",
+				Resource: baseResource,
+			}}),
+		},
+		WriteSet: []string{resource, baseResource},
+	}
+	snapshot, err := refreshSnapshotFromEvent(event)
+	if err != nil {
+		t.Fatalf("refreshSnapshotFromEvent: %v", err)
+	}
+	if len(snapshot.InputChanges) != 1 || snapshot.InputChanges[0].Input != refreshInputBase || snapshot.InputChanges[0].Resource != baseResource {
+		t.Fatalf("input changes = %+v", snapshot.InputChanges)
+	}
+}
+
 func TestRefreshVerificationFailureBlocksCurrentAttempt(t *testing.T) {
 	fixture, claim, attempt := newApprovalAttemptFixture(t)
 	revisions, err := ResourceRevisions(fixture.Dir)

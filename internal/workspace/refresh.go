@@ -504,8 +504,8 @@ func refreshInputChangeResources(changes []RefreshInputChange) []string {
 	return resources
 }
 
-func refreshInputChangesPayload(changes []RefreshInputChange) []map[string]any {
-	payload := make([]map[string]any, 0, len(changes))
+func refreshInputChangesPayload(changes []RefreshInputChange) []any {
+	payload := make([]any, 0, len(changes))
 	for _, change := range changes {
 		payload = append(payload, map[string]any{
 			"input":     change.Input,
