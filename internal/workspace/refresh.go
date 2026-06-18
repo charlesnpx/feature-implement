@@ -635,6 +635,9 @@ func appendRefreshEventAfterMutation(workspaceDir string, evidence RefreshEviden
 		if err := validateFreshRefreshState(state, evidence, recordedAt); err != nil {
 			return RefreshBranchResult{}, err
 		}
+		if err := validateResourcesNotFrozen(state.Events, state.ActiveLeases, []string{MergeUnitResource(evidence.MergeUnitID)}, "workspace refresh-branch"); err != nil {
+			return RefreshBranchResult{}, err
+		}
 		result, err := appendRefreshEvent(workspaceDir, state, evidence, evidencePath, recordedAt, expectedRefreshRevision)
 		if err == nil {
 			return result, nil

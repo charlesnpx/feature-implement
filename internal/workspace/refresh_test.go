@@ -400,6 +400,55 @@ func TestRefreshBranchBlockedByExternalIntentFreeze(t *testing.T) {
 	}
 }
 
+func TestAppendRefreshEventAfterMutationRejectsFreshExternalIntentFreeze(t *testing.T) {
+	fixture, claim, attempt, approval := newExternalIntentFixture(t, ExternalActionPush)
+	revisions, err := ResourceRevisions(fixture.Dir)
+	if err != nil {
+		t.Fatalf("ResourceRevisions: %v", err)
+	}
+	resource := RefreshResource(claim.MergeUnitID + ":" + attempt.AttemptID)
+	originalRefreshRevision := revisions[resource]
+	if _, err := Heartbeat(LeaseOptions{
+		WorkspaceDir:  fixture.Dir,
+		AgentID:       "worker-a",
+		LeaseID:       claim.LeaseID,
+		LeaseDuration: 14 * 24 * time.Hour,
+		Now:           fixedJournalTime("2026-06-17T10:02:00Z"),
+	}); err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	reserveExternalIntentForTest(t, fixture, claim, attempt, approval, "feature/test", "head-sha", "2026-06-17T10:03:00Z")
+
+	evidence := RefreshEvidence{
+		SchemaVersion: 1,
+		WorkspaceID:   fixture.Manifest.ID,
+		BaseRef:       fixtureWorkspaceBaseRef,
+		MergeUnitID:   claim.MergeUnitID,
+		AttemptID:     attempt.AttemptID,
+		AgentID:       "worker-a",
+		LeaseID:       claim.LeaseID,
+		Local:         true,
+		Branch:        attempt.Branch,
+		Worktree:      attempt.Worktree,
+		OldBase:       attempt.BaseSHA,
+		NewBase:       "new-base-sha",
+		PreHead:       "pre-head-sha",
+		PostHead:      "post-head-sha",
+		BackupRef:     "backup-ref",
+		Verification: RefreshVerification{
+			Status: RefreshStatusSucceeded,
+		},
+	}
+	_, err = appendRefreshEventAfterMutation(fixture.Dir, evidence, filepath.Join(StateDirName, "evidence", "refresh", "fresh-freeze.json"), fixedJournalTime("2026-06-17T10:04:00Z")(), originalRefreshRevision)
+	if err == nil || !strings.Contains(err.Error(), "workspace refresh-branch blocked by frozen resource") {
+		t.Fatalf("fresh freeze error = %v", err)
+	}
+	events := readTestJournalEvents(t, fixture.Dir)
+	if latest, ok := latestRefresh(events, claim.MergeUnitID, attempt.AttemptID); ok {
+		t.Fatalf("fresh freeze should not record refresh, got %+v", latest)
+	}
+}
+
 func TestMatchingRemoteTrackingRefRequiresExactRemoteBranch(t *testing.T) {
 	remotes := "origin\nupstream\n"
 	refs := strings.Join([]string{

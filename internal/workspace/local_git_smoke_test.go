@@ -298,6 +298,7 @@ func TestLocalGitRefreshRejectsRemoteRefSmoke(t *testing.T) {
 	})
 	runGit(t, gitPath, gitEnv, repoDir, "worktree", "add", "-b", attempt.Branch, attempt.Worktree, attempt.BaseRef)
 	worktreeAdded = true
+	runGit(t, gitPath, gitEnv, repoDir, "remote", "add", "origin", filepath.Join(root, "origin.git"))
 	runGit(t, gitPath, gitEnv, repoDir, "update-ref", "refs/remotes/origin/"+attempt.Branch, baseSHA)
 
 	_, err = RefreshBranch(RefreshBranchOptions{
