@@ -319,6 +319,8 @@ func workspaceCommand(args []string) error {
 		return nil
 	}
 	switch action {
+	case "init":
+		return workspaceInit(args[1:])
 	case "validate":
 		return workspaceValidate(args[1:])
 	case "status":
@@ -354,6 +356,33 @@ func workspaceCommand(args []string) error {
 	default:
 		return workspace.ErrNotImplemented(action)
 	}
+}
+
+func workspaceInit(args []string) error {
+	fs := flag.NewFlagSet("workspace init", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	manifest := fs.String("manifest", "", "Path to feature.workspace.yaml")
+	writeLock := fs.Bool("write-lock", false, "Write feature.workspace.lock.json")
+	asJSON := fs.Bool("json", false, "Emit JSON result")
+	if err := parsePermissive(fs, args, "manifest"); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("workspace init accepts only flags")
+	}
+	result, err := workspace.Init(workspace.InitOptions{ManifestPath: *manifest, WriteLock: *writeLock})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(result)
+	}
+	if result.LockPath != "" {
+		fmt.Printf("initialized %s lock=%s view=%s\n", result.WorkspaceDir, result.LockPath, result.ViewPath)
+		return nil
+	}
+	fmt.Printf("initialized %s\n", result.WorkspaceDir)
+	return nil
 }
 
 func workspaceEvaluateGates(args []string) error {

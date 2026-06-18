@@ -159,15 +159,102 @@ func TestWorkspaceCommandShell(t *testing.T) {
 		t.Fatalf("expected unsupported workspace action error:\nstdout=%s\nstderr=%s", stdout, stderr)
 	}
 
-	stdout, stderr, err = runFeature(t, "workspace", "init", "--manifest", "feature.workspace.yaml")
-	if err == nil {
-		t.Fatalf("workspace init stub should fail until implemented")
+}
+
+func TestWorkspaceInitCommandWritesLockAndView(t *testing.T) {
+	workspaceDir := workspaceWithPlanLocks(t)
+	manifestPath := filepath.Join(workspaceDir, "feature.workspace.yaml")
+
+	stdout, stderr, err := runFeature(t, "workspace", "init", "--manifest", manifestPath, "--write-lock", "--json")
+	if err != nil {
+		t.Fatalf("feature workspace init failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
 	}
-	if !strings.Contains(stderr, "workspace init is not implemented yet") {
-		t.Fatalf("expected init stub error:\nstdout=%s\nstderr=%s", stdout, stderr)
+	var result struct {
+		Status           string `json:"status"`
+		WorkspaceDir     string `json:"workspace_dir"`
+		ManifestPath     string `json:"manifest_path"`
+		LockPath         string `json:"lock_path"`
+		ViewPath         string `json:"view_path"`
+		WorkspaceID      string `json:"workspace_id"`
+		PlanCount        int    `json:"plan_count"`
+		MergeUnitCount   int    `json:"merge_unit_count"`
+		SchedulerReady   int    `json:"scheduler_ready"`
+		SchedulerBlocked int    `json:"scheduler_blocked"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("stdout is not workspace init JSON: %v\n%s", err, stdout)
+	}
+	if result.Status != "initialized" || result.WorkspaceDir != workspaceDir || result.ManifestPath != manifestPath {
+		t.Fatalf("init paths = %+v", result)
+	}
+	if result.WorkspaceID != "workspace-a" || result.PlanCount != 1 || result.MergeUnitCount != 1 {
+		t.Fatalf("init counts = %+v", result)
+	}
+	if result.SchedulerReady != 1 || result.SchedulerBlocked != 0 {
+		t.Fatalf("scheduler counts = %+v", result)
+	}
+	for _, path := range []string{result.LockPath, result.ViewPath} {
+		if path == "" {
+			t.Fatalf("init omitted output path: %+v", result)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected init output %s: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(workspacepkg.EventsPath(workspaceDir)); !os.IsNotExist(err) {
+		t.Fatalf("init should not create journal events, stat err=%v", err)
+	}
+
+	stdout, stderr, err = runFeature(t, "workspace", "status", workspaceDir, "--json")
+	if err != nil {
+		t.Fatalf("feature workspace status after init failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var status struct {
+		Ready []string `json:"ready"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &status); err != nil {
+		t.Fatalf("status stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if strings.Join(status.Ready, ",") != "foundation:story-a" {
+		t.Fatalf("status ready = %+v", status.Ready)
+	}
+
+	stdout, stderr, err = runFeature(t, "workspace", "next", workspaceDir, "--agent", "worker-a", "--claim", "--json")
+	if err != nil {
+		t.Fatalf("feature workspace next after init failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var claim struct {
+		Status      string `json:"status"`
+		MergeUnitID string `json:"merge_unit_id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &claim); err != nil {
+		t.Fatalf("claim stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if claim.Status != "claimed" || claim.MergeUnitID != "foundation:story-a" {
+		t.Fatalf("claim = %+v", claim)
+	}
+
+	if _, stderr, err = runFeature(t, "workspace", "init", "--manifest", manifestPath, "--write-lock", "--json"); err != nil {
+		t.Fatalf("feature workspace init rerun failed: %v\nstderr=%s", err, stderr)
+	}
+}
+
+func TestWorkspaceInitCommandRequiresCanonicalManifest(t *testing.T) {
+	workspaceDir := workspaceWithPlanLocks(t)
+	nonCanonicalPath := filepath.Join(workspaceDir, "workspace.yaml")
+	if err := os.WriteFile(nonCanonicalPath, []byte("schema_version: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := runFeature(t, "workspace", "init", "--manifest", nonCanonicalPath, "--json")
+	if err == nil {
+		t.Fatalf("feature workspace init should reject non-canonical manifest")
+	}
+	if !strings.Contains(stderr, "workspace init requires --manifest to point to feature.workspace.yaml") {
+		t.Fatalf("expected canonical manifest error:\nstdout=%s\nstderr=%s", stdout, stderr)
 	}
 	if strings.Contains(stdout, "Usage:") || strings.Contains(stderr, "Usage:") {
-		t.Fatalf("workspace init stub should not print usage:\nstdout=%s\nstderr=%s", stdout, stderr)
+		t.Fatalf("canonical manifest error should not print usage:\nstdout=%s\nstderr=%s", stdout, stderr)
 	}
 }
 

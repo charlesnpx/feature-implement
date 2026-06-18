@@ -23,6 +23,25 @@ type ValidateOptions struct {
 	WriteLock    bool
 }
 
+type InitOptions struct {
+	ManifestPath string
+	WriteLock    bool
+}
+
+type InitResult struct {
+	Status           string `json:"status"`
+	WorkspaceDir     string `json:"workspace_dir"`
+	ManifestPath     string `json:"manifest_path"`
+	LockPath         string `json:"lock_path,omitempty"`
+	ViewPath         string `json:"view_path,omitempty"`
+	WorkspaceID      string `json:"workspace_id"`
+	PlanCount        int    `json:"plan_count"`
+	MergeUnitCount   int    `json:"merge_unit_count"`
+	ContractCount    int    `json:"contract_count"`
+	SchedulerReady   int    `json:"scheduler_ready,omitempty"`
+	SchedulerBlocked int    `json:"scheduler_blocked,omitempty"`
+}
+
 type ValidateResult struct {
 	Status       string        `json:"status"`
 	WorkspaceDir string        `json:"workspace_dir"`
@@ -85,6 +104,50 @@ type WorkspaceGatePolicyRetentionRuleLock struct {
 type loadedPlanLock struct {
 	Ref  WorkspacePlanRef
 	Lock planpkg.Lock
+}
+
+func Init(opts InitOptions) (InitResult, error) {
+	if opts.ManifestPath == "" {
+		return InitResult{}, fmt.Errorf("workspace init requires --manifest")
+	}
+	manifestPath := filepath.Clean(opts.ManifestPath)
+	if filepath.Base(manifestPath) != ManifestFileName {
+		return InitResult{}, fmt.Errorf("workspace init requires --manifest to point to %s", ManifestFileName)
+	}
+	workspaceDir := filepath.Dir(manifestPath)
+	manifest, err := ReadManifest(manifestPath)
+	if err != nil {
+		return InitResult{}, err
+	}
+	lock, err := BuildLock(workspaceDir, manifest)
+	if err != nil {
+		return InitResult{}, err
+	}
+	result := InitResult{
+		Status:         "initialized",
+		WorkspaceDir:   workspaceDir,
+		ManifestPath:   manifestPath,
+		WorkspaceID:    lock.WorkspaceID,
+		PlanCount:      len(lock.Plans),
+		MergeUnitCount: len(lock.MergeUnits),
+		ContractCount:  len(lock.ContractGates),
+	}
+	if !opts.WriteLock {
+		return result, nil
+	}
+	lockPath := filepath.Join(workspaceDir, LockFileName)
+	if err := writeStableJSON(lockPath, lock); err != nil {
+		return InitResult{}, err
+	}
+	view, err := RebuildSchedulerView(workspaceDir)
+	if err != nil {
+		return InitResult{}, err
+	}
+	result.LockPath = lockPath
+	result.ViewPath = SchedulerViewPath(workspaceDir)
+	result.SchedulerReady = len(view.Ready)
+	result.SchedulerBlocked = len(view.Blocked)
+	return result, nil
 }
 
 func Validate(opts ValidateOptions) (ValidateResult, error) {
