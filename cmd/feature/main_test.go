@@ -35,6 +35,8 @@ func TestHelpCommandsExitSuccessfully(t *testing.T) {
 		{"workspace", "contract", "--help"},
 		{"workspace", "contract", "publish", "--help"},
 		{"workspace", "contract", "verify", "--help"},
+		{"workspace", "contract", "bind", "--help"},
+		{"workspace", "contract", "check-contracts", "--help"},
 	}
 	for _, args := range tests {
 		stdout, stderr, err := runFeature(t, args...)
@@ -930,6 +932,183 @@ func TestWorkspaceContractPublishAndVerifyCommandJSON(t *testing.T) {
 	}
 	if !strings.Contains(stdout, `"status":"ok"`) {
 		t.Fatalf("workspace status after contract publish = %s", stdout)
+	}
+}
+
+func TestWorkspaceContractBindAndCheckContractsCommandJSON(t *testing.T) {
+	workspaceDir := workspaceWithContractPlanLocks(t)
+	if _, stderr, err := runFeature(t, "workspace", "validate", workspaceDir, "--write-lock", "--json"); err != nil {
+		t.Fatalf("feature workspace validate failed: %v\nstderr=%s", err, stderr)
+	}
+	if stdout, stderr, err := runFeature(t,
+		"workspace", "contract", "publish", workspaceDir,
+		"--contract", "api-contract",
+		"--version", "v1",
+		"--producer-merge-unit", "foundation:story-a",
+		"--producer-commit", "producer-commit-cli",
+		"--command-result", "go test ./...=passed",
+		"--json",
+	); err != nil {
+		t.Fatalf("feature workspace contract publish failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+
+	stdout, stderr, err := runFeature(t, "workspace", "next", workspaceDir, "--agent", "worker-producer", "--claim", "--json")
+	if err != nil {
+		t.Fatalf("feature workspace next producer failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var producerClaim struct {
+		MergeUnitID string `json:"merge_unit_id"`
+		LeaseID     string `json:"lease_id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &producerClaim); err != nil {
+		t.Fatalf("producer claim stdout is not JSON: %v\n%s", err, stdout)
+	}
+	stdout, stderr, err = runFeature(t,
+		"workspace", "attempt", "start", workspaceDir,
+		"--merge-unit", producerClaim.MergeUnitID,
+		"--agent", "worker-producer",
+		"--lease", producerClaim.LeaseID,
+		"--base-sha", "producer-base-sha-cli",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace producer attempt start failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var producerAttempt struct {
+		AttemptID string `json:"attempt_id"`
+		Worktree  string `json:"worktree"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &producerAttempt); err != nil {
+		t.Fatalf("producer attempt stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if _, stderr, err = runFeature(t,
+		"workspace", "transition", workspaceDir,
+		"--merge-unit", producerClaim.MergeUnitID,
+		"--attempt", producerAttempt.AttemptID,
+		"--agent", "worker-producer",
+		"--lease", producerClaim.LeaseID,
+		"--from", "pending",
+		"--to", "in_progress",
+		"--evidence", "worktree="+producerAttempt.Worktree,
+		"--json",
+	); err != nil {
+		t.Fatalf("feature workspace producer transition start failed: %v\nstderr=%s", err, stderr)
+	}
+	if _, stderr, err = runFeature(t,
+		"workspace", "transition", workspaceDir,
+		"--merge-unit", producerClaim.MergeUnitID,
+		"--attempt", producerAttempt.AttemptID,
+		"--agent", "worker-producer",
+		"--lease", producerClaim.LeaseID,
+		"--from", "in_progress",
+		"--to", "completed",
+		"--evidence", "commit_sha=producer-commit-cli",
+		"--json",
+	); err != nil {
+		t.Fatalf("feature workspace producer transition complete failed: %v\nstderr=%s", err, stderr)
+	}
+
+	stdout, stderr, err = runFeature(t, "workspace", "next", workspaceDir, "--agent", "worker-consumer", "--claim", "--json")
+	if err != nil {
+		t.Fatalf("feature workspace next consumer failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var consumerClaim struct {
+		MergeUnitID string `json:"merge_unit_id"`
+		LeaseID     string `json:"lease_id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &consumerClaim); err != nil {
+		t.Fatalf("consumer claim stdout is not JSON: %v\n%s", err, stdout)
+	}
+	stdout, stderr, err = runFeature(t,
+		"workspace", "attempt", "start", workspaceDir,
+		"--merge-unit", consumerClaim.MergeUnitID,
+		"--agent", "worker-consumer",
+		"--lease", consumerClaim.LeaseID,
+		"--base-sha", "consumer-base-sha-cli",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace consumer attempt start failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var consumerAttempt struct {
+		AttemptID string `json:"attempt_id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &consumerAttempt); err != nil {
+		t.Fatalf("consumer attempt stdout is not JSON: %v\n%s", err, stdout)
+	}
+
+	stdout, stderr, err = runFeature(t,
+		"workspace", "contract", "check-contracts", workspaceDir,
+		"--merge-unit", consumerClaim.MergeUnitID,
+		"--attempt", consumerAttempt.AttemptID,
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace contract check before bind failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var before struct {
+		Status   string `json:"status"`
+		Bindings []struct {
+			ContractID string `json:"contract_id"`
+			Status     string `json:"status"`
+		} `json:"bindings"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &before); err != nil {
+		t.Fatalf("check before stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if before.Status != "missing" || len(before.Bindings) != 1 || before.Bindings[0].Status != "missing" {
+		t.Fatalf("check before bind = %+v", before)
+	}
+
+	stdout, stderr, err = runFeature(t,
+		"workspace", "contract", "bind", workspaceDir,
+		"--contract", "api-contract",
+		"--merge-unit", consumerClaim.MergeUnitID,
+		"--attempt", consumerAttempt.AttemptID,
+		"--agent", "worker-consumer",
+		"--lease", consumerClaim.LeaseID,
+		"--command-result", "go test ./...=passed",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace contract bind failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var bound struct {
+		Status       string `json:"status"`
+		ContractID   string `json:"contract_id"`
+		MergeUnitID  string `json:"merge_unit_id"`
+		AttemptID    string `json:"attempt_id"`
+		ArtifactHash string `json:"artifact_hash"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &bound); err != nil {
+		t.Fatalf("bind stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if bound.Status != "bound" || bound.ContractID != "api-contract" || bound.MergeUnitID != consumerClaim.MergeUnitID || bound.AttemptID != consumerAttempt.AttemptID || bound.ArtifactHash == "" {
+		t.Fatalf("bind result = %+v", bound)
+	}
+
+	stdout, stderr, err = runFeature(t,
+		"workspace", "contract", "check-contracts", workspaceDir,
+		"--merge-unit", consumerClaim.MergeUnitID,
+		"--attempt", consumerAttempt.AttemptID,
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace contract check after bind failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var after struct {
+		Status   string `json:"status"`
+		Bindings []struct {
+			ContractID        string `json:"contract_id"`
+			Status            string `json:"status"`
+			BoundArtifactHash string `json:"bound_artifact_hash"`
+		} `json:"bindings"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &after); err != nil {
+		t.Fatalf("check after stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if after.Status != "current" || len(after.Bindings) != 1 || after.Bindings[0].Status != "current" || after.Bindings[0].BoundArtifactHash != bound.ArtifactHash {
+		t.Fatalf("check after bind = %+v, bound=%+v", after, bound)
 	}
 }
 

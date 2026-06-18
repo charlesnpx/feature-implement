@@ -37,15 +37,16 @@ type SchedulerView struct {
 }
 
 type SchedulerMergeUnitView struct {
-	ID             string                `json:"id"`
-	PlanID         string                `json:"plan_id"`
-	MergeUnitID    string                `json:"merge_unit_id"`
-	StoryIDs       []string              `json:"story_ids"`
-	Dependencies   []string              `json:"dependencies,omitempty"`
-	Status         string                `json:"status"`
-	BlockedBy      []string              `json:"blocked_by,omitempty"`
-	ActiveLease    *SchedulerLeaseView   `json:"active_lease,omitempty"`
-	CurrentAttempt *SchedulerAttemptView `json:"current_attempt,omitempty"`
+	ID               string                  `json:"id"`
+	PlanID           string                  `json:"plan_id"`
+	MergeUnitID      string                  `json:"merge_unit_id"`
+	StoryIDs         []string                `json:"story_ids"`
+	Dependencies     []string                `json:"dependencies,omitempty"`
+	Status           string                  `json:"status"`
+	BlockedBy        []string                `json:"blocked_by,omitempty"`
+	ActiveLease      *SchedulerLeaseView     `json:"active_lease,omitempty"`
+	CurrentAttempt   *SchedulerAttemptView   `json:"current_attempt,omitempty"`
+	ContractBindings []ContractBindingStatus `json:"contract_bindings,omitempty"`
 }
 
 type SchedulerLeaseView struct {
@@ -161,6 +162,17 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 				Status:        attempt.Status,
 			}
 		}
+		attemptID := ""
+		if unit.CurrentAttempt != nil {
+			attemptID = unit.CurrentAttempt.AttemptID
+		}
+		bindings, err := contractBindingStatuses(lock, events, unit.ID, attemptID)
+		if err != nil {
+			return SchedulerView{}, err
+		}
+		if len(bindings) > 0 {
+			unit.ContractBindings = bindings
+		}
 		view.Counts[unit.Status]++
 		if unit.Status == MergeUnitPending {
 			unit.BlockedBy = incompleteDependencies(unit.Dependencies, unitByID)
@@ -198,6 +210,8 @@ func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, attempts *
 	case EventMergeUnitFailed:
 		return updateMergeUnitStatus(unitByID, attempts, lifecycles, leases, event, MergeUnitFailed)
 	case EventContractPublished:
+		return nil
+	case EventContractBound:
 		return nil
 	default:
 		return fmt.Errorf("unknown scheduler event type %q", event.Type)

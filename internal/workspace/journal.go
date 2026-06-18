@@ -361,7 +361,7 @@ func validateResourceKey(value string) error {
 		return fmt.Errorf("resource %q must use kind:id", value)
 	}
 	switch parts[0] {
-	case "workspace", "merge_unit", "lease", "base_ref", "contract":
+	case "workspace", "merge_unit", "lease", "base_ref", "contract", "contract_binding":
 		return nil
 	default:
 		return fmt.Errorf("unsupported resource kind %q", parts[0])
