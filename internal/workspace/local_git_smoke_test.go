@@ -103,6 +103,134 @@ func TestLocalGitAttemptWorktreeSmoke(t *testing.T) {
 	}
 }
 
+func TestLocalGitRefreshBranchSmoke(t *testing.T) {
+	if os.Getenv(localGitSmokeEnv) != "1" {
+		t.Skipf("set %s=1 to run the local git refresh smoke test", localGitSmokeEnv)
+	}
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git executable is unavailable")
+	}
+
+	root := t.TempDir()
+	hooksDir := filepath.Join(root, "no-hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitEnv := isolatedGitEnv(hooksDir)
+
+	repoDir := filepath.Join(root, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, gitPath, gitEnv, repoDir, "init")
+	runGit(t, gitPath, gitEnv, repoDir, "checkout", "-b", fixtureWorkspaceBaseRef)
+	runGit(t, gitPath, gitEnv, repoDir, "config", "user.email", "feature-smoke@example.test")
+	runGit(t, gitPath, gitEnv, repoDir, "config", "user.name", "Feature Smoke")
+	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, gitPath, gitEnv, repoDir, "add", "README.md")
+	runGit(t, gitPath, gitEnv, repoDir, "commit", "-m", "base")
+	baseSHA := strings.TrimSpace(runGitOutput(t, gitPath, gitEnv, repoDir, "rev-parse", "HEAD"))
+
+	fixture := newOnePlanWorkspaceFixture(t)
+	writeWorkspaceLock(t, fixture.Dir)
+	claim, err := Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	attempt, err := StartAttempt(AttemptStartOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		BaseSHA:      baseSHA,
+		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("StartAttempt: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(attempt.Worktree), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	worktreeAdded := false
+	backupRef := ""
+	t.Cleanup(func() {
+		if backupRef != "" {
+			runGitCleanup(gitPath, gitEnv, repoDir, "branch", "-D", backupRef)
+		}
+		if !worktreeAdded {
+			return
+		}
+		runGitCleanup(gitPath, gitEnv, repoDir, "worktree", "remove", "--force", attempt.Worktree)
+		runGitCleanup(gitPath, gitEnv, repoDir, "branch", "-D", attempt.Branch)
+	})
+	runGit(t, gitPath, gitEnv, repoDir, "worktree", "add", "-b", attempt.Branch, attempt.Worktree, attempt.BaseRef)
+	worktreeAdded = true
+
+	if err := os.WriteFile(filepath.Join(attempt.Worktree, "story.txt"), []byte("story work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, gitPath, gitEnv, attempt.Worktree, "add", "story.txt")
+	runGit(t, gitPath, gitEnv, attempt.Worktree, "commit", "-m", "story work")
+	preHead := strings.TrimSpace(runGitOutput(t, gitPath, gitEnv, attempt.Worktree, "rev-parse", "HEAD"))
+
+	if err := os.WriteFile(filepath.Join(repoDir, "base.txt"), []byte("new base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, gitPath, gitEnv, repoDir, "add", "base.txt")
+	runGit(t, gitPath, gitEnv, repoDir, "commit", "-m", "new base")
+	newBaseSHA := strings.TrimSpace(runGitOutput(t, gitPath, gitEnv, repoDir, "rev-parse", "HEAD"))
+
+	result, err := RefreshBranch(RefreshBranchOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Local:        true,
+		NewBase:      newBaseSHA,
+		CommandResults: []ContractCommandResult{{
+			Command: "go test ./...",
+			Status:  "passed",
+		}},
+		Now: fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("RefreshBranch: %v", err)
+	}
+	backupRef = result.Evidence.BackupRef
+	if result.Status != RefreshStatusSucceeded || result.Evidence.OldBase != baseSHA || result.Evidence.NewBase != newBaseSHA || result.Evidence.PreHead != preHead {
+		t.Fatalf("refresh result = %+v", result)
+	}
+	if result.Evidence.PostHead == preHead || result.Evidence.BackupRef == "" {
+		t.Fatalf("post refresh evidence = %+v", result.Evidence)
+	}
+	if len(result.Evidence.PatchIDsBefore) != 1 || len(result.Evidence.PatchIDsAfter) != 1 ||
+		result.Evidence.PatchIDsBefore[0].PatchID != result.Evidence.PatchIDsAfter[0].PatchID {
+		t.Fatalf("patch ids before=%+v after=%+v", result.Evidence.PatchIDsBefore, result.Evidence.PatchIDsAfter)
+	}
+	if len(result.Evidence.CommandResults) != 1 || result.Evidence.CommandResults[0].Command != "go test ./..." {
+		t.Fatalf("command results = %+v", result.Evidence.CommandResults)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.Dir, result.EvidencePath)); err != nil {
+		t.Fatalf("expected evidence file: %v", err)
+	}
+	view, err := RebuildSchedulerView(fixture.Dir)
+	if err != nil {
+		t.Fatalf("RebuildSchedulerView: %v", err)
+	}
+	if conditions := findSchedulerUnit(t, view, claim.MergeUnitID).BlockingConditions; len(conditions) != 0 {
+		t.Fatalf("unexpected blocking conditions = %+v", conditions)
+	}
+}
+
 func runGit(t *testing.T, gitPath string, gitEnv []string, dir string, args ...string) {
 	t.Helper()
 	_ = runGitOutput(t, gitPath, gitEnv, dir, args...)

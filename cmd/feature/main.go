@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -57,7 +58,7 @@ func usage(w io.Writer) {
   feature validate <plan-dir> [--write-lock] [--json]
   feature status <plan-dir> [--json]
   feature implement next|start|commit|push|open-pr|review|merge|cleanup <plan-dir> [--merge-unit <id>] [--write-state] [metadata flags] [--json]
-  feature workspace init|validate|status|next|heartbeat|release|recover|attempt|transition|contract|approve|external [args]
+  feature workspace init|validate|status|next|heartbeat|release|recover|refresh-branch|attempt|transition|contract|approve|external [args]
   feature version`)
 }
 
@@ -302,7 +303,7 @@ func implementCommand(args []string) error {
 
 func workspaceCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("workspace requires subcommand: init, validate, status, next, heartbeat, release, recover, attempt, transition, contract, approve, or external")
+		return fmt.Errorf("workspace requires subcommand: init, validate, status, next, heartbeat, release, recover, refresh-branch, attempt, transition, contract, approve, or external")
 	}
 	action := args[0]
 	if isHelpCommand(action) {
@@ -329,6 +330,8 @@ func workspaceCommand(args []string) error {
 		return workspaceRelease(args[1:])
 	case "recover":
 		return workspaceRecover(args[1:])
+	case "refresh-branch":
+		return workspaceRefreshBranch(args[1:])
 	case "attempt":
 		return workspaceAttempt(args[1:])
 	case "transition":
@@ -529,6 +532,58 @@ func workspaceRecover(args []string) error {
 		return writeJSON(result)
 	}
 	writeWorkspaceRecoverText(result)
+	return nil
+}
+
+func workspaceRefreshBranch(args []string) error {
+	fs := flag.NewFlagSet("workspace refresh-branch", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	local := fs.Bool("local", false, "Refresh an unpublished local branch")
+	mergeUnitID := fs.String("merge-unit", "", "Merge unit ID")
+	attemptID := fs.String("attempt", "", "Attempt ID")
+	agentID := fs.String("agent", "", "Agent ID that owns the lease")
+	leaseID := fs.String("lease", "", "Lease ID")
+	worktree := fs.String("worktree", "", "Worktree path; defaults to current attempt worktree")
+	newBase := fs.String("new-base", "", "New base ref or SHA")
+	backupRef := fs.String("backup-ref", "", "Backup branch ref; defaults to timestamped branch backup")
+	var commandResults commandResultFlags
+	fs.Var(&commandResults, "command-result", "Validation command result as command=status; repeatable")
+	asJSON := fs.Bool("json", false, "Emit JSON result")
+	if err := parsePermissive(fs, args, "merge-unit", "attempt", "agent", "lease", "worktree", "new-base", "backup-ref", "command-result"); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("workspace refresh-branch requires <workspace-dir>")
+	}
+	parsedResults, err := parseCommandResultFlags(commandResults)
+	if err != nil {
+		return err
+	}
+	result, err := workspace.RefreshBranch(workspace.RefreshBranchOptions{
+		WorkspaceDir:   fs.Arg(0),
+		MergeUnitID:    *mergeUnitID,
+		AttemptID:      *attemptID,
+		AgentID:        *agentID,
+		LeaseID:        *leaseID,
+		Local:          *local,
+		Worktree:       *worktree,
+		NewBase:        *newBase,
+		BackupRef:      *backupRef,
+		CommandResults: parsedResults,
+	})
+	if err != nil {
+		var verificationErr workspace.RefreshVerificationError
+		if *asJSON && errors.As(err, &verificationErr) {
+			if writeErr := writeJSON(verificationErr.Result); writeErr != nil {
+				return writeErr
+			}
+		}
+		return err
+	}
+	if *asJSON {
+		return writeJSON(result)
+	}
+	fmt.Printf("refreshed %s attempt=%s branch=%s backup=%s post_head=%s evidence=%s\n", result.MergeUnitID, result.AttemptID, result.Branch, result.Evidence.BackupRef, result.Evidence.PostHead, result.EvidencePath)
 	return nil
 }
 
@@ -1479,6 +1534,7 @@ func usageWorkspace(w io.Writer) {
   feature workspace heartbeat <workspace-dir> --agent <id> --lease <id> [--json]
   feature workspace release <workspace-dir> --agent <id> --lease <id> [--json]
   feature workspace recover <workspace-dir> [--json]
+  feature workspace refresh-branch <workspace-dir> --local --merge-unit <id> --attempt <id> --agent <id> --lease <id> --new-base <ref> [--worktree <path>] [--backup-ref <ref>] [--command-result <command=status>] [--json]
   feature workspace attempt start <workspace-dir> --merge-unit <id> --agent <id> --lease <id> --base-sha <sha> [--mode fresh-from-base] [--json]
   feature workspace attempt abandon <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --reason <text> [--json]
   feature workspace transition <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --from <status> --to <status> --evidence <key=value> [--evidence <key=value>] [--json]
@@ -1531,6 +1587,11 @@ Releases an active lease owned by an agent.`)
   feature workspace recover <workspace-dir> [--json]
 
 Recovers expired leases and rebuilds the scheduler view.`)
+	case "refresh-branch":
+		fmt.Fprintln(w, `Usage:
+  feature workspace refresh-branch <workspace-dir> --local --merge-unit <id> --attempt <id> --agent <id> --lease <id> --new-base <ref> [--worktree <path>] [--backup-ref <ref>] [--command-result <command=status>] [--json]
+
+Refreshes an unpublished local attempt branch with backup, rebase evidence, contribution preservation checks, and validation command results.`)
 	case "transition":
 		fmt.Fprintln(w, `Usage:
   feature workspace transition <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --from <status> --to <status> --evidence <key=value> [--evidence <key=value>] [--json]
