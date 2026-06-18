@@ -621,6 +621,79 @@ func TestRecordGateEvidenceRejectsMissingFields(t *testing.T) {
 	}
 }
 
+func TestOverrideGateFromStatusReflectsToolEvidence(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	if _, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir, WriteLock: true}); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	claim, attempt := startGateEvaluationAttempt(t, fixture.Dir)
+	appendGateRefreshEvent(t, fixture.Dir, claim, attempt, attempt.BaseSHA, attempt.BaseSHA, "head-sha-first", "head-sha-first", "2026-01-02T15:03:00Z")
+	evaluation, err := EvaluateGates(GateEvaluateOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      claim.AgentID,
+		LeaseID:      claim.LeaseID,
+		Now:          fixedWorkspaceTime("2026-01-02T15:04:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("EvaluateGates: %v", err)
+	}
+	if _, err := RecordGateEvidence(GateEvidenceOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      claim.AgentID,
+		LeaseID:      claim.LeaseID,
+		Gate:         "security",
+		Status:       GateStatusBlocked,
+		InputHash:    evaluation.InputHash,
+		HeadSHA:      "head-sha-first",
+		BaseSHA:      attempt.BaseSHA,
+		Command:      "gosec ./...",
+		Summary:      "security scan blocked",
+		Now:          fixedWorkspaceTime("2026-01-02T15:05:00Z"),
+	}); err != nil {
+		t.Fatalf("RecordGateEvidence: %v", err)
+	}
+
+	override, err := OverrideGate(GateOverrideOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		Gate:         "security",
+		Status:       GateStatusRetainedByOperator,
+		Reason:       "operator accepted documented risk",
+		InputHash:    evaluation.InputHash,
+		HeadSHA:      "head-sha-first",
+		BaseSHA:      attempt.BaseSHA,
+		Operator:     "operator-a",
+		ExpiresIn:    time.Hour,
+		Now:          fixedWorkspaceTime("2026-01-02T15:06:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("OverrideGate: %v", err)
+	}
+	if override.Override.FromStatus != GateStatusBlocked {
+		t.Fatalf("override from_status = %q, want %q", override.Override.FromStatus, GateStatusBlocked)
+	}
+	after, err := EvaluateGates(GateEvaluateOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      claim.AgentID,
+		LeaseID:      claim.LeaseID,
+		Now:          fixedWorkspaceTime("2026-01-02T15:07:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("EvaluateGates after override: %v", err)
+	}
+	gate := gateStatusByName(after.Gates)["security"]
+	if gate.Status != GateStatusRetainedByOperator || gate.ComputedStatus != GateStatusBlocked || gate.OverrideID != override.Override.OverrideID {
+		t.Fatalf("security gate after override = %+v", gate)
+	}
+}
+
 func TestOverrideGateBecomesStaleWhenInputsChange(t *testing.T) {
 	fixture := newOnePlanWorkspaceFixture(t)
 	if _, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir, WriteLock: true}); err != nil {

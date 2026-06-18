@@ -422,7 +422,10 @@ func OverrideGate(opts GateOverrideOptions) (GateOverrideResult, error) {
 	if opts.HeadSHA != headSHA {
 		return GateOverrideResult{}, fmt.Errorf("gate override head SHA %s does not match current head %s", opts.HeadSHA, headSHA)
 	}
-	gates := evaluateGateStatuses(input)
+	gates, err := evaluateGateStatusesWithEvidence(state.Events, input, inputHash)
+	if err != nil {
+		return GateOverrideResult{}, err
+	}
 	currentGate, ok := gateStatusByName(gates)[opts.Gate]
 	if !ok {
 		return GateOverrideResult{}, fmt.Errorf("unknown gate %s", opts.Gate)
@@ -831,6 +834,34 @@ func evaluateGateStatuses(input gateEvaluationInput) []GateStatusView {
 }
 
 func evaluateGateStatusesWithOverrides(events []JournalEvent, input gateEvaluationInput, inputHash string, evaluatedAt time.Time) ([]GateStatusView, error) {
+	gates, err := evaluateGateStatusesWithEvidence(events, input, inputHash)
+	if err != nil {
+		return nil, err
+	}
+	overrides, err := gateOverrideSnapshots(events)
+	if err != nil {
+		return nil, err
+	}
+	baseSHA, headSHA := gateInputSHAs(input)
+	for i, gate := range gates {
+		override, ok := overrides[gateOverrideKey(input.MergeUnitID, input.AttemptID, gate.Gate)]
+		if !ok || !override.Applies(inputHash, baseSHA, headSHA, evaluatedAt) {
+			continue
+		}
+		gates[i] = GateStatusView{
+			Gate:           gate.Gate,
+			Status:         GateStatusRetainedByOperator,
+			Reason:         override.Reason,
+			ComputedStatus: gate.Status,
+			OverrideID:     override.OverrideID,
+			Operator:       override.Operator,
+			ExpiresAt:      override.ExpiresAt.UTC().Format(time.RFC3339Nano),
+		}
+	}
+	return gates, nil
+}
+
+func evaluateGateStatusesWithEvidence(events []JournalEvent, input gateEvaluationInput, inputHash string) ([]GateStatusView, error) {
 	gates := evaluateGateStatuses(input)
 	evidenceByGate, err := gateEvidenceSnapshots(events)
 	if err != nil {
@@ -850,25 +881,6 @@ func evaluateGateStatusesWithOverrides(events []JournalEvent, input gateEvaluati
 			Command:    evidence.Command,
 			Reviewer:   evidence.Reviewer,
 			Summary:    evidence.Summary,
-		}
-	}
-	overrides, err := gateOverrideSnapshots(events)
-	if err != nil {
-		return nil, err
-	}
-	for i, gate := range gates {
-		override, ok := overrides[gateOverrideKey(input.MergeUnitID, input.AttemptID, gate.Gate)]
-		if !ok || !override.Applies(inputHash, baseSHA, headSHA, evaluatedAt) {
-			continue
-		}
-		gates[i] = GateStatusView{
-			Gate:           gate.Gate,
-			Status:         GateStatusRetainedByOperator,
-			Reason:         override.Reason,
-			ComputedStatus: gate.Status,
-			OverrideID:     override.OverrideID,
-			Operator:       override.Operator,
-			ExpiresAt:      override.ExpiresAt.UTC().Format(time.RFC3339Nano),
 		}
 	}
 	return gates, nil
