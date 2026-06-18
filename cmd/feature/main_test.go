@@ -568,6 +568,185 @@ func TestWorkspaceAttemptAbandonCommandJSON(t *testing.T) {
 	}
 }
 
+func TestWorkspaceAttemptRestartEnforcesCurrentAttempt(t *testing.T) {
+	workspaceDir := workspaceWithPlanLocks(t)
+	if _, stderr, err := runFeature(t, "workspace", "validate", workspaceDir, "--write-lock", "--json"); err != nil {
+		t.Fatalf("feature workspace validate failed: %v\nstderr=%s", err, stderr)
+	}
+	stdout, stderr, err := runFeature(t, "workspace", "next", workspaceDir, "--agent", "worker-a", "--claim", "--json")
+	if err != nil {
+		t.Fatalf("feature workspace next failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var claim struct {
+		MergeUnitID string `json:"merge_unit_id"`
+		LeaseID     string `json:"lease_id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &claim); err != nil {
+		t.Fatalf("claim stdout is not JSON: %v\n%s", err, stdout)
+	}
+
+	type attemptJSON struct {
+		Status        string `json:"status"`
+		MergeUnitID   string `json:"merge_unit_id"`
+		AttemptID     string `json:"attempt_id"`
+		AttemptNumber int    `json:"attempt_number"`
+		Branch        string `json:"branch"`
+		Worktree      string `json:"worktree"`
+		BaseSHA       string `json:"base_sha"`
+		Mode          string `json:"mode"`
+	}
+
+	stdout, stderr, err = runFeature(t,
+		"workspace", "attempt", "start", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--agent", "worker-a",
+		"--lease", claim.LeaseID,
+		"--base-sha", "first-base-sha",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace attempt start failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var first attemptJSON
+	if err := json.Unmarshal([]byte(stdout), &first); err != nil {
+		t.Fatalf("first attempt stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if first.AttemptID != "foundation:story-a:attempt-1" || first.AttemptNumber != 1 || first.BaseSHA != "first-base-sha" {
+		t.Fatalf("first attempt = %+v", first)
+	}
+
+	stdout, stderr, err = runFeature(t,
+		"workspace", "attempt", "abandon", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--attempt", first.AttemptID,
+		"--agent", "worker-a",
+		"--lease", claim.LeaseID,
+		"--reason", "restart with clean state",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace attempt abandon failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+
+	stdout, stderr, err = runFeature(t,
+		"workspace", "attempt", "start", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--agent", "worker-a",
+		"--lease", claim.LeaseID,
+		"--base-sha", "second-base-sha",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("second feature workspace attempt start failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var second attemptJSON
+	if err := json.Unmarshal([]byte(stdout), &second); err != nil {
+		t.Fatalf("second attempt stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if second.Status != "started" || second.MergeUnitID != claim.MergeUnitID || second.AttemptID != "foundation:story-a:attempt-2" || second.AttemptNumber != 2 {
+		t.Fatalf("second attempt result = %+v", second)
+	}
+	if second.BaseSHA != "second-base-sha" || second.Mode != "fresh-from-base" {
+		t.Fatalf("second attempt metadata = %+v", second)
+	}
+	if second.Branch != "feature/workspace-a/foundation/story-a/attempt-2" {
+		t.Fatalf("second branch = %q", second.Branch)
+	}
+	if !strings.Contains(second.Worktree, filepath.Join("state", "worktrees", "workspace-a", "foundation", "story-a", "attempt-2")) {
+		t.Fatalf("second worktree = %q", second.Worktree)
+	}
+	if second.Branch == first.Branch || second.Worktree == first.Worktree || second.BaseSHA == first.BaseSHA {
+		t.Fatalf("second attempt carried first metadata: first=%+v second=%+v", first, second)
+	}
+
+	stdout, stderr, err = runFeature(t,
+		"workspace", "transition", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--attempt", first.AttemptID,
+		"--agent", "worker-a",
+		"--lease", claim.LeaseID,
+		"--from", "pending",
+		"--to", "in_progress",
+		"--evidence", "worktree="+first.Worktree,
+		"--json",
+	)
+	if err == nil {
+		t.Fatalf("non-current attempt transition should fail\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+	if !strings.Contains(stderr, "attempt "+first.AttemptID+" is not current active attempt "+second.AttemptID) {
+		t.Fatalf("non-current transition error = %q", stderr)
+	}
+
+	stdout, stderr, err = runFeature(t,
+		"workspace", "transition", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--attempt", second.AttemptID,
+		"--agent", "worker-a",
+		"--lease", claim.LeaseID,
+		"--from", "pending",
+		"--to", "in_progress",
+		"--evidence", "worktree="+second.Worktree,
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("current attempt transition failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+
+	viewPath := filepath.Join(workspaceDir, "state", "scheduler.view.json")
+	if err := os.Remove(viewPath); err != nil {
+		if !os.IsNotExist(err) {
+			t.Fatalf("remove scheduler view: %v", err)
+		}
+	}
+	stdout, stderr, err = runFeature(t, "workspace", "status", workspaceDir, "--json")
+	if err != nil {
+		t.Fatalf("feature workspace status rebuild failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var status struct {
+		MergeUnits []struct {
+			ID             string `json:"id"`
+			Status         string `json:"status"`
+			CurrentAttempt *struct {
+				AttemptID     string `json:"attempt_id"`
+				AttemptNumber int    `json:"attempt_number"`
+				Branch        string `json:"branch"`
+				Worktree      string `json:"worktree"`
+				BaseSHA       string `json:"base_sha"`
+				Mode          string `json:"mode"`
+				Status        string `json:"status"`
+			} `json:"current_attempt,omitempty"`
+		} `json:"merge_units"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &status); err != nil {
+		t.Fatalf("status stdout is not JSON: %v\n%s", err, stdout)
+	}
+	found := false
+	for _, unit := range status.MergeUnits {
+		if unit.ID != claim.MergeUnitID {
+			continue
+		}
+		found = true
+		if unit.Status != "in_progress" {
+			t.Fatalf("merge unit status = %q", unit.Status)
+		}
+		if unit.CurrentAttempt == nil {
+			t.Fatalf("current attempt missing for %+v", unit)
+		}
+		if unit.CurrentAttempt.AttemptID != second.AttemptID ||
+			unit.CurrentAttempt.AttemptNumber != second.AttemptNumber ||
+			unit.CurrentAttempt.Branch != second.Branch ||
+			unit.CurrentAttempt.Worktree != second.Worktree ||
+			unit.CurrentAttempt.BaseSHA != second.BaseSHA ||
+			unit.CurrentAttempt.Mode != second.Mode ||
+			unit.CurrentAttempt.Status != "active" {
+			t.Fatalf("rebuilt current attempt = %+v, want second %+v", unit.CurrentAttempt, second)
+		}
+	}
+	if !found {
+		t.Fatalf("merge unit %s missing from status: %+v", claim.MergeUnitID, status.MergeUnits)
+	}
+}
+
 func TestWorkspaceTransitionCommandJSON(t *testing.T) {
 	workspaceDir := workspaceWithPlanLocks(t)
 	if _, stderr, err := runFeature(t, "workspace", "validate", workspaceDir, "--write-lock", "--json"); err != nil {
