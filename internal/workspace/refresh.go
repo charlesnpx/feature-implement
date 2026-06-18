@@ -618,6 +618,9 @@ func appendRefreshEventAfterMutation(workspaceDir string, evidence RefreshEviden
 		if err != nil {
 			return RefreshBranchResult{}, err
 		}
+		if err := validateFreshRefreshState(state, evidence, recordedAt); err != nil {
+			return RefreshBranchResult{}, err
+		}
 		result, err := appendRefreshEvent(workspaceDir, state, evidence, evidencePath, recordedAt, expectedRefreshRevision)
 		if err == nil {
 			return result, nil
@@ -632,6 +635,32 @@ func appendRefreshEventAfterMutation(workspaceDir string, evidence RefreshEviden
 		}
 	}
 	return RefreshBranchResult{}, lastErr
+}
+
+func validateFreshRefreshState(state leaseOperationState, evidence RefreshEvidence, observedAt time.Time) error {
+	lease, unit, err := requireOwnedActiveLease(state, evidence.LeaseID, evidence.AgentID)
+	if err != nil {
+		return err
+	}
+	if lease.MergeUnitID != evidence.MergeUnitID {
+		return fmt.Errorf("lease %s is for merge unit %s, not %s", evidence.LeaseID, lease.MergeUnitID, evidence.MergeUnitID)
+	}
+	switch unit.Status {
+	case MergeUnitCompleted, MergeUnitFailed:
+		return fmt.Errorf("merge unit %s lifecycle is %s", evidence.MergeUnitID, unit.Status)
+	}
+	attempts, err := attemptSnapshots(state.Events)
+	if err != nil {
+		return err
+	}
+	current, err := requireCurrentAttemptAt(attempts, evidence.MergeUnitID, evidence.AttemptID, observedAt)
+	if err != nil {
+		return err
+	}
+	if err := validateAttemptLeaseOwner(evidence.AttemptID, current.AgentID, current.LeaseID, evidence.AgentID, evidence.LeaseID); err != nil {
+		return err
+	}
+	return nil
 }
 
 func appendRefreshEvent(workspaceDir string, state leaseOperationState, evidence RefreshEvidence, evidencePath string, refreshedAt time.Time, expectedRefreshRevision int) (RefreshBranchResult, error) {
