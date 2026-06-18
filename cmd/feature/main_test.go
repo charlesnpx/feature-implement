@@ -954,8 +954,13 @@ func TestWorkspaceAttemptStartCommandJSON(t *testing.T) {
 		t.Fatalf("attempt stdout is not an object: %v\n%s", err, stdout)
 	}
 	for _, field := range []string{"story_ids", "dependencies"} {
-		if _, ok := attemptRaw[field]; !ok {
+		raw, ok := attemptRaw[field]
+		if !ok {
 			t.Fatalf("attempt worker packet omitted %s:\n%s", field, stdout)
+		}
+		var values []string
+		if err := json.Unmarshal(raw, &values); err != nil {
+			t.Fatalf("attempt worker packet %s is not a string array: %v\n%s", field, err, stdout)
 		}
 	}
 	if attempt.Status != "started" || attempt.MergeUnitID != "foundation:story-a" || attempt.AttemptID != "foundation:story-a:attempt-1" {
