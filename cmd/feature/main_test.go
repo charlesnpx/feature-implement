@@ -1455,6 +1455,94 @@ func TestWorkspaceEvaluateGatesCommandJSON(t *testing.T) {
 	}
 
 	stdout, stderr, err = runFeature(t,
+		"workspace", "gate", "record", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--attempt", attempt.AttemptID,
+		"--agent", "worker-a",
+		"--lease", claim.LeaseID,
+		"--gate", "review",
+		"--status", workspacepkg.GateStatusPassed,
+		"--input-hash", result.InputHash,
+		"--head-sha", "head-sha-cli",
+		"--base-sha", "base-sha-cli",
+		"--reviewer", "reviewer-a",
+		"--summary", "review passed",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace gate record failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var evidence struct {
+		Status   string `json:"status"`
+		Evidence struct {
+			EvidenceID string `json:"evidence_id"`
+			Gate       string `json:"gate"`
+			Status     string `json:"status"`
+			InputHash  string `json:"input_hash"`
+			Reviewer   string `json:"reviewer"`
+			Summary    string `json:"summary"`
+		} `json:"evidence"`
+		EventID string `json:"event_id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &evidence); err != nil {
+		t.Fatalf("gate record stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if evidence.Status != "recorded" ||
+		evidence.Evidence.EvidenceID == "" ||
+		evidence.Evidence.Gate != "review" ||
+		evidence.Evidence.Status != workspacepkg.GateStatusPassed ||
+		evidence.Evidence.InputHash != result.InputHash ||
+		evidence.Evidence.Reviewer != "reviewer-a" ||
+		evidence.Evidence.Summary != "review passed" ||
+		evidence.EventID == "" {
+		t.Fatalf("evidence result = %+v", evidence)
+	}
+	stdout, stderr, err = runFeature(t,
+		"workspace", "evaluate-gates", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--attempt", attempt.AttemptID,
+		"--agent", "worker-a",
+		"--lease", claim.LeaseID,
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace evaluate-gates after evidence failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var afterEvidence struct {
+		InputHash  string `json:"input_hash"`
+		OutputHash string `json:"output_hash"`
+		Gates      []struct {
+			Gate       string `json:"gate"`
+			Status     string `json:"status"`
+			EvidenceID string `json:"evidence_id"`
+			Reviewer   string `json:"reviewer"`
+			Summary    string `json:"summary"`
+		} `json:"gates"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &afterEvidence); err != nil {
+		t.Fatalf("evaluate-gates after evidence stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if afterEvidence.InputHash != result.InputHash || afterEvidence.OutputHash == result.OutputHash {
+		t.Fatalf("after evidence hashes = %+v before=%+v", afterEvidence, result)
+	}
+	foundReviewEvidence := false
+	for _, gate := range afterEvidence.Gates {
+		if gate.Gate != "review" {
+			continue
+		}
+		foundReviewEvidence = true
+		if gate.Status != workspacepkg.GateStatusPassed ||
+			gate.EvidenceID != evidence.Evidence.EvidenceID ||
+			gate.Reviewer != "reviewer-a" ||
+			gate.Summary != "review passed" {
+			t.Fatalf("review gate after evidence = %+v", gate)
+		}
+	}
+	if !foundReviewEvidence {
+		t.Fatalf("review gate missing after evidence: %+v", afterEvidence.Gates)
+	}
+
+	stdout, stderr, err = runFeature(t,
 		"workspace", "gate", "override", workspaceDir,
 		"--merge-unit", claim.MergeUnitID,
 		"--attempt", attempt.AttemptID,

@@ -421,21 +421,29 @@ func workspaceEvaluateGates(args []string) error {
 
 func workspaceGate(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("workspace gate requires subcommand: override")
+		return fmt.Errorf("workspace gate requires subcommand: override or record")
 	}
 	action := args[0]
 	if isHelpCommand(action) {
 		usageWorkspaceGate(os.Stdout)
 		return nil
 	}
-	if action != "override" {
+	switch action {
+	case "override":
+		if hasHelpFlag(args[1:]) {
+			usageWorkspaceGateAction(os.Stdout, action)
+			return nil
+		}
+		return workspaceGateOverride(args[1:])
+	case "record":
+		if hasHelpFlag(args[1:]) {
+			usageWorkspaceGateAction(os.Stdout, action)
+			return nil
+		}
+		return workspaceGateRecord(args[1:])
+	default:
 		return fmt.Errorf("unsupported workspace gate action: %s", action)
 	}
-	if hasHelpFlag(args[1:]) {
-		usageWorkspaceGateAction(os.Stdout, action)
-		return nil
-	}
-	return workspaceGateOverride(args[1:])
 }
 
 func workspaceGateOverride(args []string) error {
@@ -484,6 +492,53 @@ func workspaceGateOverride(args []string) error {
 		return writeJSON(result)
 	}
 	fmt.Printf("overrode %s gate=%s status=%s input_hash=%s expires_at=%s\n", result.Override.MergeUnitID, result.Override.Gate, result.Override.Status, result.Override.InputHash, result.Override.ExpiresAt)
+	return nil
+}
+
+func workspaceGateRecord(args []string) error {
+	fs := flag.NewFlagSet("workspace gate record", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	mergeUnitID := fs.String("merge-unit", "", "Merge unit ID")
+	attemptID := fs.String("attempt", "", "Attempt ID")
+	agentID := fs.String("agent", "", "Agent ID that owns the lease")
+	leaseID := fs.String("lease", "", "Lease ID")
+	gate := fs.String("gate", "", "Gate name")
+	status := fs.String("status", "", "Evidence status")
+	inputHash := fs.String("input-hash", "", "Evaluator input hash")
+	headSHA := fs.String("head-sha", "", "Pinned head SHA")
+	baseSHA := fs.String("base-sha", "", "Pinned base SHA")
+	command := fs.String("command", "", "Command that produced the evidence")
+	reviewer := fs.String("reviewer", "", "Reviewer identity that produced the evidence")
+	summary := fs.String("summary", "", "Evidence summary")
+	asJSON := fs.Bool("json", false, "Emit JSON result")
+	if err := parsePermissive(fs, args, "merge-unit", "attempt", "agent", "lease", "gate", "status", "input-hash", "head-sha", "base-sha", "command", "reviewer", "summary"); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("workspace gate record requires <workspace-dir>")
+	}
+	result, err := workspace.RecordGateEvidence(workspace.GateEvidenceOptions{
+		WorkspaceDir: fs.Arg(0),
+		MergeUnitID:  *mergeUnitID,
+		AttemptID:    *attemptID,
+		AgentID:      *agentID,
+		LeaseID:      *leaseID,
+		Gate:         *gate,
+		Status:       *status,
+		InputHash:    *inputHash,
+		HeadSHA:      *headSHA,
+		BaseSHA:      *baseSHA,
+		Command:      *command,
+		Reviewer:     *reviewer,
+		Summary:      *summary,
+	})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(result)
+	}
+	fmt.Printf("recorded %s gate=%s status=%s input_hash=%s evidence=%s\n", result.Evidence.MergeUnitID, result.Evidence.Gate, result.Evidence.Status, result.Evidence.InputHash, result.Evidence.EvidenceID)
 	return nil
 }
 
@@ -1950,8 +2005,9 @@ Records local lifecycle movement for the current active attempt.`)
 func usageWorkspaceGate(w io.Writer) {
 	fmt.Fprintln(w, `Usage:
   feature workspace gate override <workspace-dir> --merge-unit <id> --attempt <id> --gate <gate> --status retained_by_operator --reason <text> --input-hash <hash> --head-sha <sha> --base-sha <sha> --operator <id> (--expires-in <duration> | --expires-at <timestamp>) [--json]
+  feature workspace gate record <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --gate <review|security|test> --status <passed|blocked> --input-hash <hash> --head-sha <sha> --base-sha <sha> (--command <cmd> | --reviewer <id>) --summary <text> [--json]
 
-Records scoped operator overrides for overridable gates. Overrides are pinned to evaluator input hash, head SHA, base SHA, and expiry.`)
+Records scoped operator overrides and tool-proven gate evidence. Both are pinned to evaluator input hash, head SHA, and base SHA.`)
 }
 
 func usageWorkspaceGateAction(w io.Writer, action string) {
@@ -1961,6 +2017,11 @@ func usageWorkspaceGateAction(w io.Writer, action string) {
   feature workspace gate override <workspace-dir> --merge-unit <id> --attempt <id> --gate <gate> --status retained_by_operator --reason <text> --input-hash <hash> --head-sha <sha> --base-sha <sha> --operator <id> (--expires-in <duration> | --expires-at <timestamp>) [--json]
 
 Records a retained_by_operator override for an overridable gate.`)
+	case "record":
+		fmt.Fprintln(w, `Usage:
+  feature workspace gate record <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --gate <review|security|test> --status <passed|blocked> --input-hash <hash> --head-sha <sha> --base-sha <sha> (--command <cmd> | --reviewer <id>) --summary <text> [--json]
+
+Records tool-proven review, security, or test evidence for the current attempt.`)
 	default:
 		usageWorkspaceGate(w)
 	}
