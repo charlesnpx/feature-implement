@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1681,6 +1682,214 @@ func TestWorkspaceContractGateQueueSmokeCommandJSON(t *testing.T) {
 	})
 }
 
+func TestWorkspaceExternalRefreshRecoverySmokeCommandJSON(t *testing.T) {
+	t.Run("reports external intent result sources and recovery actions", func(t *testing.T) {
+		workspaceDir := workspaceWithPlanLocks(t)
+		var validated struct {
+			Status string `json:"status"`
+		}
+		runFeatureJSON(t, &validated, "workspace", "validate", workspaceDir, "--write-lock", "--json")
+		if validated.Status != "valid" {
+			t.Fatalf("validate = %+v", validated)
+		}
+
+		claim := claimWorkspaceForSmoke(t, workspaceDir, "worker-a")
+		attempt := startWorkspaceAttemptForSmoke(t, workspaceDir, claim, "base-sha-cli")
+		approvalID := grantWorkspaceSmokeApprovalForAction(t, workspaceDir, claim, attempt, workspacepkg.ExternalActionPush, "feature/test", "head-sha-cli", "base-sha-cli", 2)
+
+		var planned struct {
+			Status string `json:"status"`
+			Plan   struct {
+				ProviderCommand string   `json:"provider_command"`
+				IntentCommand   string   `json:"intent_command"`
+				Commands        []string `json:"commands"`
+			} `json:"plan"`
+			Intent struct {
+				Action string `json:"action"`
+				Target string `json:"target"`
+			} `json:"intent"`
+		}
+		runFeatureJSON(t, &planned,
+			"workspace", "external", "plan", workspaceDir,
+			"--merge-unit", claim.MergeUnitID,
+			"--attempt", attempt.AttemptID,
+			"--agent", claim.AgentID,
+			"--lease", claim.LeaseID,
+			"--approval", approvalID,
+			"--action", workspacepkg.ExternalActionPush,
+			"--branch", "feature/test",
+			"--head-sha", "head-sha-cli",
+			"--base-sha", "base-sha-cli",
+			"--json",
+		)
+		if planned.Status != "planned" || planned.Plan.ProviderCommand == "" || !strings.Contains(planned.Plan.IntentCommand, "feature workspace external intent reserve") {
+			t.Fatalf("provider plan = %+v", planned)
+		}
+		if planned.Intent.Action != workspacepkg.ExternalActionPush || planned.Intent.Target != "branch:feature/test" {
+			t.Fatalf("planned intent = %+v", planned.Intent)
+		}
+
+		reserved := reserveWorkspaceSmokeExternalIntent(t, workspaceDir, claim, attempt, approvalID, workspacepkg.ExternalActionPush, "feature/test", "head-sha-cli", "base-sha-cli")
+		status := workspaceSmokeExternalStatus(t, workspaceDir)
+		report := findWorkspaceSmokeExternalIntentReport(t, status.ExternalIntents, reserved.Intent.IntentID)
+		if report.ResultSource != workspacepkg.ExternalIntentResultSourceUnresolved ||
+			report.Status != "unresolved" ||
+			report.RequiredAction != "record_result" ||
+			report.Accepted {
+			t.Fatalf("unresolved report = %+v", report)
+		}
+		if !workspaceSmokeHasFrozenResource(status.FrozenResources, reserved.Intent.IntentID, "provider_target:push:branch:feature/test") ||
+			!workspaceSmokeHasBlocker(status.Blockers, "frozen_resource", "record_result", reserved.Intent.IntentID) {
+			t.Fatalf("unresolved freezes = frozen %+v blockers %+v", status.FrozenResources, status.Blockers)
+		}
+
+		recordWorkspaceSmokeExternalResult(t, workspaceDir, claim, attempt, reserved.Intent.IntentID, workspacepkg.ExternalResultSucceeded, "provider completed")
+		status = workspaceSmokeExternalStatus(t, workspaceDir)
+		report = findWorkspaceSmokeExternalIntentReport(t, status.ExternalIntents, reserved.Intent.IntentID)
+		if report.ResultSource != workspacepkg.ExternalIntentResultSourceTool ||
+			report.ResultStatus != workspacepkg.ExternalResultSucceeded ||
+			!report.Accepted ||
+			report.RequiredAction != "" ||
+			workspaceSmokeHasFrozenResource(status.FrozenResources, reserved.Intent.IntentID, "provider_target:push:branch:feature/test") {
+			t.Fatalf("tool-proven report = %+v frozen=%+v", report, status.FrozenResources)
+		}
+
+		operatorApprovalID := grantWorkspaceSmokeApprovalForAction(t, workspaceDir, claim, attempt, workspacepkg.ExternalActionOpenPR, "feature/operator", "head-sha-operator", "base-sha-cli", 1)
+		operatorIntent := reserveWorkspaceSmokeExternalIntent(t, workspaceDir, claim, attempt, operatorApprovalID, workspacepkg.ExternalActionOpenPR, "feature/operator", "head-sha-operator", "base-sha-cli")
+		var released struct {
+			Status string `json:"status"`
+		}
+		runFeatureJSON(t, &released,
+			"workspace", "release", workspaceDir,
+			"--agent", claim.AgentID,
+			"--lease", claim.LeaseID,
+			"--json",
+		)
+		if released.Status != "released" {
+			t.Fatalf("release = %+v", released)
+		}
+		status = workspaceSmokeExternalStatus(t, workspaceDir)
+		report = findWorkspaceSmokeExternalIntentReport(t, status.ExternalIntents, operatorIntent.Intent.IntentID)
+		if report.ResultSource != workspacepkg.ExternalIntentResultSourceUnresolved ||
+			report.Status != "unresolved" ||
+			report.RequiredAction != "operator_reconcile" ||
+			report.Accepted {
+			t.Fatalf("released unresolved report = %+v", report)
+		}
+
+		var reconciled struct {
+			Status string `json:"status"`
+			Result struct {
+				Status   string `json:"status"`
+				Accepted bool   `json:"accepted"`
+				Operator string `json:"operator"`
+			} `json:"result"`
+		}
+		runFeatureJSON(t, &reconciled,
+			"workspace", "external", "intent", "reconcile", workspaceDir,
+			"--intent", operatorIntent.Intent.IntentID,
+			"--operator", "operator-a",
+			"--details", "operator confirmed outcome",
+			"--json",
+		)
+		if reconciled.Status != "reconciled" ||
+			reconciled.Result.Status != workspacepkg.ExternalResultReconciledByOperator ||
+			!reconciled.Result.Accepted ||
+			reconciled.Result.Operator != "operator-a" {
+			t.Fatalf("reconcile = %+v", reconciled)
+		}
+		status = workspaceSmokeExternalStatus(t, workspaceDir)
+		report = findWorkspaceSmokeExternalIntentReport(t, status.ExternalIntents, operatorIntent.Intent.IntentID)
+		if report.ResultSource != workspacepkg.ExternalIntentResultSourceOperator ||
+			report.ResultStatus != workspacepkg.ExternalResultReconciledByOperator ||
+			report.Operator != "operator-a" ||
+			!report.Accepted {
+			t.Fatalf("operator-reconciled report = %+v", report)
+		}
+
+		appendExpiredWorkspaceSmokeLease(t, workspaceDir, claim.MergeUnitID, "lease-expired-smoke", "worker-expired")
+		var recovered workspaceSmokeRecoverResult
+		runFeatureJSON(t, &recovered, "workspace", "recover", workspaceDir, "--json")
+		if recovered.Status != "recovered" || recovered.RecoveredCount != 1 {
+			t.Fatalf("recover = %+v", recovered)
+		}
+		if len(recovered.Actions) != 1 ||
+			recovered.Actions[0].Type != workspacepkg.RecoveryActionRecoveredLease ||
+			recovered.Actions[0].MergeUnitID != claim.MergeUnitID ||
+			recovered.Actions[0].LeaseID != "lease-expired-smoke" ||
+			recovered.Actions[0].Status != "recovered" {
+			t.Fatalf("recover actions = %+v", recovered.Actions)
+		}
+		report = findWorkspaceSmokeExternalIntentReport(t, recovered.ExternalIntents, operatorIntent.Intent.IntentID)
+		if report.ResultSource != workspacepkg.ExternalIntentResultSourceOperator {
+			t.Fatalf("recover external report = %+v", report)
+		}
+	})
+
+	t.Run("refresh invalidates approvals and queue state", func(t *testing.T) {
+		ready := prepareContractGateQueueSmoke(t)
+		queued := queueContractGateSmoke(t, ready)
+		if queued.Status != "queued" || queued.Queue == nil {
+			t.Fatalf("initial queue = %+v", queued)
+		}
+
+		before := workspaceSmokeExternalStatus(t, ready.WorkspaceDir)
+		if len(before.MergeQueue) != 1 || before.MergeQueue[0].QueueID != queued.Queue.QueueID {
+			t.Fatalf("pre-refresh queue status = %+v", before.MergeQueue)
+		}
+		beforeConsumer := findWorkspaceStatusUnitForSmoke(t, before.MergeUnits, ready.ConsumerClaim.MergeUnitID)
+		if beforeConsumer.MergeQueue == nil || beforeConsumer.MergeQueue.QueueID != queued.Queue.QueueID {
+			t.Fatalf("pre-refresh consumer queue = %+v", beforeConsumer.MergeQueue)
+		}
+
+		appendWorkspaceSmokeRefresh(t, ready.WorkspaceDir, ready.ConsumerClaim.MergeUnitID, ready.ConsumerAttempt.AttemptID, ready.ConsumerAttempt.Branch, ready.ConsumerAttempt.Worktree, ready.BaseSHA, "consumer-base-sha-v2", ready.HeadSHA, "head-sha-v2")
+
+		after := workspaceSmokeExternalStatus(t, ready.WorkspaceDir)
+		if len(after.MergeQueue) != 0 {
+			t.Fatalf("post-refresh queue should be empty: %+v", after.MergeQueue)
+		}
+		afterConsumer := findWorkspaceStatusUnitForSmoke(t, after.MergeUnits, ready.ConsumerClaim.MergeUnitID)
+		if afterConsumer.MergeQueue != nil {
+			t.Fatalf("post-refresh consumer queue = %+v", afterConsumer.MergeQueue)
+		}
+		if len(afterConsumer.Approvals) != 1 ||
+			afterConsumer.Approvals[0].ApprovalID != ready.ApprovalID ||
+			afterConsumer.Approvals[0].Status != "stale" ||
+			!stringSliceContains(afterConsumer.Approvals[0].StaleInputs, "base") ||
+			!stringSliceContains(afterConsumer.Approvals[0].StaleInputs, "head") {
+			t.Fatalf("post-refresh approvals = %+v", afterConsumer.Approvals)
+		}
+
+		var approvalCheck struct {
+			Status    string `json:"status"`
+			Approvals []struct {
+				ApprovalID string `json:"approval_id"`
+			} `json:"approvals"`
+		}
+		runFeatureJSON(t, &approvalCheck,
+			"workspace", "approve", "check", ready.WorkspaceDir,
+			"--merge-unit", ready.ConsumerClaim.MergeUnitID,
+			"--attempt", ready.ConsumerAttempt.AttemptID,
+			"--action", workspacepkg.ExternalActionMerge,
+			"--branch", ready.ConsumerAttempt.Branch,
+			"--head-sha", "head-sha-v2",
+			"--base-sha", "consumer-base-sha-v2",
+			"--json",
+		)
+		if approvalCheck.Status != "denied" || len(approvalCheck.Approvals) != 0 {
+			t.Fatalf("stale approval check = %+v", approvalCheck)
+		}
+
+		blocked := queueContractGateSmokeWithSHAs(t, ready, "head-sha-v2", "consumer-base-sha-v2")
+		if blocked.Status != "blocked" ||
+			!workspaceSmokeHasBlockingCondition(blocked.BlockingConditions, "stale_approval") ||
+			!workspaceSmokeHasBlockingCondition(blocked.BlockingConditions, "stale_gate_evaluation") ||
+			!workspaceSmokeHasGateBlockingCondition(blocked.BlockingConditions, "test", workspacepkg.GateStatusRerunRequired) {
+			t.Fatalf("post-refresh queue result = %+v", blocked)
+		}
+	})
+}
+
 type workspaceSmokeClaim struct {
 	Status      string `json:"status"`
 	MergeUnitID string `json:"merge_unit_id"`
@@ -1743,16 +1952,96 @@ type workspaceSmokeQueueResult struct {
 	BlockingConditions []workspaceSmokeBlockingCondition `json:"blocking_conditions"`
 }
 
+type workspaceSmokeExternalIntentResult struct {
+	Status string `json:"status"`
+	Intent struct {
+		IntentID string `json:"intent_id"`
+		Action   string `json:"action"`
+		Target   string `json:"target"`
+		Status   string `json:"status"`
+	} `json:"intent"`
+}
+
 type workspaceSmokeStatusUnit struct {
 	ID               string `json:"id"`
 	ContractBindings []struct {
 		ContractID string `json:"contract_id"`
 		Status     string `json:"status"`
 	} `json:"contract_bindings"`
+	Approvals []struct {
+		ApprovalID  string   `json:"approval_id"`
+		Status      string   `json:"status"`
+		StaleInputs []string `json:"stale_inputs"`
+	} `json:"approvals"`
 	MergeQueue *struct {
 		QueueID  string `json:"queue_id"`
 		Position int    `json:"position"`
 	} `json:"merge_queue"`
+}
+
+type workspaceSmokeExternalIntentReport struct {
+	IntentID       string `json:"intent_id"`
+	MergeUnitID    string `json:"merge_unit_id"`
+	AttemptID      string `json:"attempt_id"`
+	Action         string `json:"action"`
+	Target         string `json:"target"`
+	Status         string `json:"status"`
+	ResultStatus   string `json:"result_status"`
+	ResultSource   string `json:"result_source"`
+	Accepted       bool   `json:"accepted"`
+	PolicyAccepted bool   `json:"policy_accepted"`
+	Operator       string `json:"operator"`
+	RequiredAction string `json:"required_action"`
+}
+
+type workspaceSmokeFrozenResource struct {
+	Resource       string `json:"resource"`
+	IntentID       string `json:"intent_id"`
+	MergeUnitID    string `json:"merge_unit_id"`
+	AttemptID      string `json:"attempt_id"`
+	Action         string `json:"action"`
+	Target         string `json:"target"`
+	Status         string `json:"status"`
+	RequiredAction string `json:"required_action"`
+}
+
+type workspaceSmokeBlockerGroup struct {
+	Type           string `json:"type"`
+	RequiredAction string `json:"required_action"`
+	Conditions     []struct {
+		Resource string `json:"resource"`
+		IntentID string `json:"intent_id"`
+	} `json:"conditions"`
+}
+
+type workspaceSmokeExternalStatusResult struct {
+	Status          string                                `json:"status"`
+	Blockers        []workspaceSmokeBlockerGroup          `json:"blockers"`
+	FrozenResources []workspaceSmokeFrozenResource        `json:"frozen_resources"`
+	ExternalIntents []workspaceSmokeExternalIntentReport  `json:"external_intents"`
+	MergeQueue      []workspaceSmokeMergeQueueStatusEntry `json:"merge_queue"`
+	MergeUnits      []workspaceSmokeStatusUnit            `json:"merge_units"`
+}
+
+type workspaceSmokeMergeQueueStatusEntry struct {
+	QueueID     string `json:"queue_id"`
+	MergeUnitID string `json:"merge_unit_id"`
+	Position    int    `json:"position"`
+}
+
+type workspaceSmokeRecoverResult struct {
+	Status          string                               `json:"status"`
+	RecoveredCount  int                                  `json:"recovered_count"`
+	Actions         []workspaceSmokeRecoveryAction       `json:"actions"`
+	ExternalIntents []workspaceSmokeExternalIntentReport `json:"external_intents"`
+}
+
+type workspaceSmokeRecoveryAction struct {
+	Type        string `json:"type"`
+	MergeUnitID string `json:"merge_unit_id"`
+	LeaseID     string `json:"lease_id"`
+	AgentID     string `json:"agent_id"`
+	Status      string `json:"status"`
 }
 
 func prepareContractGateQueueSmoke(t *testing.T) workspaceSmokeReady {
@@ -1922,6 +2211,11 @@ func transitionWorkspaceForSmoke(t *testing.T, workspaceDir string, claim worksp
 
 func grantWorkspaceSmokeMergeApproval(t *testing.T, workspaceDir string, claim workspaceSmokeClaim, attempt workspaceSmokeAttempt, headSHA string, baseSHA string) string {
 	t.Helper()
+	return grantWorkspaceSmokeApprovalForAction(t, workspaceDir, claim, attempt, workspacepkg.ExternalActionMerge, attempt.Branch, headSHA, baseSHA, 1)
+}
+
+func grantWorkspaceSmokeApprovalForAction(t *testing.T, workspaceDir string, claim workspaceSmokeClaim, attempt workspaceSmokeAttempt, action string, branch string, headSHA string, baseSHA string, maxUses int) string {
+	t.Helper()
 	var granted struct {
 		Status   string `json:"status"`
 		Approval struct {
@@ -1935,18 +2229,70 @@ func grantWorkspaceSmokeMergeApproval(t *testing.T, workspaceDir string, claim w
 		"--attempt", attempt.AttemptID,
 		"--agent", claim.AgentID,
 		"--lease", claim.LeaseID,
-		"--action", "merge",
-		"--branch", attempt.Branch,
+		"--action", action,
+		"--branch", branch,
 		"--head-sha", headSHA,
 		"--base-sha", baseSHA,
 		"--expires-in", "1h",
-		"--max-uses", "1",
+		"--max-uses", strconv.Itoa(maxUses),
 		"--json",
 	)
 	if granted.Status != "granted" || granted.Approval.Status != "active" || granted.Approval.ApprovalID == "" {
 		t.Fatalf("approval = %+v", granted)
 	}
 	return granted.Approval.ApprovalID
+}
+
+func reserveWorkspaceSmokeExternalIntent(t *testing.T, workspaceDir string, claim workspaceSmokeClaim, attempt workspaceSmokeAttempt, approvalID string, action string, branch string, headSHA string, baseSHA string) workspaceSmokeExternalIntentResult {
+	t.Helper()
+	var reserved workspaceSmokeExternalIntentResult
+	runFeatureJSON(t, &reserved,
+		"workspace", "external", "intent", "reserve", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--attempt", attempt.AttemptID,
+		"--agent", claim.AgentID,
+		"--lease", claim.LeaseID,
+		"--approval", approvalID,
+		"--action", action,
+		"--branch", branch,
+		"--head-sha", headSHA,
+		"--base-sha", baseSHA,
+		"--json",
+	)
+	if reserved.Status != "reserved" ||
+		reserved.Intent.Status != "reserved" ||
+		reserved.Intent.IntentID == "" ||
+		reserved.Intent.Action != action ||
+		reserved.Intent.Target != "branch:"+branch {
+		t.Fatalf("external intent reserve = %+v", reserved)
+	}
+	return reserved
+}
+
+func recordWorkspaceSmokeExternalResult(t *testing.T, workspaceDir string, claim workspaceSmokeClaim, attempt workspaceSmokeAttempt, intentID string, status string, details string) {
+	t.Helper()
+	var recorded struct {
+		Status string `json:"status"`
+		Result struct {
+			Status   string `json:"status"`
+			Accepted bool   `json:"accepted"`
+			Details  string `json:"details"`
+		} `json:"result"`
+	}
+	runFeatureJSON(t, &recorded,
+		"workspace", "external", "intent", "result", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--attempt", attempt.AttemptID,
+		"--agent", claim.AgentID,
+		"--lease", claim.LeaseID,
+		"--intent", intentID,
+		"--status", status,
+		"--details", details,
+		"--json",
+	)
+	if recorded.Status != "recorded" || recorded.Result.Status != status || !recorded.Result.Accepted || recorded.Result.Details != details {
+		t.Fatalf("external intent result = %+v", recorded)
+	}
 }
 
 func evaluateWorkspaceSmokeGates(t *testing.T, workspaceDir string, claim workspaceSmokeClaim, attempt workspaceSmokeAttempt) workspaceSmokeEvaluation {
@@ -2077,6 +2423,37 @@ func appendWorkspaceSmokeRefresh(t *testing.T, workspaceDir string, mergeUnitID 
 	}
 }
 
+func appendExpiredWorkspaceSmokeLease(t *testing.T, workspaceDir string, mergeUnitID string, leaseID string, agentID string) {
+	t.Helper()
+	if _, err := workspacepkg.AppendEvent(workspacepkg.AppendEventOptions{
+		WorkspaceDir: workspaceDir,
+		Type:         workspacepkg.EventLeaseGranted,
+		Payload: map[string]any{
+			"merge_unit_id":    mergeUnitID,
+			"lease_id":         leaseID,
+			"agent_id":         agentID,
+			"lease_expires_at": "2000-01-01T00:01:00Z",
+		},
+		WriteSet: []string{
+			workspacepkg.LeaseResource(mergeUnitID),
+			workspacepkg.MergeUnitResource(mergeUnitID),
+		},
+		Now: fixedFeatureTime("2000-01-01T00:00:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent expired lease: %v", err)
+	}
+}
+
+func workspaceSmokeExternalStatus(t *testing.T, workspaceDir string) workspaceSmokeExternalStatusResult {
+	t.Helper()
+	var status workspaceSmokeExternalStatusResult
+	runFeatureJSON(t, &status, "workspace", "status", workspaceDir, "--json")
+	if status.Status != "ok" {
+		t.Fatalf("workspace status = %+v", status)
+	}
+	return status
+}
+
 func assertWorkspaceStatusContractCurrentForSmoke(t *testing.T, workspaceDir string, mergeUnitID string) {
 	t.Helper()
 	var status struct {
@@ -2111,6 +2488,40 @@ func assertWorkspaceSmokeGateStatus(t *testing.T, gates []workspaceSmokeGateStat
 		}
 	}
 	t.Fatalf("gate %s missing from %+v", gate, gates)
+}
+
+func findWorkspaceSmokeExternalIntentReport(t *testing.T, reports []workspaceSmokeExternalIntentReport, intentID string) workspaceSmokeExternalIntentReport {
+	t.Helper()
+	for _, report := range reports {
+		if report.IntentID == intentID {
+			return report
+		}
+	}
+	t.Fatalf("external intent %s missing from %+v", intentID, reports)
+	return workspaceSmokeExternalIntentReport{}
+}
+
+func workspaceSmokeHasFrozenResource(freezes []workspaceSmokeFrozenResource, intentID string, resource string) bool {
+	for _, freeze := range freezes {
+		if freeze.IntentID == intentID && freeze.Resource == resource {
+			return true
+		}
+	}
+	return false
+}
+
+func workspaceSmokeHasBlocker(groups []workspaceSmokeBlockerGroup, groupType string, requiredAction string, intentID string) bool {
+	for _, group := range groups {
+		if group.Type != groupType || group.RequiredAction != requiredAction {
+			continue
+		}
+		for _, condition := range group.Conditions {
+			if condition.IntentID == intentID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func workspaceSmokeHasBlockingCondition(conditions []workspaceSmokeBlockingCondition, conditionType string) bool {
