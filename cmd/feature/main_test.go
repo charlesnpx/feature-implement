@@ -962,6 +962,9 @@ func TestWorkspaceAttemptStartCommandJSON(t *testing.T) {
 		if err := json.Unmarshal(raw, &values); err != nil {
 			t.Fatalf("attempt worker packet %s is not a string array: %v\n%s", field, err, stdout)
 		}
+		if values == nil {
+			t.Fatalf("attempt worker packet %s is null, want JSON array:\n%s", field, stdout)
+		}
 	}
 	if attempt.Status != "started" || attempt.MergeUnitID != "foundation:story-a" || attempt.AttemptID != "foundation:story-a:attempt-1" {
 		t.Fatalf("attempt result = %+v", attempt)
