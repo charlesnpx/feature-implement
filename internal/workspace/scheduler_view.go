@@ -213,7 +213,7 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 		refreshConditions := refreshes.Conditions(unit.ID, attemptID)
 		if attemptID != "" {
 			if attempt := attempts.Current(unit.ID); attempt != nil {
-				condition, stale, err := currentRefreshHeadCondition(events, *attempt)
+				condition, stale, err := currentRefreshHeadCondition("", events, *attempt)
 				if err != nil {
 					return SchedulerView{}, err
 				}

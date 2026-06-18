@@ -92,6 +92,24 @@ func TestPostRefreshCommitStalesReadinessEvidence(t *testing.T) {
 	if firstRefresh.Evidence.PostHead != headBeforeFix {
 		t.Fatalf("first refresh post_head = %s, want %s", firstRefresh.Evidence.PostHead, headBeforeFix)
 	}
+	movedWorktree := attempt.Worktree + ".moved"
+	if err := os.Rename(attempt.Worktree, movedWorktree); err != nil {
+		t.Fatalf("move worktree aside: %v", err)
+	}
+	_, unavailableErr := EvaluateGates(GateEvaluateOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      claim.AgentID,
+		LeaseID:      claim.LeaseID,
+		Now:          fixedWorkspaceTime("2026-01-02T15:03:30Z"),
+	})
+	if err := os.Rename(movedWorktree, attempt.Worktree); err != nil {
+		t.Fatalf("restore worktree: %v", err)
+	}
+	if unavailableErr == nil || !strings.Contains(unavailableErr.Error(), "stale refresh head evidence") || !strings.Contains(unavailableErr.Error(), "<unavailable>") {
+		t.Fatalf("EvaluateGates unavailable-worktree error = %v", unavailableErr)
+	}
 
 	approval, err := GrantApproval(ApprovalGrantOptions{
 		WorkspaceDir: fixture.Dir,

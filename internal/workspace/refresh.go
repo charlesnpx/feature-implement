@@ -576,8 +576,8 @@ type refreshHeadState struct {
 	ObservedHead string
 }
 
-func currentRefreshHeadCondition(events []JournalEvent, attempt attemptSnapshot) (SchedulerBlockingCondition, bool, error) {
-	state, stale, err := currentRefreshHeadState(events, attempt)
+func currentRefreshHeadCondition(workspaceDir string, events []JournalEvent, attempt attemptSnapshot) (SchedulerBlockingCondition, bool, error) {
+	state, stale, err := currentRefreshHeadState(workspaceDir, events, attempt)
 	if err != nil || !stale {
 		return SchedulerBlockingCondition{}, false, err
 	}
@@ -591,8 +591,8 @@ func currentRefreshHeadCondition(events []JournalEvent, attempt attemptSnapshot)
 	}, true, nil
 }
 
-func validateCurrentRefreshHead(events []JournalEvent, attempt attemptSnapshot, operation string) error {
-	state, stale, err := currentRefreshHeadState(events, attempt)
+func validateCurrentRefreshHead(workspaceDir string, events []JournalEvent, attempt attemptSnapshot, operation string) error {
+	state, stale, err := currentRefreshHeadState(workspaceDir, events, attempt)
 	if err != nil {
 		return fmt.Errorf("%s could not inspect current refresh head evidence: %w", operation, err)
 	}
@@ -602,7 +602,7 @@ func validateCurrentRefreshHead(events []JournalEvent, attempt attemptSnapshot, 
 	return fmt.Errorf("%s blocked by stale refresh head evidence %s: worktree %s HEAD is %s, refresh post_head is %s; requires %s", operation, state.Refresh.Resource, state.Worktree, state.ObservedHead, state.ExpectedHead, mergeQueueRequiredActionRefresh)
 }
 
-func currentRefreshHeadState(events []JournalEvent, attempt attemptSnapshot) (refreshHeadState, bool, error) {
+func currentRefreshHeadState(workspaceDir string, events []JournalEvent, attempt attemptSnapshot) (refreshHeadState, bool, error) {
 	refresh, ok := latestRefresh(events, attempt.MergeUnitID, attempt.AttemptID)
 	if !ok || refresh.Status != RefreshStatusSucceeded {
 		return refreshHeadState{}, false, nil
@@ -611,12 +611,30 @@ func currentRefreshHeadState(events []JournalEvent, attempt attemptSnapshot) (re
 	if worktree == "" {
 		worktree = strings.TrimSpace(attempt.Worktree)
 	}
+	expectedHead := strings.TrimSpace(refresh.PostHead)
+	if expectedHead == "" {
+		return refreshHeadState{}, false, nil
+	}
 	observedHead, available, err := observedWorktreeHead(worktree)
-	if err != nil || !available {
+	if err != nil {
 		return refreshHeadState{}, false, err
 	}
-	expectedHead := strings.TrimSpace(refresh.PostHead)
-	if expectedHead == "" || observedHead == expectedHead {
+	if !available {
+		recorded, err := refreshEvidenceFileExists(workspaceDir, refresh.EvidencePath)
+		if err != nil {
+			return refreshHeadState{}, false, err
+		}
+		if !recorded {
+			return refreshHeadState{}, false, nil
+		}
+		return refreshHeadState{
+			Refresh:      refresh,
+			Worktree:     worktree,
+			ExpectedHead: expectedHead,
+			ObservedHead: "<unavailable>",
+		}, true, nil
+	}
+	if observedHead == expectedHead {
 		return refreshHeadState{}, false, nil
 	}
 	return refreshHeadState{
@@ -625,6 +643,25 @@ func currentRefreshHeadState(events []JournalEvent, attempt attemptSnapshot) (re
 		ExpectedHead: expectedHead,
 		ObservedHead: observedHead,
 	}, true, nil
+}
+
+func refreshEvidenceFileExists(workspaceDir string, evidencePath string) (bool, error) {
+	workspaceDir = strings.TrimSpace(workspaceDir)
+	evidencePath = strings.TrimSpace(evidencePath)
+	if workspaceDir == "" || evidencePath == "" {
+		return false, nil
+	}
+	path := evidencePath
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(workspaceDir, path)
+	}
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func observedWorktreeHead(worktree string) (string, bool, error) {

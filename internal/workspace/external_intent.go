@@ -217,7 +217,7 @@ func ReserveExternalIntent(opts ExternalIntentReserveOptions) (ExternalIntentRes
 		return ExternalIntentResult{}, err
 	}
 	if opts.Action == ExternalActionMerge {
-		if err := validateCurrentRefreshHead(state.Events, current, "external merge intent reserve"); err != nil {
+		if err := validateCurrentRefreshHead(opts.WorkspaceDir, state.Events, current, "external merge intent reserve"); err != nil {
 			return ExternalIntentResult{}, err
 		}
 	}

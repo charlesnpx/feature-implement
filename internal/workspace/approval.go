@@ -241,7 +241,7 @@ func CheckApproval(opts ApprovalCheckOptions) (ApprovalCheckResult, error) {
 		return ApprovalCheckResult{}, err
 	}
 	if opts.Action == ExternalActionMerge {
-		if err := validateCurrentRefreshHead(state.Events, current, "approval check"); err != nil {
+		if err := validateCurrentRefreshHead(opts.WorkspaceDir, state.Events, current, "approval check"); err != nil {
 			return ApprovalCheckResult{}, err
 		}
 	}
@@ -316,7 +316,7 @@ func ConsumeApproval(opts ApprovalConsumeOptions) (ApprovalResult, error) {
 		return ApprovalResult{}, err
 	}
 	if opts.Action == ExternalActionMerge {
-		if err := validateCurrentRefreshHead(events, current, "approval consume"); err != nil {
+		if err := validateCurrentRefreshHead(opts.WorkspaceDir, events, current, "approval consume"); err != nil {
 			return ApprovalResult{}, err
 		}
 	}

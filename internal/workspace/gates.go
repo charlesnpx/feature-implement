@@ -222,7 +222,7 @@ func EvaluateGates(opts GateEvaluateOptions) (GateEvaluationResult, error) {
 	if err := validateAttemptLeaseOwner(opts.AttemptID, current.AgentID, current.LeaseID, opts.AgentID, opts.LeaseID); err != nil {
 		return GateEvaluationResult{}, err
 	}
-	if err := validateCurrentRefreshHead(state.Events, current, "gate evaluation"); err != nil {
+	if err := validateCurrentRefreshHead(opts.WorkspaceDir, state.Events, current, "gate evaluation"); err != nil {
 		return GateEvaluationResult{}, err
 	}
 	input, err := buildGateEvaluationInput(lock, state.Events, current, evaluatedAt)
@@ -322,7 +322,7 @@ func OverrideGate(opts GateOverrideOptions) (GateOverrideResult, error) {
 	if err != nil {
 		return GateOverrideResult{}, err
 	}
-	if err := validateCurrentRefreshHead(state.Events, current, "gate override"); err != nil {
+	if err := validateCurrentRefreshHead(opts.WorkspaceDir, state.Events, current, "gate override"); err != nil {
 		return GateOverrideResult{}, err
 	}
 	input, err := buildGateEvaluationInput(lock, state.Events, current, overriddenAt)
