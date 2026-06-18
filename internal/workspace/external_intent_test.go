@@ -74,6 +74,50 @@ func TestReserveExternalIntentRecordsReservationAndIdempotency(t *testing.T) {
 	}
 }
 
+func TestReserveExternalIntentSupportsStoryActions(t *testing.T) {
+	tests := []struct {
+		name   string
+		action string
+		branch string
+		pr     string
+		target string
+	}{
+		{name: "push", action: ExternalActionPush, branch: "feature/test", target: "branch:feature/test"},
+		{name: "open-pr", action: ExternalActionOpenPR, branch: "feature/test", target: "branch:feature/test"},
+		{name: "remote-delete", action: ExternalActionRemoteDelete, branch: "feature/test", target: "branch:feature/test"},
+		{name: "merge", action: ExternalActionMerge, pr: "35", target: "pr:35"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture, claim, attempt, approval := newExternalIntentFixture(t, tt.action)
+			result, err := ReserveExternalIntent(ExternalIntentReserveOptions{
+				WorkspaceDir:     fixture.Dir,
+				MergeUnitID:      claim.MergeUnitID,
+				AttemptID:        attempt.AttemptID,
+				AgentID:          "worker-a",
+				LeaseID:          claim.LeaseID,
+				ApprovalID:       approval.Approval.ApprovalID,
+				Action:           tt.action,
+				Branch:           tt.branch,
+				PR:               tt.pr,
+				RequestedHeadSHA: "head-sha",
+				ExpectedBaseSHA:  "base-sha",
+				Now:              fixedJournalTime("2026-06-17T10:03:00Z"),
+			})
+			if err != nil {
+				t.Fatalf("ReserveExternalIntent: %v", err)
+			}
+			if result.Intent.Action != tt.action || result.Intent.Target != tt.target {
+				t.Fatalf("intent = %+v", result.Intent)
+			}
+			assertContainsString(t, result.Intent.AffectedResources, ProviderTargetResource(tt.action+":"+tt.target))
+			if tt.branch != "" {
+				assertContainsString(t, result.Intent.AffectedResources, RemoteRefResource(tt.branch))
+			}
+		})
+	}
+}
+
 func TestReserveExternalIntentRequiresApproval(t *testing.T) {
 	fixture, claim, attempt := newApprovalAttemptFixture(t)
 	_, err := ReserveExternalIntent(ExternalIntentReserveOptions{
