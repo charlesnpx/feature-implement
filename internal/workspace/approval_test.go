@@ -177,6 +177,30 @@ func TestApprovalScopeMismatchAndMergeTargetValidation(t *testing.T) {
 		MergeUnitID:  claim.MergeUnitID,
 		AttemptID:    attempt.AttemptID,
 		Action:       "merge",
+		Now:          fixedJournalTime("2026-06-17T10:04:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("CheckApproval missing use target: %v", err)
+	}
+	if check.Status != "denied" || len(check.Approvals) != 0 {
+		t.Fatalf("untargeted merge check = %+v", check)
+	}
+	_, err = ConsumeApproval(ApprovalConsumeOptions{
+		WorkspaceDir: fixture.Dir,
+		ApprovalID:   granted.Approval.ApprovalID,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		Action:       "merge",
+		Now:          fixedJournalTime("2026-06-17T10:04:00Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "merge approval use requires") {
+		t.Fatalf("untargeted merge consume error = %v", err)
+	}
+	check, err = CheckApproval(ApprovalCheckOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		Action:       "merge",
 		Branch:       "other-branch",
 		HeadSHA:      "head-sha",
 		BaseSHA:      "base-sha",
@@ -201,6 +225,61 @@ func TestApprovalScopeMismatchAndMergeTargetValidation(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "branch workspace-orchestration") {
 		t.Fatalf("mismatched consume error = %v", err)
+	}
+}
+
+func TestApprovalRejectsReplayedUntargetedMergeApproval(t *testing.T) {
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	approvalID := "legacy-merge-approval"
+	resource := ApprovalResource(approvalID)
+	revisions, err := ResourceRevisions(fixture.Dir)
+	if err != nil {
+		t.Fatalf("ResourceRevisions: %v", err)
+	}
+	if _, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: fixture.Dir,
+		Type:         EventApprovalGranted,
+		Payload: map[string]any{
+			eventPayloadApprovalIDKey:  approvalID,
+			eventPayloadMergeUnitIDKey: claim.MergeUnitID,
+			eventPayloadAttemptIDKey:   attempt.AttemptID,
+			eventPayloadAgentIDKey:     "worker-a",
+			eventPayloadLeaseIDKey:     claim.LeaseID,
+			eventPayloadActionsKey:     []string{"merge"},
+			eventPayloadScopeKey:       "merge-unit",
+			eventPayloadMaxUsesKey:     1,
+			eventPayloadExpiresAtKey:   "2026-06-17T11:00:00Z",
+		},
+		ReadSet:  map[string]int{resource: revisions[resource]},
+		WriteSet: []string{resource},
+		Now:      fixedJournalTime("2026-06-17T10:02:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent legacy approval: %v", err)
+	}
+
+	check, err := CheckApproval(ApprovalCheckOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		Action:       "merge",
+		Now:          fixedJournalTime("2026-06-17T10:03:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("CheckApproval: %v", err)
+	}
+	if check.Status != "denied" || len(check.Approvals) != 0 {
+		t.Fatalf("legacy merge check = %+v", check)
+	}
+	_, err = ConsumeApproval(ApprovalConsumeOptions{
+		WorkspaceDir: fixture.Dir,
+		ApprovalID:   approvalID,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		Action:       "merge",
+		Now:          fixedJournalTime("2026-06-17T10:03:00Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "missing required merge target") {
+		t.Fatalf("legacy merge consume error = %v", err)
 	}
 }
 

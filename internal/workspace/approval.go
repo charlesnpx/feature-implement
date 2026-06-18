@@ -548,6 +548,16 @@ func approvalMatches(approval approvalSnapshot, req approvalMatchRequest) error 
 	if approval.Scope != req.scope {
 		return fmt.Errorf("approval %s scope is %s, not %s", approval.ApprovalID, approval.Scope, req.scope)
 	}
+	if req.action == "merge" {
+		approvalHasTarget := approval.PR != "" || approval.Branch != ""
+		if !approvalHasTarget || approval.HeadSHA == "" || approval.BaseSHA == "" {
+			return fmt.Errorf("approval %s is missing required merge target", approval.ApprovalID)
+		}
+		requestHasTarget := req.pr != "" || req.branch != ""
+		if !requestHasTarget || req.headSHA == "" || req.baseSHA == "" {
+			return fmt.Errorf("merge approval use requires --pr or --branch plus --head-sha and --base-sha")
+		}
+	}
 	if approval.PR != "" && approval.PR != req.pr {
 		return fmt.Errorf("approval %s is for PR %s, not %s", approval.ApprovalID, approval.PR, req.pr)
 	}
