@@ -74,7 +74,7 @@ post_head="$(git -C <worktree> rev-parse HEAD)"
 git -C <worktree> diff --name-status "$new_base"...HEAD
 git -C <worktree> log --reverse --format=%H "$new_base"..HEAD |
   while read commit; do git -C <worktree> show "$commit" | git patch-id --stable; done
-git -C <worktree> diff --stat "$backup"...HEAD
+git -C <worktree> range-diff "$old_base".."$backup" "$new_base"..HEAD
 ```
 
 The refresh is acceptable only when the branch contribution is preserved. If changed files disappear, patch IDs do not map to equivalent changes, commits are lost, or validation fails, keep the backup and block the merge unit with `refresh_verification_failed`.
@@ -105,7 +105,7 @@ git -C <worktree> push \
 
 If the push rejects because the remote no longer equals `expected_remote_sha`, stop and block with `remote_branch_moved`. Do not fall back to a plain force push.
 
-Agents must not run published rewrites directly. Use the workspace external-write protocol, or the dedicated `publish-refresh` command when available, so approval, intent, expected remote SHA, and result evidence are captured.
+Agents must not run published rewrites directly, and must not use the existing workspace push provider for refresh rewrites. That provider is for ordinary pushes and does not include a force-with-lease boundary. Until `publish-refresh` is available, stop after local verification, keep the backup, and ask for operator direction so any published rewrite records approval, intent, the exact expected remote SHA, the force-with-lease command, and result evidence.
 
 ## Relation To rebase-up
 
