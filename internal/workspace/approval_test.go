@@ -339,6 +339,62 @@ func TestApprovalPRURLMatchesNumber(t *testing.T) {
 	}
 }
 
+func TestApprovalReplayRejectsConsumedEventMissingTarget(t *testing.T) {
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	granted, err := GrantApproval(ApprovalGrantOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Actions:      []string{"merge"},
+		Branch:       "workspace-orchestration",
+		HeadSHA:      "head-sha",
+		BaseSHA:      "base-sha",
+		ExpiresIn:    time.Hour,
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("GrantApproval: %v", err)
+	}
+	resource := ApprovalResource(granted.Approval.ApprovalID)
+	revisions, err := ResourceRevisions(fixture.Dir)
+	if err != nil {
+		t.Fatalf("ResourceRevisions: %v", err)
+	}
+	if _, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: fixture.Dir,
+		Type:         EventApprovalConsumed,
+		Payload: map[string]any{
+			eventPayloadApprovalIDKey:  granted.Approval.ApprovalID,
+			eventPayloadMergeUnitIDKey: claim.MergeUnitID,
+			eventPayloadAttemptIDKey:   attempt.AttemptID,
+			eventPayloadActionsKey:     []string{"merge"},
+			eventPayloadScopeKey:       "merge-unit",
+			eventPayloadUsedCountKey:   1,
+		},
+		ReadSet:  map[string]int{resource: revisions[resource]},
+		WriteSet: []string{resource},
+		Now:      fixedJournalTime("2026-06-17T10:03:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent invalid consume: %v", err)
+	}
+
+	_, err = CheckApproval(ApprovalCheckOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		Action:       "merge",
+		Branch:       "workspace-orchestration",
+		HeadSHA:      "head-sha",
+		BaseSHA:      "base-sha",
+		Now:          fixedJournalTime("2026-06-17T10:04:00Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "merge approval use requires") {
+		t.Fatalf("invalid replay check error = %v", err)
+	}
+}
+
 func TestApprovalRejectsNegativeMaxUses(t *testing.T) {
 	fixture, claim, attempt := newApprovalAttemptFixture(t)
 	_, err := GrantApproval(ApprovalGrantOptions{

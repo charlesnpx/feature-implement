@@ -594,13 +594,16 @@ func approvalSnapshots(events []JournalEvent) (map[string]approvalSnapshot, erro
 			if err != nil {
 				return nil, err
 			}
-			usedCount, err := eventIntPayload(event, eventPayloadUsedCountKey)
-			if err != nil {
-				return nil, err
-			}
 			approval, ok := approvals[approvalID]
 			if !ok {
 				return nil, fmt.Errorf("approval event %s references unknown approval %s", event.ID, approvalID)
+			}
+			if err := validateApprovalConsumedEvent(event, approval); err != nil {
+				return nil, err
+			}
+			usedCount, err := eventIntPayload(event, eventPayloadUsedCountKey)
+			if err != nil {
+				return nil, err
 			}
 			if usedCount != approval.UsedCount+1 {
 				return nil, fmt.Errorf("approval event %s payload %s is %d, want %d", event.ID, eventPayloadUsedCountKey, usedCount, approval.UsedCount+1)
@@ -610,6 +613,43 @@ func approvalSnapshots(events []JournalEvent) (map[string]approvalSnapshot, erro
 		}
 	}
 	return approvals, nil
+}
+
+func validateApprovalConsumedEvent(event JournalEvent, approval approvalSnapshot) error {
+	mergeUnitID, err := eventStringPayload(event, eventPayloadMergeUnitIDKey)
+	if err != nil {
+		return err
+	}
+	attemptID, err := eventStringPayload(event, eventPayloadAttemptIDKey)
+	if err != nil {
+		return err
+	}
+	actions, err := eventStringSlicePayload(event, eventPayloadActionsKey)
+	if err != nil {
+		return err
+	}
+	if len(actions) != 1 {
+		return fmt.Errorf("approval event %s payload %s must contain exactly one action", event.ID, eventPayloadActionsKey)
+	}
+	scope, err := eventStringPayload(event, eventPayloadScopeKey)
+	if err != nil {
+		return err
+	}
+	occurredAt, err := time.Parse(time.RFC3339Nano, event.Timestamp)
+	if err != nil {
+		return fmt.Errorf("approval event %s timestamp must be RFC3339: %w", event.ID, err)
+	}
+	return approvalMatches(approval, approvalMatchRequest{
+		mergeUnitID: mergeUnitID,
+		attemptID:   attemptID,
+		action:      actions[0],
+		scope:       scope,
+		pr:          normalizeApprovalPR(optionalStringPayload(event, eventPayloadPRKey)),
+		branch:      optionalStringPayload(event, eventPayloadBranchKey),
+		headSHA:     optionalStringPayload(event, eventPayloadHeadSHAKey),
+		baseSHA:     optionalStringPayload(event, eventPayloadBaseSHAKey),
+		now:         occurredAt,
+	})
 }
 
 func approvalGrantedFromEvent(event JournalEvent) (approvalSnapshot, error) {
