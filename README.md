@@ -53,6 +53,8 @@ Use `feature workspace` when several validated plans need to run on a shared lon
 
 Workspace-managed workers should claim a merge unit with `feature workspace next --claim`, start an attempt with `feature workspace attempt start`, create the planned branch/worktree from the workspace `base_ref`, and record local lifecycle movement with `feature workspace transition`. External writes such as push, PR creation, review, merge, and cleanup still belong to the guarded implementation workflow and should target the workspace integration branch.
 
+Agents refreshing workspace branches should follow the [agent rebase hygiene guide](docs/agent-rebase-hygiene.md). It defines local unpublished refresh rules, published branch force-with-lease boundaries, backup and verification evidence, and the distinction from the separate `rebase-up` workflow.
+
 ## Manifest Contract
 
 `$feature` and `/feature` create a `feature.plan.yaml` manifest, then `feature plan materialize` turns it into epic, feature, and story Markdown folders.
