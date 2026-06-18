@@ -149,12 +149,12 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 			return SchedulerView{}, err
 		}
 	}
-	view.FrozenResources = externalIntents.Freezes()
-	freezesByResource := externalIntentFreezesByResource(view.FrozenResources)
 	activeLeases, err := activeLeaseSnapshots(events, now)
 	if err != nil {
 		return SchedulerView{}, err
 	}
+	view.FrozenResources = externalIntents.Freezes(activeLeases)
+	freezesByResource := externalIntentFreezesByResource(view.FrozenResources)
 	for i := range view.MergeUnits {
 		unit := &view.MergeUnits[i]
 		if lease, ok := activeLeases[unit.ID]; ok {
@@ -325,7 +325,11 @@ func validateTransitionEventPayload(event JournalEvent, currentStatus string, ta
 	if err != nil {
 		return err
 	}
-	if frozen := externalIntentFreezesByResource(externalIntents.Freezes())[MergeUnitResource(attempt.MergeUnitID)]; len(frozen) > 0 {
+	activeLeases := map[string]activeLeaseSnapshot{}
+	if activeLease != nil {
+		activeLeases[activeLease.MergeUnitID] = *activeLease
+	}
+	if frozen := externalIntentFreezesByResource(externalIntents.Freezes(activeLeases))[MergeUnitResource(attempt.MergeUnitID)]; len(frozen) > 0 {
 		first := frozen[0]
 		return fmt.Errorf("scheduler event %s blocked by frozen resource %s from external intent %s (%s; requires %s)", event.ID, first.Resource, first.IntentID, first.Status, first.RequiredAction)
 	}

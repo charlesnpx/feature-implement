@@ -725,13 +725,13 @@ func TestUnresolvedExternalIntentFreezesStatusAndBlocksOverlappingIntent(t *test
 		t.Fatalf("ReserveExternalIntent: %v", err)
 	}
 
-	status, err := Status(fixture.Dir)
+	view, err := rebuildSchedulerViewAt(fixture.Dir, fixedJournalTime("2026-06-17T10:03:30Z")())
 	if err != nil {
-		t.Fatalf("Status: %v", err)
+		t.Fatalf("rebuildSchedulerViewAt active: %v", err)
 	}
-	assertFrozenResource(t, status.FrozenResources, MergeUnitResource(claim.MergeUnitID), reserved.Intent.IntentID, externalIntentFreezeActionRecordResult)
-	assertFrozenResource(t, status.FrozenResources, ProviderTargetResource("push:branch:feature/test"), reserved.Intent.IntentID, externalIntentFreezeActionRecordResult)
-	assertFrozenResource(t, status.FrozenResources, RemoteRefResource("feature/test"), reserved.Intent.IntentID, externalIntentFreezeActionRecordResult)
+	assertFrozenResource(t, view.FrozenResources, MergeUnitResource(claim.MergeUnitID), reserved.Intent.IntentID, externalIntentFreezeActionRecordResult)
+	assertFrozenResource(t, view.FrozenResources, ProviderTargetResource("push:branch:feature/test"), reserved.Intent.IntentID, externalIntentFreezeActionRecordResult)
+	assertFrozenResource(t, view.FrozenResources, RemoteRefResource("feature/test"), reserved.Intent.IntentID, externalIntentFreezeActionRecordResult)
 
 	_, err = ReserveExternalIntent(ExternalIntentReserveOptions{
 		WorkspaceDir:     fixture.Dir,
@@ -758,16 +758,16 @@ func TestUnresolvedExternalIntentFreezesStatusAndBlocksOverlappingIntent(t *test
 	}); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
-	status, err = Status(fixture.Dir)
+	view, err = rebuildSchedulerViewAt(fixture.Dir, fixedJournalTime("2026-06-17T10:05:30Z")())
 	if err != nil {
-		t.Fatalf("Status after release: %v", err)
+		t.Fatalf("rebuildSchedulerViewAt after release: %v", err)
 	}
-	unit := findSchedulerUnit(t, SchedulerView{MergeUnits: status.MergeUnits}, claim.MergeUnitID)
-	if len(status.Blocked) != 1 || status.Blocked[0] != claim.MergeUnitID || len(unit.BlockingConditions) != 1 {
-		t.Fatalf("blocked status = blocked %+v unit %+v", status.Blocked, unit)
+	unit := findSchedulerUnit(t, view, claim.MergeUnitID)
+	if len(view.Blocked) != 1 || view.Blocked[0] != claim.MergeUnitID || len(unit.BlockingConditions) != 1 {
+		t.Fatalf("blocked status = blocked %+v unit %+v", view.Blocked, unit)
 	}
 	condition := unit.BlockingConditions[0]
-	if condition.Type != "frozen_resource" || condition.IntentID != reserved.Intent.IntentID || condition.RequiredAction != externalIntentFreezeActionRecordResult {
+	if condition.Type != "frozen_resource" || condition.IntentID != reserved.Intent.IntentID || condition.RequiredAction != externalIntentFreezeActionOperatorReconcile {
 		t.Fatalf("freeze blocking condition = %+v", condition)
 	}
 }

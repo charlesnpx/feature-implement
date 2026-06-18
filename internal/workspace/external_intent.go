@@ -209,7 +209,7 @@ func ReserveExternalIntent(opts ExternalIntentReserveOptions) (ExternalIntentRes
 	}
 	approvalResource := ApprovalResource(opts.ApprovalID)
 	affectedResources := externalIntentAffectedResources(opts, target, state.View.BaseRef)
-	if err := validateResourcesNotFrozen(state.Events, affectedResources, "external intent reserve"); err != nil {
+	if err := validateResourcesNotFrozen(state.Events, state.ActiveLeases, affectedResources, "external intent reserve"); err != nil {
 		return ExternalIntentResult{}, err
 	}
 	readSet := map[string]int{

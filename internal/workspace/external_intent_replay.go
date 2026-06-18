@@ -139,10 +139,10 @@ func (t *externalIntentTracker) Intent(id string) (externalIntentSnapshot, bool)
 	return intent, ok
 }
 
-func (t *externalIntentTracker) Freezes() []ExternalIntentFreezeView {
+func (t *externalIntentTracker) Freezes(activeLeases map[string]activeLeaseSnapshot) []ExternalIntentFreezeView {
 	freezes := []ExternalIntentFreezeView{}
 	for _, intent := range t.intents {
-		status, requiredAction, frozen := intent.freezeState()
+		status, requiredAction, frozen := intent.freezeState(activeLeases)
 		if !frozen {
 			continue
 		}
@@ -168,9 +168,12 @@ func (t *externalIntentTracker) Freezes() []ExternalIntentFreezeView {
 	return freezes
 }
 
-func (intent externalIntentSnapshot) freezeState() (string, string, bool) {
+func (intent externalIntentSnapshot) freezeState(activeLeases map[string]activeLeaseSnapshot) (string, string, bool) {
 	if intent.Result == nil {
-		return externalIntentFreezeStatusUnresolved, externalIntentFreezeActionRecordResult, true
+		if lease, ok := activeLeases[intent.MergeUnitID]; ok && lease.LeaseID == intent.LeaseID {
+			return externalIntentFreezeStatusUnresolved, externalIntentFreezeActionRecordResult, true
+		}
+		return externalIntentFreezeStatusUnresolved, externalIntentFreezeActionOperatorReconcile, true
 	}
 	if intent.Result.Status == ExternalResultAmbiguous {
 		return externalIntentFreezeStatusAmbiguous, externalIntentFreezeActionOperatorReconcile, true
@@ -178,18 +181,18 @@ func (intent externalIntentSnapshot) freezeState() (string, string, bool) {
 	return "", "", false
 }
 
-func externalIntentFreezes(events []JournalEvent) ([]ExternalIntentFreezeView, error) {
+func externalIntentFreezes(events []JournalEvent, activeLeases map[string]activeLeaseSnapshot) ([]ExternalIntentFreezeView, error) {
 	tracker := newExternalIntentTracker()
 	for _, event := range events {
 		if err := tracker.Apply(event); err != nil {
 			return nil, err
 		}
 	}
-	return tracker.Freezes(), nil
+	return tracker.Freezes(activeLeases), nil
 }
 
-func validateResourcesNotFrozen(events []JournalEvent, resources []string, operation string) error {
-	freezes, err := externalIntentFreezes(events)
+func validateResourcesNotFrozen(events []JournalEvent, activeLeases map[string]activeLeaseSnapshot, resources []string, operation string) error {
+	freezes, err := externalIntentFreezes(events, activeLeases)
 	if err != nil {
 		return err
 	}
