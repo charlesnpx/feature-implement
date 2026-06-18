@@ -124,6 +124,79 @@ func TestCopyManifestSameDirRejectsCrossDirectoryTarget(t *testing.T) {
 	}
 }
 
+func TestCopyManifestSameDirCreatesCanonicalTargetExclusively(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "workspace.yaml")
+	targetPath := filepath.Join(dir, ManifestFileName)
+	sourceBytes := []byte("schema_version: 1\nid: workspace-a\n")
+	if err := os.WriteFile(sourcePath, sourceBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := copyManifestSameDir(sourcePath, targetPath); err != nil {
+		t.Fatalf("copyManifestSameDir: %v", err)
+	}
+	targetBytes, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(targetBytes) != string(sourceBytes) {
+		t.Fatalf("target contents = %q", targetBytes)
+	}
+}
+
+func TestCopyManifestSameDirAllowsIdenticalExistingCanonicalTarget(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "workspace.yaml")
+	targetPath := filepath.Join(dir, ManifestFileName)
+	sourceBytes := []byte("schema_version: 1\nid: workspace-a\n")
+	if err := os.WriteFile(sourcePath, sourceBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetPath, sourceBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := copyManifestSameDir(sourcePath, targetPath); err != nil {
+		t.Fatalf("copyManifestSameDir identical existing target: %v", err)
+	}
+	targetBytes, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(targetBytes) != string(sourceBytes) {
+		t.Fatalf("target contents = %q", targetBytes)
+	}
+}
+
+func TestCopyManifestSameDirRejectsDifferentExistingCanonicalTarget(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "workspace.yaml")
+	targetPath := filepath.Join(dir, ManifestFileName)
+	if err := os.WriteFile(sourcePath, []byte("schema_version: 1\nid: workspace-a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	originalTarget := []byte("schema_version: 1\nid: original\n")
+	if err := os.WriteFile(targetPath, originalTarget, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := copyManifestSameDir(sourcePath, targetPath)
+	if err == nil {
+		t.Fatalf("copyManifestSameDir should reject different existing canonical target")
+	}
+	if !strings.Contains(err.Error(), "refused to overwrite existing feature.workspace.yaml with different contents") {
+		t.Fatalf("overwrite error was not actionable: %v", err)
+	}
+	targetBytes, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(targetBytes) != string(originalTarget) {
+		t.Fatalf("target contents changed: %q", targetBytes)
+	}
+}
+
 func TestValidateDoesNotWriteLockWithoutFlag(t *testing.T) {
 	fixture := newMultiPlanWorkspaceFixture(t)
 

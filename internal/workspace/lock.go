@@ -198,7 +198,18 @@ func copyManifestSameDir(sourcePath string, targetPath string) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	return os.WriteFile(targetPath, b, 0o644)
+	f, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("workspace init refused to create %s because it appeared during canonicalization", ManifestFileName)
+		}
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func Validate(opts ValidateOptions) (ValidateResult, error) {
