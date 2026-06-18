@@ -41,6 +41,9 @@ func TestHelpCommandsExitSuccessfully(t *testing.T) {
 		{"workspace", "approve", "grant", "--help"},
 		{"workspace", "approve", "check", "--help"},
 		{"workspace", "approve", "consume", "--help"},
+		{"workspace", "external", "--help"},
+		{"workspace", "external", "intent", "--help"},
+		{"workspace", "external", "intent", "reserve", "--help"},
 	}
 	for _, args := range tests {
 		stdout, stderr, err := runFeature(t, args...)
@@ -127,6 +130,7 @@ func TestWorkspaceCommandShell(t *testing.T) {
 		"feature workspace transition",
 		"feature workspace contract",
 		"feature workspace approve",
+		"feature workspace external",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("workspace help missing %q:\n%s", want, stdout)
@@ -1011,6 +1015,120 @@ func TestWorkspaceApproveCommandGrantCheckConsumeJSON(t *testing.T) {
 	}
 }
 
+func TestWorkspaceExternalIntentReserveCommandJSON(t *testing.T) {
+	workspaceDir := workspaceWithPlanLocks(t)
+	if _, stderr, err := runFeature(t, "workspace", "validate", workspaceDir, "--write-lock", "--json"); err != nil {
+		t.Fatalf("feature workspace validate failed: %v\nstderr=%s", err, stderr)
+	}
+	stdout, stderr, err := runFeature(t, "workspace", "next", workspaceDir, "--agent", "worker-a", "--claim", "--json")
+	if err != nil {
+		t.Fatalf("feature workspace next failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var claim struct {
+		MergeUnitID string `json:"merge_unit_id"`
+		LeaseID     string `json:"lease_id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &claim); err != nil {
+		t.Fatalf("claim stdout is not JSON: %v\n%s", err, stdout)
+	}
+	stdout, stderr, err = runFeature(t,
+		"workspace", "attempt", "start", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--agent", "worker-a",
+		"--lease", claim.LeaseID,
+		"--base-sha", "base-sha-cli",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace attempt start failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var attempt struct {
+		AttemptID string `json:"attempt_id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &attempt); err != nil {
+		t.Fatalf("attempt stdout is not JSON: %v\n%s", err, stdout)
+	}
+	stdout, stderr, err = runFeature(t,
+		"workspace", "approve", "grant", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--attempt", attempt.AttemptID,
+		"--agent", "worker-a",
+		"--lease", claim.LeaseID,
+		"--action", "push",
+		"--branch", "feature/test",
+		"--head-sha", "head-sha-cli",
+		"--base-sha", "base-sha-cli",
+		"--expires-in", "1h",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace approve grant failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var granted struct {
+		Approval struct {
+			ApprovalID string `json:"approval_id"`
+		} `json:"approval"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &granted); err != nil {
+		t.Fatalf("grant stdout is not JSON: %v\n%s", err, stdout)
+	}
+
+	stdout, stderr, err = runFeature(t,
+		"workspace", "external", "intent", "reserve", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--attempt", attempt.AttemptID,
+		"--agent", "worker-a",
+		"--lease", claim.LeaseID,
+		"--approval", granted.Approval.ApprovalID,
+		"--action", "push",
+		"--branch", "feature/test",
+		"--head-sha", "head-sha-cli",
+		"--base-sha", "base-sha-cli",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace external intent reserve failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var reserved struct {
+		Status string `json:"status"`
+		Intent struct {
+			IntentID          string   `json:"intent_id"`
+			IdempotencyKey    string   `json:"idempotency_key"`
+			Action            string   `json:"action"`
+			Target            string   `json:"target"`
+			ApprovalID        string   `json:"approval_id"`
+			RequestedHeadSHA  string   `json:"requested_head_sha"`
+			ExpectedBaseSHA   string   `json:"expected_base_sha"`
+			AffectedResources []string `json:"affected_resources"`
+			Status            string   `json:"status"`
+		} `json:"intent"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &reserved); err != nil {
+		t.Fatalf("reserve stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if reserved.Status != "reserved" || reserved.Intent.Status != "reserved" || reserved.Intent.IntentID == "" || reserved.Intent.IdempotencyKey == "" {
+		t.Fatalf("reserve result = %+v", reserved)
+	}
+	if reserved.Intent.Action != "push" || reserved.Intent.Target != "branch:feature/test" || reserved.Intent.ApprovalID != granted.Approval.ApprovalID {
+		t.Fatalf("reserve metadata = %+v", reserved.Intent)
+	}
+	if reserved.Intent.RequestedHeadSHA != "head-sha-cli" || reserved.Intent.ExpectedBaseSHA != "base-sha-cli" {
+		t.Fatalf("reserve SHAs = %+v", reserved.Intent)
+	}
+	if !stringSliceContains(reserved.Intent.AffectedResources, "provider_target:push:branch:feature/test") ||
+		!stringSliceContains(reserved.Intent.AffectedResources, "remote_ref:feature/test") {
+		t.Fatalf("affected resources = %+v", reserved.Intent.AffectedResources)
+	}
+
+	stdout, stderr, err = runFeature(t, "workspace", "status", workspaceDir, "--json")
+	if err != nil {
+		t.Fatalf("feature workspace status should ignore external intent events: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, `"status":"ok"`) {
+		t.Fatalf("workspace status after intent reserve = %s", stdout)
+	}
+}
+
 func TestWorkspaceContractPublishAndVerifyCommandJSON(t *testing.T) {
 	workspaceDir := workspaceWithContractPlanLocks(t)
 	if _, stderr, err := runFeature(t, "workspace", "validate", workspaceDir, "--write-lock", "--json"); err != nil {
@@ -1736,4 +1854,13 @@ func runFeature(t *testing.T, args ...string) (string, string, error) {
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	return stdout.String(), stderr.String(), err
+}
+
+func stringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

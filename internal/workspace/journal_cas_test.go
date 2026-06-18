@@ -164,6 +164,30 @@ func TestAppendEventCASAcceptsContractResources(t *testing.T) {
 	}
 }
 
+func TestAppendEventCASAcceptsExternalIntentResources(t *testing.T) {
+	workspaceDir := t.TempDir()
+	intent := ExternalIntentResource("intent-abc")
+	target := ProviderTargetResource("push:branch:feature/test")
+	remoteRef := RemoteRefResource("feature/test")
+	if _, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: workspaceDir,
+		Type:         EventExternalIntentReserved,
+		WriteSet:     []string{intent, target, remoteRef},
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent external intent resources: %v", err)
+	}
+	revisions, err := ResourceRevisions(workspaceDir)
+	if err != nil {
+		t.Fatalf("ResourceRevisions: %v", err)
+	}
+	for _, resource := range []string{intent, target, remoteRef} {
+		if revisions[resource] != 1 {
+			t.Fatalf("%s revision = %+v", resource, revisions)
+		}
+	}
+}
+
 func TestAppendEventCASRejectsUnsupportedResources(t *testing.T) {
 	_, err := AppendEvent(AppendEventOptions{
 		WorkspaceDir: t.TempDir(),

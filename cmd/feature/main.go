@@ -57,7 +57,7 @@ func usage(w io.Writer) {
   feature validate <plan-dir> [--write-lock] [--json]
   feature status <plan-dir> [--json]
   feature implement next|start|commit|push|open-pr|review|merge|cleanup <plan-dir> [--merge-unit <id>] [--write-state] [metadata flags] [--json]
-  feature workspace init|validate|status|next|heartbeat|release|recover|attempt|transition|contract|approve [args]
+  feature workspace init|validate|status|next|heartbeat|release|recover|attempt|transition|contract|approve|external [args]
   feature version`)
 }
 
@@ -302,7 +302,7 @@ func implementCommand(args []string) error {
 
 func workspaceCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("workspace requires subcommand: init, validate, status, next, heartbeat, release, recover, attempt, transition, contract, or approve")
+		return fmt.Errorf("workspace requires subcommand: init, validate, status, next, heartbeat, release, recover, attempt, transition, contract, approve, or external")
 	}
 	action := args[0]
 	if isHelpCommand(action) {
@@ -312,7 +312,7 @@ func workspaceCommand(args []string) error {
 	if !workspace.IsSupportedAction(action) {
 		return fmt.Errorf("unsupported workspace action: %s", action)
 	}
-	if action != "attempt" && action != "contract" && action != "approve" && hasHelpFlag(args[1:]) {
+	if action != "attempt" && action != "contract" && action != "approve" && action != "external" && hasHelpFlag(args[1:]) {
 		usageWorkspaceAction(os.Stdout, action)
 		return nil
 	}
@@ -337,6 +337,8 @@ func workspaceCommand(args []string) error {
 		return workspaceContract(args[1:])
 	case "approve":
 		return workspaceApprove(args[1:])
+	case "external":
+		return workspaceExternal(args[1:])
 	default:
 		return workspace.ErrNotImplemented(action)
 	}
@@ -1029,6 +1031,85 @@ func workspaceApproveConsume(args []string) error {
 	return nil
 }
 
+func workspaceExternal(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("workspace external requires subcommand: intent")
+	}
+	action := args[0]
+	if isHelpCommand(action) {
+		usageWorkspaceExternal(os.Stdout)
+		return nil
+	}
+	if action != "intent" {
+		return fmt.Errorf("unsupported workspace external action: %s", action)
+	}
+	return workspaceExternalIntent(args[1:])
+}
+
+func workspaceExternalIntent(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("workspace external intent requires subcommand: reserve")
+	}
+	action := args[0]
+	if isHelpCommand(action) {
+		usageWorkspaceExternalIntent(os.Stdout)
+		return nil
+	}
+	if action != "reserve" {
+		return fmt.Errorf("unsupported workspace external intent action: %s", action)
+	}
+	if hasHelpFlag(args[1:]) {
+		usageWorkspaceExternalIntentAction(os.Stdout, action)
+		return nil
+	}
+	return workspaceExternalIntentReserve(args[1:])
+}
+
+func workspaceExternalIntentReserve(args []string) error {
+	fs := flag.NewFlagSet("workspace external intent reserve", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	mergeUnitID := fs.String("merge-unit", "", "Merge unit ID")
+	attemptID := fs.String("attempt", "", "Attempt ID")
+	agentID := fs.String("agent", "", "Agent ID that owns the lease")
+	leaseID := fs.String("lease", "", "Lease ID")
+	approvalID := fs.String("approval", "", "Approval ID authorizing this intent")
+	action := fs.String("action", "", "External action: push, open-pr, merge, or remote-delete")
+	scope := fs.String("scope", "", "Approval scope; defaults to merge-unit")
+	branch := fs.String("branch", "", "Branch target")
+	pr := fs.String("pr", "", "PR number or URL target")
+	headSHA := fs.String("head-sha", "", "Requested head SHA")
+	baseSHA := fs.String("base-sha", "", "Expected base SHA")
+	asJSON := fs.Bool("json", false, "Emit JSON result")
+	if err := parsePermissive(fs, args, "merge-unit", "attempt", "agent", "lease", "approval", "action", "scope", "branch", "pr", "head-sha", "base-sha"); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("workspace external intent reserve requires <workspace-dir>")
+	}
+	result, err := workspace.ReserveExternalIntent(workspace.ExternalIntentReserveOptions{
+		WorkspaceDir:     fs.Arg(0),
+		MergeUnitID:      *mergeUnitID,
+		AttemptID:        *attemptID,
+		AgentID:          *agentID,
+		LeaseID:          *leaseID,
+		ApprovalID:       *approvalID,
+		Action:           *action,
+		Scope:            *scope,
+		Branch:           *branch,
+		PR:               *pr,
+		RequestedHeadSHA: *headSHA,
+		ExpectedBaseSHA:  *baseSHA,
+	})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(result)
+	}
+	fmt.Printf("reserved %s action=%s target=%s idempotency_key=%s\n", result.Intent.IntentID, result.Intent.Action, result.Intent.Target, result.Intent.IdempotencyKey)
+	return nil
+}
+
 func writeJSON(value any) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetEscapeHTML(false)
@@ -1269,6 +1350,7 @@ func usageWorkspace(w io.Writer) {
   feature workspace approve grant <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --action <action> (--expires-in <duration> | --expires-at <timestamp>) [scope and target flags] [--json]
   feature workspace approve check <workspace-dir> --merge-unit <id> --attempt <id> --action <action> [scope and target flags] [--json]
   feature workspace approve consume <workspace-dir> --approval <id> --merge-unit <id> --attempt <id> --action <action> [scope and target flags] [--json]
+  feature workspace external intent reserve <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --approval <id> --action <push|open-pr|merge|remote-delete> (--branch <name> | --pr <id>) --head-sha <sha> --base-sha <sha> [--scope <scope>] [--json]
 
 Coordinates validated feature plans through a workspace-level orchestration layer.`)
 }
@@ -1321,6 +1403,8 @@ Records local lifecycle movement for the current active attempt.`)
 		usageWorkspaceContract(w)
 	case "approve":
 		usageWorkspaceApprove(w)
+	case "external":
+		usageWorkspaceExternal(w)
 	default:
 		usageWorkspace(w)
 	}
@@ -1410,6 +1494,32 @@ Reports active approvals matching a target action and scope.`)
 Consumes one use of a matching approval capability.`)
 	default:
 		usageWorkspaceApprove(w)
+	}
+}
+
+func usageWorkspaceExternal(w io.Writer) {
+	fmt.Fprintln(w, `Usage:
+  feature workspace external intent reserve <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --approval <id> --action <push|open-pr|merge|remote-delete> (--branch <name> | --pr <id>) --head-sha <sha> --base-sha <sha> [--scope <scope>] [--json]
+
+Reserves external provider-write intents without executing provider commands.`)
+}
+
+func usageWorkspaceExternalIntent(w io.Writer) {
+	fmt.Fprintln(w, `Usage:
+  feature workspace external intent reserve <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --approval <id> --action <push|open-pr|merge|remote-delete> (--branch <name> | --pr <id>) --head-sha <sha> --base-sha <sha> [--scope <scope>] [--json]
+
+Manages external provider-write intent records.`)
+}
+
+func usageWorkspaceExternalIntentAction(w io.Writer, action string) {
+	switch action {
+	case "reserve":
+		fmt.Fprintln(w, `Usage:
+  feature workspace external intent reserve <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --approval <id> --action <push|open-pr|merge|remote-delete> (--branch <name> | --pr <id>) --head-sha <sha> --base-sha <sha> [--scope <scope>] [--json]
+
+Reserves an external write intent after validating the current attempt and required approval.`)
+	default:
+		usageWorkspaceExternalIntent(w)
 	}
 }
 
