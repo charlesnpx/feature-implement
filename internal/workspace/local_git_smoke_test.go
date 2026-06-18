@@ -24,27 +24,22 @@ func TestLocalGitAttemptWorktreeSmoke(t *testing.T) {
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
-	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
-	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
-	t.Setenv("GIT_CONFIG_COUNT", "1")
-	t.Setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
-	t.Setenv("GIT_CONFIG_VALUE_0", hooksDir)
+	gitEnv := isolatedGitEnv(hooksDir)
 
 	repoDir := filepath.Join(root, "repo")
 	if err := os.MkdirAll(repoDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	runGit(t, gitPath, repoDir, "init")
-	runGit(t, gitPath, repoDir, "checkout", "-b", fixtureWorkspaceBaseRef)
-	runGit(t, gitPath, repoDir, "config", "user.email", "feature-smoke@example.test")
-	runGit(t, gitPath, repoDir, "config", "user.name", "Feature Smoke")
+	runGit(t, gitPath, gitEnv, repoDir, "init")
+	runGit(t, gitPath, gitEnv, repoDir, "checkout", "-b", fixtureWorkspaceBaseRef)
+	runGit(t, gitPath, gitEnv, repoDir, "config", "user.email", "feature-smoke@example.test")
+	runGit(t, gitPath, gitEnv, repoDir, "config", "user.name", "Feature Smoke")
 	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("local git smoke\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	runGit(t, gitPath, repoDir, "add", "README.md")
-	runGit(t, gitPath, repoDir, "commit", "-m", "base")
-	baseSHA := strings.TrimSpace(runGitOutput(t, gitPath, repoDir, "rev-parse", "HEAD"))
+	runGit(t, gitPath, gitEnv, repoDir, "add", "README.md")
+	runGit(t, gitPath, gitEnv, repoDir, "commit", "-m", "base")
+	baseSHA := strings.TrimSpace(runGitOutput(t, gitPath, gitEnv, repoDir, "rev-parse", "HEAD"))
 
 	fixture := newOnePlanWorkspaceFixture(t)
 	writeWorkspaceLock(t, fixture.Dir)
@@ -92,34 +87,64 @@ func TestLocalGitAttemptWorktreeSmoke(t *testing.T) {
 		if !worktreeAdded {
 			return
 		}
-		_ = exec.Command(gitPath, "-C", repoDir, "worktree", "remove", "--force", attempt.Worktree).Run()
-		_ = exec.Command(gitPath, "-C", repoDir, "branch", "-D", attempt.Branch).Run()
+		runGitCleanup(gitPath, gitEnv, repoDir, "worktree", "remove", "--force", attempt.Worktree)
+		runGitCleanup(gitPath, gitEnv, repoDir, "branch", "-D", attempt.Branch)
 	})
-	runGit(t, gitPath, repoDir, "worktree", "add", "-b", attempt.Branch, attempt.Worktree, attempt.BaseRef)
+	runGit(t, gitPath, gitEnv, repoDir, "worktree", "add", "-b", attempt.Branch, attempt.Worktree, attempt.BaseRef)
 	worktreeAdded = true
 
-	gotBranch := strings.TrimSpace(runGitOutput(t, gitPath, attempt.Worktree, "rev-parse", "--abbrev-ref", "HEAD"))
+	gotBranch := strings.TrimSpace(runGitOutput(t, gitPath, gitEnv, attempt.Worktree, "rev-parse", "--abbrev-ref", "HEAD"))
 	if gotBranch != attempt.Branch {
 		t.Fatalf("worktree branch = %q, want %q", gotBranch, attempt.Branch)
 	}
-	gotSHA := strings.TrimSpace(runGitOutput(t, gitPath, attempt.Worktree, "rev-parse", "HEAD"))
+	gotSHA := strings.TrimSpace(runGitOutput(t, gitPath, gitEnv, attempt.Worktree, "rev-parse", "HEAD"))
 	if gotSHA != baseSHA {
 		t.Fatalf("worktree HEAD = %q, want %q", gotSHA, baseSHA)
 	}
 }
 
-func runGit(t *testing.T, gitPath string, dir string, args ...string) {
+func runGit(t *testing.T, gitPath string, gitEnv []string, dir string, args ...string) {
 	t.Helper()
-	_ = runGitOutput(t, gitPath, dir, args...)
+	_ = runGitOutput(t, gitPath, gitEnv, dir, args...)
 }
 
-func runGitOutput(t *testing.T, gitPath string, dir string, args ...string) string {
+func runGitOutput(t *testing.T, gitPath string, gitEnv []string, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command(gitPath, args...)
 	cmd.Dir = dir
+	cmd.Env = gitEnv
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, string(output))
 	}
 	return string(output)
+}
+
+func runGitCleanup(gitPath string, gitEnv []string, dir string, args ...string) {
+	cmd := exec.Command(gitPath, args...)
+	cmd.Dir = dir
+	cmd.Env = gitEnv
+	_ = cmd.Run()
+}
+
+func isolatedGitEnv(hooksDir string) []string {
+	env := make([]string, 0, len(os.Environ())+6)
+	for _, kv := range os.Environ() {
+		key, _, _ := strings.Cut(kv, "=")
+		switch key {
+		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+			"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+			"GIT_CONFIG_PARAMETERS":
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_CONFIG_SYSTEM="+os.DevNull,
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=core.hooksPath",
+		"GIT_CONFIG_VALUE_0="+hooksDir,
+	)
 }
