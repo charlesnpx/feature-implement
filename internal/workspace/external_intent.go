@@ -212,6 +212,7 @@ func ReserveExternalIntent(opts ExternalIntentReserveOptions) (ExternalIntentRes
 		return ExternalIntentResult{}, fmt.Errorf("approval %s is stale after refresh changed %s", approval.ApprovalID, strings.Join(staleInputs, ", "))
 	}
 	approvalResource := ApprovalResource(opts.ApprovalID)
+	approvalAttemptResource := ApprovalAttemptResource(opts.MergeUnitID, opts.AttemptID)
 	affectedResources := externalIntentAffectedResources(opts, target, state.View.BaseRef)
 	if err := validateResourcesNotFrozen(state.Events, state.ActiveLeases, affectedResources, "external intent reserve"); err != nil {
 		return ExternalIntentResult{}, err
@@ -220,10 +221,11 @@ func ReserveExternalIntent(opts ExternalIntentReserveOptions) (ExternalIntentRes
 		LeaseResource(opts.MergeUnitID):     state.Revisions[LeaseResource(opts.MergeUnitID)],
 		MergeUnitResource(opts.MergeUnitID): state.Revisions[MergeUnitResource(opts.MergeUnitID)],
 		approvalResource:                    state.Revisions[approvalResource],
+		approvalAttemptResource:             state.Revisions[approvalAttemptResource],
 		intentResource:                      0,
 	}
 	addApprovalRefreshInputReadSet(readSet, state.Revisions, approval)
-	writeSet := []string{intentResource, approvalResource}
+	writeSet := []string{intentResource, approvalResource, approvalAttemptResource}
 	for _, resource := range affectedResources {
 		readSet[resource] = state.Revisions[resource]
 		writeSet = append(writeSet, resource)

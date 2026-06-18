@@ -48,6 +48,17 @@ func TestValidateWritesDeterministicWorkspaceLock(t *testing.T) {
 	if len(first.Lock.Plans) != 2 {
 		t.Fatalf("plans = %+v", first.Lock.Plans)
 	}
+	if first.Lock.GatePolicy.ID != "default-review-gates" || first.Lock.GatePolicy.Version != "1" {
+		t.Fatalf("gate policy = %+v", first.Lock.GatePolicy)
+	}
+	if len(first.Lock.GatePolicy.RetentionRules) != 3 {
+		t.Fatalf("gate policy retention rules = %+v", first.Lock.GatePolicy.RetentionRules)
+	}
+	for _, rule := range first.Lock.GatePolicy.RetentionRules {
+		if rule.Scope != "attempt" || rule.CarryForward {
+			t.Fatalf("gate policy retention rule = %+v", rule)
+		}
+	}
 	if first.Lock.Plans[0].ID != "foundation" || first.Lock.Plans[0].LockHash == "" {
 		t.Fatalf("first plan lock = %+v", first.Lock.Plans[0])
 	}

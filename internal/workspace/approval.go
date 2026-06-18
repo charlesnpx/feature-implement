@@ -128,6 +128,10 @@ func ApprovalResource(id string) string {
 	return resourceKey("approval", id)
 }
 
+func ApprovalAttemptResource(mergeUnitID string, attemptID string) string {
+	return resourceKey("approval", mergeUnitID+":"+attemptID+":index")
+}
+
 func GrantApproval(opts ApprovalGrantOptions) (ApprovalResult, error) {
 	opts, grantedAt, expiresAt, err := normalizeApprovalGrantOptions(opts)
 	if err != nil {
@@ -161,6 +165,7 @@ func GrantApproval(opts ApprovalGrantOptions) (ApprovalResult, error) {
 	}
 	approvalID := approvalID(opts.MergeUnitID, opts.AttemptID, opts.Actions, opts.Scope, opts.PR, opts.Branch, opts.HeadSHA, opts.BaseSHA, grantedAt)
 	resource := ApprovalResource(approvalID)
+	attemptResource := ApprovalAttemptResource(opts.MergeUnitID, opts.AttemptID)
 	event, err := AppendEvent(AppendEventOptions{
 		WorkspaceDir: opts.WorkspaceDir,
 		Type:         EventApprovalGranted,
@@ -183,8 +188,9 @@ func GrantApproval(opts ApprovalGrantOptions) (ApprovalResult, error) {
 			LeaseResource(opts.MergeUnitID):     state.Revisions[LeaseResource(opts.MergeUnitID)],
 			MergeUnitResource(opts.MergeUnitID): state.Revisions[MergeUnitResource(opts.MergeUnitID)],
 			resource:                            state.Revisions[resource],
+			attemptResource:                     state.Revisions[attemptResource],
 		},
-		WriteSet: []string{resource},
+		WriteSet: []string{resource, attemptResource},
 		Now:      func() time.Time { return grantedAt },
 	})
 	if err != nil {
@@ -323,9 +329,11 @@ func ConsumeApproval(opts ApprovalConsumeOptions) (ApprovalResult, error) {
 		return ApprovalResult{}, fmt.Errorf("approval %s is stale after refresh changed %s", approval.ApprovalID, strings.Join(staleInputs, ", "))
 	}
 	resource := ApprovalResource(opts.ApprovalID)
+	attemptResource := ApprovalAttemptResource(opts.MergeUnitID, opts.AttemptID)
 	mergeUnitResource := MergeUnitResource(opts.MergeUnitID)
 	readSet := map[string]int{
 		resource:          revisions[resource],
+		attemptResource:   revisions[attemptResource],
 		mergeUnitResource: revisions[mergeUnitResource],
 	}
 	addApprovalRefreshInputReadSet(readSet, revisions, approval)
@@ -345,7 +353,7 @@ func ConsumeApproval(opts ApprovalConsumeOptions) (ApprovalResult, error) {
 			eventPayloadUsedCountKey:   approval.UsedCount + 1,
 		},
 		ReadSet:  readSet,
-		WriteSet: []string{resource},
+		WriteSet: []string{resource, attemptResource},
 		Now:      func() time.Time { return consumedAt },
 	})
 	if err != nil {
