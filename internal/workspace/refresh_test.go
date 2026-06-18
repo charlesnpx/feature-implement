@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -339,6 +340,83 @@ func TestAppendRefreshEventAfterMutationRejectsStaleAttempt(t *testing.T) {
 	events := readTestJournalEvents(t, fixture.Dir)
 	if latest, ok := latestRefresh(events, claim.MergeUnitID, attempt.AttemptID); ok {
 		t.Fatalf("stale attempt should not record refresh, got %+v", latest)
+	}
+}
+
+func TestAppendTransitionEventReadsRefreshRevision(t *testing.T) {
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	if _, err := Transition(TransitionOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		From:         MergeUnitPending,
+		To:           MergeUnitInProgress,
+		Evidence:     map[string]any{evidenceWorktreeKey: attempt.Worktree},
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	}); err != nil {
+		t.Fatalf("Transition start: %v", err)
+	}
+	revisions, err := ResourceRevisions(fixture.Dir)
+	if err != nil {
+		t.Fatalf("ResourceRevisions: %v", err)
+	}
+	appendRefreshEventForTest(t, fixture, claim, attempt, RefreshStatusVerificationFailed, attempt.BaseSHA, "base-sha-2", "2026-06-17T10:03:00Z")
+
+	err = appendTransitionEvent(fixture.Dir, TransitionOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		From:         MergeUnitInProgress,
+		To:           MergeUnitCompleted,
+	}, EventMergeUnitCompleted, map[string]any{evidenceCommitSHAKey: "commit-sha-1"}, revisions, fixedJournalTime("2026-06-17T10:04:00Z")())
+	var stale StaleResourceError
+	refreshResource := RefreshResource(claim.MergeUnitID + ":" + attempt.AttemptID)
+	if err == nil || !errors.As(err, &stale) || stale.Resource != refreshResource {
+		t.Fatalf("appendTransitionEvent stale error = %v, stale=%+v want resource %s", err, stale, refreshResource)
+	}
+}
+
+func TestRefreshBranchBlockedByExternalIntentFreeze(t *testing.T) {
+	fixture, claim, attempt, approval := newExternalIntentFixture(t, ExternalActionPush)
+	reserveExternalIntentForTest(t, fixture, claim, attempt, approval, "feature/test", "head-sha", "2026-06-17T10:03:00Z")
+
+	_, err := RefreshBranch(RefreshBranchOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Local:        true,
+		Worktree:     attempt.Worktree,
+		NewBase:      "base-sha-2",
+		Now:          fixedJournalTime("2026-06-17T10:04:00Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "workspace refresh-branch blocked by frozen resource") {
+		t.Fatalf("RefreshBranch freeze error = %v", err)
+	}
+}
+
+func TestMatchingRemoteTrackingRefRequiresExactRemoteBranch(t *testing.T) {
+	remotes := "origin\nupstream\n"
+	refs := strings.Join([]string{
+		"origin/archive/feature/story-a",
+		"upstream/feature/story-b",
+		"origin/feature/story-a",
+	}, "\n")
+	if got := matchingRemoteTrackingRef(remotes, refs, "feature/story-a"); got != "origin/feature/story-a" {
+		t.Fatalf("matchingRemoteTrackingRef exact = %q", got)
+	}
+
+	refs = strings.Join([]string{
+		"origin/archive/feature/story-a",
+		"upstream/archive/feature/story-a",
+	}, "\n")
+	if got := matchingRemoteTrackingRef(remotes, refs, "feature/story-a"); got != "" {
+		t.Fatalf("matchingRemoteTrackingRef unrelated suffix = %q", got)
 	}
 }
 

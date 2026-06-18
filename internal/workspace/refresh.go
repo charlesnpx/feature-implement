@@ -221,6 +221,9 @@ func RefreshBranch(opts RefreshBranchOptions) (RefreshBranchResult, error) {
 	}
 	refreshResource := RefreshResource(opts.MergeUnitID + ":" + opts.AttemptID)
 	originalRefreshRevision := state.Revisions[refreshResource]
+	if err := validateResourcesNotFrozen(state.Events, state.ActiveLeases, []string{MergeUnitResource(opts.MergeUnitID)}, "workspace refresh-branch"); err != nil {
+		return RefreshBranchResult{}, err
+	}
 	evidence, err := runLocalRefresh(opts, state.View.WorkspaceID, state.View.BaseRef, state.Events, current, worktree, commandResults, refreshedAt)
 	if err != nil {
 		return RefreshBranchResult{}, err
@@ -538,17 +541,28 @@ func patchIDs(worktree string, base string, head string) ([]RefreshPatchID, erro
 }
 
 func remoteTrackingRef(worktree string, branch string) (string, error) {
-	output, err := gitOutput(worktree, "for-each-ref", "--format=%(refname:short)", "refs/remotes")
+	remotes, err := gitOutput(worktree, "remote")
 	if err != nil {
 		return "", err
 	}
-	suffix := "/" + branch
-	for _, ref := range nonEmptyLines(output) {
-		if strings.HasSuffix(ref, suffix) {
-			return ref, nil
+	refs, err := gitOutput(worktree, "for-each-ref", "--format=%(refname:short)", "refs/remotes")
+	if err != nil {
+		return "", err
+	}
+	return matchingRemoteTrackingRef(remotes, refs, branch), nil
+}
+
+func matchingRemoteTrackingRef(remotes string, refs string, branch string) string {
+	wanted := map[string]bool{}
+	for _, remote := range nonEmptyLines(remotes) {
+		wanted[remote+"/"+branch] = true
+	}
+	for _, ref := range nonEmptyLines(refs) {
+		if wanted[ref] {
+			return ref
 		}
 	}
-	return "", nil
+	return ""
 }
 
 func validateRefreshBackupRef(worktree string, backupRef string) error {

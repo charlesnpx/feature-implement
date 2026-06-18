@@ -946,9 +946,11 @@ func appendLeaseEvent(workspaceDir string, eventType string, lease activeLeaseSn
 func appendTransitionEvent(workspaceDir string, opts TransitionOptions, eventType string, evidence map[string]any, revisions map[string]int, occurredAt time.Time) error {
 	leaseResource := LeaseResource(opts.MergeUnitID)
 	mergeUnitResource := MergeUnitResource(opts.MergeUnitID)
+	refreshResource := RefreshResource(opts.MergeUnitID + ":" + opts.AttemptID)
 	readSet := map[string]int{
 		leaseResource:     revisions[leaseResource],
 		mergeUnitResource: revisions[mergeUnitResource],
+		refreshResource:   revisions[refreshResource],
 	}
 	if intentID, ok := evidence[evidenceExternalIntentIDKey].(string); ok && intentID != "" {
 		intentResource := ExternalIntentResource(intentID)

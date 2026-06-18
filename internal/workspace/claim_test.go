@@ -1159,8 +1159,9 @@ func TestTransitionRecordsLifecycleForCurrentAttempt(t *testing.T) {
 		t.Fatalf("transition evidence = %+v", last.Payload[eventPayloadEvidenceKey])
 	}
 	wantReadSet := map[string]int{
-		LeaseResource("foundation:story-a"):     1,
-		MergeUnitResource("foundation:story-a"): 2,
+		LeaseResource("foundation:story-a"):                        1,
+		MergeUnitResource("foundation:story-a"):                    2,
+		RefreshResource("foundation:story-a:" + attempt.AttemptID): 0,
 	}
 	if !reflect.DeepEqual(last.ReadSet, wantReadSet) {
 		t.Fatalf("transition read set = %+v, want %+v", last.ReadSet, wantReadSet)
