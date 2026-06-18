@@ -652,8 +652,9 @@ func TestWorkspaceAttemptRestartEnforcesCurrentAttempt(t *testing.T) {
 	if second.Branch != "feature/workspace-a/foundation/story-a/attempt-2" {
 		t.Fatalf("second branch = %q", second.Branch)
 	}
-	if !strings.Contains(second.Worktree, filepath.Join("state", "worktrees", "workspace-a", "foundation", "story-a", "attempt-2")) {
-		t.Fatalf("second worktree = %q", second.Worktree)
+	wantSecondWorktree := filepath.Join(workspaceDir, "state", "worktrees", "workspace-a", "foundation", "story-a", "attempt-2")
+	if second.Worktree != wantSecondWorktree {
+		t.Fatalf("second worktree = %q, want %q", second.Worktree, wantSecondWorktree)
 	}
 	if second.Branch == first.Branch || second.Worktree == first.Worktree || second.BaseSHA == first.BaseSHA {
 		t.Fatalf("second attempt carried first metadata: first=%+v second=%+v", first, second)
