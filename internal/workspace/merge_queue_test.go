@@ -129,7 +129,7 @@ func TestQueueMergeUnitRequiresRefreshEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readWorkspaceLock: %v", err)
 	}
-	view, err := buildSchedulerViewAt(lock, readTestJournalEvents(t, fixture.Dir), fixedWorkspaceTime("2026-01-02T15:02:30Z")())
+	view, err := buildSchedulerViewAt(fixture.Dir, lock, readTestJournalEvents(t, fixture.Dir), fixedWorkspaceTime("2026-01-02T15:02:30Z")())
 	if err != nil {
 		t.Fatalf("buildSchedulerViewAt: %v", err)
 	}

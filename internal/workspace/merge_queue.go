@@ -395,7 +395,7 @@ func (t *mergeQueueTracker) Entries() []mergeQueueSnapshot {
 	return entries
 }
 
-func populateMergeQueue(view *SchedulerView, lock WorkspaceLock, events []JournalEvent, unitByID map[string]*SchedulerMergeUnitView, attempts *attemptTracker, approvals map[string]approvalSnapshot, queues *mergeQueueTracker, now time.Time) error {
+func populateMergeQueue(workspaceDir string, view *SchedulerView, lock WorkspaceLock, events []JournalEvent, unitByID map[string]*SchedulerMergeUnitView, attempts *attemptTracker, approvals map[string]approvalSnapshot, queues *mergeQueueTracker, now time.Time) error {
 	position := 1
 	for _, entry := range queues.Entries() {
 		unit := unitByID[entry.MergeUnitID]
@@ -407,7 +407,7 @@ func populateMergeQueue(view *SchedulerView, lock WorkspaceLock, events []Journa
 			continue
 		}
 		candidate := mergeQueueCandidateFromSnapshot(entry)
-		evaluation, blocking, err := evaluateMergeQueueReadiness("", lock, events, *view, unitByID, *unit, *attempt, candidate, now)
+		evaluation, blocking, err := evaluateMergeQueueReadiness(workspaceDir, lock, events, *view, unitByID, *unit, *attempt, candidate, now)
 		if err != nil {
 			return err
 		}

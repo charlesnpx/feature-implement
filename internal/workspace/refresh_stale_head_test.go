@@ -104,11 +104,19 @@ func TestPostRefreshCommitStalesReadinessEvidence(t *testing.T) {
 		LeaseID:      claim.LeaseID,
 		Now:          fixedWorkspaceTime("2026-01-02T15:03:30Z"),
 	})
+	unavailableStatus, statusErr := Status(fixture.Dir)
 	if err := os.Rename(movedWorktree, attempt.Worktree); err != nil {
 		t.Fatalf("restore worktree: %v", err)
 	}
 	if unavailableErr == nil || !strings.Contains(unavailableErr.Error(), "stale refresh head evidence") || !strings.Contains(unavailableErr.Error(), "<unavailable>") {
 		t.Fatalf("EvaluateGates unavailable-worktree error = %v", unavailableErr)
+	}
+	if statusErr != nil {
+		t.Fatalf("Status unavailable worktree: %v", statusErr)
+	}
+	unavailableUnit := findSchedulerUnit(t, SchedulerView{MergeUnits: unavailableStatus.MergeUnits}, claim.MergeUnitID)
+	if !hasBlockingConditionWithAction(unavailableUnit.BlockingConditions, refreshConditionStaleHead, mergeQueueRequiredActionRefresh) {
+		t.Fatalf("status unavailable-worktree blockers = %+v", unavailableUnit.BlockingConditions)
 	}
 
 	approval, err := GrantApproval(ApprovalGrantOptions{
