@@ -138,7 +138,7 @@ func QueueMergeUnit(opts MergeQueueOptions) (MergeQueueResult, error) {
 	if unit.MergeQueue != nil && unit.MergeQueue.AttemptID == opts.AttemptID {
 		return MergeQueueResult{}, fmt.Errorf("merge unit %s attempt %s is already queued", opts.MergeUnitID, opts.AttemptID)
 	}
-	evaluation, blocking, err := evaluateMergeQueueReadiness(lock, state.Events, state.View, state.UnitByID, unit, current, mergeQueueCandidateFromOptions(opts), queuedAt)
+	evaluation, blocking, err := evaluateMergeQueueReadiness(opts.WorkspaceDir, lock, state.Events, state.View, state.UnitByID, unit, current, mergeQueueCandidateFromOptions(opts), queuedAt)
 	if err != nil {
 		return MergeQueueResult{}, err
 	}
@@ -395,7 +395,7 @@ func (t *mergeQueueTracker) Entries() []mergeQueueSnapshot {
 	return entries
 }
 
-func populateMergeQueue(view *SchedulerView, lock WorkspaceLock, events []JournalEvent, unitByID map[string]*SchedulerMergeUnitView, attempts *attemptTracker, approvals map[string]approvalSnapshot, queues *mergeQueueTracker, now time.Time) error {
+func populateMergeQueue(workspaceDir string, view *SchedulerView, lock WorkspaceLock, events []JournalEvent, unitByID map[string]*SchedulerMergeUnitView, attempts *attemptTracker, approvals map[string]approvalSnapshot, queues *mergeQueueTracker, now time.Time) error {
 	position := 1
 	for _, entry := range queues.Entries() {
 		unit := unitByID[entry.MergeUnitID]
@@ -407,7 +407,7 @@ func populateMergeQueue(view *SchedulerView, lock WorkspaceLock, events []Journa
 			continue
 		}
 		candidate := mergeQueueCandidateFromSnapshot(entry)
-		evaluation, blocking, err := evaluateMergeQueueReadiness(lock, events, *view, unitByID, *unit, *attempt, candidate, now)
+		evaluation, blocking, err := evaluateMergeQueueReadiness(workspaceDir, lock, events, *view, unitByID, *unit, *attempt, candidate, now)
 		if err != nil {
 			return err
 		}
@@ -456,7 +456,7 @@ func mergeQueueCandidateFromSnapshot(entry mergeQueueSnapshot) mergeQueueCandida
 	}
 }
 
-func evaluateMergeQueueReadiness(lock WorkspaceLock, events []JournalEvent, view SchedulerView, unitByID map[string]*SchedulerMergeUnitView, unit SchedulerMergeUnitView, attempt attemptSnapshot, candidate mergeQueueCandidate, now time.Time) (mergeQueueEvaluation, []SchedulerBlockingCondition, error) {
+func evaluateMergeQueueReadiness(workspaceDir string, lock WorkspaceLock, events []JournalEvent, view SchedulerView, unitByID map[string]*SchedulerMergeUnitView, unit SchedulerMergeUnitView, attempt attemptSnapshot, candidate mergeQueueCandidate, now time.Time) (mergeQueueEvaluation, []SchedulerBlockingCondition, error) {
 	conditions := mergeQueueStructuralConditions(view, unitByID, unit, attempt.AttemptID)
 	approvals, err := approvalSnapshots(events)
 	if err != nil {
@@ -497,6 +497,11 @@ func evaluateMergeQueueReadiness(lock WorkspaceLock, events []JournalEvent, view
 			Status:         "stale",
 			RequiredAction: mergeQueueRequiredActionRefresh,
 		})
+	}
+	if condition, stale, err := currentRefreshHeadCondition(workspaceDir, events, attempt); err != nil {
+		return mergeQueueEvaluation{}, nil, err
+	} else if stale {
+		conditions = append(conditions, condition)
 	}
 	latestGate, ok, err := latestGateEvaluation(events, attempt.MergeUnitID, attempt.AttemptID)
 	if err != nil {

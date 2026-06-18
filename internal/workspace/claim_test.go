@@ -659,7 +659,7 @@ func TestSchedulerViewReflectsActiveLeaseState(t *testing.T) {
 		t.Fatalf("readWorkspaceLock: %v", err)
 	}
 	events := readTestJournalEvents(t, fixture.Dir)
-	view, err := buildSchedulerViewAt(lock, events, fixedJournalTime("2026-06-17T10:01:00Z")())
+	view, err := buildSchedulerViewAt(fixture.Dir, lock, events, fixedJournalTime("2026-06-17T10:01:00Z")())
 	if err != nil {
 		t.Fatalf("buildSchedulerViewAt: %v", err)
 	}
@@ -876,7 +876,7 @@ func TestStartAttemptRecordsFirstAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readWorkspaceLock: %v", err)
 	}
-	view, err := buildSchedulerViewAt(lock, events, fixedJournalTime("2026-06-17T10:02:00Z")())
+	view, err := buildSchedulerViewAt(fixture.Dir, lock, events, fixedJournalTime("2026-06-17T10:02:00Z")())
 	if err != nil {
 		t.Fatalf("buildSchedulerViewAt: %v", err)
 	}
@@ -1037,7 +1037,7 @@ func TestAbandonAttemptRecordsReasonAndClearsCurrentAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readWorkspaceLock: %v", err)
 	}
-	view, err := buildSchedulerViewAt(lock, events, fixedJournalTime("2026-06-17T10:03:00Z")())
+	view, err := buildSchedulerViewAt(fixture.Dir, lock, events, fixedJournalTime("2026-06-17T10:03:00Z")())
 	if err != nil {
 		t.Fatalf("buildSchedulerViewAt: %v", err)
 	}

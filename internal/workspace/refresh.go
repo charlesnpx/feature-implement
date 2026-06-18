@@ -33,6 +33,8 @@ const (
 
 	refreshInputBase = "base"
 	refreshInputHead = "head"
+
+	refreshConditionStaleHead = "stale_refresh_head"
 )
 
 type RefreshBranchOptions struct {
@@ -565,6 +567,127 @@ func latestRefresh(events []JournalEvent, mergeUnitID string, attemptID string) 
 		found = true
 	}
 	return latest, found
+}
+
+type refreshHeadState struct {
+	Refresh      refreshSnapshot
+	Worktree     string
+	ExpectedHead string
+	ObservedHead string
+}
+
+func currentRefreshHeadCondition(workspaceDir string, events []JournalEvent, attempt attemptSnapshot) (SchedulerBlockingCondition, bool, error) {
+	state, stale, err := currentRefreshHeadState(workspaceDir, events, attempt)
+	if err != nil || !stale {
+		return SchedulerBlockingCondition{}, false, err
+	}
+	return SchedulerBlockingCondition{
+		Type:           refreshConditionStaleHead,
+		Resource:       state.Refresh.Resource,
+		AttemptID:      attempt.AttemptID,
+		Status:         "stale",
+		RequiredAction: mergeQueueRequiredActionRefresh,
+		EvidencePath:   state.Refresh.EvidencePath,
+	}, true, nil
+}
+
+func validateCurrentRefreshHead(workspaceDir string, events []JournalEvent, attempt attemptSnapshot, operation string) error {
+	state, stale, err := currentRefreshHeadState(workspaceDir, events, attempt)
+	if err != nil {
+		return fmt.Errorf("%s could not inspect current refresh head evidence: %w", operation, err)
+	}
+	if !stale {
+		return nil
+	}
+	return fmt.Errorf("%s blocked by stale refresh head evidence %s: worktree %s HEAD is %s, refresh post_head is %s; requires %s", operation, state.Refresh.Resource, state.Worktree, state.ObservedHead, state.ExpectedHead, mergeQueueRequiredActionRefresh)
+}
+
+func currentRefreshHeadState(workspaceDir string, events []JournalEvent, attempt attemptSnapshot) (refreshHeadState, bool, error) {
+	refresh, ok := latestRefresh(events, attempt.MergeUnitID, attempt.AttemptID)
+	if !ok || refresh.Status != RefreshStatusSucceeded {
+		return refreshHeadState{}, false, nil
+	}
+	worktree := strings.TrimSpace(refresh.Worktree)
+	if worktree == "" {
+		worktree = strings.TrimSpace(attempt.Worktree)
+	}
+	expectedHead := strings.TrimSpace(refresh.PostHead)
+	if expectedHead == "" {
+		return refreshHeadState{}, false, nil
+	}
+	observedHead, available, err := observedWorktreeHead(worktree)
+	if err != nil {
+		return refreshHeadState{}, false, err
+	}
+	if !available {
+		recorded, err := refreshEvidenceFileExists(workspaceDir, refresh.EvidencePath)
+		if err != nil {
+			return refreshHeadState{}, false, err
+		}
+		if !recorded {
+			return refreshHeadState{}, false, nil
+		}
+		return refreshHeadState{
+			Refresh:      refresh,
+			Worktree:     worktree,
+			ExpectedHead: expectedHead,
+			ObservedHead: "<unavailable>",
+		}, true, nil
+	}
+	if observedHead == expectedHead {
+		return refreshHeadState{}, false, nil
+	}
+	return refreshHeadState{
+		Refresh:      refresh,
+		Worktree:     worktree,
+		ExpectedHead: expectedHead,
+		ObservedHead: observedHead,
+	}, true, nil
+}
+
+func refreshEvidenceFileExists(workspaceDir string, evidencePath string) (bool, error) {
+	workspaceDir = strings.TrimSpace(workspaceDir)
+	evidencePath = strings.TrimSpace(evidencePath)
+	if workspaceDir == "" || evidencePath == "" {
+		return false, nil
+	}
+	path := evidencePath
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(workspaceDir, path)
+	}
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func observedWorktreeHead(worktree string) (string, bool, error) {
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return "", false, nil
+	}
+	info, err := os.Stat(worktree)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	if !info.IsDir() {
+		return "", false, fmt.Errorf("worktree path %s is not a directory", worktree)
+	}
+	inside, err := gitOutput(worktree, "rev-parse", "--is-inside-work-tree")
+	if err != nil || strings.TrimSpace(inside) != "true" {
+		return "", false, nil
+	}
+	head, err := gitOutput(worktree, "rev-parse", "HEAD")
+	if err != nil {
+		return "", true, err
+	}
+	return strings.TrimSpace(head), true, nil
 }
 
 func normalizeRefreshCommandResults(values []ContractCommandResult) ([]ContractCommandResult, error) {

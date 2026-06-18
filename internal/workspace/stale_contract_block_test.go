@@ -141,7 +141,7 @@ func TestClaimReadyMergeUnitRejectsStaleContractSnapshot(t *testing.T) {
 		t.Fatalf("readWorkspaceLock: %v", err)
 	}
 	events := readTestJournalEvents(t, fixture.Dir)
-	view, err := buildSchedulerViewAt(lock, events, fixedJournalTime("2026-06-17T10:10:30Z")())
+	view, err := buildSchedulerViewAt(fixture.Dir, lock, events, fixedJournalTime("2026-06-17T10:10:30Z")())
 	if err != nil {
 		t.Fatalf("buildSchedulerViewAt: %v", err)
 	}

@@ -280,7 +280,7 @@ func nextOnce(opts NextOptions, claimedAt time.Time, leaseDuration time.Duration
 	if err != nil {
 		return NextResult{}, err
 	}
-	view, err := buildSchedulerViewAt(lock, events, claimedAt)
+	view, err := buildSchedulerViewAt(opts.WorkspaceDir, lock, events, claimedAt)
 	if err != nil {
 		return NextResult{}, err
 	}
@@ -898,7 +898,7 @@ func loadLeaseOperationState(workspaceDir string, observedAt time.Time) (leaseOp
 	if err != nil {
 		return leaseOperationState{}, err
 	}
-	view, err := buildSchedulerViewAt(lock, events, observedAt)
+	view, err := buildSchedulerViewAt(workspaceDir, lock, events, observedAt)
 	if err != nil {
 		return leaseOperationState{}, err
 	}

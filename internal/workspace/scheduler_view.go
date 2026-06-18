@@ -106,7 +106,7 @@ func rebuildSchedulerViewAt(workspaceDir string, now time.Time) (SchedulerView, 
 	if err != nil {
 		return SchedulerView{}, err
 	}
-	view, err := buildSchedulerViewAt(lock, events, now)
+	view, err := buildSchedulerViewAt(workspaceDir, lock, events, now)
 	if err != nil {
 		return SchedulerView{}, err
 	}
@@ -120,10 +120,10 @@ func rebuildSchedulerViewAt(workspaceDir string, now time.Time) (SchedulerView, 
 }
 
 func BuildSchedulerView(lock WorkspaceLock, events []JournalEvent) (SchedulerView, error) {
-	return buildSchedulerViewAt(lock, events, time.Now())
+	return buildSchedulerViewAt("", lock, events, time.Now())
 }
 
-func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Time) (SchedulerView, error) {
+func buildSchedulerViewAt(workspaceDir string, lock WorkspaceLock, events []JournalEvent, now time.Time) (SchedulerView, error) {
 	if _, err := replayResourceRevisions(events); err != nil {
 		return SchedulerView{}, err
 	}
@@ -211,6 +211,17 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 		}
 		view.Counts[unit.Status]++
 		refreshConditions := refreshes.Conditions(unit.ID, attemptID)
+		if attemptID != "" {
+			if attempt := attempts.Current(unit.ID); attempt != nil {
+				condition, stale, err := currentRefreshHeadCondition(workspaceDir, events, *attempt)
+				if err != nil {
+					return SchedulerView{}, err
+				}
+				if stale {
+					refreshConditions = append(refreshConditions, condition)
+				}
+			}
+		}
 		if attemptID != "" && unit.ActiveLease != nil && len(frozenResources) == 0 {
 			if _, ok := latestRefresh(events, unit.ID, attemptID); !ok {
 				refreshConditions = appendMissingRefreshCondition(refreshConditions, unit.ID, attemptID)
@@ -225,7 +236,7 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 		}
 	}
 	ensureLifecycleCounts(view.Counts)
-	if err := populateMergeQueue(&view, lock, events, unitByID, attempts, approvals, queues, now); err != nil {
+	if err := populateMergeQueue(workspaceDir, &view, lock, events, unitByID, attempts, approvals, queues, now); err != nil {
 		return SchedulerView{}, err
 	}
 	for i := range view.MergeUnits {

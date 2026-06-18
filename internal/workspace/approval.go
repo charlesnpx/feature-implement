@@ -236,8 +236,14 @@ func CheckApproval(opts ApprovalCheckOptions) (ApprovalCheckResult, error) {
 	if err != nil {
 		return ApprovalCheckResult{}, err
 	}
-	if _, err := requireCurrentAttemptAt(attempts, opts.MergeUnitID, opts.AttemptID, checkedAt); err != nil {
+	current, err := requireCurrentAttemptAt(attempts, opts.MergeUnitID, opts.AttemptID, checkedAt)
+	if err != nil {
 		return ApprovalCheckResult{}, err
+	}
+	if opts.Action == ExternalActionMerge {
+		if err := validateCurrentRefreshHead(opts.WorkspaceDir, state.Events, current, "approval check"); err != nil {
+			return ApprovalCheckResult{}, err
+		}
 	}
 	approvals, err := approvalSnapshots(state.Events)
 	if err != nil {
@@ -305,8 +311,14 @@ func ConsumeApproval(opts ApprovalConsumeOptions) (ApprovalResult, error) {
 	if err != nil {
 		return ApprovalResult{}, err
 	}
-	if _, err := requireCurrentAttemptAt(attempts, opts.MergeUnitID, opts.AttemptID, consumedAt); err != nil {
+	current, err := requireCurrentAttemptAt(attempts, opts.MergeUnitID, opts.AttemptID, consumedAt)
+	if err != nil {
 		return ApprovalResult{}, err
+	}
+	if opts.Action == ExternalActionMerge {
+		if err := validateCurrentRefreshHead(opts.WorkspaceDir, events, current, "approval consume"); err != nil {
+			return ApprovalResult{}, err
+		}
 	}
 	approval, ok := approvals[opts.ApprovalID]
 	if !ok {
