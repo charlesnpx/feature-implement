@@ -131,6 +131,9 @@ func isolatedGitEnv(hooksDir string) []string {
 	env := make([]string, 0, len(os.Environ())+6)
 	for _, kv := range os.Environ() {
 		key, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(key, "GIT_TRACE") {
+			continue
+		}
 		switch key {
 		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
 			"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
