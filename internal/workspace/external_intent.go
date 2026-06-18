@@ -134,14 +134,15 @@ func ReserveExternalIntent(opts ExternalIntentReserveOptions) (ExternalIntentRes
 	}
 	identity := deriveExternalIntentIdentity(state.View.WorkspaceID, opts, target)
 	intentResource := ExternalIntentResource(identity.intentID)
+	approvalResource := ApprovalResource(opts.ApprovalID)
 	affectedResources := externalIntentAffectedResources(opts, target, state.View.BaseRef)
 	readSet := map[string]int{
 		LeaseResource(opts.MergeUnitID):     state.Revisions[LeaseResource(opts.MergeUnitID)],
 		MergeUnitResource(opts.MergeUnitID): state.Revisions[MergeUnitResource(opts.MergeUnitID)],
-		ApprovalResource(opts.ApprovalID):   state.Revisions[ApprovalResource(opts.ApprovalID)],
+		approvalResource:                    state.Revisions[approvalResource],
 		intentResource:                      0,
 	}
-	writeSet := []string{intentResource}
+	writeSet := []string{intentResource, approvalResource}
 	for _, resource := range affectedResources {
 		readSet[resource] = state.Revisions[resource]
 		writeSet = append(writeSet, resource)
@@ -165,6 +166,7 @@ func ReserveExternalIntent(opts ExternalIntentReserveOptions) (ExternalIntentRes
 			eventPayloadRequestedHeadSHAKey:  opts.RequestedHeadSHA,
 			eventPayloadExpectedBaseSHAKey:   opts.ExpectedBaseSHA,
 			eventPayloadAffectedResourcesKey: affectedResources,
+			eventPayloadUsedCountKey:         approval.UsedCount + 1,
 		},
 		ReadSet:  readSet,
 		WriteSet: writeSet,

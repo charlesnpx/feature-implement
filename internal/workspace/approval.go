@@ -610,6 +610,27 @@ func approvalSnapshots(events []JournalEvent) (map[string]approvalSnapshot, erro
 			}
 			approval.UsedCount++
 			approvals[approvalID] = approval
+		case EventExternalIntentReserved:
+			approvalID, err := eventStringPayload(event, eventPayloadApprovalIDRefKey)
+			if err != nil {
+				return nil, err
+			}
+			approval, ok := approvals[approvalID]
+			if !ok {
+				return nil, fmt.Errorf("approval event %s references unknown approval %s", event.ID, approvalID)
+			}
+			if err := validateExternalIntentApprovalConsumptionEvent(event, approval); err != nil {
+				return nil, err
+			}
+			usedCount, err := eventIntPayload(event, eventPayloadUsedCountKey)
+			if err != nil {
+				return nil, err
+			}
+			if usedCount != approval.UsedCount+1 {
+				return nil, fmt.Errorf("approval event %s payload %s is %d, want %d", event.ID, eventPayloadUsedCountKey, usedCount, approval.UsedCount+1)
+			}
+			approval.UsedCount++
+			approvals[approvalID] = approval
 		}
 	}
 	return approvals, nil
@@ -648,6 +669,40 @@ func validateApprovalConsumedEvent(event JournalEvent, approval approvalSnapshot
 		branch:      optionalStringPayload(event, eventPayloadBranchKey),
 		headSHA:     optionalStringPayload(event, eventPayloadHeadSHAKey),
 		baseSHA:     optionalStringPayload(event, eventPayloadBaseSHAKey),
+		now:         occurredAt,
+	})
+}
+
+func validateExternalIntentApprovalConsumptionEvent(event JournalEvent, approval approvalSnapshot) error {
+	mergeUnitID, err := eventStringPayload(event, eventPayloadMergeUnitIDKey)
+	if err != nil {
+		return err
+	}
+	attemptID, err := eventStringPayload(event, eventPayloadAttemptIDKey)
+	if err != nil {
+		return err
+	}
+	action, err := eventStringPayload(event, eventPayloadActionKey)
+	if err != nil {
+		return err
+	}
+	scope, err := eventStringPayload(event, eventPayloadScopeKey)
+	if err != nil {
+		return err
+	}
+	occurredAt, err := time.Parse(time.RFC3339Nano, event.Timestamp)
+	if err != nil {
+		return fmt.Errorf("approval event %s timestamp must be RFC3339: %w", event.ID, err)
+	}
+	return approvalMatches(approval, approvalMatchRequest{
+		mergeUnitID: mergeUnitID,
+		attemptID:   attemptID,
+		action:      action,
+		scope:       scope,
+		pr:          normalizeApprovalPR(optionalStringPayload(event, eventPayloadPRKey)),
+		branch:      optionalStringPayload(event, eventPayloadBranchKey),
+		headSHA:     optionalStringPayload(event, eventPayloadRequestedHeadSHAKey),
+		baseSHA:     optionalStringPayload(event, eventPayloadExpectedBaseSHAKey),
 		now:         occurredAt,
 	})
 }
