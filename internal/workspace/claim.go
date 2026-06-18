@@ -654,6 +654,12 @@ func claimReadyMergeUnit(opts NextOptions, view SchedulerView, unit SchedulerMer
 		dependencyResource := MergeUnitResource(dependencyID)
 		readSet[dependencyResource] = revisions[dependencyResource]
 	}
+	for _, binding := range unit.ContractBindings {
+		contractResource := ContractResource(binding.ContractID)
+		bindingResource := ContractBindingResource(unit.ID, binding.ContractID, binding.ArtifactID)
+		readSet[contractResource] = revisions[contractResource]
+		readSet[bindingResource] = revisions[bindingResource]
+	}
 	if _, err := AppendEvent(AppendEventOptions{
 		WorkspaceDir: opts.WorkspaceDir,
 		Type:         EventLeaseGranted,

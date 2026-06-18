@@ -1,6 +1,10 @@
 package workspace
 
-import "testing"
+import (
+	"errors"
+	"path/filepath"
+	"testing"
+)
 
 func TestStaleContractBindingBlocksReadyConsumer(t *testing.T) {
 	fixture, claim, attempt := staleContractFixture(t, true)
@@ -102,6 +106,68 @@ func TestRebindingClearsStaleContractBlock(t *testing.T) {
 	}
 	if next.Status != "claimed" || next.MergeUnitID != claim.MergeUnitID {
 		t.Fatalf("consumer should be claimable after rebind and release: %+v", next)
+	}
+}
+
+func TestClaimReadyMergeUnitRejectsStaleContractSnapshot(t *testing.T) {
+	fixture := newContractWorkspaceFixture(t)
+	publishFixtureContract(t, fixture, "v1", "producer-commit-1", "2026-06-17T10:00:00Z")
+	claim, attempt := startFixtureConsumerAttempt(t, fixture, "2026-06-17T10")
+	if _, err := BindContract(ContractBindOptions{
+		WorkspaceDir: fixture.Dir,
+		ContractID:   "api-contract",
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-consumer",
+		LeaseID:      claim.LeaseID,
+		CommandResults: []ContractCommandResult{{
+			Command: "go test ./...",
+			Status:  "passed",
+		}},
+		Now: fixedJournalTime("2026-06-17T10:09:00Z"),
+	}); err != nil {
+		t.Fatalf("BindContract initial: %v", err)
+	}
+	if _, err := Release(LeaseOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-consumer",
+		LeaseID:      claim.LeaseID,
+		Now:          fixedJournalTime("2026-06-17T10:10:00Z"),
+	}); err != nil {
+		t.Fatalf("Release initial consumer lease: %v", err)
+	}
+	lock, err := readWorkspaceLock(filepath.Join(fixture.Dir, LockFileName))
+	if err != nil {
+		t.Fatalf("readWorkspaceLock: %v", err)
+	}
+	events := readTestJournalEvents(t, fixture.Dir)
+	view, err := buildSchedulerViewAt(lock, events, fixedJournalTime("2026-06-17T10:10:30Z")())
+	if err != nil {
+		t.Fatalf("buildSchedulerViewAt: %v", err)
+	}
+	unit := findSchedulerUnit(t, view, claim.MergeUnitID)
+	if len(unit.BlockingConditions) != 0 || len(unit.ContractBindings) != 1 || unit.ContractBindings[0].Status != contractBindingStatusCurrent {
+		t.Fatalf("stale snapshot unit = %+v", unit)
+	}
+	revisions, err := replayResourceRevisions(events)
+	if err != nil {
+		t.Fatalf("replayResourceRevisions: %v", err)
+	}
+	writeContractArtifact(t, fixture.Dir, "openapi: 3.1.0\ninfo:\n  title: changed\n")
+	publishFixtureContract(t, fixture, "v2", "producer-commit-2", "2026-06-17T10:11:00Z")
+
+	_, err = claimReadyMergeUnit(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-other",
+		Claim:        true,
+	}, view, unit, fixedJournalTime("2026-06-17T10:12:00Z")(), DefaultLeaseDuration, revisions)
+
+	var stale StaleResourceError
+	if !errors.As(err, &stale) {
+		t.Fatalf("claimReadyMergeUnit error = %v", err)
+	}
+	if stale.Resource != ContractResource("api-contract") || stale.Expected != 1 || stale.Observed != 2 {
+		t.Fatalf("stale error = %+v", stale)
 	}
 }
 
