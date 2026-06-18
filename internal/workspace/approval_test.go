@@ -339,6 +339,52 @@ func TestApprovalPRURLMatchesNumber(t *testing.T) {
 	}
 }
 
+func TestApprovalConsumeReadsRefreshInputResources(t *testing.T) {
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	granted, err := GrantApproval(ApprovalGrantOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Actions:      []string{"merge"},
+		PR:           "42",
+		HeadSHA:      "head-sha",
+		BaseSHA:      "base-sha",
+		ExpiresIn:    time.Hour,
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("GrantApproval: %v", err)
+	}
+	if _, err := ConsumeApproval(ApprovalConsumeOptions{
+		WorkspaceDir: fixture.Dir,
+		ApprovalID:   granted.Approval.ApprovalID,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		Action:       "merge",
+		PR:           "42",
+		HeadSHA:      "head-sha",
+		BaseSHA:      "base-sha",
+		Now:          fixedJournalTime("2026-06-17T10:03:00Z"),
+	}); err != nil {
+		t.Fatalf("ConsumeApproval: %v", err)
+	}
+	events := readTestJournalEvents(t, fixture.Dir)
+	last := events[len(events)-1]
+	if last.Type != EventApprovalConsumed {
+		t.Fatalf("last event = %+v", last)
+	}
+	baseResource := RefreshInputResource(claim.MergeUnitID, attempt.AttemptID, refreshInputBase)
+	headResource := RefreshInputResource(claim.MergeUnitID, attempt.AttemptID, refreshInputHead)
+	if _, ok := last.ReadSet[baseResource]; !ok {
+		t.Fatalf("consume read set missing %s: %+v", baseResource, last.ReadSet)
+	}
+	if _, ok := last.ReadSet[headResource]; !ok {
+		t.Fatalf("consume read set missing %s: %+v", headResource, last.ReadSet)
+	}
+}
+
 func TestApprovalReplayRejectsConsumedEventMissingTarget(t *testing.T) {
 	fixture, claim, attempt := newApprovalAttemptFixture(t)
 	granted, err := GrantApproval(ApprovalGrantOptions{

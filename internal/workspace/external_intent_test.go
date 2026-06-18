@@ -61,6 +61,14 @@ func TestReserveExternalIntentRecordsReservationAndIdempotency(t *testing.T) {
 	assertContainsString(t, last.WriteSet, ApprovalResource(approval.Approval.ApprovalID))
 	assertContainsString(t, last.WriteSet, ProviderTargetResource("push:branch:feature/test"))
 	assertContainsString(t, last.WriteSet, RemoteRefResource("feature/test"))
+	baseResource := RefreshInputResource(claim.MergeUnitID, attempt.AttemptID, refreshInputBase)
+	headResource := RefreshInputResource(claim.MergeUnitID, attempt.AttemptID, refreshInputHead)
+	if _, ok := last.ReadSet[baseResource]; !ok {
+		t.Fatalf("reserve read set missing %s: %+v", baseResource, last.ReadSet)
+	}
+	if _, ok := last.ReadSet[headResource]; !ok {
+		t.Fatalf("reserve read set missing %s: %+v", headResource, last.ReadSet)
+	}
 
 	check, err := CheckApproval(ApprovalCheckOptions{
 		WorkspaceDir: fixture.Dir,

@@ -324,6 +324,11 @@ func ConsumeApproval(opts ApprovalConsumeOptions) (ApprovalResult, error) {
 	}
 	resource := ApprovalResource(opts.ApprovalID)
 	mergeUnitResource := MergeUnitResource(opts.MergeUnitID)
+	readSet := map[string]int{
+		resource:          revisions[resource],
+		mergeUnitResource: revisions[mergeUnitResource],
+	}
+	addApprovalRefreshInputReadSet(readSet, revisions, approval)
 	event, err := AppendEvent(AppendEventOptions{
 		WorkspaceDir: opts.WorkspaceDir,
 		Type:         EventApprovalConsumed,
@@ -339,10 +344,7 @@ func ConsumeApproval(opts ApprovalConsumeOptions) (ApprovalResult, error) {
 			eventPayloadBaseSHAKey:     opts.BaseSHA,
 			eventPayloadUsedCountKey:   approval.UsedCount + 1,
 		},
-		ReadSet: map[string]int{
-			resource:          revisions[resource],
-			mergeUnitResource: revisions[mergeUnitResource],
-		},
+		ReadSet:  readSet,
 		WriteSet: []string{resource},
 		Now:      func() time.Time { return consumedAt },
 	})
@@ -599,6 +601,20 @@ func isTightMergeApproval(approval approvalSnapshot) bool {
 		approval.BaseSHA != ""
 }
 
+func approvalReadsRefreshInputs(approval approvalSnapshot) bool {
+	return approval.HeadSHA != "" || approval.BaseSHA != ""
+}
+
+func addApprovalRefreshInputReadSet(readSet map[string]int, revisions map[string]int, approval approvalSnapshot) {
+	if !approvalReadsRefreshInputs(approval) {
+		return
+	}
+	for _, input := range []string{refreshInputBase, refreshInputHead} {
+		resource := RefreshInputResource(approval.MergeUnitID, approval.AttemptID, input)
+		readSet[resource] = revisions[resource]
+	}
+}
+
 func approvalStaleInputsFromEvents(events []JournalEvent, approval approvalSnapshot) []string {
 	refresh, ok := latestRefresh(events, approval.MergeUnitID, approval.AttemptID)
 	if !ok {
@@ -615,11 +631,17 @@ func approvalStaleInputsForRefresh(approval approvalSnapshot, refresh refreshSna
 		return nil
 	}
 	stale := []string{}
-	if refresh.NewBase != "" && approval.BaseSHA != refresh.NewBase {
-		stale = append(stale, refreshInputBase)
-	}
-	if refresh.PostHead != "" && approval.HeadSHA != refresh.PostHead {
-		stale = append(stale, refreshInputHead)
+	for _, change := range refresh.InputChanges {
+		switch change.Input {
+		case refreshInputBase:
+			if approval.BaseSHA != change.NewValue {
+				stale = append(stale, refreshInputBase)
+			}
+		case refreshInputHead:
+			if approval.HeadSHA != change.NewValue {
+				stale = append(stale, refreshInputHead)
+			}
+		}
 	}
 	return stale
 }

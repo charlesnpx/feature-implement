@@ -416,6 +416,81 @@ func TestStatusReportsStaleMergeApprovalAfterRefresh(t *testing.T) {
 	}
 }
 
+func TestStaleApprovalUsesRecordedRefreshInputChanges(t *testing.T) {
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	granted, err := GrantApproval(ApprovalGrantOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Actions:      []string{"merge"},
+		PR:           "42",
+		HeadSHA:      "head-sha-1",
+		BaseSHA:      attempt.BaseSHA,
+		MaxUses:      1,
+		ExpiresAt:    time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC),
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("GrantApproval: %v", err)
+	}
+	revisions, err := ResourceRevisions(fixture.Dir)
+	if err != nil {
+		t.Fatalf("ResourceRevisions: %v", err)
+	}
+	resource := RefreshResource(claim.MergeUnitID + ":" + attempt.AttemptID)
+	baseResource := RefreshInputResource(claim.MergeUnitID, attempt.AttemptID, refreshInputBase)
+	evidencePath := filepath.Join(StateDirName, "evidence", "refresh", "base-only.json")
+	if _, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: fixture.Dir,
+		Type:         EventBranchRefreshRecorded,
+		Payload: map[string]any{
+			eventPayloadMergeUnitIDKey:  claim.MergeUnitID,
+			eventPayloadAttemptIDKey:    attempt.AttemptID,
+			eventPayloadAgentIDKey:      "worker-a",
+			eventPayloadLeaseIDKey:      claim.LeaseID,
+			eventPayloadStatusKey:       RefreshStatusSucceeded,
+			eventPayloadBranchKey:       attempt.Branch,
+			eventPayloadWorktreeKey:     attempt.Worktree,
+			eventPayloadOldBaseKey:      attempt.BaseSHA,
+			eventPayloadNewBaseKey:      "base-sha-2",
+			eventPayloadPreHeadKey:      "head-sha-1",
+			eventPayloadPostHeadKey:     "head-sha-2",
+			eventPayloadBackupRefKey:    "backup-base-only",
+			eventPayloadEvidencePathKey: evidencePath,
+			eventPayloadInputChangesKey: []map[string]any{{
+				"input":     refreshInputBase,
+				"old_value": attempt.BaseSHA,
+				"new_value": "base-sha-2",
+				"resource":  baseResource,
+			}},
+		},
+		ReadSet: map[string]int{
+			LeaseResource(claim.MergeUnitID):     revisions[LeaseResource(claim.MergeUnitID)],
+			MergeUnitResource(claim.MergeUnitID): revisions[MergeUnitResource(claim.MergeUnitID)],
+			resource:                             revisions[resource],
+		},
+		WriteSet: []string{resource, baseResource},
+		Now:      fixedJournalTime("2026-06-17T10:03:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent refresh: %v", err)
+	}
+
+	status, err := Status(fixture.Dir)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	unit := findSchedulerUnit(t, SchedulerView{MergeUnits: status.MergeUnits}, claim.MergeUnitID)
+	if len(unit.Approvals) != 1 {
+		t.Fatalf("status approvals = %+v", unit.Approvals)
+	}
+	approval := unit.Approvals[0]
+	if approval.ApprovalID != granted.Approval.ApprovalID || approval.Status != "stale" || !stringSlicesEqual(approval.StaleInputs, []string{refreshInputBase}) {
+		t.Fatalf("stale approval view = %+v", approval)
+	}
+}
+
 func TestAppendRefreshEventAfterMutationRejectsStaleAttempt(t *testing.T) {
 	fixture, claim, attempt := newApprovalAttemptFixture(t)
 	revisions, err := ResourceRevisions(fixture.Dir)

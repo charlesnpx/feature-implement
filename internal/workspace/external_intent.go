@@ -222,6 +222,7 @@ func ReserveExternalIntent(opts ExternalIntentReserveOptions) (ExternalIntentRes
 		approvalResource:                    state.Revisions[approvalResource],
 		intentResource:                      0,
 	}
+	addApprovalRefreshInputReadSet(readSet, state.Revisions, approval)
 	writeSet := []string{intentResource, approvalResource}
 	for _, resource := range affectedResources {
 		readSet[resource] = state.Revisions[resource]
