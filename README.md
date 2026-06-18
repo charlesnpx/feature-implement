@@ -175,3 +175,9 @@ stage="$(mktemp -d)"
 ./install-skill.sh --install --target all --json --install-root "$stage"
 "$stage/.local/bin/feature" version
 ```
+
+Optional local git smoke, which creates `.git` metadata only inside temp test directories:
+
+```sh
+FEATURE_WORKSPACE_LOCAL_GIT_SMOKE=1 go test ./internal/workspace -run TestLocalGitAttemptWorktreeSmoke -count=1
+```
