@@ -1033,17 +1033,79 @@ func workspaceApproveConsume(args []string) error {
 
 func workspaceExternal(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("workspace external requires subcommand: intent")
+		return fmt.Errorf("workspace external requires subcommand: intent or plan")
 	}
 	action := args[0]
 	if isHelpCommand(action) {
 		usageWorkspaceExternal(os.Stdout)
 		return nil
 	}
+	if action == "plan" {
+		if hasHelpFlag(args[1:]) {
+			usageWorkspaceExternalPlan(os.Stdout)
+			return nil
+		}
+		return workspaceExternalPlan(args[1:])
+	}
 	if action != "intent" {
 		return fmt.Errorf("unsupported workspace external action: %s", action)
 	}
 	return workspaceExternalIntent(args[1:])
+}
+
+func workspaceExternalPlan(args []string) error {
+	fs := flag.NewFlagSet("workspace external plan", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	mergeUnitID := fs.String("merge-unit", "", "Merge unit ID")
+	attemptID := fs.String("attempt", "", "Attempt ID")
+	agentID := fs.String("agent", "", "Agent ID that owns the lease")
+	leaseID := fs.String("lease", "", "Lease ID")
+	approvalID := fs.String("approval", "", "Approval ID authorizing this intent")
+	action := fs.String("action", "", "External action: push, open-pr, merge, or remote-delete")
+	scope := fs.String("scope", "", "Approval scope; defaults to merge-unit")
+	branch := fs.String("branch", "", "Branch target")
+	pr := fs.String("pr", "", "PR number or URL target")
+	headSHA := fs.String("head-sha", "", "Requested head SHA")
+	baseSHA := fs.String("base-sha", "", "Expected base SHA")
+	remote := fs.String("remote", "", "Git remote; defaults to origin")
+	worktree := fs.String("worktree", "", "Worktree for git commands; defaults to attempt worktree")
+	title := fs.String("title", "", "PR title for open-pr")
+	body := fs.String("body", "", "PR body text before workspace markers")
+	asJSON := fs.Bool("json", false, "Emit JSON result")
+	if err := parsePermissive(fs, args, "merge-unit", "attempt", "agent", "lease", "approval", "action", "scope", "branch", "pr", "head-sha", "base-sha", "remote", "worktree", "title", "body"); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("workspace external plan requires <workspace-dir>")
+	}
+	result, err := workspace.PlanExternalProviderCommand(workspace.ExternalProviderPlanOptions{
+		WorkspaceDir:     fs.Arg(0),
+		MergeUnitID:      *mergeUnitID,
+		AttemptID:        *attemptID,
+		AgentID:          *agentID,
+		LeaseID:          *leaseID,
+		ApprovalID:       *approvalID,
+		Action:           *action,
+		Scope:            *scope,
+		Branch:           *branch,
+		PR:               *pr,
+		RequestedHeadSHA: *headSHA,
+		ExpectedBaseSHA:  *baseSHA,
+		Remote:           *remote,
+		Worktree:         *worktree,
+		Title:            *title,
+		Body:             *body,
+	})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(result)
+	}
+	for _, command := range result.Plan.Commands {
+		fmt.Println(command)
+	}
+	return nil
 }
 
 func workspaceExternalIntent(args []string) error {
@@ -1576,6 +1638,7 @@ Consumes one use of a matching approval capability.`)
 
 func usageWorkspaceExternal(w io.Writer) {
 	fmt.Fprintln(w, `Usage:
+  feature workspace external plan <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --approval <id> --action <push|open-pr|merge|remote-delete> (--branch <name> | --pr <id>) --head-sha <sha> --base-sha <sha> [--scope <scope>] [--remote <name>] [--worktree <path>] [--title <text>] [--body <text>] [--json]
   feature workspace external intent reserve <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --approval <id> --action <push|open-pr|merge|remote-delete> (--branch <name> | --pr <id>) --head-sha <sha> --base-sha <sha> [--scope <scope>] [--json]
   feature workspace external intent result <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --intent <id> --status <status> [--policy-accepted] [--details <text>] [--json]
   feature workspace external intent reconcile <workspace-dir> --intent <id> --operator <id> --details <text> [--json]
@@ -1612,6 +1675,13 @@ Records operator reconciliation for an ambiguous external write intent.`)
 	default:
 		usageWorkspaceExternalIntent(w)
 	}
+}
+
+func usageWorkspaceExternalPlan(w io.Writer) {
+	fmt.Fprintln(w, `Usage:
+  feature workspace external plan <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --approval <id> --action <push|open-pr|merge|remote-delete> (--branch <name> | --pr <id>) --head-sha <sha> --base-sha <sha> [--scope <scope>] [--remote <name>] [--worktree <path>] [--title <text>] [--body <text>] [--json]
+
+Builds workspace-aware planned provider commands. The plan includes approval checking, intent reservation, provider execution, result recording, and PR body markers where applicable.`)
 }
 
 func usageWorkspaceAttemptStart(w io.Writer) {
