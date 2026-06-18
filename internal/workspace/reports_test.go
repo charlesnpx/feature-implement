@@ -97,6 +97,72 @@ func TestStatusReportsOperatorReconciledExternalIntent(t *testing.T) {
 	}
 }
 
+func TestBlockerGroupsUseFrozenResourcesWithoutDuplicateSchedulerCondition(t *testing.T) {
+	fixture, claim, attempt, approval := newExternalIntentFixture(t, ExternalActionPush)
+	reserved := reserveExternalIntentForTest(t, fixture, claim, attempt, approval, "feature/test", "head-sha", "2026-06-17T10:03:00Z")
+
+	view, err := rebuildSchedulerViewAt(fixture.Dir, fixedJournalTime("2026-06-17T10:03:30Z")())
+	if err != nil {
+		t.Fatalf("rebuildSchedulerViewAt: %v", err)
+	}
+	unit := findSchedulerUnit(t, view, claim.MergeUnitID)
+	if len(unit.BlockingConditions) != 1 || unit.BlockingConditions[0].Type != "frozen_resource" {
+		t.Fatalf("scheduler blocking conditions = %+v", unit.BlockingConditions)
+	}
+
+	group := findBlockerGroup(t, workspaceBlockerGroups(view), "frozen_resource", externalIntentFreezeActionRecordResult)
+	if group.Count != 3 || len(group.Conditions) != 3 {
+		t.Fatalf("frozen resource group = %+v", group)
+	}
+	assertBlockerResources(t, group.Conditions,
+		MergeUnitResource(claim.MergeUnitID),
+		ProviderTargetResource("push:branch:feature/test"),
+		RemoteRefResource("feature/test"),
+	)
+	for _, condition := range group.Conditions {
+		if condition.IntentID != reserved.Intent.IntentID || condition.AttemptID != attempt.AttemptID {
+			t.Fatalf("frozen resource condition = %+v", condition)
+		}
+	}
+}
+
+func TestAmbiguousPolicyAcceptedExternalIntentReportsProviderSource(t *testing.T) {
+	fixture, claim, attempt, approval := newExternalIntentFixture(t, ExternalActionPush)
+	reserved := reserveExternalIntentForTest(t, fixture, claim, attempt, approval, "feature/test", "head-sha", "2026-06-17T10:03:00Z")
+	if _, err := RecordExternalIntentResult(ExternalIntentResultRecordOptions{
+		WorkspaceDir:   fixture.Dir,
+		MergeUnitID:    claim.MergeUnitID,
+		AttemptID:      attempt.AttemptID,
+		AgentID:        "worker-a",
+		LeaseID:        claim.LeaseID,
+		IntentID:       reserved.Intent.IntentID,
+		Status:         ExternalResultAmbiguous,
+		PolicyAccepted: true,
+		Details:        "provider result",
+		Now:            fixedJournalTime("2026-06-17T10:04:00Z"),
+	}); err != nil {
+		t.Fatalf("RecordExternalIntentResult: %v", err)
+	}
+
+	events := readTestJournalEvents(t, fixture.Dir)
+	activeLeases, err := activeLeaseSnapshots(events, fixedJournalTime("2026-06-17T10:04:30Z")())
+	if err != nil {
+		t.Fatalf("activeLeaseSnapshots: %v", err)
+	}
+	reports, err := externalIntentReports(events, activeLeases)
+	if err != nil {
+		t.Fatalf("externalIntentReports: %v", err)
+	}
+	report := findExternalIntentReport(t, reports, reserved.Intent.IntentID)
+	if report.ResultSource != ExternalIntentResultSourceProvider ||
+		report.ResultStatus != ExternalResultAmbiguous ||
+		report.RequiredAction != externalIntentFreezeActionOperatorReconcile ||
+		report.Accepted ||
+		!report.PolicyAccepted {
+		t.Fatalf("ambiguous external intent report = %+v", report)
+	}
+}
+
 func findBlockerGroup(t *testing.T, groups []WorkspaceBlockerGroup, groupType string, requiredAction string) WorkspaceBlockerGroup {
 	t.Helper()
 	for _, group := range groups {
@@ -117,4 +183,21 @@ func findExternalIntentReport(t *testing.T, reports []ExternalIntentReport, inte
 	}
 	t.Fatalf("external intent %s missing from %+v", intentID, reports)
 	return ExternalIntentReport{}
+}
+
+func assertBlockerResources(t *testing.T, conditions []WorkspaceBlockerView, resources ...string) {
+	t.Helper()
+	seen := map[string]int{}
+	for _, condition := range conditions {
+		seen[condition.Resource]++
+	}
+	for _, resource := range resources {
+		if seen[resource] != 1 {
+			t.Fatalf("resource %s count = %d in %+v", resource, seen[resource], conditions)
+		}
+		delete(seen, resource)
+	}
+	if len(seen) > 0 {
+		t.Fatalf("unexpected resources in blocker conditions: %+v", seen)
+	}
 }

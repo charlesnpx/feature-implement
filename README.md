@@ -74,6 +74,7 @@ External intent report `result_source` values are intentionally distinct:
 - `tool`: the provider command completed with a tool-proven successful result.
 - `operator`: an operator reconciled the intent after an ambiguous or unresolved external write.
 - `policy`: policy accepted a non-success provider result.
+- `provider`: the provider recorded a non-success result that policy did not accept.
 - `unresolved`: no result has been recorded yet.
 
 ## Manifest Contract

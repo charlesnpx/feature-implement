@@ -64,11 +64,17 @@ func workspaceBlockerGroups(view SchedulerView) []WorkspaceBlockerGroup {
 	byKey := map[string]*WorkspaceBlockerGroup{}
 	for _, unit := range view.MergeUnits {
 		for _, condition := range unit.BlockingConditions {
+			if condition.Type == "frozen_resource" {
+				continue
+			}
 			addWorkspaceBlocker(byKey, unit.ID, condition)
 		}
 	}
 	for _, entry := range view.MergeQueue {
 		for _, condition := range entry.BlockingConditions {
+			if condition.Type == "frozen_resource" {
+				continue
+			}
 			addWorkspaceBlocker(byKey, entry.MergeUnitID, condition)
 		}
 	}
@@ -204,7 +210,7 @@ func externalIntentResultSource(result ExternalIntentRecordedResultView) string 
 	if result.Status == ExternalResultSucceeded {
 		return ExternalIntentResultSourceTool
 	}
-	if result.PolicyAccepted {
+	if result.PolicyAccepted && result.Accepted {
 		return ExternalIntentResultSourcePolicy
 	}
 	return ExternalIntentResultSourceProvider
