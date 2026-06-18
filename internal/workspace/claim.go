@@ -92,16 +92,20 @@ type RecoverOptions struct {
 }
 
 type RecoverResult struct {
-	Status         string               `json:"status"`
-	WorkspaceDir   string               `json:"workspace_dir"`
-	WorkspaceID    string               `json:"workspace_id"`
-	BaseRef        string               `json:"base_ref"`
-	ViewPath       string               `json:"view_path"`
-	Recovered      []RecoveredLeaseView `json:"recovered"`
-	RecoveredCount int                  `json:"recovered_count"`
-	Ready          []string             `json:"ready"`
-	Leased         []string             `json:"leased"`
-	Counts         map[string]int       `json:"counts"`
+	Status            string                  `json:"status"`
+	WorkspaceDir      string                  `json:"workspace_dir"`
+	WorkspaceID       string                  `json:"workspace_id"`
+	BaseRef           string                  `json:"base_ref"`
+	ViewPath          string                  `json:"view_path"`
+	Actions           []RecoveryActionView    `json:"actions,omitempty"`
+	Recovered         []RecoveredLeaseView    `json:"recovered"`
+	RecoveredCount    int                     `json:"recovered_count"`
+	Ready             []string                `json:"ready"`
+	Leased            []string                `json:"leased"`
+	Blocked           []string                `json:"blocked,omitempty"`
+	RemainingBlockers []WorkspaceBlockerGroup `json:"remaining_blockers,omitempty"`
+	ExternalIntents   []ExternalIntentReport  `json:"external_intents,omitempty"`
+	Counts            map[string]int          `json:"counts"`
 }
 
 type AttemptStartOptions struct {
@@ -434,21 +438,37 @@ func Recover(opts RecoverOptions) (RecoverResult, error) {
 	if err != nil {
 		return RecoverResult{}, err
 	}
+	events, err := readJournalEvents(EventsPath(opts.WorkspaceDir))
+	if err != nil {
+		return RecoverResult{}, err
+	}
+	activeLeases, err := activeLeaseSnapshots(events, recoveredAt)
+	if err != nil {
+		return RecoverResult{}, err
+	}
+	externalIntents, err := externalIntentReports(events, activeLeases)
+	if err != nil {
+		return RecoverResult{}, err
+	}
 	status := "unchanged"
 	if len(recovered) > 0 {
 		status = "recovered"
 	}
 	return RecoverResult{
-		Status:         status,
-		WorkspaceDir:   opts.WorkspaceDir,
-		WorkspaceID:    view.WorkspaceID,
-		BaseRef:        view.BaseRef,
-		ViewPath:       SchedulerViewPath(opts.WorkspaceDir),
-		Recovered:      recovered,
-		RecoveredCount: len(recovered),
-		Ready:          append([]string{}, view.Ready...),
-		Leased:         append([]string{}, view.Leased...),
-		Counts:         cloneCounts(view.Counts),
+		Status:            status,
+		WorkspaceDir:      opts.WorkspaceDir,
+		WorkspaceID:       view.WorkspaceID,
+		BaseRef:           view.BaseRef,
+		ViewPath:          SchedulerViewPath(opts.WorkspaceDir),
+		Actions:           recoveryActionsFromLeases(recovered),
+		Recovered:         recovered,
+		RecoveredCount:    len(recovered),
+		Ready:             append([]string{}, view.Ready...),
+		Leased:            append([]string{}, view.Leased...),
+		Blocked:           append([]string{}, view.Blocked...),
+		RemainingBlockers: workspaceBlockerGroups(view),
+		ExternalIntents:   externalIntents,
+		Counts:            cloneCounts(view.Counts),
 	}, nil
 }
 

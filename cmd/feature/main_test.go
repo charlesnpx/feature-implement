@@ -485,6 +485,12 @@ func TestWorkspaceRecoverCommandJSON(t *testing.T) {
 			LeaseID     string `json:"lease_id"`
 			AgentID     string `json:"agent_id"`
 		} `json:"recovered"`
+		Actions []struct {
+			Type        string `json:"type"`
+			MergeUnitID string `json:"merge_unit_id"`
+			LeaseID     string `json:"lease_id"`
+			Status      string `json:"status"`
+		} `json:"actions"`
 		Ready []string `json:"ready"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
@@ -495,6 +501,9 @@ func TestWorkspaceRecoverCommandJSON(t *testing.T) {
 	}
 	if len(result.Recovered) != 1 || result.Recovered[0].LeaseID != "lease-expired" || result.Recovered[0].AgentID != "worker-a" {
 		t.Fatalf("recovered leases = %+v", result.Recovered)
+	}
+	if len(result.Actions) != 1 || result.Actions[0].Type != "recovered_lease" || result.Actions[0].LeaseID != "lease-expired" || result.Actions[0].Status != "recovered" {
+		t.Fatalf("recovery actions = %+v", result.Actions)
 	}
 	if len(result.Ready) != 1 || result.Ready[0] != "foundation:story-a" {
 		t.Fatalf("ready = %+v", result.Ready)
