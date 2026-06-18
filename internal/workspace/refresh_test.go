@@ -33,6 +33,13 @@ func TestRefreshVerificationChecksContribution(t *testing.T) {
 	}
 }
 
+func TestValidateRefreshBackupRefRejectsOptionLikeRef(t *testing.T) {
+	err := validateRefreshBackupRef("", "-delete-me")
+	if err == nil || !strings.Contains(err.Error(), "must not start with '-'") {
+		t.Fatalf("validateRefreshBackupRef error = %v, want option-like ref rejection", err)
+	}
+}
+
 func TestRefreshVerificationFailureBlocksCurrentAttempt(t *testing.T) {
 	fixture, claim, attempt := newApprovalAttemptFixture(t)
 	revisions, err := ResourceRevisions(fixture.Dir)

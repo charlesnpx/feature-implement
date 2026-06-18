@@ -385,6 +385,9 @@ func runLocalRefresh(opts RefreshBranchOptions, workspaceID string, baseRef stri
 	if backupRef == "" {
 		backupRef = defaultRefreshBackupRef(branch, refreshedAt)
 	}
+	if err := validateRefreshBackupRef(worktree, backupRef); err != nil {
+		return RefreshEvidence{}, err
+	}
 	beforeFiles, err := changedFiles(worktree, oldBase, preHead)
 	if err != nil {
 		return RefreshEvidence{}, err
@@ -393,7 +396,7 @@ func runLocalRefresh(opts RefreshBranchOptions, workspaceID string, baseRef stri
 	if err != nil {
 		return RefreshEvidence{}, err
 	}
-	if _, err := gitOutput(worktree, "branch", backupRef, branch); err != nil {
+	if _, err := gitOutput(worktree, "branch", "--", backupRef, branch); err != nil {
 		return RefreshEvidence{}, err
 	}
 	if _, err := gitOutput(worktree, "rebase", "--onto", newBase, oldBase, branch); err != nil {
@@ -485,6 +488,16 @@ func remoteTrackingRef(worktree string, branch string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+func validateRefreshBackupRef(worktree string, backupRef string) error {
+	if strings.HasPrefix(backupRef, "-") {
+		return fmt.Errorf("refresh backup ref %q must not start with '-'", backupRef)
+	}
+	if _, err := gitOutput(worktree, "check-ref-format", "--branch", backupRef); err != nil {
+		return fmt.Errorf("invalid refresh backup ref %q: %w", backupRef, err)
+	}
+	return nil
 }
 
 func verifyRefreshContribution(beforeFiles []string, afterFiles []string, beforePatchIDs []RefreshPatchID, afterPatchIDs []RefreshPatchID, commandResults []ContractCommandResult) RefreshVerification {
