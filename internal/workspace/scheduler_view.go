@@ -255,6 +255,8 @@ func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, attempts *
 		return refreshes.Apply(event)
 	case EventGateEvaluationRecorded:
 		return nil
+	case EventGateOverrideRecorded:
+		return validateGateOverrideEvent(event)
 	default:
 		return fmt.Errorf("unknown scheduler event type %q", event.Type)
 	}
