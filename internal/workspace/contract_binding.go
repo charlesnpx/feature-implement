@@ -361,6 +361,8 @@ func contractBindingStatuses(lock WorkspaceLock, events []JournalEvent, mergeUni
 			status.EventHash = binding.EventHash
 			status.Status = contractBindingStatusStale
 			if publicationFound &&
+				binding.PublicationEventID == publication.EventID &&
+				binding.PublicationEventHash == publication.EventHash &&
 				binding.Version == publication.Version &&
 				binding.ArtifactPath == publication.ArtifactPath &&
 				binding.ArtifactHash == publication.ArtifactHash {

@@ -230,6 +230,55 @@ func TestCheckContractsReportsStaleBinding(t *testing.T) {
 	}
 }
 
+func TestCheckContractsReportsStaleBindingAfterSameArtifactRepublish(t *testing.T) {
+	fixture := newContractWorkspaceFixture(t)
+	firstPublication := publishFixtureContract(t, fixture, "v1", "producer-commit-1", "2026-06-17T10:00:00Z")
+	claim, attempt := startFixtureConsumerAttempt(t, fixture, "2026-06-17T10")
+	bound, err := BindContract(ContractBindOptions{
+		WorkspaceDir: fixture.Dir,
+		ContractID:   "api-contract",
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-consumer",
+		LeaseID:      claim.LeaseID,
+		CommandResults: []ContractCommandResult{{
+			Command: "go test ./...",
+			Status:  "passed",
+		}},
+		Now: fixedJournalTime("2026-06-17T10:09:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("BindContract: %v", err)
+	}
+	secondPublication := publishFixtureContract(t, fixture, "v1", "producer-commit-2", "2026-06-17T10:10:00Z")
+	if secondPublication.ArtifactHash != firstPublication.ArtifactHash {
+		t.Fatalf("fixture republish should keep same artifact hash: first=%+v second=%+v", firstPublication, secondPublication)
+	}
+	if secondPublication.EventID == firstPublication.EventID || secondPublication.EventHash == firstPublication.EventHash {
+		t.Fatalf("fixture republish should create a distinct publication event: first=%+v second=%+v", firstPublication, secondPublication)
+	}
+
+	result, err := CheckContracts(ContractCheckOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		Now:          fixedJournalTime("2026-06-17T10:11:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("CheckContracts: %v", err)
+	}
+	if result.Status != contractBindingStatusStale || len(result.Bindings) != 1 {
+		t.Fatalf("same-artifact republish should stale binding: %+v", result)
+	}
+	binding := result.Bindings[0]
+	if binding.Status != contractBindingStatusStale || binding.BoundVersion != binding.Version || binding.BoundArtifactHash != binding.ArtifactHash {
+		t.Fatalf("same-artifact stale binding = %+v", binding)
+	}
+	if bound.PublicationEventID != firstPublication.EventID || binding.PublicationEventID != secondPublication.EventID {
+		t.Fatalf("publication event metadata = bound %+v binding %+v first %+v second %+v", bound, binding, firstPublication, secondPublication)
+	}
+}
+
 func publishFixtureContract(t *testing.T, fixture workspaceFixture, version string, commit string, at string) ContractPublishResult {
 	t.Helper()
 	published, err := PublishContract(ContractPublishOptions{
