@@ -263,6 +263,58 @@ func TestApprovalDoesNotCarryForwardToFreshAttempt(t *testing.T) {
 	}
 }
 
+func TestApprovalGrantRequiresLeaseThatStartedAttempt(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	writeWorkspaceLock(t, fixture.Dir)
+	firstClaim, err := Next(NextOptions{
+		WorkspaceDir:  fixture.Dir,
+		AgentID:       "worker-a",
+		Claim:         true,
+		LeaseDuration: time.Minute,
+		Now:           fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("first Next: %v", err)
+	}
+	firstAttempt, err := StartAttempt(AttemptStartOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  firstClaim.MergeUnitID,
+		AgentID:      "worker-a",
+		LeaseID:      firstClaim.LeaseID,
+		BaseSHA:      "base-sha-1",
+		Now:          fixedJournalTime("2026-06-17T10:00:30Z"),
+	})
+	if err != nil {
+		t.Fatalf("first StartAttempt: %v", err)
+	}
+	secondClaim, err := Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-b",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("second Next: %v", err)
+	}
+	if secondClaim.MergeUnitID != firstClaim.MergeUnitID || secondClaim.LeaseID == firstClaim.LeaseID {
+		t.Fatalf("second claim = %+v, first = %+v", secondClaim, firstClaim)
+	}
+
+	_, err = GrantApproval(ApprovalGrantOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  secondClaim.MergeUnitID,
+		AttemptID:    firstAttempt.AttemptID,
+		AgentID:      "worker-b",
+		LeaseID:      secondClaim.LeaseID,
+		Actions:      []string{"push"},
+		ExpiresIn:    time.Hour,
+		Now:          fixedJournalTime("2026-06-17T10:03:00Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "was started under lease "+firstClaim.LeaseID) {
+		t.Fatalf("grant with replacement lease error = %v", err)
+	}
+}
+
 func newApprovalAttemptFixture(t *testing.T) (workspaceFixture, NextResult, AttemptResult) {
 	t.Helper()
 	fixture := newOnePlanWorkspaceFixture(t)

@@ -147,7 +147,11 @@ func GrantApproval(opts ApprovalGrantOptions) (ApprovalResult, error) {
 	if err != nil {
 		return ApprovalResult{}, err
 	}
-	if _, err := requireCurrentAttemptAt(attempts, opts.MergeUnitID, opts.AttemptID, grantedAt); err != nil {
+	current, err := requireCurrentAttemptAt(attempts, opts.MergeUnitID, opts.AttemptID, grantedAt)
+	if err != nil {
+		return ApprovalResult{}, err
+	}
+	if err := validateAttemptLeaseOwner(opts.AttemptID, current.AgentID, current.LeaseID, opts.AgentID, opts.LeaseID); err != nil {
 		return ApprovalResult{}, err
 	}
 	approvalID := approvalID(opts.MergeUnitID, opts.AttemptID, opts.Actions, opts.Scope, opts.PR, opts.Branch, opts.HeadSHA, opts.BaseSHA, grantedAt)
