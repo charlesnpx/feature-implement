@@ -260,12 +260,7 @@ func appendMergeQueueEvent(workspaceDir string, entry mergeQueueSnapshot, readSe
 	})
 }
 
-func appendMergeQueueStaleEvent(workspaceDir string, entry mergeQueueSnapshot, revisions map[string]int, reason string, staleAt time.Time) (JournalEvent, error) {
-	readSet := map[string]int{
-		MergeQueueResource():                 revisions[MergeQueueResource()],
-		QueueSlotResource(entry.QueueID):     revisions[QueueSlotResource(entry.QueueID)],
-		MergeUnitResource(entry.MergeUnitID): revisions[MergeUnitResource(entry.MergeUnitID)],
-	}
+func appendMergeQueueStaleEvent(workspaceDir string, entry mergeQueueSnapshot, readSet map[string]int, reason string, staleAt time.Time) (JournalEvent, error) {
 	return AppendEvent(AppendEventOptions{
 		WorkspaceDir: workspaceDir,
 		Type:         EventMergeQueueStale,

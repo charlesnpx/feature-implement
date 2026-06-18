@@ -134,6 +134,16 @@ func TestReserveMergeIntentRejectsStaleQueuedContract(t *testing.T) {
 	if last.Type != EventMergeQueueStale || last.Payload[eventPayloadQueueIDKey] != queued.Queue.QueueID {
 		t.Fatalf("stale queue event = %+v", last)
 	}
+	for _, resource := range []string{
+		ContractResource("api-contract"),
+		ContractBindingResource(claim.MergeUnitID, "api-contract", "openapi"),
+		GateEvaluationResource(claim.MergeUnitID, attempt.AttemptID),
+		ApprovalResource(ready.Approval.Approval.ApprovalID),
+	} {
+		if _, ok := last.ReadSet[resource]; !ok {
+			t.Fatalf("stale queue read set missing %s: %+v", resource, last.ReadSet)
+		}
+	}
 }
 
 func TestReserveMergeIntentRecordsQueueExitAndAllowsCompletion(t *testing.T) {

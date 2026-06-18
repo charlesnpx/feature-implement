@@ -313,7 +313,8 @@ func validateMergeIntentQueueReservation(state leaseOperationState, unit Schedul
 			return nil, err
 		}
 		if ok {
-			if _, err := appendMergeQueueStaleEvent(opts.WorkspaceDir, entry, state.Revisions, mergeQueueStaleReasonNotLive, state.ObservedAt); err != nil {
+			readSet := mergeQueueReadSet(state.Revisions, state.Events, attempt, unit, entry)
+			if _, err := appendMergeQueueStaleEvent(opts.WorkspaceDir, entry, readSet, mergeQueueStaleReasonNotLive, state.ObservedAt); err != nil {
 				return nil, err
 			}
 		}
