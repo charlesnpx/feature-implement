@@ -10,13 +10,18 @@ import (
 
 const (
 	EventMergeQueueEntered = "merge_queue.entered"
+	EventMergeQueueStale   = "merge_queue.stale"
 
 	eventPayloadQueueIDKey          = "queue_id"
 	eventPayloadQueuePositionKey    = "queue_position"
+	eventPayloadQueueReasonKey      = "queue_reason"
 	eventPayloadGateInputHashKey    = "gate_input_hash"
 	eventPayloadGateOutputHashKey   = "gate_output_hash"
 	eventPayloadQueuedAtKey         = "queued_at"
 	mergeQueueStatusQueued          = "queued"
+	mergeQueueStatusStale           = "stale"
+	mergeQueueExitReasonReserved    = "merge_intent_reserved"
+	mergeQueueStaleReasonNotLive    = "not_live"
 	mergeQueueRequiredActionRefresh = "refresh_branch"
 )
 
@@ -47,22 +52,23 @@ type MergeQueueResult struct {
 }
 
 type MergeQueueEntryView struct {
-	QueueID        string `json:"queue_id"`
-	MergeUnitID    string `json:"merge_unit_id"`
-	AttemptID      string `json:"attempt_id"`
-	AgentID        string `json:"agent_id,omitempty"`
-	LeaseID        string `json:"lease_id,omitempty"`
-	ApprovalID     string `json:"approval_id"`
-	Scope          string `json:"scope"`
-	PR             string `json:"pr,omitempty"`
-	Branch         string `json:"branch,omitempty"`
-	HeadSHA        string `json:"head_sha"`
-	BaseSHA        string `json:"base_sha"`
-	GateInputHash  string `json:"gate_input_hash"`
-	GateOutputHash string `json:"gate_output_hash"`
-	Position       int    `json:"position"`
-	QueuedAt       string `json:"queued_at"`
-	Status         string `json:"status"`
+	QueueID            string                       `json:"queue_id"`
+	MergeUnitID        string                       `json:"merge_unit_id"`
+	AttemptID          string                       `json:"attempt_id"`
+	AgentID            string                       `json:"agent_id,omitempty"`
+	LeaseID            string                       `json:"lease_id,omitempty"`
+	ApprovalID         string                       `json:"approval_id"`
+	Scope              string                       `json:"scope"`
+	PR                 string                       `json:"pr,omitempty"`
+	Branch             string                       `json:"branch,omitempty"`
+	HeadSHA            string                       `json:"head_sha"`
+	BaseSHA            string                       `json:"base_sha"`
+	GateInputHash      string                       `json:"gate_input_hash"`
+	GateOutputHash     string                       `json:"gate_output_hash"`
+	Position           int                          `json:"position"`
+	QueuedAt           string                       `json:"queued_at"`
+	Status             string                       `json:"status"`
+	BlockingConditions []SchedulerBlockingCondition `json:"blocking_conditions,omitempty"`
 }
 
 type mergeQueueSnapshot struct {
@@ -254,6 +260,24 @@ func appendMergeQueueEvent(workspaceDir string, entry mergeQueueSnapshot, readSe
 	})
 }
 
+func appendMergeQueueStaleEvent(workspaceDir string, entry mergeQueueSnapshot, readSet map[string]int, reason string, staleAt time.Time) (JournalEvent, error) {
+	return AppendEvent(AppendEventOptions{
+		WorkspaceDir: workspaceDir,
+		Type:         EventMergeQueueStale,
+		Payload: map[string]any{
+			eventPayloadQueueIDKey:     entry.QueueID,
+			eventPayloadMergeUnitIDKey: entry.MergeUnitID,
+			eventPayloadAttemptIDKey:   entry.AttemptID,
+			eventPayloadStatusKey:      mergeQueueStatusStale,
+			eventPayloadQueueReasonKey: reason,
+			eventPayloadQueuedAtKey:    entry.QueuedAt.UTC().Format(time.RFC3339Nano),
+		},
+		ReadSet:  readSet,
+		WriteSet: []string{MergeQueueResource(), QueueSlotResource(entry.QueueID)},
+		Now:      func() time.Time { return staleAt },
+	})
+}
+
 func mergeQueueReadSet(revisions map[string]int, events []JournalEvent, attempt attemptSnapshot, unit SchedulerMergeUnitView, entry mergeQueueSnapshot) map[string]int {
 	readSet := map[string]int{
 		MergeQueueResource():                                        revisions[MergeQueueResource()],
@@ -296,14 +320,64 @@ func newMergeQueueTracker() *mergeQueueTracker {
 }
 
 func (t *mergeQueueTracker) Apply(event JournalEvent) error {
-	if event.Type != EventMergeQueueEntered {
-		return nil
+	switch event.Type {
+	case EventMergeQueueEntered:
+		entry, err := mergeQueueFromEvent(event)
+		if err != nil {
+			return err
+		}
+		t.entries[mergeQueueAttemptKey(entry.MergeUnitID, entry.AttemptID)] = entry
+	case EventExternalIntentReserved:
+		queueID := optionalStringPayload(event, eventPayloadQueueIDKey)
+		if queueID == "" {
+			return nil
+		}
+		return t.applyQueueExit(event, queueID)
+	case EventMergeQueueStale:
+		queueID, err := eventStringPayload(event, eventPayloadQueueIDKey)
+		if err != nil {
+			return err
+		}
+		status, err := eventStringPayload(event, eventPayloadStatusKey)
+		if err != nil {
+			return err
+		}
+		if status != mergeQueueStatusStale {
+			return fmt.Errorf("merge queue stale event %s status is %s, not %s", event.ID, status, mergeQueueStatusStale)
+		}
+		if _, err := eventStringPayload(event, eventPayloadQueueReasonKey); err != nil {
+			return err
+		}
+		return t.applyQueueExit(event, queueID)
 	}
-	entry, err := mergeQueueFromEvent(event)
+	return nil
+}
+
+func (t *mergeQueueTracker) applyQueueExit(event JournalEvent, queueID string) error {
+	mergeUnitID, err := eventStringPayload(event, eventPayloadMergeUnitIDKey)
 	if err != nil {
 		return err
 	}
-	t.entries[mergeQueueAttemptKey(entry.MergeUnitID, entry.AttemptID)] = entry
+	attemptID, err := eventStringPayload(event, eventPayloadAttemptIDKey)
+	if err != nil {
+		return err
+	}
+	key := mergeQueueAttemptKey(mergeUnitID, attemptID)
+	entry, ok := t.entries[key]
+	if !ok {
+		return fmt.Errorf("merge queue exit event %s references unqueued attempt %s", event.ID, attemptID)
+	}
+	if entry.QueueID != queueID {
+		return fmt.Errorf("merge queue exit event %s queue_id %s does not match queued entry %s", event.ID, queueID, entry.QueueID)
+	}
+	if !containsString(event.WriteSet, MergeQueueResource()) {
+		return fmt.Errorf("merge queue exit event %s missing write_set resource %s", event.ID, MergeQueueResource())
+	}
+	slotResource := QueueSlotResource(queueID)
+	if !containsString(event.WriteSet, slotResource) {
+		return fmt.Errorf("merge queue exit event %s missing write_set resource %s", event.ID, slotResource)
+	}
+	delete(t.entries, key)
 	return nil
 }
 
@@ -717,7 +791,7 @@ func mergeQueueID(mergeUnitID string, attemptID string, headSHA string, baseSHA 
 }
 
 func (e mergeQueueSnapshot) View(position int) MergeQueueEntryView {
-	return MergeQueueEntryView{
+	view := MergeQueueEntryView{
 		QueueID:        e.QueueID,
 		MergeUnitID:    e.MergeUnitID,
 		AttemptID:      e.AttemptID,
@@ -735,6 +809,16 @@ func (e mergeQueueSnapshot) View(position int) MergeQueueEntryView {
 		QueuedAt:       e.QueuedAt.UTC().Format(time.RFC3339Nano),
 		Status:         mergeQueueStatusQueued,
 	}
+	if position > 1 {
+		view.BlockingConditions = append(view.BlockingConditions, SchedulerBlockingCondition{
+			Type:           "queue_position",
+			Resource:       MergeQueueResource(),
+			AttemptID:      e.AttemptID,
+			Status:         fmt.Sprintf("position_%d", position),
+			RequiredAction: "wait_for_queue",
+		})
+	}
+	return view
 }
 
 func sortSchedulerBlockingConditions(conditions []SchedulerBlockingCondition) {

@@ -297,6 +297,8 @@ func TestAppendMergeQueueEventRejectsStaleQueueResource(t *testing.T) {
 	}
 	entry.QueueID = "queue-b"
 	entry.QueuedAt = parseWorkspaceTestTime("2026-01-02T15:01:00Z")
+	delete(readSet, QueueSlotResource("queue-a"))
+	readSet[QueueSlotResource(entry.QueueID)] = revisions[QueueSlotResource(entry.QueueID)]
 	_, err = appendMergeQueueEvent(fixture.Dir, entry, readSet, parseWorkspaceTestTime("2026-01-02T15:01:00Z"))
 	var stale StaleResourceError
 	if !errors.As(err, &stale) || stale.Resource != MergeQueueResource() {

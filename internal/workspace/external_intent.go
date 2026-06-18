@@ -123,9 +123,17 @@ type ExternalIntentView struct {
 	PR                string                            `json:"pr,omitempty"`
 	RequestedHeadSHA  string                            `json:"requested_head_sha"`
 	ExpectedBaseSHA   string                            `json:"expected_base_sha"`
+	QueueID           string                            `json:"queue_id,omitempty"`
+	QueuePosition     int                               `json:"queue_position,omitempty"`
 	AffectedResources []string                          `json:"affected_resources"`
 	Status            string                            `json:"status"`
 	Result            *ExternalIntentRecordedResultView `json:"result,omitempty"`
+}
+
+type mergeIntentQueueReservation struct {
+	entry   mergeQueueSnapshot
+	view    MergeQueueEntryView
+	readSet map[string]int
 }
 
 type ExternalIntentRecordedResultView struct {
@@ -164,7 +172,7 @@ func ReserveExternalIntent(opts ExternalIntentReserveOptions) (ExternalIntentRes
 		return ExternalIntentResult{}, err
 	}
 	reservedAt = state.ObservedAt
-	lease, _, err := requireOwnedActiveLease(state, opts.LeaseID, opts.AgentID)
+	lease, unit, err := requireOwnedActiveLease(state, opts.LeaseID, opts.AgentID)
 	if err != nil {
 		return ExternalIntentResult{}, err
 	}
@@ -217,6 +225,10 @@ func ReserveExternalIntent(opts ExternalIntentReserveOptions) (ExternalIntentRes
 	if err := validateResourcesNotFrozen(state.Events, state.ActiveLeases, affectedResources, "external intent reserve"); err != nil {
 		return ExternalIntentResult{}, err
 	}
+	queueReservation, err := validateMergeIntentQueueReservation(state, unit, current, opts)
+	if err != nil {
+		return ExternalIntentResult{}, err
+	}
 	readSet := map[string]int{
 		LeaseResource(opts.MergeUnitID):     state.Revisions[LeaseResource(opts.MergeUnitID)],
 		MergeUnitResource(opts.MergeUnitID): state.Revisions[MergeUnitResource(opts.MergeUnitID)],
@@ -230,30 +242,44 @@ func ReserveExternalIntent(opts ExternalIntentReserveOptions) (ExternalIntentRes
 		readSet[resource] = state.Revisions[resource]
 		writeSet = append(writeSet, resource)
 	}
+	if queueReservation != nil {
+		for resource, revision := range queueReservation.readSet {
+			readSet[resource] = revision
+		}
+		writeSet = append(writeSet, MergeQueueResource(), QueueSlotResource(queueReservation.entry.QueueID))
+	}
+	payload := map[string]any{
+		eventPayloadIntentIDKey:          identity.intentID,
+		eventPayloadIdempotencyKeyKey:    identity.idempotencyKey,
+		eventPayloadMergeUnitIDKey:       opts.MergeUnitID,
+		eventPayloadAttemptIDKey:         opts.AttemptID,
+		eventPayloadAgentIDKey:           opts.AgentID,
+		eventPayloadLeaseIDKey:           opts.LeaseID,
+		eventPayloadApprovalIDRefKey:     opts.ApprovalID,
+		eventPayloadActionKey:            opts.Action,
+		eventPayloadScopeKey:             opts.Scope,
+		eventPayloadTargetKey:            target,
+		eventPayloadBranchKey:            opts.Branch,
+		eventPayloadPRKey:                opts.PR,
+		eventPayloadRequestedHeadSHAKey:  opts.RequestedHeadSHA,
+		eventPayloadExpectedBaseSHAKey:   opts.ExpectedBaseSHA,
+		eventPayloadAffectedResourcesKey: affectedResources,
+		eventPayloadUsedCountKey:         approval.UsedCount + 1,
+	}
+	if queueReservation != nil {
+		payload[eventPayloadQueueIDKey] = queueReservation.entry.QueueID
+		payload[eventPayloadQueuePositionKey] = queueReservation.view.Position
+		payload[eventPayloadQueueReasonKey] = mergeQueueExitReasonReserved
+		payload[eventPayloadGateInputHashKey] = queueReservation.entry.GateInputHash
+		payload[eventPayloadGateOutputHashKey] = queueReservation.entry.GateOutputHash
+	}
 	event, err := AppendEvent(AppendEventOptions{
 		WorkspaceDir: opts.WorkspaceDir,
 		Type:         EventExternalIntentReserved,
-		Payload: map[string]any{
-			eventPayloadIntentIDKey:          identity.intentID,
-			eventPayloadIdempotencyKeyKey:    identity.idempotencyKey,
-			eventPayloadMergeUnitIDKey:       opts.MergeUnitID,
-			eventPayloadAttemptIDKey:         opts.AttemptID,
-			eventPayloadAgentIDKey:           opts.AgentID,
-			eventPayloadLeaseIDKey:           opts.LeaseID,
-			eventPayloadApprovalIDRefKey:     opts.ApprovalID,
-			eventPayloadActionKey:            opts.Action,
-			eventPayloadScopeKey:             opts.Scope,
-			eventPayloadTargetKey:            target,
-			eventPayloadBranchKey:            opts.Branch,
-			eventPayloadPRKey:                opts.PR,
-			eventPayloadRequestedHeadSHAKey:  opts.RequestedHeadSHA,
-			eventPayloadExpectedBaseSHAKey:   opts.ExpectedBaseSHA,
-			eventPayloadAffectedResourcesKey: affectedResources,
-			eventPayloadUsedCountKey:         approval.UsedCount + 1,
-		},
-		ReadSet:  readSet,
-		WriteSet: writeSet,
-		Now:      func() time.Time { return reservedAt },
+		Payload:      payload,
+		ReadSet:      readSet,
+		WriteSet:     writeSet,
+		Now:          func() time.Time { return reservedAt },
 	})
 	if err != nil {
 		return ExternalIntentResult{}, err
@@ -263,9 +289,98 @@ func ReserveExternalIntent(opts ExternalIntentReserveOptions) (ExternalIntentRes
 		WorkspaceDir: opts.WorkspaceDir,
 		WorkspaceID:  state.View.WorkspaceID,
 		BaseRef:      state.View.BaseRef,
-		Intent:       externalIntentView(opts, identity, target, affectedResources),
+		Intent:       externalIntentView(opts, identity, target, affectedResources, queueReservation),
 		EventID:      event.ID,
 		EventHash:    event.EventHash,
+	}, nil
+}
+
+func validateMergeIntentQueueReservation(state leaseOperationState, unit SchedulerMergeUnitView, attempt attemptSnapshot, opts ExternalIntentReserveOptions) (*mergeIntentQueueReservation, error) {
+	if opts.Action != ExternalActionMerge {
+		return nil, nil
+	}
+	var live *MergeQueueEntryView
+	for i := range state.View.MergeQueue {
+		entry := &state.View.MergeQueue[i]
+		if entry.MergeUnitID == opts.MergeUnitID && entry.AttemptID == opts.AttemptID {
+			live = entry
+			break
+		}
+	}
+	if live == nil {
+		entry, ok, err := mergeQueueEntryForAttempt(state.Events, opts.MergeUnitID, opts.AttemptID)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			readSet := mergeQueueReadSet(state.Revisions, state.Events, attempt, unit, entry)
+			if _, err := appendMergeQueueStaleEvent(opts.WorkspaceDir, entry, readSet, mergeQueueStaleReasonNotLive, state.ObservedAt); err != nil {
+				return nil, err
+			}
+		}
+		return nil, fmt.Errorf("merge intent reserve requires merge unit %s attempt %s to be in the live merge queue", opts.MergeUnitID, opts.AttemptID)
+	}
+	if live.Position != 1 {
+		return nil, fmt.Errorf("merge intent reserve requires merge unit %s attempt %s at queue position 1, observed position %d", opts.MergeUnitID, opts.AttemptID, live.Position)
+	}
+	if live.ApprovalID != opts.ApprovalID {
+		return nil, fmt.Errorf("merge intent reserve approval %s does not match queued approval %s", opts.ApprovalID, live.ApprovalID)
+	}
+	if live.Scope != opts.Scope {
+		return nil, fmt.Errorf("merge intent reserve scope %s does not match queued scope %s", opts.Scope, live.Scope)
+	}
+	if live.PR != opts.PR {
+		return nil, fmt.Errorf("merge intent reserve PR %s does not match queued PR %s", opts.PR, live.PR)
+	}
+	if live.Branch != opts.Branch {
+		return nil, fmt.Errorf("merge intent reserve branch %s does not match queued branch %s", opts.Branch, live.Branch)
+	}
+	if live.HeadSHA != opts.RequestedHeadSHA {
+		return nil, fmt.Errorf("merge intent reserve head %s does not match queued head %s", opts.RequestedHeadSHA, live.HeadSHA)
+	}
+	if live.BaseSHA != opts.ExpectedBaseSHA {
+		return nil, fmt.Errorf("merge intent reserve base %s does not match queued base %s", opts.ExpectedBaseSHA, live.BaseSHA)
+	}
+	entry, err := mergeQueueSnapshotFromView(*live)
+	if err != nil {
+		return nil, err
+	}
+	readSet := mergeQueueReadSet(state.Revisions, state.Events, attempt, unit, entry)
+	return &mergeIntentQueueReservation{entry: entry, view: *live, readSet: readSet}, nil
+}
+
+func mergeQueueEntryForAttempt(events []JournalEvent, mergeUnitID string, attemptID string) (mergeQueueSnapshot, bool, error) {
+	tracker := newMergeQueueTracker()
+	for _, event := range events {
+		if err := tracker.Apply(event); err != nil {
+			return mergeQueueSnapshot{}, false, err
+		}
+	}
+	entry, ok := tracker.entries[mergeQueueAttemptKey(mergeUnitID, attemptID)]
+	return entry, ok, nil
+}
+
+func mergeQueueSnapshotFromView(view MergeQueueEntryView) (mergeQueueSnapshot, error) {
+	queuedAt, err := time.Parse(time.RFC3339Nano, view.QueuedAt)
+	if err != nil {
+		return mergeQueueSnapshot{}, fmt.Errorf("merge queue entry %s queued_at must be RFC3339: %w", view.QueueID, err)
+	}
+	return mergeQueueSnapshot{
+		QueueID:        view.QueueID,
+		MergeUnitID:    view.MergeUnitID,
+		AttemptID:      view.AttemptID,
+		AgentID:        view.AgentID,
+		LeaseID:        view.LeaseID,
+		ApprovalID:     view.ApprovalID,
+		Scope:          view.Scope,
+		PR:             view.PR,
+		Branch:         view.Branch,
+		HeadSHA:        view.HeadSHA,
+		BaseSHA:        view.BaseSHA,
+		GateInputHash:  view.GateInputHash,
+		GateOutputHash: view.GateOutputHash,
+		Position:       view.Position,
+		QueuedAt:       queuedAt,
 	}, nil
 }
 
@@ -617,8 +732,8 @@ func externalIntentAffectedResources(opts ExternalIntentReserveOptions, target s
 	return resources
 }
 
-func externalIntentView(opts ExternalIntentReserveOptions, identity externalIntentIdentity, target string, affectedResources []string) ExternalIntentView {
-	return ExternalIntentView{
+func externalIntentView(opts ExternalIntentReserveOptions, identity externalIntentIdentity, target string, affectedResources []string, queueReservation *mergeIntentQueueReservation) ExternalIntentView {
+	view := ExternalIntentView{
 		IntentID:          identity.intentID,
 		IdempotencyKey:    identity.idempotencyKey,
 		MergeUnitID:       opts.MergeUnitID,
@@ -636,6 +751,11 @@ func externalIntentView(opts ExternalIntentReserveOptions, identity externalInte
 		AffectedResources: append([]string{}, affectedResources...),
 		Status:            "reserved",
 	}
+	if queueReservation != nil {
+		view.QueueID = queueReservation.entry.QueueID
+		view.QueuePosition = queueReservation.view.Position
+	}
+	return view
 }
 
 func externalIntentRecordedResultView(status string, policyAccepted bool, details string, operator string, eventID string, eventHash string) ExternalIntentRecordedResultView {

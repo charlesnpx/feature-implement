@@ -259,7 +259,12 @@ func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, attempts *
 		return nil
 	case EventApprovalGranted, EventApprovalConsumed:
 		return nil
-	case EventExternalIntentReserved, EventExternalIntentResultRecorded, EventExternalIntentReconciled:
+	case EventExternalIntentReserved:
+		if err := externalIntents.Apply(event); err != nil {
+			return err
+		}
+		return queues.Apply(event)
+	case EventExternalIntentResultRecorded, EventExternalIntentReconciled:
 		return externalIntents.Apply(event)
 	case EventBranchRefreshRecorded:
 		return refreshes.Apply(event)
@@ -267,7 +272,7 @@ func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, attempts *
 		return nil
 	case EventGateOverrideRecorded:
 		return validateGateOverrideEvent(event)
-	case EventMergeQueueEntered:
+	case EventMergeQueueEntered, EventMergeQueueStale:
 		return queues.Apply(event)
 	default:
 		return fmt.Errorf("unknown scheduler event type %q", event.Type)

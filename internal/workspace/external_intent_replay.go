@@ -293,6 +293,17 @@ func externalIntentReservedFromEvent(event JournalEvent) (externalIntentSnapshot
 	if !containsString(event.WriteSet, ExternalIntentResource(intentID)) {
 		return externalIntentSnapshot{}, fmt.Errorf("external intent event %s must write %s", event.ID, ExternalIntentResource(intentID))
 	}
+	queueID := optionalStringPayload(event, eventPayloadQueueIDKey)
+	queuePosition := 0
+	if queueID != "" {
+		queuePosition, err = eventIntPayload(event, eventPayloadQueuePositionKey)
+		if err != nil {
+			return externalIntentSnapshot{}, err
+		}
+		if queuePosition <= 0 {
+			return externalIntentSnapshot{}, fmt.Errorf("external intent event %s payload %s must be positive", event.ID, eventPayloadQueuePositionKey)
+		}
+	}
 	return externalIntentSnapshot{
 		ExternalIntentView: ExternalIntentView{
 			IntentID:          intentID,
@@ -309,6 +320,8 @@ func externalIntentReservedFromEvent(event JournalEvent) (externalIntentSnapshot
 			PR:                normalizeApprovalPR(optionalStringPayload(event, eventPayloadPRKey)),
 			RequestedHeadSHA:  requestedHeadSHA,
 			ExpectedBaseSHA:   expectedBaseSHA,
+			QueueID:           queueID,
+			QueuePosition:     queuePosition,
 			AffectedResources: affectedResources,
 			Status:            "reserved",
 		},
