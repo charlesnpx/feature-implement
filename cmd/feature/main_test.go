@@ -1037,10 +1037,7 @@ func TestInstallSkillsPlanAllCommandJSONDoesNotWrite(t *testing.T) {
 		Operation string `json:"operation"`
 		Kind      string `json:"kind"`
 		Targets   map[string]struct {
-			Files []struct {
-				Path   string `json:"path"`
-				SHA256 string `json:"sha256,omitempty"`
-			} `json:"files"`
+			Files []map[string]json.RawMessage `json:"files"`
 		} `json:"targets"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
@@ -1055,23 +1052,31 @@ func TestInstallSkillsPlanAllCommandJSONDoesNotWrite(t *testing.T) {
 			t.Fatalf("target %s missing from plan result: %+v", target, result.Targets)
 		}
 		for _, file := range files.Files {
-			if !strings.HasPrefix(file.Path, stage+string(os.PathSeparator)) {
-				t.Fatalf("target %s planned path outside install root: %q", target, file.Path)
+			pathRaw, ok := file["path"]
+			if !ok {
+				t.Fatalf("target %s file missing path: %+v", target, file)
 			}
-			if file.SHA256 != "" {
-				t.Fatalf("plan target %s should not include sha256: %+v", target, file)
+			var path string
+			if err := json.Unmarshal(pathRaw, &path); err != nil {
+				t.Fatalf("target %s path is not a string: %v", target, err)
+			}
+			if !strings.HasPrefix(path, stage+string(os.PathSeparator)) {
+				t.Fatalf("target %s planned path outside install root: %q", target, path)
+			}
+			if _, ok := file["sha256"]; ok {
+				t.Fatalf("plan target %s should omit sha256: %+v", target, file)
 			}
 		}
 	}
 	if len(result.Targets) != 3 {
 		t.Fatalf("unexpected target set: %+v", result.Targets)
 	}
-	for target, files := range result.Targets {
-		for _, file := range files.Files {
-			if _, err := os.Stat(file.Path); !os.IsNotExist(err) {
-				t.Fatalf("plan target %s should not write %s, stat err=%v", target, file.Path, err)
-			}
-		}
+	entries, err := os.ReadDir(stage)
+	if err != nil {
+		t.Fatalf("read install root: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("plan should not write under install root: %+v", entries)
 	}
 }
 
