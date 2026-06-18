@@ -56,7 +56,7 @@ func usage(w io.Writer) {
   feature validate <plan-dir> [--write-lock] [--json]
   feature status <plan-dir> [--json]
   feature implement next|start|commit|push|open-pr|review|merge|cleanup <plan-dir> [--merge-unit <id>] [--write-state] [metadata flags] [--json]
-  feature workspace init|validate|status|next|heartbeat|release|recover|attempt|transition [args]
+  feature workspace init|validate|status|next|heartbeat|release|recover|attempt|transition|contract [args]
   feature version`)
 }
 
@@ -301,7 +301,7 @@ func implementCommand(args []string) error {
 
 func workspaceCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("workspace requires subcommand: init, validate, status, next, heartbeat, release, recover, attempt, or transition")
+		return fmt.Errorf("workspace requires subcommand: init, validate, status, next, heartbeat, release, recover, attempt, transition, or contract")
 	}
 	action := args[0]
 	if isHelpCommand(action) {
@@ -311,7 +311,7 @@ func workspaceCommand(args []string) error {
 	if !workspace.IsSupportedAction(action) {
 		return fmt.Errorf("unsupported workspace action: %s", action)
 	}
-	if action != "attempt" && hasHelpFlag(args[1:]) {
+	if action != "attempt" && action != "contract" && hasHelpFlag(args[1:]) {
 		usageWorkspaceAction(os.Stdout, action)
 		return nil
 	}
@@ -332,6 +332,8 @@ func workspaceCommand(args []string) error {
 		return workspaceAttempt(args[1:])
 	case "transition":
 		return workspaceTransition(args[1:])
+	case "contract":
+		return workspaceContract(args[1:])
 	default:
 		return workspace.ErrNotImplemented(action)
 	}
@@ -672,6 +674,113 @@ func workspaceAttemptAbandon(args []string) error {
 	return nil
 }
 
+func workspaceContract(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("workspace contract requires subcommand: publish or verify")
+	}
+	action := args[0]
+	if isHelpCommand(action) {
+		usageWorkspaceContract(os.Stdout)
+		return nil
+	}
+	if action != "publish" && action != "verify" {
+		return fmt.Errorf("unsupported workspace contract action: %s", action)
+	}
+	if hasHelpFlag(args[1:]) {
+		usageWorkspaceContractAction(os.Stdout, action)
+		return nil
+	}
+	switch action {
+	case "publish":
+		return workspaceContractPublish(args[1:])
+	case "verify":
+		return workspaceContractVerify(args[1:])
+	default:
+		return workspace.ErrNotImplemented("contract " + action)
+	}
+}
+
+func workspaceContractPublish(args []string) error {
+	fs := flag.NewFlagSet("workspace contract publish", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	contractID := fs.String("contract", "", "Contract gate ID")
+	version := fs.String("version", "", "Published contract version")
+	artifactID := fs.String("artifact", "", "Artifact ID; required when the contract has multiple artifacts")
+	producerMergeUnitID := fs.String("producer-merge-unit", "", "Explicit producer merge unit ID")
+	producerCommit := fs.String("producer-commit", "", "Producer commit SHA")
+	attemptID := fs.String("attempt", "", "Current producer attempt ID")
+	agentID := fs.String("agent", "", "Agent ID that owns the producer lease")
+	leaseID := fs.String("lease", "", "Producer lease ID")
+	var commandResults commandResultFlags
+	fs.Var(&commandResults, "command-result", "Validation command result as command=status; repeatable")
+	asJSON := fs.Bool("json", false, "Emit JSON result")
+	if err := parsePermissive(fs, args, "contract", "version", "artifact", "producer-merge-unit", "producer-commit", "attempt", "agent", "lease", "command-result"); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("workspace contract publish requires <workspace-dir>")
+	}
+	parsedResults, err := parseCommandResultFlags(commandResults)
+	if err != nil {
+		return err
+	}
+	result, err := workspace.PublishContract(workspace.ContractPublishOptions{
+		WorkspaceDir:        fs.Arg(0),
+		ContractID:          *contractID,
+		Version:             *version,
+		ArtifactID:          *artifactID,
+		ProducerMergeUnitID: *producerMergeUnitID,
+		ProducerCommit:      *producerCommit,
+		AttemptID:           *attemptID,
+		AgentID:             *agentID,
+		LeaseID:             *leaseID,
+		CommandResults:      parsedResults,
+	})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(result)
+	}
+	fmt.Printf("published %s version=%s artifact=%s hash=%s producer=%s commit=%s\n", result.ContractID, result.Version, result.ArtifactID, result.ArtifactHash, result.ProducerMergeUnitID, result.ProducerCommit)
+	return nil
+}
+
+func workspaceContractVerify(args []string) error {
+	fs := flag.NewFlagSet("workspace contract verify", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	contractID := fs.String("contract", "", "Contract gate ID")
+	artifactID := fs.String("artifact", "", "Artifact ID; required when the contract has multiple artifacts")
+	asJSON := fs.Bool("json", false, "Emit JSON result")
+	if err := parsePermissive(fs, args, "contract", "artifact"); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("workspace contract verify requires <workspace-dir>")
+	}
+	result, err := workspace.VerifyContract(workspace.ContractVerifyOptions{
+		WorkspaceDir: fs.Arg(0),
+		ContractID:   *contractID,
+		ArtifactID:   *artifactID,
+	})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(result)
+	}
+	writeWorkspaceContractVerifyText(result)
+	return nil
+}
+
+func writeWorkspaceContractVerifyText(result workspace.ContractVerifyResult) {
+	if result.Status == "unpublished" {
+		fmt.Printf("unpublished %s artifact=%s exists=%t\n", result.ContractID, result.ArtifactID, result.ArtifactExists)
+		return
+	}
+	fmt.Printf("verified %s status=%s artifact=%s hash_matches=%t\n", result.ContractID, result.Status, result.ArtifactID, result.HashMatches)
+}
+
 func writeJSON(value any) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetEscapeHTML(false)
@@ -734,6 +843,34 @@ func parseEvidenceFlags(values []string) (map[string]any, error) {
 		evidence[key] = text
 	}
 	return evidence, nil
+}
+
+type commandResultFlags []string
+
+func (f *commandResultFlags) String() string {
+	return strings.Join(*f, ",")
+}
+
+func (f *commandResultFlags) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
+
+func parseCommandResultFlags(values []string) ([]workspace.ContractCommandResult, error) {
+	results := make([]workspace.ContractCommandResult, 0, len(values))
+	for _, value := range values {
+		index := strings.LastIndex(value, "=")
+		if index < 0 {
+			return nil, fmt.Errorf("--command-result must use command=status")
+		}
+		command := strings.TrimSpace(value[:index])
+		status := strings.TrimSpace(value[index+1:])
+		if command == "" || status == "" {
+			return nil, fmt.Errorf("--command-result must use non-empty command=status")
+		}
+		results = append(results, workspace.ContractCommandResult{Command: command, Status: status})
+	}
+	return results, nil
 }
 
 func reorderFlags(args []string, valueFlags ...string) ([]string, []string) {
@@ -843,6 +980,8 @@ func usageWorkspace(w io.Writer) {
   feature workspace attempt start <workspace-dir> --merge-unit <id> --agent <id> --lease <id> --base-sha <sha> [--mode fresh-from-base] [--json]
   feature workspace attempt abandon <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --reason <text> [--json]
   feature workspace transition <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --from <status> --to <status> --evidence <key=value> [--evidence <key=value>] [--json]
+  feature workspace contract publish <workspace-dir> --contract <id> --version <version> --producer-commit <sha> (--producer-merge-unit <id> | --attempt <id> --agent <id> --lease <id>) --command-result <command=status> [--command-result <command=status>] [--artifact <id>] [--json]
+  feature workspace contract verify <workspace-dir> --contract <id> [--artifact <id>] [--json]
 
 Coordinates validated feature plans through a workspace-level orchestration layer.`)
 }
@@ -891,6 +1030,8 @@ Recovers expired leases and rebuilds the scheduler view.`)
 Records local lifecycle movement for the current active attempt.`)
 	case "attempt":
 		usageWorkspaceAttempt(w)
+	case "contract":
+		usageWorkspaceContract(w)
 	default:
 		usageWorkspace(w)
 	}
@@ -912,6 +1053,31 @@ func usageWorkspaceAttemptAction(w io.Writer, action string) {
 		usageWorkspaceAttemptAbandon(w)
 	default:
 		usageWorkspaceAttempt(w)
+	}
+}
+
+func usageWorkspaceContract(w io.Writer) {
+	fmt.Fprintln(w, `Usage:
+  feature workspace contract publish <workspace-dir> --contract <id> --version <version> --producer-commit <sha> (--producer-merge-unit <id> | --attempt <id> --agent <id> --lease <id>) --command-result <command=status> [--command-result <command=status>] [--artifact <id>] [--json]
+  feature workspace contract verify <workspace-dir> --contract <id> [--artifact <id>] [--json]
+
+Publishes and verifies repository-owned contract artifacts through workspace runtime state.`)
+}
+
+func usageWorkspaceContractAction(w io.Writer, action string) {
+	switch action {
+	case "publish":
+		fmt.Fprintln(w, `Usage:
+  feature workspace contract publish <workspace-dir> --contract <id> --version <version> --producer-commit <sha> (--producer-merge-unit <id> | --attempt <id> --agent <id> --lease <id>) --command-result <command=status> [--command-result <command=status>] [--artifact <id>] [--json]
+
+Records the current repository artifact hash and validation command results for a producer-owned contract.`)
+	case "verify":
+		fmt.Fprintln(w, `Usage:
+  feature workspace contract verify <workspace-dir> --contract <id> [--artifact <id>] [--json]
+
+Reports whether the repository artifact exists and matches the latest published hash.`)
+	default:
+		usageWorkspaceContract(w)
 	}
 }
 

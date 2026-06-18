@@ -32,6 +32,9 @@ func TestHelpCommandsExitSuccessfully(t *testing.T) {
 		{"workspace", "attempt", "start", "--help"},
 		{"workspace", "attempt", "abandon", "--help"},
 		{"workspace", "transition", "--help"},
+		{"workspace", "contract", "--help"},
+		{"workspace", "contract", "publish", "--help"},
+		{"workspace", "contract", "verify", "--help"},
 	}
 	for _, args := range tests {
 		stdout, stderr, err := runFeature(t, args...)
@@ -116,6 +119,7 @@ func TestWorkspaceCommandShell(t *testing.T) {
 		"feature workspace recover",
 		"feature workspace attempt",
 		"feature workspace transition",
+		"feature workspace contract",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("workspace help missing %q:\n%s", want, stdout)
@@ -846,6 +850,89 @@ func TestWorkspaceTransitionCommandJSON(t *testing.T) {
 	}
 }
 
+func TestWorkspaceContractPublishAndVerifyCommandJSON(t *testing.T) {
+	workspaceDir := workspaceWithContractPlanLocks(t)
+	if _, stderr, err := runFeature(t, "workspace", "validate", workspaceDir, "--write-lock", "--json"); err != nil {
+		t.Fatalf("feature workspace validate failed: %v\nstderr=%s", err, stderr)
+	}
+
+	stdout, stderr, err := runFeature(t,
+		"workspace", "contract", "publish", workspaceDir,
+		"--contract", "api-contract",
+		"--version", "v1",
+		"--producer-merge-unit", "foundation:story-a",
+		"--producer-commit", "producer-commit-cli",
+		"--command-result", "go test ./...=passed",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace contract publish failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var published struct {
+		Status              string `json:"status"`
+		ContractID          string `json:"contract_id"`
+		Version             string `json:"version"`
+		ProducerMergeUnitID string `json:"producer_merge_unit_id"`
+		ProducerCommit      string `json:"producer_commit"`
+		ArtifactID          string `json:"artifact_id"`
+		ArtifactPath        string `json:"artifact_path"`
+		ArtifactHash        string `json:"artifact_hash"`
+		CommandResults      []struct {
+			Command string `json:"command"`
+			Status  string `json:"status"`
+		} `json:"command_results"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &published); err != nil {
+		t.Fatalf("publish stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if published.Status != "published" || published.ContractID != "api-contract" || published.Version != "v1" {
+		t.Fatalf("published metadata = %+v", published)
+	}
+	if published.ProducerMergeUnitID != "foundation:story-a" || published.ProducerCommit != "producer-commit-cli" {
+		t.Fatalf("published producer metadata = %+v", published)
+	}
+	if published.ArtifactID != "openapi" || published.ArtifactPath != "contracts/openapi.yaml" || published.ArtifactHash == "" {
+		t.Fatalf("published artifact metadata = %+v", published)
+	}
+	if len(published.CommandResults) != 1 || published.CommandResults[0].Command != "go test ./..." || published.CommandResults[0].Status != "passed" {
+		t.Fatalf("published command results = %+v", published.CommandResults)
+	}
+
+	stdout, stderr, err = runFeature(t,
+		"workspace", "contract", "verify", workspaceDir,
+		"--contract", "api-contract",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace contract verify failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var verified struct {
+		Status         string `json:"status"`
+		ContractID     string `json:"contract_id"`
+		ArtifactExists bool   `json:"artifact_exists"`
+		HashMatches    bool   `json:"hash_matches"`
+		PublishedHash  string `json:"published_hash"`
+		CurrentHash    string `json:"current_hash"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &verified); err != nil {
+		t.Fatalf("verify stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if verified.Status != "ok" || verified.ContractID != "api-contract" || !verified.ArtifactExists || !verified.HashMatches {
+		t.Fatalf("verify result = %+v", verified)
+	}
+	if verified.PublishedHash != published.ArtifactHash || verified.CurrentHash != published.ArtifactHash {
+		t.Fatalf("verify hashes = %+v, published=%+v", verified, published)
+	}
+
+	stdout, stderr, err = runFeature(t, "workspace", "status", workspaceDir, "--json")
+	if err != nil {
+		t.Fatalf("feature workspace status should ignore contract events: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, `"status":"ok"`) {
+		t.Fatalf("workspace status after contract publish = %s", stdout)
+	}
+}
+
 func TestWorkspaceCLISmokeRebuildsStatusFromJournal(t *testing.T) {
 	workspaceDir := workspaceWithTwoPlanLocks(t)
 	stdout, stderr, err := runFeature(t, "workspace", "validate", workspaceDir, "--write-lock", "--json")
@@ -1147,6 +1234,48 @@ dependencies:
     after: sources:story-b
 `
 	if err := os.WriteFile(filepath.Join(workspaceDir, "feature.workspace.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return workspaceDir
+}
+
+func workspaceWithContractPlanLocks(t *testing.T) string {
+	t.Helper()
+	workspaceDir := workspaceWithTwoPlanLocks(t)
+	manifest := `schema_version: 1
+id: workspace-a
+repo: .
+base_ref: workspace-orchestration
+remote: origin
+plans:
+  - id: foundation
+    path: plans/foundation
+  - id: sources
+    path: plans/sources
+dependencies:
+  - before: foundation:story-a
+    after: sources:story-b
+contract_gates:
+  - id: api-contract
+    producers:
+      - foundation:story-a
+    consumers:
+      - sources:story-b
+    artifacts:
+      - id: openapi
+        path: contracts/openapi.yaml
+    validation:
+      commands:
+        - go test ./...
+`
+	if err := os.WriteFile(filepath.Join(workspaceDir, "feature.workspace.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	contractDir := filepath.Join(workspaceDir, "contracts")
+	if err := os.MkdirAll(contractDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(contractDir, "openapi.yaml"), []byte("openapi: 3.1.0\ninfo:\n  title: cli fixture\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return workspaceDir

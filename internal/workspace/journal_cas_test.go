@@ -144,14 +144,34 @@ func TestAppendEventCASMultiResourceWrite(t *testing.T) {
 	}
 }
 
+func TestAppendEventCASAcceptsContractResources(t *testing.T) {
+	workspaceDir := t.TempDir()
+	contract := ContractResource("api-contract")
+	if _, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: workspaceDir,
+		Type:         EventContractPublished,
+		WriteSet:     []string{contract},
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent contract resource: %v", err)
+	}
+	revisions, err := ResourceRevisions(workspaceDir)
+	if err != nil {
+		t.Fatalf("ResourceRevisions: %v", err)
+	}
+	if revisions[contract] != 1 {
+		t.Fatalf("contract revision = %+v", revisions)
+	}
+}
+
 func TestAppendEventCASRejectsUnsupportedResources(t *testing.T) {
 	_, err := AppendEvent(AppendEventOptions{
 		WorkspaceDir: t.TempDir(),
-		Type:         "contract.updated",
-		WriteSet:     []string{"contract:core"},
+		Type:         "external.updated",
+		WriteSet:     []string{"database:core"},
 		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
 	})
-	if err == nil || !strings.Contains(err.Error(), `unsupported resource kind "contract"`) {
+	if err == nil || !strings.Contains(err.Error(), `unsupported resource kind "database"`) {
 		t.Fatalf("AppendEvent error = %v", err)
 	}
 }
