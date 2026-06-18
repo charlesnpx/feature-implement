@@ -308,6 +308,9 @@ func OverrideGate(opts GateOverrideOptions) (GateOverrideResult, error) {
 	if opts.ExpiresAt.IsZero() {
 		expiresAt = overriddenAt.Add(opts.ExpiresIn)
 	}
+	if !expiresAt.After(overriddenAt) {
+		return GateOverrideResult{}, fmt.Errorf("gate override expiry must be in the future")
+	}
 	attempts, err := attemptSnapshots(state.Events)
 	if err != nil {
 		return GateOverrideResult{}, err

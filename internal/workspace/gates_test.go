@@ -521,6 +521,44 @@ func TestOverrideGateRejectsHeadMismatch(t *testing.T) {
 	}
 }
 
+func TestOverrideGateRejectsExplicitExpiryBeforeObservedJournalTime(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	if _, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir, WriteLock: true}); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	claim, attempt := startGateEvaluationAttempt(t, fixture.Dir)
+	appendGateRefreshEvent(t, fixture.Dir, claim, attempt, attempt.BaseSHA, attempt.BaseSHA, "head-sha-first", "head-sha-first", "2026-01-02T15:03:00Z")
+	evaluation, err := EvaluateGates(GateEvaluateOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      claim.AgentID,
+		LeaseID:      claim.LeaseID,
+		Now:          fixedWorkspaceTime("2026-01-02T15:04:05Z"),
+	})
+	if err != nil {
+		t.Fatalf("EvaluateGates: %v", err)
+	}
+
+	_, err = OverrideGate(GateOverrideOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		Gate:         "security",
+		Status:       GateStatusRetainedByOperator,
+		Reason:       "operator accepted base-only rebase",
+		InputHash:    evaluation.InputHash,
+		HeadSHA:      "head-sha-first",
+		BaseSHA:      attempt.BaseSHA,
+		Operator:     "operator-a",
+		ExpiresAt:    parseWorkspaceTestTime("2026-01-02T15:04:00Z"),
+		Now:          fixedWorkspaceTime("2026-01-02T15:02:00Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "expiry must be in the future") {
+		t.Fatalf("OverrideGate observed expiry error = %v", err)
+	}
+}
+
 func TestOverrideGateRejectsMissingReason(t *testing.T) {
 	fixture := newOnePlanWorkspaceFixture(t)
 	if _, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir, WriteLock: true}); err != nil {
@@ -708,10 +746,14 @@ func gateStatusesByName(gates []GateStatusView) map[string]string {
 
 func fixedWorkspaceTime(value string) func() time.Time {
 	return func() time.Time {
-		parsed, err := time.Parse(time.RFC3339Nano, value)
-		if err != nil {
-			panic(err)
-		}
-		return parsed
+		return parseWorkspaceTestTime(value)
 	}
+}
+
+func parseWorkspaceTestTime(value string) time.Time {
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		panic(err)
+	}
+	return parsed
 }
