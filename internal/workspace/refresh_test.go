@@ -469,6 +469,119 @@ func TestMatchingRemoteTrackingRefRequiresExactRemoteBranch(t *testing.T) {
 	}
 }
 
+func TestPublishRefreshPlansForceWithLeaseCommand(t *testing.T) {
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	appendRefreshEventForTest(t, fixture, claim, attempt, RefreshStatusSucceeded, attempt.BaseSHA, "base-sha-2", "2026-06-17T10:02:00Z")
+	approval := grantPublishRefreshApprovalForTest(t, fixture, claim, attempt, "post-base-sha-2", "remote-sha-1", "2026-06-17T10:03:00Z")
+	before := len(readTestJournalEvents(t, fixture.Dir))
+
+	planned, err := PublishRefresh(PublishRefreshOptions{
+		WorkspaceDir:      fixture.Dir,
+		MergeUnitID:       claim.MergeUnitID,
+		AttemptID:         attempt.AttemptID,
+		AgentID:           "worker-a",
+		LeaseID:           claim.LeaseID,
+		ApprovalID:        approval.Approval.ApprovalID,
+		Remote:            "upstream",
+		ExpectedRemoteSHA: "remote-sha-1",
+		Now:               fixedJournalTime("2026-06-17T10:04:00Z"),
+		remoteHeadResolver: func(worktree string, remote string, branch string) (string, error) {
+			if worktree != attempt.Worktree || remote != "upstream" || branch != attempt.Branch {
+				t.Fatalf("remote resolver args = %q %q %q", worktree, remote, branch)
+			}
+			return "remote-sha-1", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("PublishRefresh: %v", err)
+	}
+	if planned.Status != "planned" || planned.HeadSHA != "post-base-sha-2" || planned.Intent.Action != ExternalActionPush || planned.Intent.ExpectedBaseSHA != "remote-sha-1" {
+		t.Fatalf("planned = %+v", planned)
+	}
+	wantProvider := "git -C " + attempt.Worktree + " push " + shellQuote("--force-with-lease=refs/heads/"+attempt.Branch+":remote-sha-1") + " upstream HEAD:refs/heads/" + attempt.Branch
+	if planned.Plan.ProviderCommand != wantProvider {
+		t.Fatalf("provider command = %s, want %s", planned.Plan.ProviderCommand, wantProvider)
+	}
+	if !strings.Contains(planned.Plan.IntentCommand, "feature workspace external intent reserve") ||
+		!strings.Contains(planned.Plan.IntentCommand, "--approval "+approval.Approval.ApprovalID) ||
+		!strings.Contains(planned.Plan.IntentCommand, "--head-sha post-base-sha-2") ||
+		!strings.Contains(planned.Plan.IntentCommand, "--base-sha remote-sha-1") {
+		t.Fatalf("intent command = %s", planned.Plan.IntentCommand)
+	}
+	if got := len(readTestJournalEvents(t, fixture.Dir)); got != before {
+		t.Fatalf("PublishRefresh should only plan when remote matches: got %d events want %d", got, before)
+	}
+}
+
+func TestPublishRefreshRequiresApproval(t *testing.T) {
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	appendRefreshEventForTest(t, fixture, claim, attempt, RefreshStatusSucceeded, attempt.BaseSHA, "base-sha-2", "2026-06-17T10:02:00Z")
+	before := len(readTestJournalEvents(t, fixture.Dir))
+
+	_, err := PublishRefresh(PublishRefreshOptions{
+		WorkspaceDir:      fixture.Dir,
+		MergeUnitID:       claim.MergeUnitID,
+		AttemptID:         attempt.AttemptID,
+		AgentID:           "worker-a",
+		LeaseID:           claim.LeaseID,
+		ApprovalID:        "approval-missing",
+		ExpectedRemoteSHA: "remote-sha-1",
+		Now:               fixedJournalTime("2026-06-17T10:03:00Z"),
+		remoteHeadResolver: func(worktree string, remote string, branch string) (string, error) {
+			t.Fatal("remote resolver should not run before approval validation")
+			return "", nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "approval not found") {
+		t.Fatalf("PublishRefresh error = %v, want missing approval", err)
+	}
+	if got := len(readTestJournalEvents(t, fixture.Dir)); got != before {
+		t.Fatalf("missing approval should not append events: got %d want %d", got, before)
+	}
+}
+
+func TestPublishRefreshRemoteMovedRecordsBlockingCondition(t *testing.T) {
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	appendRefreshEventForTest(t, fixture, claim, attempt, RefreshStatusSucceeded, attempt.BaseSHA, "base-sha-2", "2026-06-17T10:02:00Z")
+	approval := grantPublishRefreshApprovalForTest(t, fixture, claim, attempt, "post-base-sha-2", "remote-sha-1", "2026-06-17T10:03:00Z")
+
+	result, err := PublishRefresh(PublishRefreshOptions{
+		WorkspaceDir:      fixture.Dir,
+		MergeUnitID:       claim.MergeUnitID,
+		AttemptID:         attempt.AttemptID,
+		AgentID:           "worker-a",
+		LeaseID:           claim.LeaseID,
+		ApprovalID:        approval.Approval.ApprovalID,
+		ExpectedRemoteSHA: "remote-sha-1",
+		Now:               fixedJournalTime("2026-06-17T10:04:00Z"),
+		remoteHeadResolver: func(worktree string, remote string, branch string) (string, error) {
+			return "remote-sha-2", nil
+		},
+	})
+	var moved RemoteBranchMovedError
+	if err == nil || !errors.As(err, &moved) {
+		t.Fatalf("PublishRefresh error = %v, want RemoteBranchMovedError", err)
+	}
+	if result.Status != RefreshStatusRemoteBranchMoved || moved.Result.EventID == "" || result.ObservedRemoteSHA != "remote-sha-2" {
+		t.Fatalf("remote moved result = %+v moved=%+v", result, moved.Result)
+	}
+	view, err := RebuildSchedulerView(fixture.Dir)
+	if err != nil {
+		t.Fatalf("RebuildSchedulerView: %v", err)
+	}
+	unit := findSchedulerUnit(t, view, claim.MergeUnitID)
+	if len(unit.BlockingConditions) != 1 {
+		t.Fatalf("blocking conditions = %+v", unit.BlockingConditions)
+	}
+	condition := unit.BlockingConditions[0]
+	if condition.Type != RefreshStatusRemoteBranchMoved ||
+		condition.Status != RefreshStatusRemoteBranchMoved ||
+		condition.RequiredAction != "rerun_local_refresh" ||
+		condition.EvidencePath != result.EvidencePath {
+		t.Fatalf("remote moved condition = %+v result=%+v", condition, result)
+	}
+}
+
 func appendRefreshEventForTest(t *testing.T, fixture workspaceFixture, claim NextResult, attempt AttemptResult, status string, oldBase string, newBase string, at string) string {
 	t.Helper()
 	revisions, err := ResourceRevisions(fixture.Dir)
@@ -506,4 +619,26 @@ func appendRefreshEventForTest(t *testing.T, fixture workspaceFixture, claim Nex
 		t.Fatalf("AppendEvent refresh %s: %v", newBase, err)
 	}
 	return evidencePath
+}
+
+func grantPublishRefreshApprovalForTest(t *testing.T, fixture workspaceFixture, claim NextResult, attempt AttemptResult, headSHA string, remoteSHA string, at string) ApprovalResult {
+	t.Helper()
+	approval, err := GrantApproval(ApprovalGrantOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Actions:      []string{ExternalActionPush},
+		Branch:       attempt.Branch,
+		HeadSHA:      headSHA,
+		BaseSHA:      remoteSHA,
+		MaxUses:      1,
+		ExpiresIn:    time.Hour,
+		Now:          fixedJournalTime(at),
+	})
+	if err != nil {
+		t.Fatalf("GrantApproval: %v", err)
+	}
+	return approval
 }

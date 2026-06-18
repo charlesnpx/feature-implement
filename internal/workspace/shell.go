@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-var SupportedActions = []string{"init", "validate", "status", "next", "heartbeat", "release", "recover", "refresh-branch", "attempt", "transition", "contract", "approve", "external"}
+var SupportedActions = []string{"init", "validate", "status", "next", "heartbeat", "release", "recover", "refresh-branch", "publish-refresh", "attempt", "transition", "contract", "approve", "external"}
 
 func IsSupportedAction(action string) bool {
 	for _, supported := range SupportedActions {

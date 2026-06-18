@@ -29,6 +29,7 @@ func TestHelpCommandsExitSuccessfully(t *testing.T) {
 		{"workspace", "release", "--help"},
 		{"workspace", "recover", "--help"},
 		{"workspace", "refresh-branch", "--help"},
+		{"workspace", "publish-refresh", "--help"},
 		{"workspace", "attempt", "--help"},
 		{"workspace", "attempt", "start", "--help"},
 		{"workspace", "attempt", "abandon", "--help"},

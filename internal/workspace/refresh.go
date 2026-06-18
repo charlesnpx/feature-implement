@@ -19,6 +19,7 @@ const (
 
 	RefreshStatusSucceeded          = "refreshed"
 	RefreshStatusVerificationFailed = "verification_failed"
+	RefreshStatusRemoteBranchMoved  = "remote_branch_moved"
 
 	refreshAppendMaxAttempts = 3
 
@@ -104,8 +105,13 @@ type refreshSnapshot struct {
 	AttemptID    string
 	Status       string
 	Resource     string
+	Branch       string
+	Worktree     string
 	OldBase      string
 	NewBase      string
+	PreHead      string
+	PostHead     string
+	BackupRef    string
 	EvidencePath string
 }
 
@@ -153,18 +159,30 @@ func (t *refreshTracker) Apply(event JournalEvent) error {
 
 func (t *refreshTracker) Conditions(mergeUnitID string, attemptID string) []SchedulerBlockingCondition {
 	snapshot, ok := t.latestByMergeUnit[mergeUnitID]
-	if !ok || snapshot.Status != RefreshStatusVerificationFailed {
+	if !ok {
 		return nil
 	}
 	if attemptID == "" || snapshot.AttemptID != attemptID {
 		return nil
 	}
+	conditionType := ""
+	requiredAction := ""
+	switch snapshot.Status {
+	case RefreshStatusVerificationFailed:
+		conditionType = "refresh_verification_failed"
+		requiredAction = "rerun_local_refresh"
+	case RefreshStatusRemoteBranchMoved:
+		conditionType = RefreshStatusRemoteBranchMoved
+		requiredAction = "rerun_local_refresh"
+	default:
+		return nil
+	}
 	return []SchedulerBlockingCondition{{
-		Type:           "refresh_verification_failed",
+		Type:           conditionType,
 		Resource:       snapshot.Resource,
 		AttemptID:      snapshot.AttemptID,
 		Status:         snapshot.Status,
-		RequiredAction: "rerun_local_refresh",
+		RequiredAction: requiredAction,
 		EvidencePath:   snapshot.EvidencePath,
 	}}
 }
@@ -293,7 +311,7 @@ func refreshSnapshotFromEvent(event JournalEvent) (refreshSnapshot, error) {
 		return refreshSnapshot{}, err
 	}
 	switch status {
-	case RefreshStatusSucceeded, RefreshStatusVerificationFailed:
+	case RefreshStatusSucceeded, RefreshStatusVerificationFailed, RefreshStatusRemoteBranchMoved:
 	default:
 		return refreshSnapshot{}, fmt.Errorf("refresh event %s has unsupported status %s", event.ID, status)
 	}
@@ -305,10 +323,12 @@ func refreshSnapshotFromEvent(event JournalEvent) (refreshSnapshot, error) {
 	if !containsString(event.WriteSet, resource) {
 		return refreshSnapshot{}, fmt.Errorf("refresh event %s missing write_set resource %s", event.ID, resource)
 	}
-	if _, err := eventStringPayload(event, eventPayloadBranchKey); err != nil {
+	branch, err := eventStringPayload(event, eventPayloadBranchKey)
+	if err != nil {
 		return refreshSnapshot{}, err
 	}
-	if _, err := eventStringPayload(event, eventPayloadWorktreeKey); err != nil {
+	worktree, err := eventStringPayload(event, eventPayloadWorktreeKey)
+	if err != nil {
 		return refreshSnapshot{}, err
 	}
 	oldBase, err := eventStringPayload(event, eventPayloadOldBaseKey)
@@ -319,13 +339,16 @@ func refreshSnapshotFromEvent(event JournalEvent) (refreshSnapshot, error) {
 	if err != nil {
 		return refreshSnapshot{}, err
 	}
-	if _, err := eventStringPayload(event, eventPayloadPreHeadKey); err != nil {
+	preHead, err := eventStringPayload(event, eventPayloadPreHeadKey)
+	if err != nil {
 		return refreshSnapshot{}, err
 	}
-	if _, err := eventStringPayload(event, eventPayloadPostHeadKey); err != nil {
+	postHead, err := eventStringPayload(event, eventPayloadPostHeadKey)
+	if err != nil {
 		return refreshSnapshot{}, err
 	}
-	if _, err := eventStringPayload(event, eventPayloadBackupRefKey); err != nil {
+	backupRef, err := eventStringPayload(event, eventPayloadBackupRefKey)
+	if err != nil {
 		return refreshSnapshot{}, err
 	}
 	return refreshSnapshot{
@@ -333,8 +356,13 @@ func refreshSnapshotFromEvent(event JournalEvent) (refreshSnapshot, error) {
 		AttemptID:    attemptID,
 		Status:       status,
 		Resource:     resource,
+		Branch:       branch,
+		Worktree:     worktree,
 		OldBase:      oldBase,
 		NewBase:      newBase,
+		PreHead:      preHead,
+		PostHead:     postHead,
+		BackupRef:    backupRef,
 		EvidencePath: evidencePath,
 	}, nil
 }
