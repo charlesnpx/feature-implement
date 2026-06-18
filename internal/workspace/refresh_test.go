@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -495,6 +496,9 @@ func TestPublishRefreshPlansForceWithLeaseCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PublishRefresh: %v", err)
 	}
+	if planned.Intent == nil || planned.Plan == nil {
+		t.Fatalf("planned missing intent or plan = %+v", planned)
+	}
 	if planned.Status != "planned" || planned.HeadSHA != "post-base-sha-2" || planned.Intent.Action != ExternalActionPush || planned.Intent.ExpectedBaseSHA != "remote-sha-1" {
 		t.Fatalf("planned = %+v", planned)
 	}
@@ -593,6 +597,7 @@ func TestPublishRefreshRemoteMovedRecordsBlockingCondition(t *testing.T) {
 	if result.Status != RefreshStatusRemoteBranchMoved || moved.Result.EventID == "" || result.ObservedRemoteSHA != "remote-sha-2" {
 		t.Fatalf("remote moved result = %+v moved=%+v", result, moved.Result)
 	}
+	assertPublishRefreshRemoteMovedJSONOmitsPlan(t, result)
 	view, err := RebuildSchedulerView(fixture.Dir)
 	if err != nil {
 		t.Fatalf("RebuildSchedulerView: %v", err)
@@ -664,6 +669,7 @@ func TestPublishRefreshRemoteMovedRecordsAfterFailedIntentResult(t *testing.T) {
 	if result.Status != RefreshStatusRemoteBranchMoved || result.EventID == "" {
 		t.Fatalf("remote moved result after failed intent = %+v", result)
 	}
+	assertPublishRefreshRemoteMovedJSONOmitsPlan(t, result)
 }
 
 func TestPublishRefreshRemoteMovedRecordsAfterLeaseHeartbeat(t *testing.T) {
@@ -700,10 +706,29 @@ func TestPublishRefreshRemoteMovedRecordsAfterLeaseHeartbeat(t *testing.T) {
 	if result.Status != RefreshStatusRemoteBranchMoved || result.EventID == "" {
 		t.Fatalf("remote moved result after heartbeat = %+v", result)
 	}
+	assertPublishRefreshRemoteMovedJSONOmitsPlan(t, result)
 	events := readTestJournalEvents(t, fixture.Dir)
 	last := events[len(events)-1]
 	if last.Type != EventBranchRefreshRecorded || last.Timestamp != "2026-06-17T10:05:00Z" {
 		t.Fatalf("last event = %+v", last)
+	}
+}
+
+func assertPublishRefreshRemoteMovedJSONOmitsPlan(t *testing.T, result PublishRefreshResult) {
+	t.Helper()
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("Marshal PublishRefreshResult: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("Unmarshal PublishRefreshResult: %v\n%s", err, raw)
+	}
+	if _, ok := decoded["intent"]; ok {
+		t.Fatalf("remote moved JSON should omit intent: %s", raw)
+	}
+	if _, ok := decoded["plan"]; ok {
+		t.Fatalf("remote moved JSON should omit plan: %s", raw)
 	}
 }
 

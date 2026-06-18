@@ -23,23 +23,23 @@ type PublishRefreshOptions struct {
 }
 
 type PublishRefreshResult struct {
-	Status            string                   `json:"status"`
-	WorkspaceDir      string                   `json:"workspace_dir"`
-	WorkspaceID       string                   `json:"workspace_id"`
-	BaseRef           string                   `json:"base_ref"`
-	MergeUnitID       string                   `json:"merge_unit_id"`
-	AttemptID         string                   `json:"attempt_id"`
-	Branch            string                   `json:"branch"`
-	Worktree          string                   `json:"worktree"`
-	Remote            string                   `json:"remote"`
-	HeadSHA           string                   `json:"head_sha"`
-	ExpectedRemoteSHA string                   `json:"expected_remote_sha"`
-	ObservedRemoteSHA string                   `json:"observed_remote_sha"`
-	Intent            ExternalIntentView       `json:"intent,omitempty"`
-	Plan              ExternalProviderPlanView `json:"plan,omitempty"`
-	EvidencePath      string                   `json:"evidence_path,omitempty"`
-	EventID           string                   `json:"event_id,omitempty"`
-	EventHash         string                   `json:"event_hash,omitempty"`
+	Status            string                    `json:"status"`
+	WorkspaceDir      string                    `json:"workspace_dir"`
+	WorkspaceID       string                    `json:"workspace_id"`
+	BaseRef           string                    `json:"base_ref"`
+	MergeUnitID       string                    `json:"merge_unit_id"`
+	AttemptID         string                    `json:"attempt_id"`
+	Branch            string                    `json:"branch"`
+	Worktree          string                    `json:"worktree"`
+	Remote            string                    `json:"remote"`
+	HeadSHA           string                    `json:"head_sha"`
+	ExpectedRemoteSHA string                    `json:"expected_remote_sha"`
+	ObservedRemoteSHA string                    `json:"observed_remote_sha"`
+	Intent            *ExternalIntentView       `json:"intent,omitempty"`
+	Plan              *ExternalProviderPlanView `json:"plan,omitempty"`
+	EvidencePath      string                    `json:"evidence_path,omitempty"`
+	EventID           string                    `json:"event_id,omitempty"`
+	EventHash         string                    `json:"event_hash,omitempty"`
 }
 
 type RemoteBranchMovedError struct {
@@ -161,8 +161,8 @@ func PublishRefresh(opts PublishRefreshOptions) (PublishRefreshResult, error) {
 		HeadSHA:           refresh.PostHead,
 		ExpectedRemoteSHA: opts.ExpectedRemoteSHA,
 		ObservedRemoteSHA: observedRemoteSHA,
-		Intent:            planned.Intent,
-		Plan:              planned.Plan,
+		Intent:            &planned.Intent,
+		Plan:              &planned.Plan,
 	}, nil
 }
 

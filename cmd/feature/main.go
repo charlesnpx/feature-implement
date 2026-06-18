@@ -634,6 +634,9 @@ func workspacePublishRefresh(args []string) error {
 	if *asJSON {
 		return writeJSON(result)
 	}
+	if result.Plan == nil {
+		return fmt.Errorf("workspace publish-refresh produced no provider plan")
+	}
 	for _, command := range result.Plan.Commands {
 		fmt.Println(command)
 	}
