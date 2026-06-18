@@ -191,7 +191,7 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 		if unit.CurrentAttempt != nil {
 			attemptID = unit.CurrentAttempt.AttemptID
 		}
-		unitApprovals := approvalViewsForStatus(approvals, refreshes, unit.ID, attemptID, now)
+		unitApprovals := approvalViewsForStatus(approvals, events, unit.ID, attemptID, now)
 		if len(unitApprovals) > 0 {
 			unit.Approvals = unitApprovals
 		}
@@ -515,27 +515,16 @@ func schedulerBlockingConditions(dependencies []string, bindings []ContractBindi
 	return conditions
 }
 
-func approvalViewsForStatus(approvals map[string]approvalSnapshot, refreshes *refreshTracker, mergeUnitID string, attemptID string, now time.Time) []ApprovalView {
+func approvalViewsForStatus(approvals map[string]approvalSnapshot, events []JournalEvent, mergeUnitID string, attemptID string, now time.Time) []ApprovalView {
 	if attemptID == "" {
 		return nil
 	}
 	views := []ApprovalView{}
-	var refresh refreshSnapshot
-	hasRefresh := false
-	if refreshes != nil {
-		refresh, hasRefresh = refreshes.latestByMergeUnit[mergeUnitID]
-		if hasRefresh && refresh.AttemptID != attemptID {
-			hasRefresh = false
-		}
-	}
 	for _, approval := range approvals {
 		if approval.MergeUnitID != mergeUnitID || approval.AttemptID != attemptID {
 			continue
 		}
-		staleInputs := []string(nil)
-		if hasRefresh {
-			staleInputs = approvalStaleInputsForRefresh(approval, refresh)
-		}
+		staleInputs := approvalStaleInputsFromEvents(events, approval)
 		views = append(views, approval.ViewWithStaleInputs(now, staleInputs))
 	}
 	sort.Slice(views, func(i, j int) bool { return views[i].ApprovalID < views[j].ApprovalID })

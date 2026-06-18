@@ -491,6 +491,58 @@ func TestStaleApprovalUsesRecordedRefreshInputChanges(t *testing.T) {
 	}
 }
 
+func TestStaleApprovalAccumulatesRefreshInputChanges(t *testing.T) {
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	granted, err := GrantApproval(ApprovalGrantOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Actions:      []string{"merge"},
+		PR:           "42",
+		HeadSHA:      "head-sha-1",
+		BaseSHA:      attempt.BaseSHA,
+		MaxUses:      1,
+		ExpiresAt:    time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC),
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("GrantApproval: %v", err)
+	}
+	appendRefreshEvidenceForTest(t, fixture, claim, attempt, attempt.BaseSHA, "base-sha-2", "head-sha-1", "head-sha-2", "2026-06-17T10:03:00Z")
+	appendRefreshEvidenceForTest(t, fixture, claim, attempt, "base-sha-2", "base-sha-2", "head-sha-2", "head-sha-2", "2026-06-17T10:04:00Z")
+
+	status, err := Status(fixture.Dir)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	unit := findSchedulerUnit(t, SchedulerView{MergeUnits: status.MergeUnits}, claim.MergeUnitID)
+	if len(unit.Approvals) != 1 {
+		t.Fatalf("status approvals = %+v", unit.Approvals)
+	}
+	approval := unit.Approvals[0]
+	if approval.ApprovalID != granted.Approval.ApprovalID || approval.Status != "stale" || !stringSlicesEqual(approval.StaleInputs, []string{refreshInputBase, refreshInputHead}) {
+		t.Fatalf("stale approval after no-op refresh = %+v", approval)
+	}
+	check, err := CheckApproval(ApprovalCheckOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		Action:       "merge",
+		PR:           "42",
+		HeadSHA:      "head-sha-1",
+		BaseSHA:      attempt.BaseSHA,
+		Now:          fixedJournalTime("2026-06-17T10:05:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("CheckApproval: %v", err)
+	}
+	if check.Status != "denied" || len(check.Approvals) != 0 {
+		t.Fatalf("stale approval check after no-op refresh = %+v", check)
+	}
+}
+
 func TestAppendRefreshEventAfterMutationRejectsStaleAttempt(t *testing.T) {
 	fixture, claim, attempt := newApprovalAttemptFixture(t)
 	revisions, err := ResourceRevisions(fixture.Dir)
@@ -937,6 +989,40 @@ func assertPublishRefreshRemoteMovedJSONOmitsPlan(t *testing.T, result PublishRe
 	if _, ok := decoded["plan"]; ok {
 		t.Fatalf("remote moved JSON should omit plan: %s", raw)
 	}
+}
+
+func appendRefreshEvidenceForTest(t *testing.T, fixture workspaceFixture, claim NextResult, attempt AttemptResult, oldBase string, newBase string, preHead string, postHead string, at string) string {
+	t.Helper()
+	revisions, err := ResourceRevisions(fixture.Dir)
+	if err != nil {
+		t.Fatalf("ResourceRevisions: %v", err)
+	}
+	resource := RefreshResource(claim.MergeUnitID + ":" + attempt.AttemptID)
+	evidence := RefreshEvidence{
+		SchemaVersion: 1,
+		WorkspaceID:   fixture.Manifest.ID,
+		BaseRef:       fixtureWorkspaceBaseRef,
+		MergeUnitID:   claim.MergeUnitID,
+		AttemptID:     attempt.AttemptID,
+		AgentID:       "worker-a",
+		LeaseID:       claim.LeaseID,
+		Local:         true,
+		Branch:        attempt.Branch,
+		Worktree:      attempt.Worktree,
+		OldBase:       oldBase,
+		NewBase:       newBase,
+		PreHead:       preHead,
+		PostHead:      postHead,
+		BackupRef:     "backup-" + newBase + "-" + postHead,
+		Verification: RefreshVerification{
+			Status: RefreshStatusSucceeded,
+		},
+	}
+	evidencePath := filepath.Join(StateDirName, "evidence", "refresh", newBase+"-"+postHead+".json")
+	if _, err := appendRefreshEventAfterMutation(fixture.Dir, evidence, evidencePath, fixedJournalTime(at)(), revisions[resource], fixedJournalTime(at)); err != nil {
+		t.Fatalf("appendRefreshEventAfterMutation: %v", err)
+	}
+	return evidencePath
 }
 
 func appendRefreshEventForTest(t *testing.T, fixture workspaceFixture, claim NextResult, attempt AttemptResult, status string, oldBase string, newBase string, at string) string {

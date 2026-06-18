@@ -616,32 +616,42 @@ func addApprovalRefreshInputReadSet(readSet map[string]int, revisions map[string
 }
 
 func approvalStaleInputsFromEvents(events []JournalEvent, approval approvalSnapshot) []string {
-	refresh, ok := latestRefresh(events, approval.MergeUnitID, approval.AttemptID)
-	if !ok {
-		return nil
-	}
-	return approvalStaleInputsForRefresh(approval, refresh)
+	return approvalStaleInputsForValues(approval, latestRefreshInputValues(events, approval.MergeUnitID, approval.AttemptID))
 }
 
-func approvalStaleInputsForRefresh(approval approvalSnapshot, refresh refreshSnapshot) []string {
+func latestRefreshInputValues(events []JournalEvent, mergeUnitID string, attemptID string) map[string]string {
+	values := map[string]string{}
+	for _, event := range events {
+		if event.Type != EventBranchRefreshRecorded {
+			continue
+		}
+		refresh, err := refreshSnapshotFromEvent(event)
+		if err != nil {
+			continue
+		}
+		if refresh.MergeUnitID != mergeUnitID || refresh.AttemptID != attemptID {
+			continue
+		}
+		for _, change := range refresh.InputChanges {
+			values[change.Input] = change.NewValue
+		}
+	}
+	return values
+}
+
+func approvalStaleInputsForValues(approval approvalSnapshot, inputValues map[string]string) []string {
 	if !isTightMergeApproval(approval) {
 		return nil
 	}
-	if refresh.MergeUnitID != approval.MergeUnitID || refresh.AttemptID != approval.AttemptID {
+	if len(inputValues) == 0 {
 		return nil
 	}
 	stale := []string{}
-	for _, change := range refresh.InputChanges {
-		switch change.Input {
-		case refreshInputBase:
-			if approval.BaseSHA != change.NewValue {
-				stale = append(stale, refreshInputBase)
-			}
-		case refreshInputHead:
-			if approval.HeadSHA != change.NewValue {
-				stale = append(stale, refreshInputHead)
-			}
-		}
+	if value, ok := inputValues[refreshInputBase]; ok && approval.BaseSHA != value {
+		stale = append(stale, refreshInputBase)
+	}
+	if value, ok := inputValues[refreshInputHead]; ok && approval.HeadSHA != value {
+		stale = append(stale, refreshInputHead)
 	}
 	return stale
 }
