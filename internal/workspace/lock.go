@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	planpkg "github.com/charlesnpx/feature-implement/internal/plan"
 )
@@ -236,10 +237,14 @@ func Validate(opts ValidateOptions) (ValidateResult, error) {
 }
 
 func BuildLock(workspaceDir string, manifest WorkspaceManifest) (WorkspaceLock, error) {
+	repo, err := resolveWorkspaceRepoPath(workspaceDir, manifest.Repo)
+	if err != nil {
+		return WorkspaceLock{}, err
+	}
 	lock := WorkspaceLock{
 		SchemaVersion: lockSchemaVersion,
 		WorkspaceID:   manifest.ID,
-		Repo:          manifest.Repo,
+		Repo:          repo,
 		BaseRef:       manifest.BaseRef,
 		Remote:        manifest.Remote,
 		GatePolicy:    defaultWorkspaceGatePolicyLock(),
@@ -274,6 +279,33 @@ func BuildLock(workspaceDir string, manifest WorkspaceManifest) (WorkspaceLock, 
 	}
 	lock.ContractGates = contractGates
 	return lock, nil
+}
+
+func resolveWorkspaceRepoPath(workspaceDir string, repo string) (string, error) {
+	raw := strings.TrimSpace(repo)
+	if raw == "" {
+		return "", fmt.Errorf("repo is required")
+	}
+	workspaceAbs, err := filepath.Abs(workspaceDir)
+	if err != nil {
+		return "", err
+	}
+	resolved := raw
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Join(workspaceAbs, resolved)
+	}
+	resolved = filepath.Clean(resolved)
+	info, err := os.Stat(resolved)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("workspace repo path %q resolves to %s but does not exist", repo, resolved)
+		}
+		return "", fmt.Errorf("workspace repo path %q resolves to %s: %w", repo, resolved, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("workspace repo path %q resolves to %s, which is not a directory", repo, resolved)
+	}
+	return resolved, nil
 }
 
 func validatePlanLockMetadata(plan WorkspacePlanRef, manifest WorkspaceManifest, lock planpkg.Lock) error {

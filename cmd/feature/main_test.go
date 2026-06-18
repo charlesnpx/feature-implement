@@ -536,6 +536,74 @@ func TestWorkspaceCommandsRejectMismatchedPlanLockBaseAndRemote(t *testing.T) {
 	}
 }
 
+func TestWorkspaceCommandsUseResolvedRepoFromNonRepoWorkingDirectory(t *testing.T) {
+	workspaceDir := workspaceWithPlanLocks(t)
+	cwd := t.TempDir()
+
+	stdout, stderr, err := runFeatureInDir(t, cwd, "workspace", "validate", workspaceDir, "--write-lock", "--json")
+	if err != nil {
+		t.Fatalf("feature workspace validate failed from non-repo cwd: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var validated struct {
+		Lock struct {
+			Repo string `json:"repo"`
+		} `json:"lock"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &validated); err != nil {
+		t.Fatalf("validate stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if validated.Lock.Repo != workspaceDir {
+		t.Fatalf("lock repo = %q, want %q", validated.Lock.Repo, workspaceDir)
+	}
+
+	stdout, stderr, err = runFeatureInDir(t, cwd, "workspace", "status", workspaceDir, "--json")
+	if err != nil {
+		t.Fatalf("feature workspace status failed from non-repo cwd: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var status struct {
+		Ready []string `json:"ready"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &status); err != nil {
+		t.Fatalf("status stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if len(status.Ready) != 1 || status.Ready[0] != "foundation:story-a" {
+		t.Fatalf("status ready = %+v", status.Ready)
+	}
+
+	stdout, stderr, err = runFeatureInDir(t, cwd, "workspace", "next", workspaceDir, "--agent", "worker-a", "--claim", "--json")
+	if err != nil {
+		t.Fatalf("feature workspace next failed from non-repo cwd: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var claim struct {
+		MergeUnitID string `json:"merge_unit_id"`
+		LeaseID     string `json:"lease_id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &claim); err != nil {
+		t.Fatalf("next stdout is not JSON: %v\n%s", err, stdout)
+	}
+
+	stdout, stderr, err = runFeatureInDir(t, cwd,
+		"workspace", "attempt", "start", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--agent", "worker-a",
+		"--lease", claim.LeaseID,
+		"--base-sha", "base-sha-cli",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace attempt start failed from non-repo cwd: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var attempt struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &attempt); err != nil {
+		t.Fatalf("attempt stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if attempt.Status != "started" {
+		t.Fatalf("attempt = %+v", attempt)
+	}
+}
+
 func TestWorkspaceStatusCommandJSON(t *testing.T) {
 	workspaceDir := workspaceWithPlanLocks(t)
 	if _, stderr, err := runFeature(t, "workspace", "validate", workspaceDir, "--write-lock", "--json"); err != nil {
@@ -3348,9 +3416,17 @@ func TestHelperProcess(t *testing.T) {
 
 func runFeature(t *testing.T, args ...string) (string, string, error) {
 	t.Helper()
+	return runFeatureInDir(t, "", args...)
+}
+
+func runFeatureInDir(t *testing.T, dir string, args ...string) (string, string, error) {
+	t.Helper()
 	cmdArgs := append([]string{"-test.run=TestHelperProcess", "--"}, args...)
 	cmd := exec.Command(os.Args[0], cmdArgs...)
 	cmd.Env = append(os.Environ(), "FEATURE_HELPER_PROCESS=1")
+	if dir != "" {
+		cmd.Dir = dir
+	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout

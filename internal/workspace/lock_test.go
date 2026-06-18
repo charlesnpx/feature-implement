@@ -47,6 +47,9 @@ func TestValidateWritesDeterministicWorkspaceLock(t *testing.T) {
 	if first.Lock.WorkspaceID != "workspace-a" || first.Lock.BaseRef != "workspace-orchestration" || first.Lock.Remote != "origin" {
 		t.Fatalf("lock metadata = %+v", first.Lock)
 	}
+	if first.Lock.Repo != fixture.Dir {
+		t.Fatalf("repo = %q, want %q", first.Lock.Repo, fixture.Dir)
+	}
 	if len(first.Lock.Plans) != 2 {
 		t.Fatalf("plans = %+v", first.Lock.Plans)
 	}
@@ -211,6 +214,86 @@ func TestValidateDoesNotWriteLockWithoutFlag(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(fixture.Dir, LockFileName)); !os.IsNotExist(err) {
 		t.Fatalf("lock should not be written without flag: %v", err)
+	}
+}
+
+func TestBuildLockResolvesWorkspaceRepoPath(t *testing.T) {
+	t.Run("relative", func(t *testing.T) {
+		fixture := newOnePlanWorkspaceFixture(t)
+		repoDir := filepath.Join(fixture.Dir, "repo")
+		if err := os.Mkdir(repoDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		fixture.Manifest.Repo = "repo"
+		writeWorkspaceManifest(t, fixture.Dir, fixture.Manifest)
+
+		lock, err := BuildLock(fixture.Dir, mustReadWorkspaceManifest(t, fixture.Dir))
+
+		if err != nil {
+			t.Fatalf("BuildLock relative repo: %v", err)
+		}
+		if lock.Repo != repoDir {
+			t.Fatalf("repo = %q, want %q", lock.Repo, repoDir)
+		}
+	})
+
+	t.Run("absolute", func(t *testing.T) {
+		fixture := newOnePlanWorkspaceFixture(t)
+		repoDir := filepath.Join(t.TempDir(), "repo")
+		if err := os.Mkdir(repoDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		fixture.Manifest.Repo = repoDir
+		writeWorkspaceManifest(t, fixture.Dir, fixture.Manifest)
+
+		lock, err := BuildLock(fixture.Dir, mustReadWorkspaceManifest(t, fixture.Dir))
+
+		if err != nil {
+			t.Fatalf("BuildLock absolute repo: %v", err)
+		}
+		if lock.Repo != repoDir {
+			t.Fatalf("repo = %q, want %q", lock.Repo, repoDir)
+		}
+	})
+}
+
+func TestValidateRejectsUnusableWorkspaceRepoPath(t *testing.T) {
+	tests := []struct {
+		name string
+		repo func(*testing.T, string) string
+		want string
+	}{
+		{
+			name: "missing",
+			repo: func(t *testing.T, workspaceDir string) string {
+				return "missing"
+			},
+			want: `workspace repo path "missing" resolves to`,
+		},
+		{
+			name: "file",
+			repo: func(t *testing.T, workspaceDir string) string {
+				path := filepath.Join(workspaceDir, "repo-file")
+				if err := os.WriteFile(path, []byte("not a directory\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return "repo-file"
+			},
+			want: "which is not a directory",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newOnePlanWorkspaceFixture(t)
+			fixture.Manifest.Repo = tt.repo(t, fixture.Dir)
+			writeWorkspaceManifest(t, fixture.Dir, fixture.Manifest)
+
+			_, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir})
+
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate error = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }
 
