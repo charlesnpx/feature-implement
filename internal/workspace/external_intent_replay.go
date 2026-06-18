@@ -106,10 +106,7 @@ func (t *externalIntentTracker) Apply(event JournalEvent) error {
 		if !ok {
 			return fmt.Errorf("external intent reconciliation event %s references unknown intent %s", event.ID, reconciliation.intentID)
 		}
-		if intent.Result == nil {
-			return fmt.Errorf("external intent reconciliation event %s references intent %s without a result", event.ID, reconciliation.intentID)
-		}
-		if intent.Result.Status != ExternalResultAmbiguous {
+		if intent.Result != nil && intent.Result.Status != ExternalResultAmbiguous {
 			return fmt.Errorf("external intent reconciliation event %s references non-ambiguous intent %s result %s", event.ID, reconciliation.intentID, intent.Result.Status)
 		}
 		if reconciliation.mergeUnitID != intent.MergeUnitID {

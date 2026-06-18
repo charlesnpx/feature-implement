@@ -371,10 +371,7 @@ func ReconcileExternalIntent(opts ExternalIntentReconcileOptions) (ExternalInten
 	if !ok {
 		return ExternalIntentReconcileResult{}, fmt.Errorf("external intent not found: %s", opts.IntentID)
 	}
-	if intent.Result == nil {
-		return ExternalIntentReconcileResult{}, fmt.Errorf("external intent %s has no recorded result to reconcile", opts.IntentID)
-	}
-	if intent.Result.Status != ExternalResultAmbiguous {
+	if intent.Result != nil && intent.Result.Status != ExternalResultAmbiguous {
 		return ExternalIntentReconcileResult{}, fmt.Errorf("external intent %s result %s does not require reconciliation", opts.IntentID, intent.Result.Status)
 	}
 	intentResource := ExternalIntentResource(opts.IntentID)
@@ -514,8 +511,7 @@ func normalizeExternalIntentResultStatus(value string) (string, error) {
 		ExternalResultNotPerformed,
 		ExternalResultFailedBeforeSideEffect,
 		ExternalResultFailedAfterSideEffect,
-		ExternalResultAmbiguous,
-		ExternalResultReconciledByOperator:
+		ExternalResultAmbiguous:
 		return status, nil
 	default:
 		return "", fmt.Errorf("unsupported external intent result status: %s", value)

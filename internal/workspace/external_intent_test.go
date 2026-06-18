@@ -378,7 +378,6 @@ func TestRecordExternalIntentResultRecordsStatuses(t *testing.T) {
 		{status: ExternalResultFailedBeforeSideEffect},
 		{status: ExternalResultFailedAfterSideEffect},
 		{status: ExternalResultAmbiguous},
-		{status: ExternalResultReconciledByOperator, accepted: true},
 		{status: ExternalResultFailedBeforeSideEffect, policyAccepted: true, accepted: true},
 	}
 	for _, tt := range tests {
@@ -435,18 +434,22 @@ func TestRecordExternalIntentResultRejectsUnknownStatusAndDuplicate(t *testing.T
 	fixture, claim, attempt, approval := newExternalIntentFixture(t, ExternalActionPush)
 	reserved := reserveExternalIntentForTest(t, fixture, claim, attempt, approval, "feature/test", "head-sha", "2026-06-17T10:03:00Z")
 
-	_, err := RecordExternalIntentResult(ExternalIntentResultRecordOptions{
-		WorkspaceDir: fixture.Dir,
-		MergeUnitID:  claim.MergeUnitID,
-		AttemptID:    attempt.AttemptID,
-		AgentID:      "worker-a",
-		LeaseID:      claim.LeaseID,
-		IntentID:     reserved.Intent.IntentID,
-		Status:       "sideways",
-		Now:          fixedJournalTime("2026-06-17T10:04:00Z"),
-	})
-	if err == nil || !strings.Contains(err.Error(), "unsupported external intent result status") {
-		t.Fatalf("unknown status error = %v", err)
+	for _, status := range []string{"sideways", ExternalResultReconciledByOperator} {
+		t.Run(status, func(t *testing.T) {
+			_, err := RecordExternalIntentResult(ExternalIntentResultRecordOptions{
+				WorkspaceDir: fixture.Dir,
+				MergeUnitID:  claim.MergeUnitID,
+				AttemptID:    attempt.AttemptID,
+				AgentID:      "worker-a",
+				LeaseID:      claim.LeaseID,
+				IntentID:     reserved.Intent.IntentID,
+				Status:       status,
+				Now:          fixedJournalTime("2026-06-17T10:04:00Z"),
+			})
+			if err == nil || !strings.Contains(err.Error(), "unsupported external intent result status") {
+				t.Fatalf("unsupported status %s error = %v", status, err)
+			}
+		})
 	}
 
 	if _, err := RecordExternalIntentResult(ExternalIntentResultRecordOptions{
@@ -461,7 +464,7 @@ func TestRecordExternalIntentResultRejectsUnknownStatusAndDuplicate(t *testing.T
 	}); err != nil {
 		t.Fatalf("RecordExternalIntentResult first: %v", err)
 	}
-	_, err = RecordExternalIntentResult(ExternalIntentResultRecordOptions{
+	_, err := RecordExternalIntentResult(ExternalIntentResultRecordOptions{
 		WorkspaceDir: fixture.Dir,
 		MergeUnitID:  claim.MergeUnitID,
 		AttemptID:    attempt.AttemptID,
@@ -473,6 +476,52 @@ func TestRecordExternalIntentResultRejectsUnknownStatusAndDuplicate(t *testing.T
 	})
 	if err == nil || !strings.Contains(err.Error(), "already has result succeeded") {
 		t.Fatalf("duplicate result error = %v", err)
+	}
+}
+
+func TestReconcileExternalIntentClearsUnresolvedFreezeAfterLeaseRelease(t *testing.T) {
+	fixture, claim, attempt, approval := newExternalIntentFixture(t, ExternalActionPush)
+	reserved := reserveExternalIntentForTest(t, fixture, claim, attempt, approval, "feature/test", "head-sha", "2026-06-17T10:03:00Z")
+	if _, err := Release(LeaseOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Now:          fixedJournalTime("2026-06-17T10:04:00Z"),
+	}); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if _, err := RecordExternalIntentResult(ExternalIntentResultRecordOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		IntentID:     reserved.Intent.IntentID,
+		Status:       ExternalResultSucceeded,
+		Now:          fixedJournalTime("2026-06-17T10:05:00Z"),
+	}); err == nil || !strings.Contains(err.Error(), "lease") {
+		t.Fatalf("record after release should require active lease: %v", err)
+	}
+
+	reconciled, err := ReconcileExternalIntent(ExternalIntentReconcileOptions{
+		WorkspaceDir: fixture.Dir,
+		IntentID:     reserved.Intent.IntentID,
+		Operator:     "operator-a",
+		Details:      "operator confirmed no provider side effect",
+		Now:          fixedJournalTime("2026-06-17T10:06:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("ReconcileExternalIntent unresolved: %v", err)
+	}
+	if reconciled.Result.Status != ExternalResultReconciledByOperator || !reconciled.Result.Accepted || reconciled.Result.Operator != "operator-a" {
+		t.Fatalf("reconciled unresolved = %+v", reconciled)
+	}
+	status, err := Status(fixture.Dir)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if len(status.FrozenResources) != 0 {
+		t.Fatalf("unresolved freeze after reconcile = %+v", status.FrozenResources)
 	}
 }
 
