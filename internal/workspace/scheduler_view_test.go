@@ -17,7 +17,7 @@ func TestRebuildSchedulerViewEmptyJournalDefaultsFromLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RebuildSchedulerView: %v", err)
 	}
-	if view.WorkspaceID != "workspace-chained" || view.BaseRef != fixtureWorkspaceBaseRef {
+	if view.WorkspaceID != "workspace-chained" || view.Repo != fixture.Dir || view.BaseRef != fixtureWorkspaceBaseRef {
 		t.Fatalf("view metadata = %+v", view)
 	}
 	if len(view.MergeUnits) != 2 {

@@ -28,6 +28,7 @@ const (
 type SchedulerView struct {
 	SchemaVersion   int                        `json:"schema_version"`
 	WorkspaceID     string                     `json:"workspace_id"`
+	Repo            string                     `json:"repo"`
 	BaseRef         string                     `json:"base_ref"`
 	MergeUnits      []SchedulerMergeUnitView   `json:"merge_units"`
 	MergeQueue      []MergeQueueEntryView      `json:"merge_queue,omitempty"`
@@ -129,6 +130,7 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 	view := SchedulerView{
 		SchemaVersion: 1,
 		WorkspaceID:   lock.WorkspaceID,
+		Repo:          lock.Repo,
 		BaseRef:       lock.BaseRef,
 		Counts:        map[string]int{},
 	}
