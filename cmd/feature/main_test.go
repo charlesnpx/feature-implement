@@ -44,6 +44,7 @@ func TestHelpCommandsExitSuccessfully(t *testing.T) {
 		{"workspace", "external", "--help"},
 		{"workspace", "external", "intent", "--help"},
 		{"workspace", "external", "intent", "reserve", "--help"},
+		{"workspace", "external", "intent", "result", "--help"},
 	}
 	for _, args := range tests {
 		stdout, stderr, err := runFeature(t, args...)
@@ -1120,9 +1121,51 @@ func TestWorkspaceExternalIntentReserveCommandJSON(t *testing.T) {
 		t.Fatalf("affected resources = %+v", reserved.Intent.AffectedResources)
 	}
 
+	stdout, stderr, err = runFeature(t,
+		"workspace", "external", "intent", "result", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--attempt", attempt.AttemptID,
+		"--agent", "worker-a",
+		"--lease", claim.LeaseID,
+		"--intent", reserved.Intent.IntentID,
+		"--status", "succeeded",
+		"--details", "provider completed",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace external intent result failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var recorded struct {
+		Status string `json:"status"`
+		Intent struct {
+			IntentID string `json:"intent_id"`
+			Status   string `json:"status"`
+			Result   struct {
+				Status   string `json:"status"`
+				Accepted bool   `json:"accepted"`
+				Details  string `json:"details"`
+			} `json:"result"`
+		} `json:"intent"`
+		Result struct {
+			Status   string `json:"status"`
+			Accepted bool   `json:"accepted"`
+			Details  string `json:"details"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &recorded); err != nil {
+		t.Fatalf("result stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if recorded.Status != "recorded" || recorded.Intent.IntentID != reserved.Intent.IntentID || recorded.Intent.Status != "succeeded" {
+		t.Fatalf("recorded result = %+v", recorded)
+	}
+	if recorded.Result.Status != "succeeded" || !recorded.Result.Accepted || recorded.Result.Details != "provider completed" ||
+		recorded.Intent.Result.Status != recorded.Result.Status || !recorded.Intent.Result.Accepted {
+		t.Fatalf("recorded result metadata = %+v", recorded)
+	}
+
 	stdout, stderr, err = runFeature(t, "workspace", "status", workspaceDir, "--json")
 	if err != nil {
-		t.Fatalf("feature workspace status should ignore external intent events: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+		t.Fatalf("feature workspace status should ignore resolved external intent events: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
 	}
 	if !strings.Contains(stdout, `"status":"ok"`) {
 		t.Fatalf("workspace status after intent reserve = %s", stdout)

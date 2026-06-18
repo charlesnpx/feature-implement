@@ -37,9 +37,10 @@ const (
 	eventPayloadToKey             = "to"
 	eventPayloadEvidenceKey       = "evidence"
 
-	evidenceWorktreeKey  = "worktree"
-	evidenceCommitSHAKey = "commit_sha"
-	evidenceReasonKey    = "reason"
+	evidenceWorktreeKey         = "worktree"
+	evidenceCommitSHAKey        = "commit_sha"
+	evidenceReasonKey           = "reason"
+	evidenceExternalIntentIDKey = "external_intent_id"
 
 	attemptStatusActive    = "active"
 	attemptStatusAbandoned = "abandoned"
@@ -622,6 +623,16 @@ func Transition(opts TransitionOptions) (TransitionResult, error) {
 	if err != nil {
 		return TransitionResult{}, err
 	}
+	if opts.To == MergeUnitCompleted {
+		externalIntents, err := externalIntentSnapshots(state.Events)
+		if err != nil {
+			return TransitionResult{}, err
+		}
+		tracker := &externalIntentTracker{intents: externalIntents}
+		if err := validateExternalIntentCompletionEvidence("transition", evidence, opts.MergeUnitID, opts.AttemptID, tracker); err != nil {
+			return TransitionResult{}, err
+		}
+	}
 	if err := appendTransitionEvent(opts.WorkspaceDir, opts, eventType, evidence, state.Revisions, transitionedAt); err != nil {
 		return TransitionResult{}, err
 	}
@@ -925,6 +936,14 @@ func appendLeaseEvent(workspaceDir string, eventType string, lease activeLeaseSn
 func appendTransitionEvent(workspaceDir string, opts TransitionOptions, eventType string, evidence map[string]any, revisions map[string]int, occurredAt time.Time) error {
 	leaseResource := LeaseResource(opts.MergeUnitID)
 	mergeUnitResource := MergeUnitResource(opts.MergeUnitID)
+	readSet := map[string]int{
+		leaseResource:     revisions[leaseResource],
+		mergeUnitResource: revisions[mergeUnitResource],
+	}
+	if intentID, ok := evidence[evidenceExternalIntentIDKey].(string); ok && intentID != "" {
+		intentResource := ExternalIntentResource(intentID)
+		readSet[intentResource] = revisions[intentResource]
+	}
 	_, err := AppendEvent(AppendEventOptions{
 		WorkspaceDir: workspaceDir,
 		Type:         eventType,
@@ -937,10 +956,7 @@ func appendTransitionEvent(workspaceDir string, opts TransitionOptions, eventTyp
 			eventPayloadToKey:          opts.To,
 			eventPayloadEvidenceKey:    evidence,
 		},
-		ReadSet: map[string]int{
-			leaseResource:     revisions[leaseResource],
-			mergeUnitResource: revisions[mergeUnitResource],
-		},
+		ReadSet:  readSet,
 		WriteSet: []string{mergeUnitResource},
 		Now:      func() time.Time { return occurredAt },
 	})
