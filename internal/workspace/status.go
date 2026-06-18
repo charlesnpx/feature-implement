@@ -18,6 +18,7 @@ type StatusResult struct {
 	Ready           []string                   `json:"ready"`
 	Blocked         []string                   `json:"blocked"`
 	FrozenResources []ExternalIntentFreezeView `json:"frozen_resources,omitempty"`
+	MergeQueue      []MergeQueueEntryView      `json:"merge_queue,omitempty"`
 	MergeUnits      []SchedulerMergeUnitView   `json:"merge_units"`
 }
 
@@ -49,6 +50,7 @@ func Status(workspaceDir string) (StatusResult, error) {
 		Ready:           append([]string{}, view.Ready...),
 		Blocked:         append([]string{}, view.Blocked...),
 		FrozenResources: append([]ExternalIntentFreezeView{}, view.FrozenResources...),
+		MergeQueue:      append([]MergeQueueEntryView{}, view.MergeQueue...),
 		MergeUnits:      append([]SchedulerMergeUnitView{}, view.MergeUnits...),
 	}, nil
 }
