@@ -1601,7 +1601,15 @@ func TestWorkspaceContractGateQueueSmokeCommandJSON(t *testing.T) {
 		ready := prepareContractGateQueueSmoke(t)
 
 		queued := queueContractGateSmoke(t, ready)
-		if queued.Status != "queued" || queued.Queue == nil || queued.Queue.Position != 1 || queued.Queue.ApprovalID != ready.ApprovalID {
+		if queued.Status != "queued" ||
+			queued.Queue == nil ||
+			queued.Queue.MergeUnitID != ready.ConsumerClaim.MergeUnitID ||
+			queued.Queue.AttemptID != ready.ConsumerAttempt.AttemptID ||
+			queued.Queue.Branch != ready.ConsumerAttempt.Branch ||
+			queued.Queue.HeadSHA != ready.HeadSHA ||
+			queued.Queue.BaseSHA != ready.BaseSHA ||
+			queued.Queue.Position != 1 ||
+			queued.Queue.ApprovalID != ready.ApprovalID {
 			t.Fatalf("queue result = %+v", queued)
 		}
 		if queued.Queue.GateInputHash != ready.Evaluation.InputHash || queued.Queue.GateOutputHash != ready.Evaluation.OutputHash {
@@ -1617,7 +1625,10 @@ func TestWorkspaceContractGateQueueSmokeCommandJSON(t *testing.T) {
 			MergeUnits []workspaceSmokeStatusUnit `json:"merge_units"`
 		}
 		runFeatureJSON(t, &status, "workspace", "status", ready.WorkspaceDir, "--json")
-		if len(status.MergeQueue) != 1 || status.MergeQueue[0].QueueID != queued.Queue.QueueID || status.MergeQueue[0].Position != 1 {
+		if len(status.MergeQueue) != 1 ||
+			status.MergeQueue[0].QueueID != queued.Queue.QueueID ||
+			status.MergeQueue[0].MergeUnitID != ready.ConsumerClaim.MergeUnitID ||
+			status.MergeQueue[0].Position != 1 {
 			t.Fatalf("status merge queue = %+v", status.MergeQueue)
 		}
 		consumer := findWorkspaceStatusUnitForSmoke(t, status.MergeUnits, ready.ConsumerClaim.MergeUnitID)
@@ -1719,7 +1730,12 @@ type workspaceSmokeQueueResult struct {
 	Status string `json:"status"`
 	Queue  *struct {
 		QueueID        string `json:"queue_id"`
+		MergeUnitID    string `json:"merge_unit_id"`
+		AttemptID      string `json:"attempt_id"`
 		ApprovalID     string `json:"approval_id"`
+		Branch         string `json:"branch"`
+		HeadSHA        string `json:"head_sha"`
+		BaseSHA        string `json:"base_sha"`
 		Position       int    `json:"position"`
 		GateInputHash  string `json:"gate_input_hash"`
 		GateOutputHash string `json:"gate_output_hash"`
