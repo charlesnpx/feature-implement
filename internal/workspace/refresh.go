@@ -232,7 +232,7 @@ func RefreshBranch(opts RefreshBranchOptions) (RefreshBranchResult, error) {
 	if err != nil {
 		return RefreshBranchResult{}, err
 	}
-	result, err := appendRefreshEventAfterMutation(opts.WorkspaceDir, evidence, evidencePath, refreshedAt, originalRefreshRevision)
+	result, err := appendRefreshEventAfterMutation(opts.WorkspaceDir, evidence, evidencePath, refreshedAt, originalRefreshRevision, opts.Now)
 	if err != nil {
 		return RefreshBranchResult{}, err
 	}
@@ -616,11 +616,14 @@ func firstFailedRefreshCommand(commandResults []ContractCommandResult) string {
 	return ""
 }
 
-func appendRefreshEventAfterMutation(workspaceDir string, evidence RefreshEvidence, evidencePath string, refreshedAt time.Time, expectedRefreshRevision int) (RefreshBranchResult, error) {
+func appendRefreshEventAfterMutation(workspaceDir string, evidence RefreshEvidence, evidencePath string, refreshedAt time.Time, expectedRefreshRevision int, now func() time.Time) (RefreshBranchResult, error) {
+	if now == nil {
+		now = time.Now
+	}
 	var lastErr error
 	refreshResource := RefreshResource(evidence.MergeUnitID + ":" + evidence.AttemptID)
 	for attempt := 0; attempt < refreshAppendMaxAttempts; attempt++ {
-		recordedAt := time.Now()
+		recordedAt := now()
 		if recordedAt.Before(refreshedAt) {
 			recordedAt = refreshedAt
 		}

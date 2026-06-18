@@ -269,7 +269,7 @@ func TestAppendRefreshEventAfterMutationUsesFreshLeaseRevision(t *testing.T) {
 			PatchIDsPreserved:     true,
 		},
 	}
-	result, err := appendRefreshEventAfterMutation(fixture.Dir, evidence, evidencePath, fixedJournalTime("2026-06-17T10:02:30Z")(), originalRefreshRevision)
+	result, err := appendRefreshEventAfterMutation(fixture.Dir, evidence, evidencePath, fixedJournalTime("2026-06-17T10:02:30Z")(), originalRefreshRevision, fixedJournalTime("2026-06-17T10:02:30Z"))
 	if err != nil {
 		t.Fatalf("appendRefreshEventAfterMutation: %v", err)
 	}
@@ -333,7 +333,7 @@ func TestAppendRefreshEventAfterMutationRejectsStaleAttempt(t *testing.T) {
 			Status: RefreshStatusVerificationFailed,
 		},
 	}
-	_, err = appendRefreshEventAfterMutation(fixture.Dir, evidence, filepath.Join(StateDirName, "evidence", "refresh", "stale-attempt.json"), fixedJournalTime("2026-06-17T10:02:30Z")(), originalRefreshRevision)
+	_, err = appendRefreshEventAfterMutation(fixture.Dir, evidence, filepath.Join(StateDirName, "evidence", "refresh", "stale-attempt.json"), fixedJournalTime("2026-06-17T10:02:30Z")(), originalRefreshRevision, fixedJournalTime("2026-06-17T10:02:30Z"))
 	if err == nil || !strings.Contains(err.Error(), "has no active attempt") {
 		t.Fatalf("stale attempt error = %v", err)
 	}
@@ -439,7 +439,7 @@ func TestAppendRefreshEventAfterMutationRejectsFreshExternalIntentFreeze(t *test
 			Status: RefreshStatusSucceeded,
 		},
 	}
-	_, err = appendRefreshEventAfterMutation(fixture.Dir, evidence, filepath.Join(StateDirName, "evidence", "refresh", "fresh-freeze.json"), fixedJournalTime("2026-06-17T10:04:00Z")(), originalRefreshRevision)
+	_, err = appendRefreshEventAfterMutation(fixture.Dir, evidence, filepath.Join(StateDirName, "evidence", "refresh", "fresh-freeze.json"), fixedJournalTime("2026-06-17T10:04:00Z")(), originalRefreshRevision, fixedJournalTime("2026-06-17T10:04:00Z"))
 	if err == nil || !strings.Contains(err.Error(), "workspace refresh-branch blocked by frozen resource") {
 		t.Fatalf("fresh freeze error = %v", err)
 	}
