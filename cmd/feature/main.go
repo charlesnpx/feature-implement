@@ -1586,7 +1586,7 @@ Reserves external provider-write intents, records provider results, and reconcil
 func usageWorkspaceExternalIntent(w io.Writer) {
 	fmt.Fprintln(w, `Usage:
   feature workspace external intent reserve <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --approval <id> --action <push|open-pr|merge|remote-delete> (--branch <name> | --pr <id>) --head-sha <sha> --base-sha <sha> [--scope <scope>] [--json]
-  feature workspace external intent result <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --intent <id> --status <succeeded|not_performed|failed_before_side_effect|failed_after_side_effect|ambiguous|reconciled_by_operator> [--policy-accepted] [--details <text>] [--json]
+  feature workspace external intent result <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --intent <id> --status <succeeded|not_performed|failed_before_side_effect|failed_after_side_effect|ambiguous> [--policy-accepted] [--details <text>] [--json]
   feature workspace external intent reconcile <workspace-dir> --intent <id> --operator <id> --details <text> [--json]
 
 Manages external provider-write intent records.`)
@@ -1601,7 +1601,7 @@ func usageWorkspaceExternalIntentAction(w io.Writer, action string) {
 Reserves an external write intent after validating the current attempt and required approval.`)
 	case "result":
 		fmt.Fprintln(w, `Usage:
-  feature workspace external intent result <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --intent <id> --status <succeeded|not_performed|failed_before_side_effect|failed_after_side_effect|ambiguous|reconciled_by_operator> [--policy-accepted] [--details <text>] [--json]
+  feature workspace external intent result <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --intent <id> --status <succeeded|not_performed|failed_before_side_effect|failed_after_side_effect|ambiguous> [--policy-accepted] [--details <text>] [--json]
 
 Records the observed provider result for a reserved external write intent.`)
 	case "reconcile":
