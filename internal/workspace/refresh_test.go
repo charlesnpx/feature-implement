@@ -237,7 +237,7 @@ func TestAppendRefreshEventAfterMutationUsesFreshLeaseRevision(t *testing.T) {
 		AgentID:       "worker-a",
 		LeaseID:       claim.LeaseID,
 		LeaseDuration: 14 * 24 * time.Hour,
-		Now:           fixedJournalTime("2026-06-17T10:02:00Z"),
+		Now:           fixedJournalTime("2026-06-17T10:03:00Z"),
 	}); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}

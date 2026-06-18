@@ -1429,7 +1429,7 @@ func TestTransitionRejectsLeaseBeforeGrantTimestamp(t *testing.T) {
 		Evidence:     map[string]any{evidenceWorktreeKey: attempt.Worktree},
 		Now:          fixedJournalTime("2026-06-17T09:59:59Z"),
 	})
-	if err == nil || !strings.Contains(err.Error(), "active lease not found: "+claim.LeaseID) {
+	if err == nil || !strings.Contains(err.Error(), "attempt "+attempt.AttemptID+" has not started yet") {
 		t.Fatalf("future-dated lease error = %v", err)
 	}
 }

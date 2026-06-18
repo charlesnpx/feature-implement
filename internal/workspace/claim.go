@@ -848,6 +848,10 @@ func loadLeaseOperationState(workspaceDir string, observedAt time.Time) (leaseOp
 	if err != nil {
 		return leaseOperationState{}, err
 	}
+	observedAt, err = observedAtAfterEvents(events, observedAt)
+	if err != nil {
+		return leaseOperationState{}, err
+	}
 	revisions, err := replayResourceRevisions(events)
 	if err != nil {
 		return leaseOperationState{}, err
