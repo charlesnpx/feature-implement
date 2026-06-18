@@ -10,7 +10,8 @@ import (
 )
 
 const (
-	EventExternalIntentReserved = "external_intent.reserved"
+	EventExternalIntentReserved       = "external_intent.reserved"
+	EventExternalIntentResultRecorded = "external_intent.result_recorded"
 
 	eventPayloadIntentIDKey          = "intent_id"
 	eventPayloadIdempotencyKeyKey    = "idempotency_key"
@@ -20,11 +21,20 @@ const (
 	eventPayloadRequestedHeadSHAKey  = "requested_head_sha"
 	eventPayloadExpectedBaseSHAKey   = "expected_base_sha"
 	eventPayloadAffectedResourcesKey = "affected_resources"
+	eventPayloadPolicyAcceptedKey    = "policy_accepted"
+	eventPayloadDetailsKey           = "details"
 
 	ExternalActionPush         = "push"
 	ExternalActionOpenPR       = "open-pr"
 	ExternalActionMerge        = "merge"
 	ExternalActionRemoteDelete = "remote-delete"
+
+	ExternalResultSucceeded              = "succeeded"
+	ExternalResultNotPerformed           = "not_performed"
+	ExternalResultFailedBeforeSideEffect = "failed_before_side_effect"
+	ExternalResultFailedAfterSideEffect  = "failed_after_side_effect"
+	ExternalResultAmbiguous              = "ambiguous"
+	ExternalResultReconciledByOperator   = "reconciled_by_operator"
 )
 
 type ExternalIntentReserveOptions struct {
@@ -43,6 +53,19 @@ type ExternalIntentReserveOptions struct {
 	Now              func() time.Time
 }
 
+type ExternalIntentResultRecordOptions struct {
+	WorkspaceDir   string
+	MergeUnitID    string
+	AttemptID      string
+	AgentID        string
+	LeaseID        string
+	IntentID       string
+	Status         string
+	PolicyAccepted bool
+	Details        string
+	Now            func() time.Time
+}
+
 type ExternalIntentResult struct {
 	Status       string             `json:"status"`
 	WorkspaceDir string             `json:"workspace_dir"`
@@ -53,23 +76,44 @@ type ExternalIntentResult struct {
 	EventHash    string             `json:"event_hash,omitempty"`
 }
 
+type ExternalIntentResultRecordResult struct {
+	Status       string                           `json:"status"`
+	WorkspaceDir string                           `json:"workspace_dir"`
+	WorkspaceID  string                           `json:"workspace_id"`
+	BaseRef      string                           `json:"base_ref"`
+	Intent       ExternalIntentView               `json:"intent"`
+	Result       ExternalIntentRecordedResultView `json:"result"`
+	EventID      string                           `json:"event_id,omitempty"`
+	EventHash    string                           `json:"event_hash,omitempty"`
+}
+
 type ExternalIntentView struct {
-	IntentID          string   `json:"intent_id"`
-	IdempotencyKey    string   `json:"idempotency_key"`
-	MergeUnitID       string   `json:"merge_unit_id"`
-	AttemptID         string   `json:"attempt_id"`
-	AgentID           string   `json:"agent_id,omitempty"`
-	LeaseID           string   `json:"lease_id,omitempty"`
-	Action            string   `json:"action"`
-	Scope             string   `json:"scope"`
-	Target            string   `json:"target"`
-	ApprovalID        string   `json:"approval_id"`
-	Branch            string   `json:"branch,omitempty"`
-	PR                string   `json:"pr,omitempty"`
-	RequestedHeadSHA  string   `json:"requested_head_sha"`
-	ExpectedBaseSHA   string   `json:"expected_base_sha"`
-	AffectedResources []string `json:"affected_resources"`
-	Status            string   `json:"status"`
+	IntentID          string                            `json:"intent_id"`
+	IdempotencyKey    string                            `json:"idempotency_key"`
+	MergeUnitID       string                            `json:"merge_unit_id"`
+	AttemptID         string                            `json:"attempt_id"`
+	AgentID           string                            `json:"agent_id,omitempty"`
+	LeaseID           string                            `json:"lease_id,omitempty"`
+	Action            string                            `json:"action"`
+	Scope             string                            `json:"scope"`
+	Target            string                            `json:"target"`
+	ApprovalID        string                            `json:"approval_id"`
+	Branch            string                            `json:"branch,omitempty"`
+	PR                string                            `json:"pr,omitempty"`
+	RequestedHeadSHA  string                            `json:"requested_head_sha"`
+	ExpectedBaseSHA   string                            `json:"expected_base_sha"`
+	AffectedResources []string                          `json:"affected_resources"`
+	Status            string                            `json:"status"`
+	Result            *ExternalIntentRecordedResultView `json:"result,omitempty"`
+}
+
+type ExternalIntentRecordedResultView struct {
+	Status         string `json:"status"`
+	PolicyAccepted bool   `json:"policy_accepted"`
+	Accepted       bool   `json:"accepted"`
+	Details        string `json:"details,omitempty"`
+	EventID        string `json:"event_id,omitempty"`
+	EventHash      string `json:"event_hash,omitempty"`
 }
 
 func ExternalIntentResource(id string) string {
@@ -189,6 +233,98 @@ func ReserveExternalIntent(opts ExternalIntentReserveOptions) (ExternalIntentRes
 	}, nil
 }
 
+func RecordExternalIntentResult(opts ExternalIntentResultRecordOptions) (ExternalIntentResultRecordResult, error) {
+	opts, recordedAt, err := normalizeExternalIntentResultRecordOptions(opts)
+	if err != nil {
+		return ExternalIntentResultRecordResult{}, err
+	}
+	state, err := loadLeaseOperationState(opts.WorkspaceDir, recordedAt)
+	if err != nil {
+		return ExternalIntentResultRecordResult{}, err
+	}
+	lease, _, err := requireOwnedActiveLease(state, opts.LeaseID, opts.AgentID)
+	if err != nil {
+		return ExternalIntentResultRecordResult{}, err
+	}
+	if lease.MergeUnitID != opts.MergeUnitID {
+		return ExternalIntentResultRecordResult{}, fmt.Errorf("lease %s is for merge unit %s, not %s", opts.LeaseID, lease.MergeUnitID, opts.MergeUnitID)
+	}
+	attempts, err := attemptSnapshots(state.Events)
+	if err != nil {
+		return ExternalIntentResultRecordResult{}, err
+	}
+	current, err := requireCurrentAttemptAt(attempts, opts.MergeUnitID, opts.AttemptID, recordedAt)
+	if err != nil {
+		return ExternalIntentResultRecordResult{}, err
+	}
+	if err := validateAttemptLeaseOwner(opts.AttemptID, current.AgentID, current.LeaseID, opts.AgentID, opts.LeaseID); err != nil {
+		return ExternalIntentResultRecordResult{}, err
+	}
+	intents, err := externalIntentSnapshots(state.Events)
+	if err != nil {
+		return ExternalIntentResultRecordResult{}, err
+	}
+	intent, ok := intents[opts.IntentID]
+	if !ok {
+		return ExternalIntentResultRecordResult{}, fmt.Errorf("external intent not found: %s", opts.IntentID)
+	}
+	if intent.MergeUnitID != opts.MergeUnitID {
+		return ExternalIntentResultRecordResult{}, fmt.Errorf("external intent %s is for merge unit %s, not %s", opts.IntentID, intent.MergeUnitID, opts.MergeUnitID)
+	}
+	if intent.AttemptID != opts.AttemptID {
+		return ExternalIntentResultRecordResult{}, fmt.Errorf("external intent %s is for attempt %s, not %s", opts.IntentID, intent.AttemptID, opts.AttemptID)
+	}
+	if intent.Result != nil {
+		return ExternalIntentResultRecordResult{}, fmt.Errorf("external intent %s already has result %s", opts.IntentID, intent.Result.Status)
+	}
+	intentResource := ExternalIntentResource(opts.IntentID)
+	readSet := map[string]int{
+		LeaseResource(opts.MergeUnitID):     state.Revisions[LeaseResource(opts.MergeUnitID)],
+		MergeUnitResource(opts.MergeUnitID): state.Revisions[MergeUnitResource(opts.MergeUnitID)],
+		intentResource:                      state.Revisions[intentResource],
+	}
+	writeSet := []string{intentResource}
+	for _, resource := range intent.AffectedResources {
+		readSet[resource] = state.Revisions[resource]
+		writeSet = append(writeSet, resource)
+	}
+	event, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: opts.WorkspaceDir,
+		Type:         EventExternalIntentResultRecorded,
+		Payload: map[string]any{
+			eventPayloadIntentIDKey:       opts.IntentID,
+			eventPayloadMergeUnitIDKey:    opts.MergeUnitID,
+			eventPayloadAttemptIDKey:      opts.AttemptID,
+			eventPayloadAgentIDKey:        opts.AgentID,
+			eventPayloadLeaseIDKey:        opts.LeaseID,
+			eventPayloadActionKey:         intent.Action,
+			eventPayloadTargetKey:         intent.Target,
+			eventPayloadStatusKey:         opts.Status,
+			eventPayloadPolicyAcceptedKey: opts.PolicyAccepted,
+			eventPayloadDetailsKey:        opts.Details,
+		},
+		ReadSet:  readSet,
+		WriteSet: writeSet,
+		Now:      func() time.Time { return recordedAt },
+	})
+	if err != nil {
+		return ExternalIntentResultRecordResult{}, err
+	}
+	recorded := externalIntentRecordedResultView(opts.Status, opts.PolicyAccepted, opts.Details, event.ID, event.EventHash)
+	intent.Result = &recorded
+	intent.Status = recorded.Status
+	return ExternalIntentResultRecordResult{
+		Status:       "recorded",
+		WorkspaceDir: opts.WorkspaceDir,
+		WorkspaceID:  state.View.WorkspaceID,
+		BaseRef:      state.View.BaseRef,
+		Intent:       intent.ExternalIntentView,
+		Result:       recorded,
+		EventID:      event.ID,
+		EventHash:    event.EventHash,
+	}, nil
+}
+
 func normalizeExternalIntentReserveOptions(opts ExternalIntentReserveOptions) (ExternalIntentReserveOptions, time.Time, string, error) {
 	if opts.WorkspaceDir == "" {
 		return ExternalIntentReserveOptions{}, time.Time{}, "", fmt.Errorf("workspace external intent reserve requires <workspace-dir>")
@@ -237,6 +373,58 @@ func normalizeExternalIntentReserveOptions(opts ExternalIntentReserveOptions) (E
 		now = opts.Now
 	}
 	return opts, now(), target, nil
+}
+
+func normalizeExternalIntentResultRecordOptions(opts ExternalIntentResultRecordOptions) (ExternalIntentResultRecordOptions, time.Time, error) {
+	if opts.WorkspaceDir == "" {
+		return ExternalIntentResultRecordOptions{}, time.Time{}, fmt.Errorf("workspace external intent result requires <workspace-dir>")
+	}
+	opts.MergeUnitID = strings.TrimSpace(opts.MergeUnitID)
+	if opts.MergeUnitID == "" {
+		return ExternalIntentResultRecordOptions{}, time.Time{}, fmt.Errorf("workspace external intent result requires --merge-unit")
+	}
+	opts.AttemptID = strings.TrimSpace(opts.AttemptID)
+	if opts.AttemptID == "" {
+		return ExternalIntentResultRecordOptions{}, time.Time{}, fmt.Errorf("workspace external intent result requires --attempt")
+	}
+	opts.AgentID = strings.TrimSpace(opts.AgentID)
+	if opts.AgentID == "" {
+		return ExternalIntentResultRecordOptions{}, time.Time{}, fmt.Errorf("workspace external intent result requires --agent")
+	}
+	opts.LeaseID = strings.TrimSpace(opts.LeaseID)
+	if opts.LeaseID == "" {
+		return ExternalIntentResultRecordOptions{}, time.Time{}, fmt.Errorf("workspace external intent result requires --lease")
+	}
+	opts.IntentID = strings.TrimSpace(opts.IntentID)
+	if opts.IntentID == "" {
+		return ExternalIntentResultRecordOptions{}, time.Time{}, fmt.Errorf("workspace external intent result requires --intent")
+	}
+	status, err := normalizeExternalIntentResultStatus(opts.Status)
+	if err != nil {
+		return ExternalIntentResultRecordOptions{}, time.Time{}, err
+	}
+	opts.Status = status
+	opts.Details = strings.TrimSpace(opts.Details)
+	now := time.Now
+	if opts.Now != nil {
+		now = opts.Now
+	}
+	return opts, now(), nil
+}
+
+func normalizeExternalIntentResultStatus(value string) (string, error) {
+	status := strings.TrimSpace(strings.ToLower(value))
+	switch status {
+	case ExternalResultSucceeded,
+		ExternalResultNotPerformed,
+		ExternalResultFailedBeforeSideEffect,
+		ExternalResultFailedAfterSideEffect,
+		ExternalResultAmbiguous,
+		ExternalResultReconciledByOperator:
+		return status, nil
+	default:
+		return "", fmt.Errorf("unsupported external intent result status: %s", value)
+	}
 }
 
 func externalIntentTarget(action string, branch string, pr string) (string, error) {
@@ -321,4 +509,19 @@ func externalIntentView(opts ExternalIntentReserveOptions, identity externalInte
 		AffectedResources: append([]string{}, affectedResources...),
 		Status:            "reserved",
 	}
+}
+
+func externalIntentRecordedResultView(status string, policyAccepted bool, details string, eventID string, eventHash string) ExternalIntentRecordedResultView {
+	return ExternalIntentRecordedResultView{
+		Status:         status,
+		PolicyAccepted: policyAccepted,
+		Accepted:       externalIntentResultAccepted(status, policyAccepted),
+		Details:        details,
+		EventID:        eventID,
+		EventHash:      eventHash,
+	}
+}
+
+func externalIntentResultAccepted(status string, policyAccepted bool) bool {
+	return status == ExternalResultSucceeded || status == ExternalResultReconciledByOperator || policyAccepted
 }
