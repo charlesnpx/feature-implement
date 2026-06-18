@@ -169,7 +169,7 @@ func validateExternalProviderPlanApproval(events []JournalEvent, opts ExternalIn
 	if !ok {
 		return fmt.Errorf("approval not found: %s", opts.ApprovalID)
 	}
-	return approvalMatches(approval, approvalMatchRequest{
+	if err := approvalMatches(approval, approvalMatchRequest{
 		mergeUnitID: opts.MergeUnitID,
 		attemptID:   opts.AttemptID,
 		action:      opts.Action,
@@ -179,7 +179,13 @@ func validateExternalProviderPlanApproval(events []JournalEvent, opts ExternalIn
 		headSHA:     opts.RequestedHeadSHA,
 		baseSHA:     opts.ExpectedBaseSHA,
 		now:         plannedAt,
-	})
+	}); err != nil {
+		return err
+	}
+	if staleInputs := approvalStaleInputsFromEvents(events, approval); len(staleInputs) > 0 {
+		return fmt.Errorf("approval %s is stale after refresh changed %s", approval.ApprovalID, strings.Join(staleInputs, ", "))
+	}
+	return nil
 }
 
 func externalProviderPlanView(opts ExternalIntentReserveOptions, worktree string, remote string, baseRef string, title string, prBody string, marker ExternalProviderMarker) (ExternalProviderPlanView, error) {

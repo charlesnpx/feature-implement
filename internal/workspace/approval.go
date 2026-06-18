@@ -104,6 +104,7 @@ type ApprovalView struct {
 	UsedCount   int      `json:"used_count"`
 	ExpiresAt   string   `json:"expires_at"`
 	Status      string   `json:"status"`
+	StaleInputs []string `json:"stale_inputs,omitempty"`
 }
 
 type approvalSnapshot struct {
@@ -248,7 +249,7 @@ func CheckApproval(opts ApprovalCheckOptions) (ApprovalCheckResult, error) {
 			headSHA:     opts.HeadSHA,
 			baseSHA:     opts.BaseSHA,
 			now:         checkedAt,
-		}); err == nil {
+		}); err == nil && len(approvalStaleInputsFromEvents(state.Events, approval)) == 0 {
 			matches = append(matches, approval.View(checkedAt))
 		}
 	}
@@ -317,6 +318,9 @@ func ConsumeApproval(opts ApprovalConsumeOptions) (ApprovalResult, error) {
 		now:         consumedAt,
 	}); err != nil {
 		return ApprovalResult{}, err
+	}
+	if staleInputs := approvalStaleInputsFromEvents(events, approval); len(staleInputs) > 0 {
+		return ApprovalResult{}, fmt.Errorf("approval %s is stale after refresh changed %s", approval.ApprovalID, strings.Join(staleInputs, ", "))
 	}
 	resource := ApprovalResource(opts.ApprovalID)
 	mergeUnitResource := MergeUnitResource(opts.MergeUnitID)
@@ -588,6 +592,38 @@ func approvalMatches(approval approvalSnapshot, req approvalMatchRequest) error 
 	return nil
 }
 
+func isTightMergeApproval(approval approvalSnapshot) bool {
+	return containsString(approval.Actions, "merge") &&
+		(approval.PR != "" || approval.Branch != "") &&
+		approval.HeadSHA != "" &&
+		approval.BaseSHA != ""
+}
+
+func approvalStaleInputsFromEvents(events []JournalEvent, approval approvalSnapshot) []string {
+	refresh, ok := latestRefresh(events, approval.MergeUnitID, approval.AttemptID)
+	if !ok {
+		return nil
+	}
+	return approvalStaleInputsForRefresh(approval, refresh)
+}
+
+func approvalStaleInputsForRefresh(approval approvalSnapshot, refresh refreshSnapshot) []string {
+	if !isTightMergeApproval(approval) {
+		return nil
+	}
+	if refresh.MergeUnitID != approval.MergeUnitID || refresh.AttemptID != approval.AttemptID {
+		return nil
+	}
+	stale := []string{}
+	if refresh.NewBase != "" && approval.BaseSHA != refresh.NewBase {
+		stale = append(stale, refreshInputBase)
+	}
+	if refresh.PostHead != "" && approval.HeadSHA != refresh.PostHead {
+		stale = append(stale, refreshInputHead)
+	}
+	return stale
+}
+
 func approvalSnapshots(events []JournalEvent) (map[string]approvalSnapshot, error) {
 	approvals := map[string]approvalSnapshot{}
 	for _, event := range events {
@@ -809,11 +845,17 @@ func optionalStringPayload(event JournalEvent, key string) string {
 }
 
 func (approval approvalSnapshot) View(now time.Time) ApprovalView {
+	return approval.ViewWithStaleInputs(now, nil)
+}
+
+func (approval approvalSnapshot) ViewWithStaleInputs(now time.Time, staleInputs []string) ApprovalView {
 	status := "active"
 	if !now.Before(approval.ExpiresAt) {
 		status = "expired"
 	} else if approval.UsedCount >= approval.MaxUses {
 		status = "exhausted"
+	} else if len(staleInputs) > 0 {
+		status = "stale"
 	}
 	return ApprovalView{
 		ApprovalID:  approval.ApprovalID,
@@ -831,5 +873,6 @@ func (approval approvalSnapshot) View(now time.Time) ApprovalView {
 		UsedCount:   approval.UsedCount,
 		ExpiresAt:   approval.ExpiresAt.UTC().Format(time.RFC3339Nano),
 		Status:      status,
+		StaleInputs: append([]string{}, staleInputs...),
 	}
 }
