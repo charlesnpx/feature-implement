@@ -31,6 +31,8 @@ func TestHelpCommandsExitSuccessfully(t *testing.T) {
 		{"workspace", "refresh-branch", "--help"},
 		{"workspace", "publish-refresh", "--help"},
 		{"workspace", "evaluate-gates", "--help"},
+		{"workspace", "gate", "--help"},
+		{"workspace", "gate", "override", "--help"},
 		{"workspace", "attempt", "--help"},
 		{"workspace", "attempt", "start", "--help"},
 		{"workspace", "attempt", "abandon", "--help"},
@@ -133,6 +135,7 @@ func TestWorkspaceCommandShell(t *testing.T) {
 		"feature workspace release",
 		"feature workspace recover",
 		"feature workspace evaluate-gates",
+		"feature workspace gate",
 		"feature workspace attempt",
 		"feature workspace transition",
 		"feature workspace contract",
@@ -897,9 +900,38 @@ func TestWorkspaceEvaluateGatesCommandJSON(t *testing.T) {
 	}
 	var attempt struct {
 		AttemptID string `json:"attempt_id"`
+		Branch    string `json:"branch"`
+		Worktree  string `json:"worktree"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &attempt); err != nil {
 		t.Fatalf("attempt stdout is not JSON: %v\n%s", err, stdout)
+	}
+	revisions, err := workspacepkg.ResourceRevisions(workspaceDir)
+	if err != nil {
+		t.Fatalf("ResourceRevisions: %v", err)
+	}
+	refreshResource := workspacepkg.RefreshResource(claim.MergeUnitID + ":" + attempt.AttemptID)
+	if _, err := workspacepkg.AppendEvent(workspacepkg.AppendEventOptions{
+		WorkspaceDir: workspaceDir,
+		Type:         workspacepkg.EventBranchRefreshRecorded,
+		Payload: map[string]any{
+			"merge_unit_id": claim.MergeUnitID,
+			"attempt_id":    attempt.AttemptID,
+			"status":        workspacepkg.RefreshStatusSucceeded,
+			"branch":        attempt.Branch,
+			"worktree":      attempt.Worktree,
+			"old_base":      "base-sha-cli",
+			"new_base":      "base-sha-cli",
+			"pre_head":      "head-sha-cli",
+			"post_head":     "head-sha-cli",
+			"backup_ref":    "backup/cli",
+			"evidence_path": "state/refresh-evidence-cli.json",
+		},
+		ReadSet:  map[string]int{refreshResource: revisions[refreshResource]},
+		WriteSet: []string{refreshResource},
+		Now:      fixedFeatureTime("2026-01-02T15:03:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent refresh: %v", err)
 	}
 
 	stdout, stderr, err = runFeature(t,
@@ -937,6 +969,48 @@ func TestWorkspaceEvaluateGatesCommandJSON(t *testing.T) {
 	}
 	if len(result.Gates) != 5 {
 		t.Fatalf("evaluate gates = %+v", result.Gates)
+	}
+
+	stdout, stderr, err = runFeature(t,
+		"workspace", "gate", "override", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--attempt", attempt.AttemptID,
+		"--gate", "security",
+		"--status", workspacepkg.GateStatusRetainedByOperator,
+		"--reason", "operator accepted base-only rebase",
+		"--input-hash", result.InputHash,
+		"--head-sha", "head-sha-cli",
+		"--base-sha", "base-sha-cli",
+		"--operator", "operator-a",
+		"--expires-in", "1h",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace gate override failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var override struct {
+		Status   string `json:"status"`
+		Override struct {
+			OverrideID string `json:"override_id"`
+			Gate       string `json:"gate"`
+			Status     string `json:"status"`
+			Reason     string `json:"reason"`
+			InputHash  string `json:"input_hash"`
+			Operator   string `json:"operator"`
+		} `json:"override"`
+		EventID string `json:"event_id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &override); err != nil {
+		t.Fatalf("override stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if override.Status != "recorded" ||
+		override.Override.OverrideID == "" ||
+		override.Override.Gate != "security" ||
+		override.Override.Status != workspacepkg.GateStatusRetainedByOperator ||
+		override.Override.InputHash != result.InputHash ||
+		override.Override.Operator != "operator-a" ||
+		override.EventID == "" {
+		t.Fatalf("override result = %+v", override)
 	}
 }
 

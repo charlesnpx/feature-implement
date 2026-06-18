@@ -58,7 +58,7 @@ func usage(w io.Writer) {
   feature validate <plan-dir> [--write-lock] [--json]
   feature status <plan-dir> [--json]
   feature implement next|start|commit|push|open-pr|review|merge|cleanup <plan-dir> [--merge-unit <id>] [--write-state] [metadata flags] [--json]
-  feature workspace init|validate|status|next|heartbeat|release|recover|refresh-branch|publish-refresh|evaluate-gates|attempt|transition|contract|approve|external [args]
+  feature workspace init|validate|status|next|heartbeat|release|recover|refresh-branch|publish-refresh|evaluate-gates|gate|attempt|transition|contract|approve|external [args]
   feature version`)
 }
 
@@ -303,7 +303,7 @@ func implementCommand(args []string) error {
 
 func workspaceCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("workspace requires subcommand: init, validate, status, next, heartbeat, release, recover, refresh-branch, publish-refresh, evaluate-gates, attempt, transition, contract, approve, or external")
+		return fmt.Errorf("workspace requires subcommand: init, validate, status, next, heartbeat, release, recover, refresh-branch, publish-refresh, evaluate-gates, gate, attempt, transition, contract, approve, or external")
 	}
 	action := args[0]
 	if isHelpCommand(action) {
@@ -313,7 +313,7 @@ func workspaceCommand(args []string) error {
 	if !workspace.IsSupportedAction(action) {
 		return fmt.Errorf("unsupported workspace action: %s", action)
 	}
-	if action != "attempt" && action != "contract" && action != "approve" && action != "external" && hasHelpFlag(args[1:]) {
+	if action != "attempt" && action != "contract" && action != "approve" && action != "external" && action != "gate" && hasHelpFlag(args[1:]) {
 		usageWorkspaceAction(os.Stdout, action)
 		return nil
 	}
@@ -336,6 +336,8 @@ func workspaceCommand(args []string) error {
 		return workspacePublishRefresh(args[1:])
 	case "evaluate-gates":
 		return workspaceEvaluateGates(args[1:])
+	case "gate":
+		return workspaceGate(args[1:])
 	case "attempt":
 		return workspaceAttempt(args[1:])
 	case "transition":
@@ -382,6 +384,74 @@ func workspaceEvaluateGates(args []string) error {
 	for _, gate := range result.Gates {
 		fmt.Printf("gate %s status=%s reason=%s\n", gate.Gate, gate.Status, gate.Reason)
 	}
+	return nil
+}
+
+func workspaceGate(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("workspace gate requires subcommand: override")
+	}
+	action := args[0]
+	if isHelpCommand(action) {
+		usageWorkspaceGate(os.Stdout)
+		return nil
+	}
+	if action != "override" {
+		return fmt.Errorf("unsupported workspace gate action: %s", action)
+	}
+	if hasHelpFlag(args[1:]) {
+		usageWorkspaceGateAction(os.Stdout, action)
+		return nil
+	}
+	return workspaceGateOverride(args[1:])
+}
+
+func workspaceGateOverride(args []string) error {
+	fs := flag.NewFlagSet("workspace gate override", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	mergeUnitID := fs.String("merge-unit", "", "Merge unit ID")
+	attemptID := fs.String("attempt", "", "Attempt ID")
+	gate := fs.String("gate", "", "Gate name")
+	status := fs.String("status", "", "Override status")
+	reason := fs.String("reason", "", "Operator reason")
+	inputHash := fs.String("input-hash", "", "Evaluator input hash")
+	headSHA := fs.String("head-sha", "", "Pinned head SHA")
+	baseSHA := fs.String("base-sha", "", "Pinned base SHA")
+	operator := fs.String("operator", "", "Operator ID")
+	expiresIn := fs.String("expires-in", "", "Duration until expiry")
+	expiresAt := fs.String("expires-at", "", "RFC3339 expiry timestamp")
+	asJSON := fs.Bool("json", false, "Emit JSON result")
+	if err := parsePermissive(fs, args, "merge-unit", "attempt", "gate", "status", "reason", "input-hash", "head-sha", "base-sha", "operator", "expires-in", "expires-at"); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("workspace gate override requires <workspace-dir>")
+	}
+	parsedExpiresIn, parsedExpiresAt, err := parseApprovalExpiry(*expiresIn, *expiresAt)
+	if err != nil {
+		return err
+	}
+	result, err := workspace.OverrideGate(workspace.GateOverrideOptions{
+		WorkspaceDir: fs.Arg(0),
+		MergeUnitID:  *mergeUnitID,
+		AttemptID:    *attemptID,
+		Gate:         *gate,
+		Status:       *status,
+		Reason:       *reason,
+		InputHash:    *inputHash,
+		HeadSHA:      *headSHA,
+		BaseSHA:      *baseSHA,
+		Operator:     *operator,
+		ExpiresIn:    parsedExpiresIn,
+		ExpiresAt:    parsedExpiresAt,
+	})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(result)
+	}
+	fmt.Printf("overrode %s gate=%s status=%s input_hash=%s expires_at=%s\n", result.Override.MergeUnitID, result.Override.Gate, result.Override.Status, result.Override.InputHash, result.Override.ExpiresAt)
 	return nil
 }
 
@@ -1629,6 +1699,7 @@ func usageWorkspace(w io.Writer) {
   feature workspace refresh-branch <workspace-dir> --local --merge-unit <id> --attempt <id> --agent <id> --lease <id> --new-base <ref> [--worktree <path>] [--backup-ref <ref>] [--command-result <command=status>] [--json]
   feature workspace publish-refresh <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --approval <id> --expected-remote-sha <sha> [--branch <name>] [--remote <name>] [--worktree <path>] [--scope <scope>] [--json]
   feature workspace evaluate-gates <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> [--json]
+  feature workspace gate override <workspace-dir> --merge-unit <id> --attempt <id> --gate <gate> --status retained_by_operator --reason <text> --input-hash <hash> --head-sha <sha> --base-sha <sha> --operator <id> (--expires-in <duration> | --expires-at <timestamp>) [--json]
   feature workspace attempt start <workspace-dir> --merge-unit <id> --agent <id> --lease <id> --base-sha <sha> [--mode fresh-from-base] [--json]
   feature workspace attempt abandon <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --reason <text> [--json]
   feature workspace transition <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --from <status> --to <status> --evidence <key=value> [--evidence <key=value>] [--json]
@@ -1696,6 +1767,8 @@ Plans an approved force-with-lease publish of the latest successful local refres
   feature workspace evaluate-gates <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> [--json]
 
 Computes and records attempt-scoped review, contract, security, test, and merge approval gates.`)
+	case "gate":
+		usageWorkspaceGate(w)
 	case "transition":
 		fmt.Fprintln(w, `Usage:
   feature workspace transition <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --from <status> --to <status> --evidence <key=value> [--evidence <key=value>] [--json]
@@ -1711,6 +1784,25 @@ Records local lifecycle movement for the current active attempt.`)
 		usageWorkspaceExternal(w)
 	default:
 		usageWorkspace(w)
+	}
+}
+
+func usageWorkspaceGate(w io.Writer) {
+	fmt.Fprintln(w, `Usage:
+  feature workspace gate override <workspace-dir> --merge-unit <id> --attempt <id> --gate <gate> --status retained_by_operator --reason <text> --input-hash <hash> --head-sha <sha> --base-sha <sha> --operator <id> (--expires-in <duration> | --expires-at <timestamp>) [--json]
+
+Records scoped operator overrides for overridable gates. Overrides are pinned to evaluator input hash, head SHA, base SHA, and expiry.`)
+}
+
+func usageWorkspaceGateAction(w io.Writer, action string) {
+	switch action {
+	case "override":
+		fmt.Fprintln(w, `Usage:
+  feature workspace gate override <workspace-dir> --merge-unit <id> --attempt <id> --gate <gate> --status retained_by_operator --reason <text> --input-hash <hash> --head-sha <sha> --base-sha <sha> --operator <id> (--expires-in <duration> | --expires-at <timestamp>) [--json]
+
+Records a retained_by_operator override for an overridable gate.`)
+	default:
+		usageWorkspaceGate(w)
 	}
 }
 

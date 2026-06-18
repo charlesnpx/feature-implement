@@ -3,6 +3,7 @@ package workspace
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -334,6 +335,217 @@ func TestEvaluateGatesBlocksFailedContractCommandResult(t *testing.T) {
 	}
 }
 
+func TestOverrideGateAppliesRetainedByOperator(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	if _, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir, WriteLock: true}); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	claim, attempt := startGateEvaluationAttempt(t, fixture.Dir)
+	appendGateRefreshEvent(t, fixture.Dir, claim, attempt, attempt.BaseSHA, attempt.BaseSHA, "head-sha-first", "head-sha-first", "2026-01-02T15:03:00Z")
+	evaluation, err := EvaluateGates(GateEvaluateOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      claim.AgentID,
+		LeaseID:      claim.LeaseID,
+		Now:          fixedWorkspaceTime("2026-01-02T15:04:05Z"),
+	})
+	if err != nil {
+		t.Fatalf("EvaluateGates: %v", err)
+	}
+	override, err := OverrideGate(GateOverrideOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		Gate:         "security",
+		Status:       GateStatusRetainedByOperator,
+		Reason:       "operator accepted base-only rebase",
+		InputHash:    evaluation.InputHash,
+		HeadSHA:      "head-sha-first",
+		BaseSHA:      attempt.BaseSHA,
+		Operator:     "operator-a",
+		ExpiresIn:    time.Hour,
+		Now:          fixedWorkspaceTime("2026-01-02T15:05:05Z"),
+	})
+	if err != nil {
+		t.Fatalf("OverrideGate: %v", err)
+	}
+	if override.Override.Status != GateStatusRetainedByOperator || override.Override.InputHash != evaluation.InputHash {
+		t.Fatalf("override = %+v", override.Override)
+	}
+
+	after, err := EvaluateGates(GateEvaluateOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      claim.AgentID,
+		LeaseID:      claim.LeaseID,
+		Now:          fixedWorkspaceTime("2026-01-02T15:06:05Z"),
+	})
+	if err != nil {
+		t.Fatalf("EvaluateGates after override: %v", err)
+	}
+	found := false
+	for _, gate := range after.Gates {
+		if gate.Gate != "security" {
+			continue
+		}
+		found = true
+		if gate.Status != GateStatusRetainedByOperator ||
+			gate.ComputedStatus != GateStatusPending ||
+			gate.OverrideID != override.Override.OverrideID ||
+			gate.Operator != "operator-a" {
+			t.Fatalf("security gate = %+v", gate)
+		}
+	}
+	if !found {
+		t.Fatalf("security gate missing: %+v", after.Gates)
+	}
+}
+
+func TestOverrideGateBecomesStaleWhenInputsChange(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	if _, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir, WriteLock: true}); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	claim, attempt := startGateEvaluationAttempt(t, fixture.Dir)
+	appendGateRefreshEvent(t, fixture.Dir, claim, attempt, attempt.BaseSHA, attempt.BaseSHA, "head-sha-first", "head-sha-first", "2026-01-02T15:03:00Z")
+	evaluation, err := EvaluateGates(GateEvaluateOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      claim.AgentID,
+		LeaseID:      claim.LeaseID,
+		Now:          fixedWorkspaceTime("2026-01-02T15:04:05Z"),
+	})
+	if err != nil {
+		t.Fatalf("EvaluateGates: %v", err)
+	}
+	if _, err := OverrideGate(GateOverrideOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		Gate:         "security",
+		Status:       GateStatusRetainedByOperator,
+		Reason:       "operator accepted base-only rebase",
+		InputHash:    evaluation.InputHash,
+		HeadSHA:      "head-sha-first",
+		BaseSHA:      attempt.BaseSHA,
+		Operator:     "operator-a",
+		ExpiresIn:    time.Hour,
+		Now:          fixedWorkspaceTime("2026-01-02T15:05:05Z"),
+	}); err != nil {
+		t.Fatalf("OverrideGate: %v", err)
+	}
+	appendGateRefreshEvent(t, fixture.Dir, claim, attempt, attempt.BaseSHA, "base-sha-second", "head-sha-first", "head-sha-second", "2026-01-02T15:06:00Z")
+
+	after, err := EvaluateGates(GateEvaluateOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      claim.AgentID,
+		LeaseID:      claim.LeaseID,
+		Now:          fixedWorkspaceTime("2026-01-02T15:06:05Z"),
+	})
+	if err != nil {
+		t.Fatalf("EvaluateGates after refresh: %v", err)
+	}
+	for _, gate := range after.Gates {
+		if gate.Gate == "security" && gate.Status == GateStatusRetainedByOperator {
+			t.Fatalf("stale override still applied: %+v", gate)
+		}
+	}
+}
+
+func TestOverrideGateRejectsHeadMismatch(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	if _, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir, WriteLock: true}); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	claim, attempt := startGateEvaluationAttempt(t, fixture.Dir)
+	appendGateRefreshEvent(t, fixture.Dir, claim, attempt, attempt.BaseSHA, attempt.BaseSHA, "head-sha-first", "head-sha-first", "2026-01-02T15:03:00Z")
+	evaluation, err := EvaluateGates(GateEvaluateOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      claim.AgentID,
+		LeaseID:      claim.LeaseID,
+		Now:          fixedWorkspaceTime("2026-01-02T15:04:05Z"),
+	})
+	if err != nil {
+		t.Fatalf("EvaluateGates: %v", err)
+	}
+
+	_, err = OverrideGate(GateOverrideOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		Gate:         "security",
+		Status:       GateStatusRetainedByOperator,
+		Reason:       "operator accepted base-only rebase",
+		InputHash:    evaluation.InputHash,
+		HeadSHA:      "wrong-head-sha",
+		BaseSHA:      attempt.BaseSHA,
+		Operator:     "operator-a",
+		ExpiresIn:    time.Hour,
+		Now:          fixedWorkspaceTime("2026-01-02T15:05:05Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not match current head") {
+		t.Fatalf("OverrideGate head mismatch error = %v", err)
+	}
+}
+
+func TestOverrideGateRejectsMissingReason(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	if _, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir, WriteLock: true}); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	claim, attempt := startGateEvaluationAttempt(t, fixture.Dir)
+
+	_, err := OverrideGate(GateOverrideOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		Gate:         "security",
+		Status:       GateStatusRetainedByOperator,
+		InputHash:    "input-hash",
+		HeadSHA:      "head-sha",
+		BaseSHA:      attempt.BaseSHA,
+		Operator:     "operator-a",
+		ExpiresIn:    time.Hour,
+		Now:          fixedWorkspaceTime("2026-01-02T15:05:05Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires --reason") {
+		t.Fatalf("OverrideGate missing reason error = %v", err)
+	}
+}
+
+func TestOverrideGateRejectsNonOverridableGate(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	if _, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir, WriteLock: true}); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	claim, attempt := startGateEvaluationAttempt(t, fixture.Dir)
+
+	_, err := OverrideGate(GateOverrideOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		Gate:         "merge_approval",
+		Status:       GateStatusRetainedByOperator,
+		Reason:       "operator attempted approval override",
+		InputHash:    "input-hash",
+		HeadSHA:      "head-sha",
+		BaseSHA:      attempt.BaseSHA,
+		Operator:     "operator-a",
+		ExpiresIn:    time.Hour,
+		Now:          fixedWorkspaceTime("2026-01-02T15:05:05Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "gate merge_approval is not overridable") {
+		t.Fatalf("OverrideGate non-overridable error = %v", err)
+	}
+}
+
 func TestGateEvaluationEventDoesNotBreakSchedulerReplay(t *testing.T) {
 	fixture := newOnePlanWorkspaceFixture(t)
 	if _, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir, WriteLock: true}); err != nil {
@@ -422,6 +634,38 @@ func appendRefreshInputChangeEvent(t *testing.T, workspaceDir string, mergeUnitI
 		},
 		WriteSet: []string{refreshResource, inputResource},
 		Now:      fixedWorkspaceTime("2026-01-02T15:03:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Append refresh event: %v", err)
+	}
+}
+
+func appendGateRefreshEvent(t *testing.T, workspaceDir string, claim gateClaimFixture, attempt AttemptResult, oldBase string, newBase string, preHead string, postHead string, at string) {
+	t.Helper()
+	revisions, err := ResourceRevisions(workspaceDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshResource := RefreshResource(claim.MergeUnitID + ":" + attempt.AttemptID)
+	_, err = AppendEvent(AppendEventOptions{
+		WorkspaceDir: workspaceDir,
+		Type:         EventBranchRefreshRecorded,
+		Payload: map[string]any{
+			eventPayloadMergeUnitIDKey:  claim.MergeUnitID,
+			eventPayloadAttemptIDKey:    attempt.AttemptID,
+			eventPayloadStatusKey:       RefreshStatusSucceeded,
+			eventPayloadEvidencePathKey: "state/refresh-evidence.json",
+			eventPayloadBranchKey:       attempt.Branch,
+			eventPayloadWorktreeKey:     attempt.Worktree,
+			eventPayloadOldBaseKey:      oldBase,
+			eventPayloadNewBaseKey:      newBase,
+			eventPayloadPreHeadKey:      preHead,
+			eventPayloadPostHeadKey:     postHead,
+			eventPayloadBackupRefKey:    "backup/test",
+		},
+		ReadSet:  map[string]int{refreshResource: revisions[refreshResource]},
+		WriteSet: []string{refreshResource},
+		Now:      fixedWorkspaceTime(at),
 	})
 	if err != nil {
 		t.Fatalf("Append refresh event: %v", err)
