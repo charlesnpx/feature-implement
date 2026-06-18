@@ -648,7 +648,8 @@ func approvalStaleInputsForRefresh(approval approvalSnapshot, refresh refreshSna
 
 func approvalSnapshots(events []JournalEvent) (map[string]approvalSnapshot, error) {
 	approvals := map[string]approvalSnapshot{}
-	for _, event := range events {
+	for i, event := range events {
+		priorEvents := events[:i]
 		switch event.Type {
 		case EventApprovalGranted:
 			approval, err := approvalGrantedFromEvent(event)
@@ -666,6 +667,9 @@ func approvalSnapshots(events []JournalEvent) (map[string]approvalSnapshot, erro
 				return nil, fmt.Errorf("approval event %s references unknown approval %s", event.ID, approvalID)
 			}
 			if err := validateApprovalConsumedEvent(event, approval); err != nil {
+				return nil, err
+			}
+			if err := validateApprovalEventNotStale(event, priorEvents, approval); err != nil {
 				return nil, err
 			}
 			usedCount, err := eventIntPayload(event, eventPayloadUsedCountKey)
@@ -693,6 +697,9 @@ func approvalSnapshots(events []JournalEvent) (map[string]approvalSnapshot, erro
 			if err := validateExternalIntentApprovalConsumptionEvent(event, approval); err != nil {
 				return nil, err
 			}
+			if err := validateApprovalEventNotStale(event, priorEvents, approval); err != nil {
+				return nil, err
+			}
 			usedCount, err := eventIntPayload(event, eventPayloadUsedCountKey)
 			if err != nil {
 				return nil, err
@@ -705,6 +712,14 @@ func approvalSnapshots(events []JournalEvent) (map[string]approvalSnapshot, erro
 		}
 	}
 	return approvals, nil
+}
+
+func validateApprovalEventNotStale(event JournalEvent, priorEvents []JournalEvent, approval approvalSnapshot) error {
+	staleInputs := approvalStaleInputsFromEvents(priorEvents, approval)
+	if len(staleInputs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("approval event %s consumes stale approval %s after refresh changed %s", event.ID, approval.ApprovalID, strings.Join(staleInputs, ", "))
 }
 
 func validateApprovalConsumedEvent(event JournalEvent, approval approvalSnapshot) error {
