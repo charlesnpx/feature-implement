@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -49,6 +50,100 @@ func TestQueueMergeUnitRecordsReadyAttempt(t *testing.T) {
 	unit := findSchedulerUnit(t, SchedulerView{MergeUnits: status.MergeUnits}, ready.Claim.MergeUnitID)
 	if unit.MergeQueue == nil || unit.MergeQueue.QueueID != result.Queue.QueueID {
 		t.Fatalf("unit queue status = %+v", unit.MergeQueue)
+	}
+}
+
+func TestQueuedMergeUnitIsNotReadyAfterLeaseRelease(t *testing.T) {
+	ready := newQueueReadyAttemptFixture(t)
+	if _, err := QueueMergeUnit(MergeQueueOptions{
+		WorkspaceDir: ready.Fixture.Dir,
+		MergeUnitID:  ready.Claim.MergeUnitID,
+		AttemptID:    ready.Attempt.AttemptID,
+		AgentID:      ready.Claim.AgentID,
+		LeaseID:      ready.Claim.LeaseID,
+		ApprovalID:   ready.Approval.Approval.ApprovalID,
+		Branch:       ready.Attempt.Branch,
+		HeadSHA:      ready.HeadSHA,
+		BaseSHA:      ready.BaseSHA,
+		Now:          fixedWorkspaceTime("2026-01-02T15:09:00Z"),
+	}); err != nil {
+		t.Fatalf("QueueMergeUnit: %v", err)
+	}
+	if _, err := Release(LeaseOptions{
+		WorkspaceDir: ready.Fixture.Dir,
+		AgentID:      ready.Claim.AgentID,
+		LeaseID:      ready.Claim.LeaseID,
+		Now:          fixedWorkspaceTime("2026-01-02T15:10:00Z"),
+	}); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+
+	status, err := Status(ready.Fixture.Dir)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if len(status.Ready) != 0 || len(status.MergeQueue) != 1 {
+		t.Fatalf("queued unit should not be ready: ready=%+v queue=%+v", status.Ready, status.MergeQueue)
+	}
+	next, err := Next(NextOptions{
+		WorkspaceDir: ready.Fixture.Dir,
+		AgentID:      "worker-other",
+		Claim:        true,
+		Now:          fixedWorkspaceTime("2026-01-02T15:11:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if next.Status != "none" {
+		t.Fatalf("queued unit should not be claimable: %+v", next)
+	}
+}
+
+func TestMergeQueueLeavesWhenGateHashesChange(t *testing.T) {
+	ready := newQueueReadyAttemptFixture(t)
+	if _, err := QueueMergeUnit(MergeQueueOptions{
+		WorkspaceDir: ready.Fixture.Dir,
+		MergeUnitID:  ready.Claim.MergeUnitID,
+		AttemptID:    ready.Attempt.AttemptID,
+		AgentID:      ready.Claim.AgentID,
+		LeaseID:      ready.Claim.LeaseID,
+		ApprovalID:   ready.Approval.Approval.ApprovalID,
+		Branch:       ready.Attempt.Branch,
+		HeadSHA:      ready.HeadSHA,
+		BaseSHA:      ready.BaseSHA,
+		Now:          fixedWorkspaceTime("2026-01-02T15:09:00Z"),
+	}); err != nil {
+		t.Fatalf("QueueMergeUnit: %v", err)
+	}
+	overrideQueueGate(t, ready.Fixture.Dir, ready.Claim, ready.Attempt, ready.Evaluation.InputHash, "security", ready.HeadSHA, ready.BaseSHA, "2026-01-02T15:10:00Z")
+	evaluateQueueGates(t, ready.Fixture.Dir, ready.Claim, ready.Attempt, "2026-01-02T15:11:00Z")
+
+	status, err := Status(ready.Fixture.Dir)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if len(status.MergeQueue) != 0 {
+		t.Fatalf("queue should be empty after gate hash change: %+v", status.MergeQueue)
+	}
+}
+
+func TestQueueMergeUnitRejectsAmbiguousTarget(t *testing.T) {
+	ready := newQueueReadyAttemptFixture(t)
+	_, err := QueueMergeUnit(MergeQueueOptions{
+		WorkspaceDir: ready.Fixture.Dir,
+		MergeUnitID:  ready.Claim.MergeUnitID,
+		AttemptID:    ready.Attempt.AttemptID,
+		AgentID:      ready.Claim.AgentID,
+		LeaseID:      ready.Claim.LeaseID,
+		ApprovalID:   ready.Approval.Approval.ApprovalID,
+		PR:           "47",
+		Branch:       ready.Attempt.Branch,
+		HeadSHA:      ready.HeadSHA,
+		BaseSHA:      ready.BaseSHA,
+		Now:          fixedWorkspaceTime("2026-01-02T15:09:00Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "accepts only one target") {
+		t.Fatalf("ambiguous target error = %v", err)
 	}
 }
 

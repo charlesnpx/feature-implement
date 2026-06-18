@@ -214,23 +214,26 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 		if unit.Status == MergeUnitPending {
 			unit.BlockedBy = incompleteDependencies(unit.Dependencies, unitByID)
 			unit.BlockingConditions = schedulerBlockingConditions(unit.BlockedBy, unit.ContractBindings, freezesByResource[MergeUnitResource(unit.ID)], refreshConditions)
-			if unit.ActiveLease != nil {
-				continue
-			}
-			if len(unit.BlockingConditions) == 0 {
-				view.Ready = append(view.Ready, unit.ID)
-			} else {
-				view.Blocked = append(view.Blocked, unit.ID)
-			}
+		}
+	}
+	ensureLifecycleCounts(view.Counts)
+	if err := populateMergeQueue(&view, lock, events, unitByID, attempts, approvals, queues, now); err != nil {
+		return SchedulerView{}, err
+	}
+	for i := range view.MergeUnits {
+		unit := &view.MergeUnits[i]
+		if unit.Status != MergeUnitPending || unit.ActiveLease != nil || unit.MergeQueue != nil {
+			continue
+		}
+		if len(unit.BlockingConditions) == 0 {
+			view.Ready = append(view.Ready, unit.ID)
+		} else {
+			view.Blocked = append(view.Blocked, unit.ID)
 		}
 	}
 	sort.Strings(view.Ready)
 	sort.Strings(view.Blocked)
 	sort.Strings(view.Leased)
-	ensureLifecycleCounts(view.Counts)
-	if err := populateMergeQueue(&view, lock, events, unitByID, attempts, approvals, queues, now); err != nil {
-		return SchedulerView{}, err
-	}
 	return view, nil
 }
 

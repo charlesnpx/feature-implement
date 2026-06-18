@@ -206,6 +206,9 @@ func normalizeMergeQueueOptions(opts MergeQueueOptions) (MergeQueueOptions, time
 	opts.Scope = normalizeApprovalScope(opts.Scope)
 	opts.PR = normalizeApprovalPR(opts.PR)
 	opts.Branch = strings.TrimSpace(opts.Branch)
+	if opts.PR != "" && opts.Branch != "" {
+		return MergeQueueOptions{}, time.Time{}, fmt.Errorf("workspace queue enter accepts only one target: --pr or --branch")
+	}
 	if opts.PR == "" && opts.Branch == "" {
 		return MergeQueueOptions{}, time.Time{}, fmt.Errorf("workspace queue enter requires --pr or --branch")
 	}
@@ -330,11 +333,11 @@ func populateMergeQueue(view *SchedulerView, lock WorkspaceLock, events []Journa
 			continue
 		}
 		candidate := mergeQueueCandidateFromSnapshot(entry)
-		_, blocking, err := evaluateMergeQueueReadiness(lock, events, *view, unitByID, *unit, *attempt, candidate, now)
+		evaluation, blocking, err := evaluateMergeQueueReadiness(lock, events, *view, unitByID, *unit, *attempt, candidate, now)
 		if err != nil {
 			return err
 		}
-		if len(blocking) > 0 {
+		if len(blocking) > 0 || evaluation.GateInputHash != entry.GateInputHash || evaluation.GateOutputHash != entry.GateOutputHash {
 			continue
 		}
 		if _, ok := approvals[entry.ApprovalID]; !ok {
@@ -643,6 +646,9 @@ func mergeQueueFromEvent(event JournalEvent) (mergeQueueSnapshot, error) {
 	}
 	pr := optionalStringPayload(event, eventPayloadPRKey)
 	branch := optionalStringPayload(event, eventPayloadBranchKey)
+	if pr != "" && branch != "" {
+		return mergeQueueSnapshot{}, fmt.Errorf("merge queue event %s cannot target both PR and branch", event.ID)
+	}
 	if pr == "" && branch == "" {
 		return mergeQueueSnapshot{}, fmt.Errorf("merge queue event %s requires PR or branch target", event.ID)
 	}
