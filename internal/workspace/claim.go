@@ -149,8 +149,8 @@ type AttemptResult struct {
 	MergeUnitID     string   `json:"merge_unit_id"`
 	PlanID          string   `json:"plan_id"`
 	PlanMergeUnitID string   `json:"plan_merge_unit_id"`
-	StoryIDs        []string `json:"story_ids,omitempty"`
-	Dependencies    []string `json:"dependencies,omitempty"`
+	StoryIDs        []string `json:"story_ids"`
+	Dependencies    []string `json:"dependencies"`
 	AttemptID       string   `json:"attempt_id"`
 	AttemptNumber   int      `json:"attempt_number"`
 	AgentID         string   `json:"agent_id"`

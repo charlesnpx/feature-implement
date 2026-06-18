@@ -949,6 +949,15 @@ func TestWorkspaceAttemptStartCommandJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &attempt); err != nil {
 		t.Fatalf("attempt stdout is not JSON: %v\n%s", err, stdout)
 	}
+	var attemptRaw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(stdout), &attemptRaw); err != nil {
+		t.Fatalf("attempt stdout is not an object: %v\n%s", err, stdout)
+	}
+	for _, field := range []string{"story_ids", "dependencies"} {
+		if _, ok := attemptRaw[field]; !ok {
+			t.Fatalf("attempt worker packet omitted %s:\n%s", field, stdout)
+		}
+	}
 	if attempt.Status != "started" || attempt.MergeUnitID != "foundation:story-a" || attempt.AttemptID != "foundation:story-a:attempt-1" {
 		t.Fatalf("attempt result = %+v", attempt)
 	}
