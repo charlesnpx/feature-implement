@@ -448,6 +448,94 @@ func TestWorkspaceValidateCommandWritesLock(t *testing.T) {
 	}
 }
 
+func TestWorkspaceCommandsAcceptMatchingPlanLockBaseAndRemote(t *testing.T) {
+	tests := []struct {
+		name string
+		args func(string) []string
+	}{
+		{
+			name: "validate",
+			args: func(workspaceDir string) []string {
+				return []string{"workspace", "validate", workspaceDir, "--write-lock", "--json"}
+			},
+		},
+		{
+			name: "init",
+			args: func(workspaceDir string) []string {
+				return []string{"workspace", "init", "--manifest", filepath.Join(workspaceDir, "feature.workspace.yaml"), "--write-lock", "--json"}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workspaceDir := workspaceWithPlanLocks(t)
+			writeWorkspacePlanLockMetadata(t, workspaceDir, "workspace-orchestration", "origin")
+
+			stdout, stderr, err := runFeature(t, tt.args(workspaceDir)...)
+
+			if err != nil {
+				t.Fatalf("feature %s failed for matching plan lock metadata: %v\nstdout=%s\nstderr=%s", tt.name, err, stdout, stderr)
+			}
+		})
+	}
+}
+
+func TestWorkspaceCommandsRejectMismatchedPlanLockBaseAndRemote(t *testing.T) {
+	commands := []struct {
+		name string
+		args func(string) []string
+	}{
+		{
+			name: "validate",
+			args: func(workspaceDir string) []string {
+				return []string{"workspace", "validate", workspaceDir, "--write-lock", "--json"}
+			},
+		},
+		{
+			name: "init",
+			args: func(workspaceDir string) []string {
+				return []string{"workspace", "init", "--manifest", filepath.Join(workspaceDir, "feature.workspace.yaml"), "--write-lock", "--json"}
+			},
+		},
+	}
+	mismatches := []struct {
+		name    string
+		baseRef string
+		remote  string
+		want    string
+	}{
+		{
+			name:    "base ref",
+			baseRef: "main",
+			remote:  "origin",
+			want:    `plan foundation lock base_ref "main" does not match workspace base_ref "workspace-orchestration"`,
+		},
+		{
+			name:    "remote",
+			baseRef: "workspace-orchestration",
+			remote:  "upstream",
+			want:    `plan foundation lock remote "upstream" does not match workspace remote "origin"`,
+		},
+	}
+	for _, command := range commands {
+		for _, mismatch := range mismatches {
+			t.Run(command.name+"/"+mismatch.name, func(t *testing.T) {
+				workspaceDir := workspaceWithPlanLocks(t)
+				writeWorkspacePlanLockMetadata(t, workspaceDir, mismatch.baseRef, mismatch.remote)
+
+				stdout, stderr, err := runFeature(t, command.args(workspaceDir)...)
+
+				if err == nil {
+					t.Fatalf("feature %s should fail for mismatched plan lock metadata\nstdout=%s\nstderr=%s", command.name, stdout, stderr)
+				}
+				if !strings.Contains(stderr, mismatch.want) {
+					t.Fatalf("expected mismatch error %q:\nstdout=%s\nstderr=%s", mismatch.want, stdout, stderr)
+				}
+			})
+		}
+	}
+}
+
 func TestWorkspaceStatusCommandJSON(t *testing.T) {
 	workspaceDir := workspaceWithPlanLocks(t)
 	if _, stderr, err := runFeature(t, "workspace", "validate", workspaceDir, "--write-lock", "--json"); err != nil {
@@ -3042,6 +3130,36 @@ plans:
 		t.Fatal(err)
 	}
 	return workspaceDir
+}
+
+func writeWorkspacePlanLockMetadata(t *testing.T, workspaceDir string, baseRef string, remote string) {
+	t.Helper()
+	path := filepath.Join(workspaceDir, "plans", "foundation", "feature.plan.lock.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lock map[string]any
+	if err := json.Unmarshal(b, &lock); err != nil {
+		t.Fatal(err)
+	}
+	if baseRef == "" {
+		delete(lock, "base_ref")
+	} else {
+		lock["base_ref"] = baseRef
+	}
+	if remote == "" {
+		delete(lock, "remote")
+	} else {
+		lock["remote"] = remote
+	}
+	b, err = json.Marshal(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func workspaceWithTwoPlanLocks(t *testing.T) string {

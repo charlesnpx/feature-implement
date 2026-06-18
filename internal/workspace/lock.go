@@ -252,6 +252,9 @@ func BuildLock(workspaceDir string, manifest WorkspaceManifest) (WorkspaceLock, 
 		if err != nil {
 			return WorkspaceLock{}, fmt.Errorf("plan %s lock: %w", plan.ID, err)
 		}
+		if err := validatePlanLockMetadata(plan, manifest, planLock); err != nil {
+			return WorkspaceLock{}, err
+		}
 		lock.Plans = append(lock.Plans, WorkspacePlanLock{
 			ID:       plan.ID,
 			Path:     plan.Path,
@@ -271,6 +274,16 @@ func BuildLock(workspaceDir string, manifest WorkspaceManifest) (WorkspaceLock, 
 	}
 	lock.ContractGates = contractGates
 	return lock, nil
+}
+
+func validatePlanLockMetadata(plan WorkspacePlanRef, manifest WorkspaceManifest, lock planpkg.Lock) error {
+	if lock.BaseRef != "" && lock.BaseRef != manifest.BaseRef {
+		return fmt.Errorf("plan %s lock base_ref %q does not match workspace base_ref %q", plan.ID, lock.BaseRef, manifest.BaseRef)
+	}
+	if lock.Remote != "" && lock.Remote != manifest.Remote {
+		return fmt.Errorf("plan %s lock remote %q does not match workspace remote %q", plan.ID, lock.Remote, manifest.Remote)
+	}
+	return nil
 }
 
 func defaultWorkspaceGatePolicyLock() WorkspaceGatePolicyLock {
