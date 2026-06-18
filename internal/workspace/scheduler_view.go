@@ -222,6 +222,8 @@ func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, attempts *
 		return nil
 	case EventContractBound:
 		return nil
+	case EventApprovalGranted, EventApprovalConsumed:
+		return nil
 	default:
 		return fmt.Errorf("unknown scheduler event type %q", event.Type)
 	}
