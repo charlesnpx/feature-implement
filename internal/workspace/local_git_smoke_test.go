@@ -75,7 +75,7 @@ func TestLocalGitAttemptWorktreeSmoke(t *testing.T) {
 	if attempt.Worktree != wantWorktree {
 		t.Fatalf("attempt worktree = %q, want %q", attempt.Worktree, wantWorktree)
 	}
-	wantCommand := "git worktree add -b " + wantBranch + " " + wantWorktree + " " + fixtureWorkspaceBaseRef
+	wantCommand := "git worktree add -b " + wantBranch + " " + wantWorktree + " " + baseSHA
 	if len(attempt.Commands) != 1 || attempt.Commands[0] != wantCommand {
 		t.Fatalf("planned commands = %+v, want %q", attempt.Commands, wantCommand)
 	}
@@ -91,7 +91,7 @@ func TestLocalGitAttemptWorktreeSmoke(t *testing.T) {
 		runGitCleanup(gitPath, gitEnv, repoDir, "worktree", "remove", "--force", attempt.Worktree)
 		runGitCleanup(gitPath, gitEnv, repoDir, "branch", "-D", attempt.Branch)
 	})
-	runGit(t, gitPath, gitEnv, repoDir, "worktree", "add", "-b", attempt.Branch, attempt.Worktree, attempt.BaseRef)
+	runGit(t, gitPath, gitEnv, repoDir, "worktree", "add", "-b", attempt.Branch, attempt.Worktree, attempt.BaseSHA)
 	worktreeAdded = true
 
 	gotBranch := strings.TrimSpace(runGitOutput(t, gitPath, gitEnv, attempt.Worktree, "rev-parse", "--abbrev-ref", "HEAD"))

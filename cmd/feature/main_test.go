@@ -954,7 +954,7 @@ func TestWorkspaceAttemptStartCommandJSON(t *testing.T) {
 	if !strings.Contains(attempt.Worktree, filepath.Join("state", "worktrees", "workspace-a", "foundation", "story-a", "attempt-1")) {
 		t.Fatalf("worktree = %q", attempt.Worktree)
 	}
-	wantCommand := "git worktree add -b feature/workspace-a/foundation/story-a/attempt-1 " + attempt.Worktree + " workspace-orchestration"
+	wantCommand := "git worktree add -b feature/workspace-a/foundation/story-a/attempt-1 " + attempt.Worktree + " base-sha-cli"
 	if len(attempt.Commands) != 1 || attempt.Commands[0] != wantCommand {
 		t.Fatalf("commands = %+v, want %q", attempt.Commands, wantCommand)
 	}

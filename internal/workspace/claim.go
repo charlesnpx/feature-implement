@@ -500,7 +500,7 @@ func StartAttempt(opts AttemptStartOptions) (AttemptResult, error) {
 	attemptID := fmt.Sprintf("%s:attempt-%d", opts.MergeUnitID, nextNumber)
 	branch := attemptBranchName(state.View.WorkspaceID, unit.PlanID, unit.MergeUnitID, nextNumber)
 	worktree := attemptWorktreePath(opts.WorkspaceDir, state.View.WorkspaceID, unit.PlanID, unit.MergeUnitID, nextNumber)
-	commands := attemptWorktreeCommands(branch, worktree, state.View.BaseRef)
+	commands := attemptWorktreeCommands(branch, worktree, opts.BaseSHA)
 	mergeUnitResource := MergeUnitResource(opts.MergeUnitID)
 	if _, err := AppendEvent(AppendEventOptions{
 		WorkspaceDir: opts.WorkspaceDir,
@@ -1414,8 +1414,8 @@ func attemptWorktreePath(workspaceDir string, workspaceID string, planID string,
 	return filepath.Join(StateDir(workspaceDir), "worktrees", workspaceID, planID, mergeUnitID, fmt.Sprintf("attempt-%d", attemptNumber))
 }
 
-func attemptWorktreeCommands(branch string, worktree string, baseRef string) []string {
-	return []string{fmt.Sprintf("git worktree add -b %s %s %s", shellQuote(branch), shellQuote(worktree), shellQuote(baseRef))}
+func attemptWorktreeCommands(branch string, worktree string, baseSHA string) []string {
+	return []string{fmt.Sprintf("git worktree add -b %s %s %s", shellQuote(branch), shellQuote(worktree), shellQuote(baseSHA))}
 }
 
 func eventLeasePayload(event JournalEvent) (activeLeaseSnapshot, error) {
