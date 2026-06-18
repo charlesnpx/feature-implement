@@ -587,6 +587,61 @@ func TestHeartbeatRejectsExpiredLease(t *testing.T) {
 	}
 }
 
+func TestHeartbeatUsesNormalizedOperationTime(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	writeWorkspaceLock(t, fixture.Dir)
+	claim, err := Next(NextOptions{
+		WorkspaceDir:  fixture.Dir,
+		AgentID:       "worker-a",
+		Claim:         true,
+		LeaseDuration: time.Hour,
+		Now:           fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	revisions, err := ResourceRevisions(fixture.Dir)
+	if err != nil {
+		t.Fatalf("ResourceRevisions: %v", err)
+	}
+	if _, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: fixture.Dir,
+		Type:         EventLeaseHeartbeat,
+		Payload: map[string]any{
+			eventPayloadMergeUnitIDKey:    claim.MergeUnitID,
+			eventPayloadLeaseIDKey:        claim.LeaseID,
+			eventPayloadAgentIDKey:        "worker-a",
+			eventPayloadLeaseExpiresAtKey: "2026-06-17T11:03:00Z",
+		},
+		ReadSet: map[string]int{
+			LeaseResource(claim.MergeUnitID): revisions[LeaseResource(claim.MergeUnitID)],
+		},
+		WriteSet: []string{LeaseResource(claim.MergeUnitID)},
+		Now:      fixedJournalTime("2026-06-17T10:03:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent heartbeat: %v", err)
+	}
+
+	heartbeat, err := Heartbeat(LeaseOptions{
+		WorkspaceDir:  fixture.Dir,
+		AgentID:       "worker-a",
+		LeaseID:       claim.LeaseID,
+		LeaseDuration: time.Hour,
+		Now:           fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	if heartbeat.LeaseExpiresAt != "2026-06-17T11:03:00Z" {
+		t.Fatalf("heartbeat expiry = %s", heartbeat.LeaseExpiresAt)
+	}
+	events := readTestJournalEvents(t, fixture.Dir)
+	last := events[len(events)-1]
+	if last.Timestamp != "2026-06-17T10:03:00Z" {
+		t.Fatalf("heartbeat timestamp = %s", last.Timestamp)
+	}
+}
+
 func TestSchedulerViewReflectsActiveLeaseState(t *testing.T) {
 	fixture := newOnePlanWorkspaceFixture(t)
 	writeWorkspaceLock(t, fixture.Dir)
@@ -1159,8 +1214,9 @@ func TestTransitionRecordsLifecycleForCurrentAttempt(t *testing.T) {
 		t.Fatalf("transition evidence = %+v", last.Payload[eventPayloadEvidenceKey])
 	}
 	wantReadSet := map[string]int{
-		LeaseResource("foundation:story-a"):     1,
-		MergeUnitResource("foundation:story-a"): 2,
+		LeaseResource("foundation:story-a"):                        1,
+		MergeUnitResource("foundation:story-a"):                    2,
+		RefreshResource("foundation:story-a:" + attempt.AttemptID): 0,
 	}
 	if !reflect.DeepEqual(last.ReadSet, wantReadSet) {
 		t.Fatalf("transition read set = %+v, want %+v", last.ReadSet, wantReadSet)
@@ -1393,7 +1449,7 @@ func TestTransitionRejectsMissingLease(t *testing.T) {
 	}
 }
 
-func TestTransitionRejectsLeaseBeforeGrantTimestamp(t *testing.T) {
+func TestTransitionUsesNormalizedLeaseOperationTime(t *testing.T) {
 	fixture := newOnePlanWorkspaceFixture(t)
 	writeWorkspaceLock(t, fixture.Dir)
 	claim, err := Next(NextOptions{
@@ -1417,7 +1473,7 @@ func TestTransitionRejectsLeaseBeforeGrantTimestamp(t *testing.T) {
 		t.Fatalf("StartAttempt: %v", err)
 	}
 
-	_, err = Transition(TransitionOptions{
+	transitioned, err := Transition(TransitionOptions{
 		WorkspaceDir: fixture.Dir,
 		MergeUnitID:  "foundation:story-a",
 		AttemptID:    attempt.AttemptID,
@@ -1428,12 +1484,20 @@ func TestTransitionRejectsLeaseBeforeGrantTimestamp(t *testing.T) {
 		Evidence:     map[string]any{evidenceWorktreeKey: attempt.Worktree},
 		Now:          fixedJournalTime("2026-06-17T09:59:59Z"),
 	})
-	if err == nil || !strings.Contains(err.Error(), "active lease not found: "+claim.LeaseID) {
-		t.Fatalf("future-dated lease error = %v", err)
+	if err != nil {
+		t.Fatalf("Transition: %v", err)
+	}
+	if transitioned.EventType != EventMergeUnitStarted {
+		t.Fatalf("transition result = %+v", transitioned)
+	}
+	events := readTestJournalEvents(t, fixture.Dir)
+	last := events[len(events)-1]
+	if last.Timestamp != "2026-06-17T10:01:00Z" {
+		t.Fatalf("transition timestamp = %s", last.Timestamp)
 	}
 }
 
-func TestTransitionRejectsAttemptBeforeStartTimestamp(t *testing.T) {
+func TestTransitionUsesNormalizedAttemptStartTime(t *testing.T) {
 	fixture := newOnePlanWorkspaceFixture(t)
 	writeWorkspaceLock(t, fixture.Dir)
 	claim, err := Next(NextOptions{
@@ -1457,7 +1521,7 @@ func TestTransitionRejectsAttemptBeforeStartTimestamp(t *testing.T) {
 		t.Fatalf("StartAttempt: %v", err)
 	}
 
-	_, err = Transition(TransitionOptions{
+	transitioned, err := Transition(TransitionOptions{
 		WorkspaceDir: fixture.Dir,
 		MergeUnitID:  "foundation:story-a",
 		AttemptID:    attempt.AttemptID,
@@ -1468,8 +1532,16 @@ func TestTransitionRejectsAttemptBeforeStartTimestamp(t *testing.T) {
 		Evidence:     map[string]any{evidenceWorktreeKey: attempt.Worktree},
 		Now:          fixedJournalTime("2026-06-17T10:05:00Z"),
 	})
-	if err == nil || !strings.Contains(err.Error(), "attempt "+attempt.AttemptID+" has not started yet") {
-		t.Fatalf("future-dated attempt error = %v", err)
+	if err != nil {
+		t.Fatalf("Transition: %v", err)
+	}
+	if transitioned.EventType != EventMergeUnitStarted {
+		t.Fatalf("transition result = %+v", transitioned)
+	}
+	events := readTestJournalEvents(t, fixture.Dir)
+	last := events[len(events)-1]
+	if last.Timestamp != "2026-06-17T10:10:00Z" {
+		t.Fatalf("transition timestamp = %s", last.Timestamp)
 	}
 }
 

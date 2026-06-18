@@ -95,6 +95,7 @@ type contractPublishProducer struct {
 	agentID     string
 	leaseID     string
 	readSet     map[string]int
+	observedAt  time.Time
 }
 
 func ContractResource(id string) string {
@@ -121,6 +122,9 @@ func PublishContract(opts ContractPublishOptions) (ContractPublishResult, error)
 	producer, err := resolveContractPublishProducer(opts, gate, publishedAt)
 	if err != nil {
 		return ContractPublishResult{}, err
+	}
+	if !producer.observedAt.IsZero() {
+		publishedAt = producer.observedAt
 	}
 	commandResults, err := normalizeContractCommandResults(gate, opts.CommandResults)
 	if err != nil {
@@ -342,6 +346,7 @@ func resolveContractPublishProducer(opts ContractPublishOptions, gate WorkspaceC
 	if err != nil {
 		return contractPublishProducer{}, err
 	}
+	publishedAt = state.ObservedAt
 	lease, _, err := requireOwnedActiveLease(state, opts.LeaseID, opts.AgentID)
 	if err != nil {
 		return contractPublishProducer{}, err
@@ -367,6 +372,7 @@ func resolveContractPublishProducer(opts ContractPublishOptions, gate WorkspaceC
 		attemptID:   current.AttemptID,
 		agentID:     current.AgentID,
 		leaseID:     current.LeaseID,
+		observedAt:  publishedAt,
 		readSet: map[string]int{
 			leaseResource:     state.Revisions[leaseResource],
 			mergeUnitResource: state.Revisions[mergeUnitResource],

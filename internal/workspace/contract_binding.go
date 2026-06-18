@@ -138,6 +138,7 @@ func BindContract(opts ContractBindOptions) (ContractBindResult, error) {
 	if err != nil {
 		return ContractBindResult{}, err
 	}
+	boundAt = state.ObservedAt
 	lease, _, err := requireOwnedActiveLease(state, opts.LeaseID, opts.AgentID)
 	if err != nil {
 		return ContractBindResult{}, err
@@ -242,6 +243,7 @@ func CheckContracts(opts ContractCheckOptions) (ContractCheckResult, error) {
 	if err != nil {
 		return ContractCheckResult{}, err
 	}
+	checkedAt = state.ObservedAt
 	attempts, err := attemptSnapshots(state.Events)
 	if err != nil {
 		return ContractCheckResult{}, err

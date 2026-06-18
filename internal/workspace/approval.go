@@ -136,6 +136,10 @@ func GrantApproval(opts ApprovalGrantOptions) (ApprovalResult, error) {
 	if err != nil {
 		return ApprovalResult{}, err
 	}
+	grantedAt = state.ObservedAt
+	if opts.ExpiresAt.IsZero() {
+		expiresAt = grantedAt.Add(opts.ExpiresIn)
+	}
 	lease, _, err := requireOwnedActiveLease(state, opts.LeaseID, opts.AgentID)
 	if err != nil {
 		return ApprovalResult{}, err
@@ -220,6 +224,7 @@ func CheckApproval(opts ApprovalCheckOptions) (ApprovalCheckResult, error) {
 	if err != nil {
 		return ApprovalCheckResult{}, err
 	}
+	checkedAt = state.ObservedAt
 	attempts, err := attemptSnapshots(state.Events)
 	if err != nil {
 		return ApprovalCheckResult{}, err
@@ -274,6 +279,10 @@ func ConsumeApproval(opts ApprovalConsumeOptions) (ApprovalResult, error) {
 		return ApprovalResult{}, err
 	}
 	events, err := readJournalEvents(EventsPath(opts.WorkspaceDir))
+	if err != nil {
+		return ApprovalResult{}, err
+	}
+	consumedAt, err = observedAtAfterEvents(events, consumedAt)
 	if err != nil {
 		return ApprovalResult{}, err
 	}
