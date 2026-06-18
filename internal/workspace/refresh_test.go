@@ -12,19 +12,24 @@ func TestRefreshVerificationChecksContribution(t *testing.T) {
 	beforePatches := []RefreshPatchID{{PatchID: "patch-a", Commit: "commit-a"}}
 	afterPatches := []RefreshPatchID{{PatchID: "patch-a", Commit: "commit-b"}}
 
-	verified := verifyRefreshContribution(beforeFiles, afterFiles, beforePatches, afterPatches)
+	verified := verifyRefreshContribution(beforeFiles, afterFiles, beforePatches, afterPatches, []ContractCommandResult{{Command: "go test ./...", Status: "passed"}})
 	if verified.Status != RefreshStatusSucceeded || !verified.ChangedFilesPreserved || !verified.PatchIDsPreserved {
 		t.Fatalf("verified = %+v", verified)
 	}
 
-	failed := verifyRefreshContribution(beforeFiles, []string{"M\tother.md"}, beforePatches, afterPatches)
+	failed := verifyRefreshContribution(beforeFiles, []string{"M\tother.md"}, beforePatches, afterPatches, nil)
 	if failed.Status != RefreshStatusVerificationFailed || failed.ChangedFilesPreserved || !strings.Contains(failed.FailureReason, "changed files") {
 		t.Fatalf("failed changed files = %+v", failed)
 	}
 
-	failed = verifyRefreshContribution(beforeFiles, afterFiles, beforePatches, []RefreshPatchID{{PatchID: "patch-b", Commit: "commit-b"}})
+	failed = verifyRefreshContribution(beforeFiles, afterFiles, beforePatches, []RefreshPatchID{{PatchID: "patch-b", Commit: "commit-b"}}, nil)
 	if failed.Status != RefreshStatusVerificationFailed || failed.PatchIDsPreserved || !strings.Contains(failed.FailureReason, "patch IDs") {
 		t.Fatalf("failed patch ids = %+v", failed)
+	}
+
+	failed = verifyRefreshContribution(beforeFiles, afterFiles, beforePatches, afterPatches, []ContractCommandResult{{Command: "go test ./...", Status: "failed"}})
+	if failed.Status != RefreshStatusVerificationFailed || !strings.Contains(failed.FailureReason, "validation command failed: go test ./...") {
+		t.Fatalf("failed command result = %+v", failed)
 	}
 }
 
@@ -103,17 +108,17 @@ func TestRefreshVerificationFailureBlocksCurrentAttempt(t *testing.T) {
 	}
 }
 
-func TestLatestSuccessfulRefreshAdvancesBaseline(t *testing.T) {
+func TestLatestRefreshAdvancesBaselineAfterSuccessOrFailure(t *testing.T) {
 	fixture, claim, attempt := newApprovalAttemptFixture(t)
 	first := appendRefreshEventForTest(t, fixture, claim, attempt, RefreshStatusSucceeded, "base-sha-1", "base-sha-2", "2026-06-17T10:02:00Z")
-	second := appendRefreshEventForTest(t, fixture, claim, attempt, RefreshStatusSucceeded, "base-sha-2", "base-sha-3", "2026-06-17T10:03:00Z")
+	second := appendRefreshEventForTest(t, fixture, claim, attempt, RefreshStatusVerificationFailed, "base-sha-2", "base-sha-3", "2026-06-17T10:03:00Z")
 
 	events := readTestJournalEvents(t, fixture.Dir)
-	latest, ok := latestSuccessfulRefresh(events, claim.MergeUnitID, attempt.AttemptID)
+	latest, ok := latestRefresh(events, claim.MergeUnitID, attempt.AttemptID)
 	if !ok {
-		t.Fatalf("latest successful refresh not found")
+		t.Fatalf("latest refresh not found")
 	}
-	if latest.NewBase != "base-sha-3" || latest.OldBase != "base-sha-2" || latest.EvidencePath != second || latest.EvidencePath == first {
+	if latest.Status != RefreshStatusVerificationFailed || latest.NewBase != "base-sha-3" || latest.OldBase != "base-sha-2" || latest.EvidencePath != second || latest.EvidencePath == first {
 		t.Fatalf("latest refresh = %+v first=%s second=%s", latest, first, second)
 	}
 }

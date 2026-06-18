@@ -305,7 +305,7 @@ func refreshSnapshotFromEvent(event JournalEvent) (refreshSnapshot, error) {
 	}, nil
 }
 
-func latestSuccessfulRefresh(events []JournalEvent, mergeUnitID string, attemptID string) (refreshSnapshot, bool) {
+func latestRefresh(events []JournalEvent, mergeUnitID string, attemptID string) (refreshSnapshot, bool) {
 	var latest refreshSnapshot
 	found := false
 	for _, event := range events {
@@ -316,7 +316,7 @@ func latestSuccessfulRefresh(events []JournalEvent, mergeUnitID string, attemptI
 		if err != nil {
 			continue
 		}
-		if snapshot.MergeUnitID != mergeUnitID || snapshot.AttemptID != attemptID || snapshot.Status != RefreshStatusSucceeded {
+		if snapshot.MergeUnitID != mergeUnitID || snapshot.AttemptID != attemptID {
 			continue
 		}
 		latest = snapshot
@@ -373,7 +373,7 @@ func runLocalRefresh(opts RefreshBranchOptions, workspaceID string, baseRef stri
 	}
 	preHead = strings.TrimSpace(preHead)
 	oldBase := attempt.BaseSHA
-	if latest, ok := latestSuccessfulRefresh(events, opts.MergeUnitID, opts.AttemptID); ok {
+	if latest, ok := latestRefresh(events, opts.MergeUnitID, opts.AttemptID); ok {
 		oldBase = latest.NewBase
 	}
 	newBase, err := gitOutput(worktree, "rev-parse", opts.NewBase)
@@ -412,7 +412,7 @@ func runLocalRefresh(opts RefreshBranchOptions, workspaceID string, baseRef stri
 	if err != nil {
 		return RefreshEvidence{}, err
 	}
-	verification := verifyRefreshContribution(beforeFiles, afterFiles, beforePatchIDs, afterPatchIDs)
+	verification := verifyRefreshContribution(beforeFiles, afterFiles, beforePatchIDs, afterPatchIDs, commandResults)
 	return RefreshEvidence{
 		SchemaVersion:      1,
 		WorkspaceID:        workspaceID,
@@ -487,28 +487,45 @@ func remoteTrackingRef(worktree string, branch string) (string, error) {
 	return "", nil
 }
 
-func verifyRefreshContribution(beforeFiles []string, afterFiles []string, beforePatchIDs []RefreshPatchID, afterPatchIDs []RefreshPatchID) RefreshVerification {
+func verifyRefreshContribution(beforeFiles []string, afterFiles []string, beforePatchIDs []RefreshPatchID, afterPatchIDs []RefreshPatchID, commandResults []ContractCommandResult) RefreshVerification {
 	filesPreserved := stringSlicesEqual(beforeFiles, afterFiles)
 	patchesPreserved := patchIDSetsEqual(beforePatchIDs, afterPatchIDs)
 	status := RefreshStatusSucceeded
-	reason := ""
+	reasons := []string{}
 	if !filesPreserved || !patchesPreserved {
 		status = RefreshStatusVerificationFailed
 		switch {
 		case !filesPreserved && !patchesPreserved:
-			reason = "changed files and patch IDs differ after refresh"
+			reasons = append(reasons, "changed files and patch IDs differ after refresh")
 		case !filesPreserved:
-			reason = "changed files differ after refresh"
+			reasons = append(reasons, "changed files differ after refresh")
 		default:
-			reason = "patch IDs differ after refresh"
+			reasons = append(reasons, "patch IDs differ after refresh")
 		}
+	}
+	if failed := firstFailedRefreshCommand(commandResults); failed != "" {
+		status = RefreshStatusVerificationFailed
+		reasons = append(reasons, "validation command failed: "+failed)
 	}
 	return RefreshVerification{
 		Status:                status,
 		ChangedFilesPreserved: filesPreserved,
 		PatchIDsPreserved:     patchesPreserved,
-		FailureReason:         reason,
+		FailureReason:         strings.Join(reasons, "; "),
 	}
+}
+
+func firstFailedRefreshCommand(commandResults []ContractCommandResult) string {
+	for _, result := range commandResults {
+		status := strings.ToLower(strings.TrimSpace(result.Status))
+		switch status {
+		case "passed", "pass", "success", "succeeded", "ok":
+			continue
+		default:
+			return strings.TrimSpace(result.Command)
+		}
+	}
+	return ""
 }
 
 func appendRefreshEvent(workspaceDir string, state leaseOperationState, evidence RefreshEvidence, evidencePath string, refreshedAt time.Time) (RefreshBranchResult, error) {
