@@ -190,6 +190,7 @@ func RefreshBranch(opts RefreshBranchOptions) (RefreshBranchResult, error) {
 	if err != nil {
 		return RefreshBranchResult{}, err
 	}
+	refreshedAt = state.ObservedAt
 	lease, _, err := requireOwnedActiveLease(state, opts.LeaseID, opts.AgentID)
 	if err != nil {
 		return RefreshBranchResult{}, err
@@ -631,10 +632,7 @@ func appendRefreshEventAfterMutation(workspaceDir string, evidence RefreshEviden
 		if err != nil {
 			return RefreshBranchResult{}, err
 		}
-		recordedAt, err = observedAtAfterEvents(state.Events, recordedAt)
-		if err != nil {
-			return RefreshBranchResult{}, err
-		}
+		recordedAt = state.ObservedAt
 		if err := validateFreshRefreshState(state, evidence, recordedAt); err != nil {
 			return RefreshBranchResult{}, err
 		}

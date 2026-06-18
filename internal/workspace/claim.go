@@ -347,6 +347,7 @@ func Heartbeat(opts LeaseOptions) (LeaseResult, error) {
 	if err != nil {
 		return LeaseResult{}, err
 	}
+	observedAt = state.ObservedAt
 	lease, unit, err := requireOwnedActiveLease(state, opts.LeaseID, opts.AgentID)
 	if err != nil {
 		return LeaseResult{}, err
@@ -377,6 +378,7 @@ func Release(opts LeaseOptions) (LeaseResult, error) {
 	if err != nil {
 		return LeaseResult{}, err
 	}
+	observedAt = state.ObservedAt
 	lease, unit, err := requireOwnedActiveLease(state, opts.LeaseID, opts.AgentID)
 	if err != nil {
 		return LeaseResult{}, err
@@ -409,6 +411,7 @@ func Recover(opts RecoverOptions) (RecoverResult, error) {
 	if err != nil {
 		return RecoverResult{}, err
 	}
+	recoveredAt = state.ObservedAt
 	expiredLeases, err := expiredLeaseSnapshots(state.Events, recoveredAt)
 	if err != nil {
 		return RecoverResult{}, err
@@ -458,6 +461,7 @@ func StartAttempt(opts AttemptStartOptions) (AttemptResult, error) {
 	if err != nil {
 		return AttemptResult{}, err
 	}
+	startedAt = state.ObservedAt
 	lease, unit, err := requireOwnedActiveLease(state, opts.LeaseID, opts.AgentID)
 	if err != nil {
 		return AttemptResult{}, err
@@ -530,6 +534,7 @@ func AbandonAttempt(opts AttemptAbandonOptions) (AttemptResult, error) {
 	if err != nil {
 		return AttemptResult{}, err
 	}
+	abandonedAt = state.ObservedAt
 	lease, unit, err := requireOwnedActiveLease(state, opts.LeaseID, opts.AgentID)
 	if err != nil {
 		return AttemptResult{}, err
@@ -594,6 +599,7 @@ func Transition(opts TransitionOptions) (TransitionResult, error) {
 	if err != nil {
 		return TransitionResult{}, err
 	}
+	transitionedAt = state.ObservedAt
 	lease, unit, err := requireOwnedActiveLease(state, opts.LeaseID, opts.AgentID)
 	if err != nil {
 		return TransitionResult{}, err
@@ -715,6 +721,7 @@ type leaseOperationState struct {
 	Revisions    map[string]int
 	ActiveLeases map[string]activeLeaseSnapshot
 	UnitByID     map[string]*SchedulerMergeUnitView
+	ObservedAt   time.Time
 }
 
 func normalizeLeaseOptions(action string, opts LeaseOptions) (LeaseOptions, time.Time, error) {
@@ -870,6 +877,7 @@ func loadLeaseOperationState(workspaceDir string, observedAt time.Time) (leaseOp
 		Revisions:    revisions,
 		ActiveLeases: activeLeases,
 		UnitByID:     schedulerUnitByID(view),
+		ObservedAt:   observedAt,
 	}, nil
 }
 

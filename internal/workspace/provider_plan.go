@@ -70,6 +70,7 @@ func PlanExternalProviderCommand(opts ExternalProviderPlanOptions) (ExternalProv
 	if err != nil {
 		return ExternalProviderPlanResult{}, err
 	}
+	plannedAt = state.ObservedAt
 	lease, _, err := requireOwnedActiveLease(state, reserveOpts.LeaseID, reserveOpts.AgentID)
 	if err != nil {
 		return ExternalProviderPlanResult{}, err

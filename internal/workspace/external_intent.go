@@ -163,6 +163,7 @@ func ReserveExternalIntent(opts ExternalIntentReserveOptions) (ExternalIntentRes
 	if err != nil {
 		return ExternalIntentResult{}, err
 	}
+	reservedAt = state.ObservedAt
 	lease, _, err := requireOwnedActiveLease(state, opts.LeaseID, opts.AgentID)
 	if err != nil {
 		return ExternalIntentResult{}, err
@@ -271,6 +272,7 @@ func RecordExternalIntentResult(opts ExternalIntentResultRecordOptions) (Externa
 	if err != nil {
 		return ExternalIntentResultRecordResult{}, err
 	}
+	recordedAt = state.ObservedAt
 	lease, _, err := requireOwnedActiveLease(state, opts.LeaseID, opts.AgentID)
 	if err != nil {
 		return ExternalIntentResultRecordResult{}, err
@@ -363,6 +365,7 @@ func ReconcileExternalIntent(opts ExternalIntentReconcileOptions) (ExternalInten
 	if err != nil {
 		return ExternalIntentReconcileResult{}, err
 	}
+	reconciledAt = state.ObservedAt
 	intents, err := externalIntentSnapshots(state.Events)
 	if err != nil {
 		return ExternalIntentReconcileResult{}, err
