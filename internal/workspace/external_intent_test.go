@@ -61,6 +61,14 @@ func TestReserveExternalIntentRecordsReservationAndIdempotency(t *testing.T) {
 	assertContainsString(t, last.WriteSet, ApprovalResource(approval.Approval.ApprovalID))
 	assertContainsString(t, last.WriteSet, ProviderTargetResource("push:branch:feature/test"))
 	assertContainsString(t, last.WriteSet, RemoteRefResource("feature/test"))
+	baseResource := RefreshInputResource(claim.MergeUnitID, attempt.AttemptID, refreshInputBase)
+	headResource := RefreshInputResource(claim.MergeUnitID, attempt.AttemptID, refreshInputHead)
+	if _, ok := last.ReadSet[baseResource]; !ok {
+		t.Fatalf("reserve read set missing %s: %+v", baseResource, last.ReadSet)
+	}
+	if _, ok := last.ReadSet[headResource]; !ok {
+		t.Fatalf("reserve read set missing %s: %+v", headResource, last.ReadSet)
+	}
 
 	check, err := CheckApproval(ApprovalCheckOptions{
 		WorkspaceDir: fixture.Dir,
@@ -329,6 +337,66 @@ func TestApprovalReplayIgnoresLegacyIntentReservationWithoutApprovalWrite(t *tes
 	}
 	if check.Status != "approved" || len(check.Approvals) != 1 || check.Approvals[0].UsedCount != 0 {
 		t.Fatalf("legacy intent should not consume approval: %+v", check)
+	}
+}
+
+func TestApprovalReplayRejectsStaleExternalIntentApproval(t *testing.T) {
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	granted, err := GrantApproval(ApprovalGrantOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Actions:      []string{ExternalActionMerge},
+		PR:           "42",
+		HeadSHA:      "pre-head-sha",
+		BaseSHA:      attempt.BaseSHA,
+		ExpiresIn:    time.Hour,
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("GrantApproval: %v", err)
+	}
+	appendRefreshForStaleApprovalReplayTest(t, fixture, claim, attempt, "pre-head-sha", "post-head-sha")
+	revisions, err := ResourceRevisions(fixture.Dir)
+	if err != nil {
+		t.Fatalf("ResourceRevisions: %v", err)
+	}
+	intentResource := ExternalIntentResource("intent-stale-merge")
+	approvalResource := ApprovalResource(granted.Approval.ApprovalID)
+	readSet := staleApprovalConsumptionReadSet(claim.MergeUnitID, attempt.AttemptID, approvalResource, revisions)
+	readSet[intentResource] = revisions[intentResource]
+	if _, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: fixture.Dir,
+		Type:         EventExternalIntentReserved,
+		Payload: map[string]any{
+			eventPayloadIntentIDKey:          "intent-stale-merge",
+			eventPayloadIdempotencyKeyKey:    "intent-key-stale-merge",
+			eventPayloadMergeUnitIDKey:       claim.MergeUnitID,
+			eventPayloadAttemptIDKey:         attempt.AttemptID,
+			eventPayloadAgentIDKey:           "worker-a",
+			eventPayloadLeaseIDKey:           claim.LeaseID,
+			eventPayloadApprovalIDRefKey:     granted.Approval.ApprovalID,
+			eventPayloadActionKey:            ExternalActionMerge,
+			eventPayloadScopeKey:             "merge-unit",
+			eventPayloadTargetKey:            "pr:42",
+			eventPayloadPRKey:                "42",
+			eventPayloadRequestedHeadSHAKey:  "pre-head-sha",
+			eventPayloadExpectedBaseSHAKey:   attempt.BaseSHA,
+			eventPayloadAffectedResourcesKey: []string{ProviderTargetResource("merge:pr:42")},
+			eventPayloadUsedCountKey:         1,
+		},
+		ReadSet:  readSet,
+		WriteSet: []string{intentResource, approvalResource},
+		Now:      fixedJournalTime("2026-06-17T10:04:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent stale intent: %v", err)
+	}
+
+	_, err = approvalSnapshots(readTestJournalEvents(t, fixture.Dir))
+	if err == nil || !strings.Contains(err.Error(), "consumes stale approval") || !strings.Contains(err.Error(), "base, head") {
+		t.Fatalf("approvalSnapshots stale intent error = %v", err)
 	}
 }
 

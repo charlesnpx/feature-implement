@@ -49,6 +49,7 @@ type SchedulerMergeUnitView struct {
 	ActiveLease        *SchedulerLeaseView          `json:"active_lease,omitempty"`
 	CurrentAttempt     *SchedulerAttemptView        `json:"current_attempt,omitempty"`
 	ContractBindings   []ContractBindingStatus      `json:"contract_bindings,omitempty"`
+	Approvals          []ApprovalView               `json:"approvals,omitempty"`
 }
 
 type SchedulerBlockingCondition struct {
@@ -152,6 +153,10 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 			return SchedulerView{}, err
 		}
 	}
+	approvals, err := approvalSnapshots(events)
+	if err != nil {
+		return SchedulerView{}, err
+	}
 	activeLeases, err := activeLeaseSnapshots(events, now)
 	if err != nil {
 		return SchedulerView{}, err
@@ -185,6 +190,10 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 		attemptID := ""
 		if unit.CurrentAttempt != nil {
 			attemptID = unit.CurrentAttempt.AttemptID
+		}
+		unitApprovals := approvalViewsForStatus(approvals, events, unit.ID, attemptID, now)
+		if len(unitApprovals) > 0 {
+			unit.Approvals = unitApprovals
 		}
 		bindings, err := contractBindingStatuses(lock, events, unit.ID, attemptID)
 		if err != nil {
@@ -504,6 +513,22 @@ func schedulerBlockingConditions(dependencies []string, bindings []ContractBindi
 		return conditions[i].ContractID < conditions[j].ContractID
 	})
 	return conditions
+}
+
+func approvalViewsForStatus(approvals map[string]approvalSnapshot, events []JournalEvent, mergeUnitID string, attemptID string, now time.Time) []ApprovalView {
+	if attemptID == "" {
+		return nil
+	}
+	views := []ApprovalView{}
+	for _, approval := range approvals {
+		if approval.MergeUnitID != mergeUnitID || approval.AttemptID != attemptID {
+			continue
+		}
+		staleInputs := approvalStaleInputsFromEvents(events, approval)
+		views = append(views, approval.ViewWithStaleInputs(now, staleInputs))
+	}
+	sort.Slice(views, func(i, j int) bool { return views[i].ApprovalID < views[j].ApprovalID })
+	return views
 }
 
 func ensureLifecycleCounts(counts map[string]int) {

@@ -104,6 +104,7 @@ type ApprovalView struct {
 	UsedCount   int      `json:"used_count"`
 	ExpiresAt   string   `json:"expires_at"`
 	Status      string   `json:"status"`
+	StaleInputs []string `json:"stale_inputs,omitempty"`
 }
 
 type approvalSnapshot struct {
@@ -248,7 +249,7 @@ func CheckApproval(opts ApprovalCheckOptions) (ApprovalCheckResult, error) {
 			headSHA:     opts.HeadSHA,
 			baseSHA:     opts.BaseSHA,
 			now:         checkedAt,
-		}); err == nil {
+		}); err == nil && len(approvalStaleInputsFromEvents(state.Events, approval)) == 0 {
 			matches = append(matches, approval.View(checkedAt))
 		}
 	}
@@ -318,8 +319,16 @@ func ConsumeApproval(opts ApprovalConsumeOptions) (ApprovalResult, error) {
 	}); err != nil {
 		return ApprovalResult{}, err
 	}
+	if staleInputs := approvalStaleInputsFromEvents(events, approval); len(staleInputs) > 0 {
+		return ApprovalResult{}, fmt.Errorf("approval %s is stale after refresh changed %s", approval.ApprovalID, strings.Join(staleInputs, ", "))
+	}
 	resource := ApprovalResource(opts.ApprovalID)
 	mergeUnitResource := MergeUnitResource(opts.MergeUnitID)
+	readSet := map[string]int{
+		resource:          revisions[resource],
+		mergeUnitResource: revisions[mergeUnitResource],
+	}
+	addApprovalRefreshInputReadSet(readSet, revisions, approval)
 	event, err := AppendEvent(AppendEventOptions{
 		WorkspaceDir: opts.WorkspaceDir,
 		Type:         EventApprovalConsumed,
@@ -335,10 +344,7 @@ func ConsumeApproval(opts ApprovalConsumeOptions) (ApprovalResult, error) {
 			eventPayloadBaseSHAKey:     opts.BaseSHA,
 			eventPayloadUsedCountKey:   approval.UsedCount + 1,
 		},
-		ReadSet: map[string]int{
-			resource:          revisions[resource],
-			mergeUnitResource: revisions[mergeUnitResource],
-		},
+		ReadSet:  readSet,
 		WriteSet: []string{resource},
 		Now:      func() time.Time { return consumedAt },
 	})
@@ -588,9 +594,110 @@ func approvalMatches(approval approvalSnapshot, req approvalMatchRequest) error 
 	return nil
 }
 
+func isTightMergeApproval(approval approvalSnapshot) bool {
+	return containsString(approval.Actions, "merge") &&
+		(approval.PR != "" || approval.Branch != "") &&
+		approval.HeadSHA != "" &&
+		approval.BaseSHA != ""
+}
+
+func approvalReadsRefreshInputs(approval approvalSnapshot) bool {
+	return approval.HeadSHA != "" || approval.BaseSHA != ""
+}
+
+func addApprovalRefreshInputReadSet(readSet map[string]int, revisions map[string]int, approval approvalSnapshot) {
+	if !approvalReadsRefreshInputs(approval) {
+		return
+	}
+	for _, input := range []string{refreshInputBase, refreshInputHead} {
+		resource := RefreshInputResource(approval.MergeUnitID, approval.AttemptID, input)
+		readSet[resource] = revisions[resource]
+	}
+}
+
+func approvalStaleInputsFromEvents(events []JournalEvent, approval approvalSnapshot) []string {
+	if !isTightMergeApproval(approval) {
+		return nil
+	}
+	stale := approvalStaleInputsForValues(approval, latestRefreshInputValues(events, approval.MergeUnitID, approval.AttemptID))
+	changedAfterGrant := refreshInputsChangedAfterApproval(events, approval)
+	for _, input := range []string{refreshInputBase, refreshInputHead} {
+		if changedAfterGrant[input] && !containsString(stale, input) {
+			stale = append(stale, input)
+		}
+	}
+	return stale
+}
+
+func latestRefreshInputValues(events []JournalEvent, mergeUnitID string, attemptID string) map[string]string {
+	values := map[string]string{}
+	for _, event := range events {
+		if event.Type != EventBranchRefreshRecorded {
+			continue
+		}
+		refresh, err := refreshSnapshotFromEvent(event)
+		if err != nil {
+			continue
+		}
+		if refresh.MergeUnitID != mergeUnitID || refresh.AttemptID != attemptID {
+			continue
+		}
+		for _, change := range refresh.InputChanges {
+			values[change.Input] = change.NewValue
+		}
+	}
+	return values
+}
+
+func approvalStaleInputsForValues(approval approvalSnapshot, inputValues map[string]string) []string {
+	if !isTightMergeApproval(approval) {
+		return nil
+	}
+	if len(inputValues) == 0 {
+		return nil
+	}
+	stale := []string{}
+	if value, ok := inputValues[refreshInputBase]; ok && approval.BaseSHA != value {
+		stale = append(stale, refreshInputBase)
+	}
+	if value, ok := inputValues[refreshInputHead]; ok && approval.HeadSHA != value {
+		stale = append(stale, refreshInputHead)
+	}
+	return stale
+}
+
+func refreshInputsChangedAfterApproval(events []JournalEvent, approval approvalSnapshot) map[string]bool {
+	changed := map[string]bool{}
+	seenApprovalGrant := false
+	for _, event := range events {
+		if event.Type == EventApprovalGranted {
+			approvalID, err := eventStringPayload(event, eventPayloadApprovalIDKey)
+			if err == nil && approvalID == approval.ApprovalID {
+				seenApprovalGrant = true
+			}
+			continue
+		}
+		if !seenApprovalGrant || event.Type != EventBranchRefreshRecorded {
+			continue
+		}
+		refresh, err := refreshSnapshotFromEvent(event)
+		if err != nil {
+			continue
+		}
+		if refresh.MergeUnitID != approval.MergeUnitID || refresh.AttemptID != approval.AttemptID {
+			continue
+		}
+		for _, change := range refresh.InputChanges {
+			changed[change.Input] = true
+		}
+	}
+	return changed
+}
+
 func approvalSnapshots(events []JournalEvent) (map[string]approvalSnapshot, error) {
 	approvals := map[string]approvalSnapshot{}
-	for _, event := range events {
+	for i, event := range events {
+		priorEvents := events[:i]
 		switch event.Type {
 		case EventApprovalGranted:
 			approval, err := approvalGrantedFromEvent(event)
@@ -608,6 +715,9 @@ func approvalSnapshots(events []JournalEvent) (map[string]approvalSnapshot, erro
 				return nil, fmt.Errorf("approval event %s references unknown approval %s", event.ID, approvalID)
 			}
 			if err := validateApprovalConsumedEvent(event, approval); err != nil {
+				return nil, err
+			}
+			if err := validateApprovalEventNotStale(event, priorEvents, approval); err != nil {
 				return nil, err
 			}
 			usedCount, err := eventIntPayload(event, eventPayloadUsedCountKey)
@@ -635,6 +745,9 @@ func approvalSnapshots(events []JournalEvent) (map[string]approvalSnapshot, erro
 			if err := validateExternalIntentApprovalConsumptionEvent(event, approval); err != nil {
 				return nil, err
 			}
+			if err := validateApprovalEventNotStale(event, priorEvents, approval); err != nil {
+				return nil, err
+			}
 			usedCount, err := eventIntPayload(event, eventPayloadUsedCountKey)
 			if err != nil {
 				return nil, err
@@ -647,6 +760,14 @@ func approvalSnapshots(events []JournalEvent) (map[string]approvalSnapshot, erro
 		}
 	}
 	return approvals, nil
+}
+
+func validateApprovalEventNotStale(event JournalEvent, priorEvents []JournalEvent, approval approvalSnapshot) error {
+	staleInputs := approvalStaleInputsFromEvents(priorEvents, approval)
+	if len(staleInputs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("approval event %s consumes stale approval %s after refresh changed %s", event.ID, approval.ApprovalID, strings.Join(staleInputs, ", "))
 }
 
 func validateApprovalConsumedEvent(event JournalEvent, approval approvalSnapshot) error {
@@ -809,11 +930,17 @@ func optionalStringPayload(event JournalEvent, key string) string {
 }
 
 func (approval approvalSnapshot) View(now time.Time) ApprovalView {
+	return approval.ViewWithStaleInputs(now, nil)
+}
+
+func (approval approvalSnapshot) ViewWithStaleInputs(now time.Time, staleInputs []string) ApprovalView {
 	status := "active"
 	if !now.Before(approval.ExpiresAt) {
 		status = "expired"
 	} else if approval.UsedCount >= approval.MaxUses {
 		status = "exhausted"
+	} else if len(staleInputs) > 0 {
+		status = "stale"
 	}
 	return ApprovalView{
 		ApprovalID:  approval.ApprovalID,
@@ -831,5 +958,6 @@ func (approval approvalSnapshot) View(now time.Time) ApprovalView {
 		UsedCount:   approval.UsedCount,
 		ExpiresAt:   approval.ExpiresAt.UTC().Format(time.RFC3339Nano),
 		Status:      status,
+		StaleInputs: append([]string{}, staleInputs...),
 	}
 }

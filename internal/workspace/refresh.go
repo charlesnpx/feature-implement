@@ -29,6 +29,10 @@ const (
 	eventPayloadPostHeadKey     = "post_head"
 	eventPayloadBackupRefKey    = "backup_ref"
 	eventPayloadEvidencePathKey = "evidence_path"
+	eventPayloadInputChangesKey = "input_changes"
+
+	refreshInputBase = "base"
+	refreshInputHead = "head"
 )
 
 type RefreshBranchOptions struct {
@@ -80,8 +84,16 @@ type RefreshEvidence struct {
 	ChangedFilesAfter  []string                `json:"changed_files_after"`
 	PatchIDsBefore     []RefreshPatchID        `json:"patch_ids_before"`
 	PatchIDsAfter      []RefreshPatchID        `json:"patch_ids_after"`
+	InputChanges       []RefreshInputChange    `json:"input_changes,omitempty"`
 	CommandResults     []ContractCommandResult `json:"command_results,omitempty"`
 	Verification       RefreshVerification     `json:"verification"`
+}
+
+type RefreshInputChange struct {
+	Input    string `json:"input"`
+	OldValue string `json:"old_value"`
+	NewValue string `json:"new_value"`
+	Resource string `json:"resource"`
 }
 
 type RefreshPatchID struct {
@@ -113,6 +125,7 @@ type refreshSnapshot struct {
 	PostHead     string
 	BackupRef    string
 	EvidencePath string
+	InputChanges []RefreshInputChange
 }
 
 type refreshTracker struct {
@@ -129,6 +142,10 @@ func (e RefreshVerificationError) Error() string {
 
 func RefreshResource(id string) string {
 	return resourceKey("refresh", id)
+}
+
+func RefreshInputResource(mergeUnitID string, attemptID string, input string) string {
+	return RefreshResource(mergeUnitID + ":" + attemptID + ":input:" + input)
 }
 
 func newRefreshTracker() *refreshTracker {
@@ -351,6 +368,13 @@ func refreshSnapshotFromEvent(event JournalEvent) (refreshSnapshot, error) {
 	if err != nil {
 		return refreshSnapshot{}, err
 	}
+	inputChanges, found, err := eventRefreshInputChangesPayload(event, mergeUnitID, attemptID)
+	if err != nil {
+		return refreshSnapshot{}, err
+	}
+	if !found {
+		inputChanges = refreshInputChangesFromValues(status, mergeUnitID, attemptID, oldBase, newBase, preHead, postHead)
+	}
 	return refreshSnapshot{
 		MergeUnitID:  mergeUnitID,
 		AttemptID:    attemptID,
@@ -364,7 +388,163 @@ func refreshSnapshotFromEvent(event JournalEvent) (refreshSnapshot, error) {
 		PostHead:     postHead,
 		BackupRef:    backupRef,
 		EvidencePath: evidencePath,
+		InputChanges: inputChanges,
 	}, nil
+}
+
+func eventRefreshInputChangesPayload(event JournalEvent, mergeUnitID string, attemptID string) ([]RefreshInputChange, bool, error) {
+	value, ok := event.Payload[eventPayloadInputChangesKey]
+	if !ok {
+		return nil, false, nil
+	}
+	switch raw := value.(type) {
+	case []RefreshInputChange:
+		changes := append([]RefreshInputChange(nil), raw...)
+		for i, change := range changes {
+			if err := validateRefreshInputChangeForAttempt(change, mergeUnitID, attemptID); err != nil {
+				return nil, true, fmt.Errorf("scheduler event %s payload %s item %d: %w", event.ID, eventPayloadInputChangesKey, i+1, err)
+			}
+		}
+		sort.Slice(changes, func(i, j int) bool { return changes[i].Input < changes[j].Input })
+		return changes, true, nil
+	case []any:
+		changes := make([]RefreshInputChange, 0, len(raw))
+		for i, item := range raw {
+			entry, ok := item.(map[string]any)
+			if !ok {
+				return nil, true, fmt.Errorf("scheduler event %s payload %s item %d must be an object", event.ID, eventPayloadInputChangesKey, i+1)
+			}
+			change := RefreshInputChange{
+				Input:    stringMapValue(entry, "input"),
+				OldValue: stringMapValue(entry, "old_value"),
+				NewValue: stringMapValue(entry, "new_value"),
+				Resource: stringMapValue(entry, "resource"),
+			}
+			if err := validateRefreshInputChangeForAttempt(change, mergeUnitID, attemptID); err != nil {
+				return nil, true, fmt.Errorf("scheduler event %s payload %s item %d: %w", event.ID, eventPayloadInputChangesKey, i+1, err)
+			}
+			changes = append(changes, change)
+		}
+		sort.Slice(changes, func(i, j int) bool { return changes[i].Input < changes[j].Input })
+		return changes, true, nil
+	default:
+		return nil, true, fmt.Errorf("scheduler event %s payload %s must be a list", event.ID, eventPayloadInputChangesKey)
+	}
+}
+
+func stringMapValue(values map[string]any, key string) string {
+	value, _ := values[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func normalizeRefreshInputChanges(evidence RefreshEvidence) []RefreshInputChange {
+	if len(evidence.InputChanges) == 0 {
+		return refreshInputChangesFromValues(
+			evidence.Verification.Status,
+			evidence.MergeUnitID,
+			evidence.AttemptID,
+			evidence.OldBase,
+			evidence.NewBase,
+			evidence.PreHead,
+			evidence.PostHead,
+		)
+	}
+	changes := append([]RefreshInputChange(nil), evidence.InputChanges...)
+	for i, change := range changes {
+		change.Input = strings.TrimSpace(change.Input)
+		change.OldValue = strings.TrimSpace(change.OldValue)
+		change.NewValue = strings.TrimSpace(change.NewValue)
+		change.Resource = strings.TrimSpace(change.Resource)
+		if change.Resource == "" && change.Input != "" {
+			change.Resource = RefreshInputResource(evidence.MergeUnitID, evidence.AttemptID, change.Input)
+		}
+		changes[i] = change
+	}
+	sort.Slice(changes, func(i, j int) bool { return changes[i].Input < changes[j].Input })
+	return changes
+}
+
+func refreshInputChangesFromValues(status string, mergeUnitID string, attemptID string, oldBase string, newBase string, preHead string, postHead string) []RefreshInputChange {
+	switch status {
+	case RefreshStatusSucceeded, RefreshStatusVerificationFailed:
+	default:
+		return nil
+	}
+	changes := []RefreshInputChange{}
+	if oldBase != "" && newBase != "" && oldBase != newBase {
+		changes = append(changes, RefreshInputChange{
+			Input:    refreshInputBase,
+			OldValue: oldBase,
+			NewValue: newBase,
+			Resource: RefreshInputResource(mergeUnitID, attemptID, refreshInputBase),
+		})
+	}
+	if preHead != "" && postHead != "" && preHead != postHead {
+		changes = append(changes, RefreshInputChange{
+			Input:    refreshInputHead,
+			OldValue: preHead,
+			NewValue: postHead,
+			Resource: RefreshInputResource(mergeUnitID, attemptID, refreshInputHead),
+		})
+	}
+	return changes
+}
+
+func refreshInputChangeResources(changes []RefreshInputChange) []string {
+	resources := make([]string, 0, len(changes))
+	seen := map[string]bool{}
+	for _, change := range changes {
+		if change.Resource == "" || seen[change.Resource] {
+			continue
+		}
+		seen[change.Resource] = true
+		resources = append(resources, change.Resource)
+	}
+	sort.Strings(resources)
+	return resources
+}
+
+func refreshInputChangesPayload(changes []RefreshInputChange) []any {
+	payload := make([]any, 0, len(changes))
+	for _, change := range changes {
+		payload = append(payload, map[string]any{
+			"input":     change.Input,
+			"old_value": change.OldValue,
+			"new_value": change.NewValue,
+			"resource":  change.Resource,
+		})
+	}
+	return payload
+}
+
+func validateRefreshInputChange(change RefreshInputChange) error {
+	switch change.Input {
+	case refreshInputBase, refreshInputHead:
+	default:
+		return fmt.Errorf("unsupported refresh input %q", change.Input)
+	}
+	if change.OldValue == "" || change.NewValue == "" {
+		return fmt.Errorf("refresh input %s requires old_value and new_value", change.Input)
+	}
+	wantSuffix := ":input:" + change.Input
+	if change.Resource == "" || !strings.HasPrefix(change.Resource, "refresh:") || !strings.HasSuffix(change.Resource, wantSuffix) {
+		return fmt.Errorf("refresh input %s resource %q must be a refresh resource ending with %q", change.Input, change.Resource, wantSuffix)
+	}
+	if err := validateResourceKey(change.Resource); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateRefreshInputChangeForAttempt(change RefreshInputChange, mergeUnitID string, attemptID string) error {
+	if err := validateRefreshInputChange(change); err != nil {
+		return err
+	}
+	wantResource := RefreshInputResource(mergeUnitID, attemptID, change.Input)
+	if change.Resource != wantResource {
+		return fmt.Errorf("refresh input %s resource %q must be %q", change.Input, change.Resource, wantResource)
+	}
+	return nil
 }
 
 func latestRefresh(events []JournalEvent, mergeUnitID string, attemptID string) (refreshSnapshot, bool) {
@@ -502,6 +682,7 @@ func runLocalRefresh(opts RefreshBranchOptions, workspaceID string, baseRef stri
 		ChangedFilesAfter:  afterFiles,
 		PatchIDsBefore:     beforePatchIDs,
 		PatchIDsAfter:      afterPatchIDs,
+		InputChanges:       refreshInputChangesFromValues(RefreshStatusSucceeded, opts.MergeUnitID, opts.AttemptID, oldBase, newBase, preHead, postHead),
 		CommandResults:     commandResults,
 		Verification:       verification,
 	}, nil
@@ -526,6 +707,7 @@ func failedRefreshEvidence(opts RefreshBranchOptions, workspaceID string, baseRe
 		BackupRef:          backupRef,
 		ChangedFilesBefore: append([]string(nil), beforeFiles...),
 		PatchIDsBefore:     append([]RefreshPatchID(nil), beforePatchIDs...),
+		InputChanges:       refreshInputChangesFromValues(RefreshStatusVerificationFailed, opts.MergeUnitID, opts.AttemptID, oldBase, newBase, preHead, postHead),
 		CommandResults:     commandResults,
 		Verification: RefreshVerification{
 			Status:        RefreshStatusVerificationFailed,
@@ -711,30 +893,41 @@ func validateFreshRefreshState(state leaseOperationState, evidence RefreshEviden
 
 func appendRefreshEvent(workspaceDir string, state leaseOperationState, evidence RefreshEvidence, evidencePath string, refreshedAt time.Time, expectedRefreshRevision int) (RefreshBranchResult, error) {
 	resource := RefreshResource(evidence.MergeUnitID + ":" + evidence.AttemptID)
+	evidence.InputChanges = normalizeRefreshInputChanges(evidence)
+	for _, change := range evidence.InputChanges {
+		if err := validateRefreshInputChangeForAttempt(change, evidence.MergeUnitID, evidence.AttemptID); err != nil {
+			return RefreshBranchResult{}, err
+		}
+	}
+	payload := map[string]any{
+		eventPayloadMergeUnitIDKey:  evidence.MergeUnitID,
+		eventPayloadAttemptIDKey:    evidence.AttemptID,
+		eventPayloadAgentIDKey:      evidence.AgentID,
+		eventPayloadLeaseIDKey:      evidence.LeaseID,
+		eventPayloadStatusKey:       evidence.Verification.Status,
+		eventPayloadBranchKey:       evidence.Branch,
+		eventPayloadWorktreeKey:     evidence.Worktree,
+		eventPayloadOldBaseKey:      evidence.OldBase,
+		eventPayloadNewBaseKey:      evidence.NewBase,
+		eventPayloadPreHeadKey:      evidence.PreHead,
+		eventPayloadPostHeadKey:     evidence.PostHead,
+		eventPayloadBackupRefKey:    evidence.BackupRef,
+		eventPayloadEvidencePathKey: evidencePath,
+	}
+	if len(evidence.InputChanges) > 0 {
+		payload[eventPayloadInputChangesKey] = refreshInputChangesPayload(evidence.InputChanges)
+	}
+	writeSet := append([]string{resource}, refreshInputChangeResources(evidence.InputChanges)...)
 	event, err := AppendEvent(AppendEventOptions{
 		WorkspaceDir: workspaceDir,
 		Type:         EventBranchRefreshRecorded,
-		Payload: map[string]any{
-			eventPayloadMergeUnitIDKey:  evidence.MergeUnitID,
-			eventPayloadAttemptIDKey:    evidence.AttemptID,
-			eventPayloadAgentIDKey:      evidence.AgentID,
-			eventPayloadLeaseIDKey:      evidence.LeaseID,
-			eventPayloadStatusKey:       evidence.Verification.Status,
-			eventPayloadBranchKey:       evidence.Branch,
-			eventPayloadWorktreeKey:     evidence.Worktree,
-			eventPayloadOldBaseKey:      evidence.OldBase,
-			eventPayloadNewBaseKey:      evidence.NewBase,
-			eventPayloadPreHeadKey:      evidence.PreHead,
-			eventPayloadPostHeadKey:     evidence.PostHead,
-			eventPayloadBackupRefKey:    evidence.BackupRef,
-			eventPayloadEvidencePathKey: evidencePath,
-		},
+		Payload:      payload,
 		ReadSet: map[string]int{
 			LeaseResource(evidence.MergeUnitID):     state.Revisions[LeaseResource(evidence.MergeUnitID)],
 			MergeUnitResource(evidence.MergeUnitID): state.Revisions[MergeUnitResource(evidence.MergeUnitID)],
 			resource:                                expectedRefreshRevision,
 		},
-		WriteSet: []string{resource},
+		WriteSet: writeSet,
 		Now:      func() time.Time { return refreshedAt },
 	})
 	if err != nil {

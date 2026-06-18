@@ -208,6 +208,9 @@ func ReserveExternalIntent(opts ExternalIntentReserveOptions) (ExternalIntentRes
 	}); err != nil {
 		return ExternalIntentResult{}, err
 	}
+	if staleInputs := approvalStaleInputsFromEvents(state.Events, approval); len(staleInputs) > 0 {
+		return ExternalIntentResult{}, fmt.Errorf("approval %s is stale after refresh changed %s", approval.ApprovalID, strings.Join(staleInputs, ", "))
+	}
 	approvalResource := ApprovalResource(opts.ApprovalID)
 	affectedResources := externalIntentAffectedResources(opts, target, state.View.BaseRef)
 	if err := validateResourcesNotFrozen(state.Events, state.ActiveLeases, affectedResources, "external intent reserve"); err != nil {
@@ -219,6 +222,7 @@ func ReserveExternalIntent(opts ExternalIntentReserveOptions) (ExternalIntentRes
 		approvalResource:                    state.Revisions[approvalResource],
 		intentResource:                      0,
 	}
+	addApprovalRefreshInputReadSet(readSet, state.Revisions, approval)
 	writeSet := []string{intentResource, approvalResource}
 	for _, resource := range affectedResources {
 		readSet[resource] = state.Revisions[resource]

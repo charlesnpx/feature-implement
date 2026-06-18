@@ -339,6 +339,103 @@ func TestApprovalPRURLMatchesNumber(t *testing.T) {
 	}
 }
 
+func TestApprovalConsumeReadsRefreshInputResources(t *testing.T) {
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	granted, err := GrantApproval(ApprovalGrantOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Actions:      []string{"merge"},
+		PR:           "42",
+		HeadSHA:      "head-sha",
+		BaseSHA:      "base-sha",
+		ExpiresIn:    time.Hour,
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("GrantApproval: %v", err)
+	}
+	if _, err := ConsumeApproval(ApprovalConsumeOptions{
+		WorkspaceDir: fixture.Dir,
+		ApprovalID:   granted.Approval.ApprovalID,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		Action:       "merge",
+		PR:           "42",
+		HeadSHA:      "head-sha",
+		BaseSHA:      "base-sha",
+		Now:          fixedJournalTime("2026-06-17T10:03:00Z"),
+	}); err != nil {
+		t.Fatalf("ConsumeApproval: %v", err)
+	}
+	events := readTestJournalEvents(t, fixture.Dir)
+	last := events[len(events)-1]
+	if last.Type != EventApprovalConsumed {
+		t.Fatalf("last event = %+v", last)
+	}
+	baseResource := RefreshInputResource(claim.MergeUnitID, attempt.AttemptID, refreshInputBase)
+	headResource := RefreshInputResource(claim.MergeUnitID, attempt.AttemptID, refreshInputHead)
+	if _, ok := last.ReadSet[baseResource]; !ok {
+		t.Fatalf("consume read set missing %s: %+v", baseResource, last.ReadSet)
+	}
+	if _, ok := last.ReadSet[headResource]; !ok {
+		t.Fatalf("consume read set missing %s: %+v", headResource, last.ReadSet)
+	}
+}
+
+func TestApprovalReplayRejectsStaleConsumedApproval(t *testing.T) {
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	granted, err := GrantApproval(ApprovalGrantOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Actions:      []string{"merge"},
+		PR:           "42",
+		HeadSHA:      "pre-head-sha",
+		BaseSHA:      attempt.BaseSHA,
+		ExpiresIn:    time.Hour,
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("GrantApproval: %v", err)
+	}
+	appendRefreshForStaleApprovalReplayTest(t, fixture, claim, attempt, "pre-head-sha", "post-head-sha")
+	revisions, err := ResourceRevisions(fixture.Dir)
+	if err != nil {
+		t.Fatalf("ResourceRevisions: %v", err)
+	}
+	approvalResource := ApprovalResource(granted.Approval.ApprovalID)
+	if _, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: fixture.Dir,
+		Type:         EventApprovalConsumed,
+		Payload: map[string]any{
+			eventPayloadApprovalIDKey:  granted.Approval.ApprovalID,
+			eventPayloadMergeUnitIDKey: claim.MergeUnitID,
+			eventPayloadAttemptIDKey:   attempt.AttemptID,
+			eventPayloadActionsKey:     []string{"merge"},
+			eventPayloadScopeKey:       "merge-unit",
+			eventPayloadPRKey:          "42",
+			eventPayloadHeadSHAKey:     "pre-head-sha",
+			eventPayloadBaseSHAKey:     attempt.BaseSHA,
+			eventPayloadUsedCountKey:   1,
+		},
+		ReadSet:  staleApprovalConsumptionReadSet(claim.MergeUnitID, attempt.AttemptID, approvalResource, revisions),
+		WriteSet: []string{approvalResource},
+		Now:      fixedJournalTime("2026-06-17T10:04:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent stale consume: %v", err)
+	}
+
+	_, err = approvalSnapshots(readTestJournalEvents(t, fixture.Dir))
+	if err == nil || !strings.Contains(err.Error(), "consumes stale approval") || !strings.Contains(err.Error(), "base, head") {
+		t.Fatalf("approvalSnapshots stale consume error = %v", err)
+	}
+}
+
 func TestApprovalReplayRejectsConsumedEventMissingTarget(t *testing.T) {
 	fixture, claim, attempt := newApprovalAttemptFixture(t)
 	granted, err := GrantApproval(ApprovalGrantOptions{
@@ -535,6 +632,48 @@ func TestApprovalGrantRequiresLeaseThatStartedAttempt(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "was started under lease "+firstClaim.LeaseID) {
 		t.Fatalf("grant with replacement lease error = %v", err)
+	}
+}
+
+func appendRefreshForStaleApprovalReplayTest(t *testing.T, fixture workspaceFixture, claim NextResult, attempt AttemptResult, preHead string, postHead string) {
+	t.Helper()
+	revisions, err := ResourceRevisions(fixture.Dir)
+	if err != nil {
+		t.Fatalf("ResourceRevisions: %v", err)
+	}
+	resource := RefreshResource(claim.MergeUnitID + ":" + attempt.AttemptID)
+	evidence := RefreshEvidence{
+		SchemaVersion: 1,
+		WorkspaceID:   fixture.Manifest.ID,
+		BaseRef:       fixtureWorkspaceBaseRef,
+		MergeUnitID:   claim.MergeUnitID,
+		AttemptID:     attempt.AttemptID,
+		AgentID:       "worker-a",
+		LeaseID:       claim.LeaseID,
+		Local:         true,
+		Branch:        attempt.Branch,
+		Worktree:      attempt.Worktree,
+		OldBase:       attempt.BaseSHA,
+		NewBase:       "base-sha-2",
+		PreHead:       preHead,
+		PostHead:      postHead,
+		BackupRef:     "backup-stale-approval",
+		Verification: RefreshVerification{
+			Status: RefreshStatusSucceeded,
+		},
+	}
+	if _, err := appendRefreshEventAfterMutation(fixture.Dir, evidence, StateDirName+"/evidence/refresh/stale-approval.json", fixedJournalTime("2026-06-17T10:03:00Z")(), revisions[resource], fixedJournalTime("2026-06-17T10:03:00Z")); err != nil {
+		t.Fatalf("appendRefreshEventAfterMutation: %v", err)
+	}
+}
+
+func staleApprovalConsumptionReadSet(mergeUnitID string, attemptID string, approvalResource string, revisions map[string]int) map[string]int {
+	return map[string]int{
+		approvalResource:               revisions[approvalResource],
+		MergeUnitResource(mergeUnitID): revisions[MergeUnitResource(mergeUnitID)],
+		RefreshInputResource(mergeUnitID, attemptID, refreshInputBase): revisions[RefreshInputResource(mergeUnitID, attemptID, refreshInputBase)],
+		RefreshInputResource(mergeUnitID, attemptID, refreshInputHead): revisions[RefreshInputResource(mergeUnitID, attemptID, refreshInputHead)],
+		RefreshResource(mergeUnitID + ":" + attemptID):                 revisions[RefreshResource(mergeUnitID+":"+attemptID)],
 	}
 }
 
