@@ -32,6 +32,7 @@ type InitResult struct {
 	Status           string `json:"status"`
 	WorkspaceDir     string `json:"workspace_dir"`
 	ManifestPath     string `json:"manifest_path"`
+	SourceManifest   string `json:"source_manifest,omitempty"`
 	LockPath         string `json:"lock_path,omitempty"`
 	ViewPath         string `json:"view_path,omitempty"`
 	WorkspaceID      string `json:"workspace_id"`
@@ -110,9 +111,10 @@ func Init(opts InitOptions) (InitResult, error) {
 	if opts.ManifestPath == "" {
 		return InitResult{}, fmt.Errorf("workspace init requires --manifest")
 	}
-	manifestPath := filepath.Clean(opts.ManifestPath)
-	if filepath.Base(manifestPath) != ManifestFileName {
-		return InitResult{}, fmt.Errorf("workspace init requires --manifest to point to %s", ManifestFileName)
+	sourceManifestPath := filepath.Clean(opts.ManifestPath)
+	manifestPath, copied, err := canonicalizeInitManifest(sourceManifestPath)
+	if err != nil {
+		return InitResult{}, err
 	}
 	workspaceDir := filepath.Dir(manifestPath)
 	manifest, err := ReadManifest(manifestPath)
@@ -132,6 +134,9 @@ func Init(opts InitOptions) (InitResult, error) {
 		MergeUnitCount: len(lock.MergeUnits),
 		ContractCount:  len(lock.ContractGates),
 	}
+	if copied {
+		result.SourceManifest = sourceManifestPath
+	}
 	if !opts.WriteLock {
 		return result, nil
 	}
@@ -148,6 +153,36 @@ func Init(opts InitOptions) (InitResult, error) {
 	result.SchedulerReady = len(view.Ready)
 	result.SchedulerBlocked = len(view.Blocked)
 	return result, nil
+}
+
+func canonicalizeInitManifest(sourcePath string) (string, bool, error) {
+	canonicalPath := filepath.Join(filepath.Dir(sourcePath), ManifestFileName)
+	if filepath.Base(sourcePath) == ManifestFileName {
+		return sourcePath, false, nil
+	}
+	if err := copyManifestSameDir(sourcePath, canonicalPath); err != nil {
+		return "", false, err
+	}
+	return canonicalPath, true, nil
+}
+
+func copyManifestSameDir(sourcePath string, targetPath string) error {
+	sourceDir, err := filepath.Abs(filepath.Dir(sourcePath))
+	if err != nil {
+		return err
+	}
+	targetDir, err := filepath.Abs(filepath.Dir(targetPath))
+	if err != nil {
+		return err
+	}
+	if sourceDir != targetDir {
+		return fmt.Errorf("workspace init can only canonicalize manifests within the same directory; move the manifest beside %s or use absolute plans[].path values before copying across directories", ManifestFileName)
+	}
+	b, err := os.ReadFile(sourcePath)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(targetPath, b, 0o644)
 }
 
 func Validate(opts ValidateOptions) (ValidateResult, error) {

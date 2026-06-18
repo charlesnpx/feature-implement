@@ -239,22 +239,70 @@ func TestWorkspaceInitCommandWritesLockAndView(t *testing.T) {
 	}
 }
 
-func TestWorkspaceInitCommandRequiresCanonicalManifest(t *testing.T) {
+func TestWorkspaceInitCommandCanonicalizesSameDirectoryManifest(t *testing.T) {
 	workspaceDir := workspaceWithPlanLocks(t)
+	canonicalPath := filepath.Join(workspaceDir, "feature.workspace.yaml")
+	manifestBytes, err := os.ReadFile(canonicalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(canonicalPath); err != nil {
+		t.Fatal(err)
+	}
 	nonCanonicalPath := filepath.Join(workspaceDir, "workspace.yaml")
-	if err := os.WriteFile(nonCanonicalPath, []byte("schema_version: 1\n"), 0o644); err != nil {
+	if err := os.WriteFile(nonCanonicalPath, manifestBytes, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	stdout, stderr, err := runFeature(t, "workspace", "init", "--manifest", nonCanonicalPath, "--json")
-	if err == nil {
-		t.Fatalf("feature workspace init should reject non-canonical manifest")
+	stdout, stderr, err := runFeature(t, "workspace", "init", "--manifest", nonCanonicalPath, "--write-lock", "--json")
+	if err != nil {
+		t.Fatalf("feature workspace init failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
 	}
-	if !strings.Contains(stderr, "workspace init requires --manifest to point to feature.workspace.yaml") {
-		t.Fatalf("expected canonical manifest error:\nstdout=%s\nstderr=%s", stdout, stderr)
+	var result struct {
+		Status         string `json:"status"`
+		WorkspaceDir   string `json:"workspace_dir"`
+		ManifestPath   string `json:"manifest_path"`
+		SourceManifest string `json:"source_manifest"`
+		LockPath       string `json:"lock_path"`
 	}
-	if strings.Contains(stdout, "Usage:") || strings.Contains(stderr, "Usage:") {
-		t.Fatalf("canonical manifest error should not print usage:\nstdout=%s\nstderr=%s", stdout, stderr)
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("stdout is not workspace init JSON: %v\n%s", err, stdout)
+	}
+	if result.Status != "initialized" || result.WorkspaceDir != workspaceDir {
+		t.Fatalf("init result = %+v", result)
+	}
+	if result.ManifestPath != canonicalPath || result.SourceManifest != nonCanonicalPath {
+		t.Fatalf("manifest paths = %+v", result)
+	}
+	copiedBytes, err := os.ReadFile(canonicalPath)
+	if err != nil {
+		t.Fatalf("expected canonical manifest copy: %v", err)
+	}
+	if !bytes.Equal(copiedBytes, manifestBytes) {
+		t.Fatalf("canonical manifest copy changed contents:\n%s", copiedBytes)
+	}
+	if result.LockPath == "" {
+		t.Fatalf("init did not write lock: %+v", result)
+	}
+	var lock struct {
+		Plans []struct {
+			LockPath string `json:"lock_path"`
+		} `json:"plans"`
+	}
+	lockBytes, err := os.ReadFile(result.LockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(lockBytes, &lock); err != nil {
+		t.Fatalf("lock is not JSON: %v\n%s", err, lockBytes)
+	}
+	if len(lock.Plans) != 1 || lock.Plans[0].LockPath != filepath.Join(workspaceDir, "plans", "foundation", "feature.plan.lock.json") {
+		t.Fatalf("relative plan path was not resolved from manifest directory: %+v", lock.Plans)
+	}
+
+	stdout, stderr, err = runFeature(t, "workspace", "status", workspaceDir, "--json")
+	if err != nil {
+		t.Fatalf("feature workspace status failed after canonicalization: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
 	}
 }
 
