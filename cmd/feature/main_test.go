@@ -928,25 +928,58 @@ func TestWorkspaceAttemptStartCommandJSON(t *testing.T) {
 		t.Fatalf("feature workspace attempt start failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
 	}
 	var attempt struct {
-		Status        string   `json:"status"`
-		MergeUnitID   string   `json:"merge_unit_id"`
-		AttemptID     string   `json:"attempt_id"`
-		AttemptNumber int      `json:"attempt_number"`
-		Branch        string   `json:"branch"`
-		Worktree      string   `json:"worktree"`
-		BaseRef       string   `json:"base_ref"`
-		BaseSHA       string   `json:"base_sha"`
-		Mode          string   `json:"mode"`
-		Commands      []string `json:"commands"`
+		Status          string   `json:"status"`
+		Repo            string   `json:"repo"`
+		MergeUnitID     string   `json:"merge_unit_id"`
+		PlanID          string   `json:"plan_id"`
+		PlanMergeUnitID string   `json:"plan_merge_unit_id"`
+		StoryIDs        []string `json:"story_ids"`
+		Dependencies    []string `json:"dependencies"`
+		AttemptID       string   `json:"attempt_id"`
+		AttemptNumber   int      `json:"attempt_number"`
+		AgentID         string   `json:"agent_id"`
+		LeaseID         string   `json:"lease_id"`
+		Branch          string   `json:"branch"`
+		Worktree        string   `json:"worktree"`
+		BaseRef         string   `json:"base_ref"`
+		BaseSHA         string   `json:"base_sha"`
+		Mode            string   `json:"mode"`
+		Commands        []string `json:"commands"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &attempt); err != nil {
 		t.Fatalf("attempt stdout is not JSON: %v\n%s", err, stdout)
+	}
+	var attemptRaw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(stdout), &attemptRaw); err != nil {
+		t.Fatalf("attempt stdout is not an object: %v\n%s", err, stdout)
+	}
+	for _, field := range []string{"story_ids", "dependencies"} {
+		raw, ok := attemptRaw[field]
+		if !ok {
+			t.Fatalf("attempt worker packet omitted %s:\n%s", field, stdout)
+		}
+		var values []string
+		if err := json.Unmarshal(raw, &values); err != nil {
+			t.Fatalf("attempt worker packet %s is not a string array: %v\n%s", field, err, stdout)
+		}
+		if values == nil {
+			t.Fatalf("attempt worker packet %s is null, want JSON array:\n%s", field, stdout)
+		}
 	}
 	if attempt.Status != "started" || attempt.MergeUnitID != "foundation:story-a" || attempt.AttemptID != "foundation:story-a:attempt-1" {
 		t.Fatalf("attempt result = %+v", attempt)
 	}
 	if attempt.AttemptNumber != 1 || attempt.BaseRef != "workspace-orchestration" || attempt.BaseSHA != "base-sha-cli" || attempt.Mode != "fresh-from-base" {
 		t.Fatalf("attempt metadata = %+v", attempt)
+	}
+	if attempt.Repo != workspaceDir || attempt.PlanID != "foundation" || attempt.PlanMergeUnitID != "story-a" {
+		t.Fatalf("worker packet plan context = %+v", attempt)
+	}
+	if attempt.AgentID != "worker-a" || attempt.LeaseID != claim.LeaseID {
+		t.Fatalf("worker packet lease context = %+v", attempt)
+	}
+	if strings.Join(attempt.StoryIDs, ",") != "story-a" || len(attempt.Dependencies) != 0 {
+		t.Fatalf("worker packet story context = story_ids %+v dependencies %+v", attempt.StoryIDs, attempt.Dependencies)
 	}
 	if attempt.Branch != "feature/workspace-a/foundation/story-a/attempt-1" {
 		t.Fatalf("branch = %q", attempt.Branch)
@@ -1007,16 +1040,52 @@ func TestWorkspaceAttemptAbandonCommandJSON(t *testing.T) {
 		t.Fatalf("feature workspace attempt abandon failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
 	}
 	var abandoned struct {
-		Status      string `json:"status"`
-		MergeUnitID string `json:"merge_unit_id"`
-		AttemptID   string `json:"attempt_id"`
-		Reason      string `json:"reason"`
+		Status          string   `json:"status"`
+		MergeUnitID     string   `json:"merge_unit_id"`
+		PlanID          string   `json:"plan_id"`
+		PlanMergeUnitID string   `json:"plan_merge_unit_id"`
+		StoryIDs        []string `json:"story_ids"`
+		AttemptID       string   `json:"attempt_id"`
+		Reason          string   `json:"reason"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &abandoned); err != nil {
 		t.Fatalf("abandon stdout is not JSON: %v\n%s", err, stdout)
 	}
 	if abandoned.Status != "abandoned" || abandoned.MergeUnitID != claim.MergeUnitID || abandoned.AttemptID != started.AttemptID || abandoned.Reason != "review findings require restart" {
 		t.Fatalf("abandon result = %+v", abandoned)
+	}
+	if abandoned.PlanID != "foundation" || abandoned.PlanMergeUnitID != "story-a" || strings.Join(abandoned.StoryIDs, ",") != "story-a" {
+		t.Fatalf("abandon worker packet context = %+v", abandoned)
+	}
+
+	stdout, stderr, err = runFeature(t, "workspace", "status", workspaceDir, "--json")
+	if err != nil {
+		t.Fatalf("feature workspace status after abandon failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var status struct {
+		MergeUnits []struct {
+			ID             string `json:"id"`
+			Status         string `json:"status"`
+			CurrentAttempt *struct {
+				AttemptID string `json:"attempt_id"`
+			} `json:"current_attempt,omitempty"`
+		} `json:"merge_units"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &status); err != nil {
+		t.Fatalf("status after abandon stdout is not JSON: %v\n%s", err, stdout)
+	}
+	found := false
+	for _, unit := range status.MergeUnits {
+		if unit.ID != claim.MergeUnitID {
+			continue
+		}
+		found = true
+		if unit.Status != "pending" || unit.CurrentAttempt != nil {
+			t.Fatalf("status after abandon unit = %+v", unit)
+		}
+	}
+	if !found {
+		t.Fatalf("merge unit %s missing from status after abandon: %+v", claim.MergeUnitID, status.MergeUnits)
 	}
 }
 
@@ -1157,13 +1226,20 @@ func TestWorkspaceAttemptRestartEnforcesCurrentAttempt(t *testing.T) {
 	}
 	var status struct {
 		MergeUnits []struct {
-			ID             string `json:"id"`
-			Status         string `json:"status"`
+			ID             string   `json:"id"`
+			PlanID         string   `json:"plan_id"`
+			PlanMergeUnit  string   `json:"merge_unit_id"`
+			StoryIDs       []string `json:"story_ids"`
+			Dependencies   []string `json:"dependencies"`
+			Status         string   `json:"status"`
 			CurrentAttempt *struct {
 				AttemptID     string `json:"attempt_id"`
 				AttemptNumber int    `json:"attempt_number"`
+				AgentID       string `json:"agent_id"`
+				LeaseID       string `json:"lease_id"`
 				Branch        string `json:"branch"`
 				Worktree      string `json:"worktree"`
+				BaseRef       string `json:"base_ref"`
 				BaseSHA       string `json:"base_sha"`
 				Mode          string `json:"mode"`
 				Status        string `json:"status"`
@@ -1182,13 +1258,19 @@ func TestWorkspaceAttemptRestartEnforcesCurrentAttempt(t *testing.T) {
 		if unit.Status != "in_progress" {
 			t.Fatalf("merge unit status = %q", unit.Status)
 		}
+		if unit.PlanID != "foundation" || unit.PlanMergeUnit != "story-a" || strings.Join(unit.StoryIDs, ",") != "story-a" || len(unit.Dependencies) != 0 {
+			t.Fatalf("merge unit worker context = %+v", unit)
+		}
 		if unit.CurrentAttempt == nil {
 			t.Fatalf("current attempt missing for %+v", unit)
 		}
 		if unit.CurrentAttempt.AttemptID != second.AttemptID ||
 			unit.CurrentAttempt.AttemptNumber != second.AttemptNumber ||
+			unit.CurrentAttempt.AgentID != "worker-a" ||
+			unit.CurrentAttempt.LeaseID != claim.LeaseID ||
 			unit.CurrentAttempt.Branch != second.Branch ||
 			unit.CurrentAttempt.Worktree != second.Worktree ||
+			unit.CurrentAttempt.BaseRef != "workspace-orchestration" ||
 			unit.CurrentAttempt.BaseSHA != second.BaseSHA ||
 			unit.CurrentAttempt.Mode != second.Mode ||
 			unit.CurrentAttempt.Status != "active" {

@@ -141,22 +141,27 @@ type TransitionOptions struct {
 }
 
 type AttemptResult struct {
-	Status        string   `json:"status"`
-	WorkspaceDir  string   `json:"workspace_dir"`
-	WorkspaceID   string   `json:"workspace_id"`
-	BaseRef       string   `json:"base_ref"`
-	MergeUnitID   string   `json:"merge_unit_id"`
-	AttemptID     string   `json:"attempt_id"`
-	AttemptNumber int      `json:"attempt_number"`
-	AgentID       string   `json:"agent_id"`
-	LeaseID       string   `json:"lease_id"`
-	Branch        string   `json:"branch"`
-	Worktree      string   `json:"worktree"`
-	BaseSHA       string   `json:"base_sha"`
-	Mode          string   `json:"mode"`
-	Lifecycle     string   `json:"lifecycle"`
-	Reason        string   `json:"reason,omitempty"`
-	Commands      []string `json:"commands,omitempty"`
+	Status          string   `json:"status"`
+	WorkspaceDir    string   `json:"workspace_dir"`
+	WorkspaceID     string   `json:"workspace_id"`
+	Repo            string   `json:"repo"`
+	BaseRef         string   `json:"base_ref"`
+	MergeUnitID     string   `json:"merge_unit_id"`
+	PlanID          string   `json:"plan_id"`
+	PlanMergeUnitID string   `json:"plan_merge_unit_id"`
+	StoryIDs        []string `json:"story_ids"`
+	Dependencies    []string `json:"dependencies"`
+	AttemptID       string   `json:"attempt_id"`
+	AttemptNumber   int      `json:"attempt_number"`
+	AgentID         string   `json:"agent_id"`
+	LeaseID         string   `json:"lease_id"`
+	Branch          string   `json:"branch"`
+	Worktree        string   `json:"worktree"`
+	BaseSHA         string   `json:"base_sha"`
+	Mode            string   `json:"mode"`
+	Lifecycle       string   `json:"lifecycle"`
+	Reason          string   `json:"reason,omitempty"`
+	Commands        []string `json:"commands,omitempty"`
 }
 
 type TransitionResult struct {
@@ -527,21 +532,26 @@ func StartAttempt(opts AttemptStartOptions) (AttemptResult, error) {
 		return AttemptResult{}, err
 	}
 	return AttemptResult{
-		Status:        "started",
-		WorkspaceDir:  opts.WorkspaceDir,
-		WorkspaceID:   state.View.WorkspaceID,
-		BaseRef:       state.View.BaseRef,
-		MergeUnitID:   opts.MergeUnitID,
-		AttemptID:     attemptID,
-		AttemptNumber: nextNumber,
-		AgentID:       opts.AgentID,
-		LeaseID:       opts.LeaseID,
-		Branch:        branch,
-		Worktree:      worktree,
-		BaseSHA:       opts.BaseSHA,
-		Mode:          opts.Mode,
-		Lifecycle:     unit.Status,
-		Commands:      commands,
+		Status:          "started",
+		WorkspaceDir:    opts.WorkspaceDir,
+		WorkspaceID:     state.View.WorkspaceID,
+		Repo:            state.View.Repo,
+		BaseRef:         state.View.BaseRef,
+		MergeUnitID:     opts.MergeUnitID,
+		PlanID:          unit.PlanID,
+		PlanMergeUnitID: unit.MergeUnitID,
+		StoryIDs:        append([]string{}, unit.StoryIDs...),
+		Dependencies:    append([]string{}, unit.Dependencies...),
+		AttemptID:       attemptID,
+		AttemptNumber:   nextNumber,
+		AgentID:         opts.AgentID,
+		LeaseID:         opts.LeaseID,
+		Branch:          branch,
+		Worktree:        worktree,
+		BaseSHA:         opts.BaseSHA,
+		Mode:            opts.Mode,
+		Lifecycle:       unit.Status,
+		Commands:        commands,
 	}, nil
 }
 
@@ -592,21 +602,26 @@ func AbandonAttempt(opts AttemptAbandonOptions) (AttemptResult, error) {
 		return AttemptResult{}, err
 	}
 	return AttemptResult{
-		Status:        attemptStatusAbandoned,
-		WorkspaceDir:  opts.WorkspaceDir,
-		WorkspaceID:   state.View.WorkspaceID,
-		BaseRef:       state.View.BaseRef,
-		MergeUnitID:   opts.MergeUnitID,
-		AttemptID:     current.AttemptID,
-		AttemptNumber: current.AttemptNumber,
-		AgentID:       opts.AgentID,
-		LeaseID:       opts.LeaseID,
-		Branch:        current.Branch,
-		Worktree:      current.Worktree,
-		BaseSHA:       current.BaseSHA,
-		Mode:          current.Mode,
-		Lifecycle:     unit.Status,
-		Reason:        opts.Reason,
+		Status:          attemptStatusAbandoned,
+		WorkspaceDir:    opts.WorkspaceDir,
+		WorkspaceID:     state.View.WorkspaceID,
+		Repo:            state.View.Repo,
+		BaseRef:         state.View.BaseRef,
+		MergeUnitID:     opts.MergeUnitID,
+		PlanID:          unit.PlanID,
+		PlanMergeUnitID: unit.MergeUnitID,
+		StoryIDs:        append([]string{}, unit.StoryIDs...),
+		Dependencies:    append([]string{}, unit.Dependencies...),
+		AttemptID:       current.AttemptID,
+		AttemptNumber:   current.AttemptNumber,
+		AgentID:         opts.AgentID,
+		LeaseID:         opts.LeaseID,
+		Branch:          current.Branch,
+		Worktree:        current.Worktree,
+		BaseSHA:         current.BaseSHA,
+		Mode:            current.Mode,
+		Lifecycle:       unit.Status,
+		Reason:          opts.Reason,
 	}, nil
 }
 

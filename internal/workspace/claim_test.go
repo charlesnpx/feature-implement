@@ -835,6 +835,15 @@ func TestStartAttemptRecordsFirstAttempt(t *testing.T) {
 	if attempt.BaseRef != fixtureWorkspaceBaseRef || attempt.BaseSHA != "base-sha-1" || attempt.Mode != "fresh-from-base" {
 		t.Fatalf("base/mode metadata = %+v", attempt)
 	}
+	if attempt.Repo != fixture.Dir || attempt.PlanID != "foundation" || attempt.PlanMergeUnitID != "story-a" {
+		t.Fatalf("worker packet plan context = %+v", attempt)
+	}
+	if len(attempt.StoryIDs) != 1 || attempt.StoryIDs[0] != "story-a" || len(attempt.Dependencies) != 0 {
+		t.Fatalf("worker packet story context = story_ids %+v dependencies %+v", attempt.StoryIDs, attempt.Dependencies)
+	}
+	if attempt.AgentID != "worker-a" || attempt.LeaseID != claim.LeaseID {
+		t.Fatalf("worker packet lease context = %+v", attempt)
+	}
 	wantCommand := "git -C " + fixture.Dir + " worktree add -b feature/workspace-a/foundation/story-a/attempt-1 " + wantWorktree + " base-sha-1"
 	if len(attempt.Commands) != 1 || attempt.Commands[0] != wantCommand {
 		t.Fatalf("commands = %+v, want %q", attempt.Commands, wantCommand)
