@@ -101,6 +101,8 @@ type refreshSnapshot struct {
 	AttemptID    string
 	Status       string
 	Resource     string
+	OldBase      string
+	NewBase      string
 	EvidencePath string
 }
 
@@ -138,7 +140,7 @@ func (t *refreshTracker) Conditions(mergeUnitID string, attemptID string) []Sche
 	if !ok || snapshot.Status != RefreshStatusVerificationFailed {
 		return nil
 	}
-	if attemptID != "" && snapshot.AttemptID != attemptID {
+	if attemptID == "" || snapshot.AttemptID != attemptID {
 		return nil
 	}
 	return []SchedulerBlockingCondition{{
@@ -189,7 +191,7 @@ func RefreshBranch(opts RefreshBranchOptions) (RefreshBranchResult, error) {
 	if err != nil {
 		return RefreshBranchResult{}, err
 	}
-	evidence, err := runLocalRefresh(opts, state.View.WorkspaceID, state.View.BaseRef, current, worktree, commandResults, refreshedAt)
+	evidence, err := runLocalRefresh(opts, state.View.WorkspaceID, state.View.BaseRef, state.Events, current, worktree, commandResults, refreshedAt)
 	if err != nil {
 		return RefreshBranchResult{}, err
 	}
@@ -275,10 +277,12 @@ func refreshSnapshotFromEvent(event JournalEvent) (refreshSnapshot, error) {
 	if _, err := eventStringPayload(event, eventPayloadWorktreeKey); err != nil {
 		return refreshSnapshot{}, err
 	}
-	if _, err := eventStringPayload(event, eventPayloadOldBaseKey); err != nil {
+	oldBase, err := eventStringPayload(event, eventPayloadOldBaseKey)
+	if err != nil {
 		return refreshSnapshot{}, err
 	}
-	if _, err := eventStringPayload(event, eventPayloadNewBaseKey); err != nil {
+	newBase, err := eventStringPayload(event, eventPayloadNewBaseKey)
+	if err != nil {
 		return refreshSnapshot{}, err
 	}
 	if _, err := eventStringPayload(event, eventPayloadPreHeadKey); err != nil {
@@ -295,8 +299,30 @@ func refreshSnapshotFromEvent(event JournalEvent) (refreshSnapshot, error) {
 		AttemptID:    attemptID,
 		Status:       status,
 		Resource:     resource,
+		OldBase:      oldBase,
+		NewBase:      newBase,
 		EvidencePath: evidencePath,
 	}, nil
+}
+
+func latestSuccessfulRefresh(events []JournalEvent, mergeUnitID string, attemptID string) (refreshSnapshot, bool) {
+	var latest refreshSnapshot
+	found := false
+	for _, event := range events {
+		if event.Type != EventBranchRefreshRecorded {
+			continue
+		}
+		snapshot, err := refreshSnapshotFromEvent(event)
+		if err != nil {
+			continue
+		}
+		if snapshot.MergeUnitID != mergeUnitID || snapshot.AttemptID != attemptID || snapshot.Status != RefreshStatusSucceeded {
+			continue
+		}
+		latest = snapshot
+		found = true
+	}
+	return latest, found
 }
 
 func normalizeRefreshCommandResults(values []ContractCommandResult) ([]ContractCommandResult, error) {
@@ -318,7 +344,7 @@ func normalizeRefreshCommandResults(values []ContractCommandResult) ([]ContractC
 	return results, nil
 }
 
-func runLocalRefresh(opts RefreshBranchOptions, workspaceID string, baseRef string, attempt attemptSnapshot, worktree string, commandResults []ContractCommandResult, refreshedAt time.Time) (RefreshEvidence, error) {
+func runLocalRefresh(opts RefreshBranchOptions, workspaceID string, baseRef string, events []JournalEvent, attempt attemptSnapshot, worktree string, commandResults []ContractCommandResult, refreshedAt time.Time) (RefreshEvidence, error) {
 	if dirty, err := gitOutput(worktree, "status", "--porcelain"); err != nil {
 		return RefreshEvidence{}, err
 	} else if strings.TrimSpace(dirty) != "" {
@@ -336,12 +362,20 @@ func runLocalRefresh(opts RefreshBranchOptions, workspaceID string, baseRef stri
 	if err == nil && strings.TrimSpace(upstream) != "" {
 		return RefreshEvidence{}, fmt.Errorf("local refresh requires an unpublished branch; %s tracks %s", branch, strings.TrimSpace(upstream))
 	}
+	if remoteRef, err := remoteTrackingRef(worktree, branch); err != nil {
+		return RefreshEvidence{}, err
+	} else if remoteRef != "" {
+		return RefreshEvidence{}, fmt.Errorf("local refresh requires an unpublished branch; %s has remote ref %s", branch, remoteRef)
+	}
 	preHead, err := gitOutput(worktree, "rev-parse", "HEAD")
 	if err != nil {
 		return RefreshEvidence{}, err
 	}
 	preHead = strings.TrimSpace(preHead)
 	oldBase := attempt.BaseSHA
+	if latest, ok := latestSuccessfulRefresh(events, opts.MergeUnitID, opts.AttemptID); ok {
+		oldBase = latest.NewBase
+	}
 	newBase, err := gitOutput(worktree, "rev-parse", opts.NewBase)
 	if err != nil {
 		return RefreshEvidence{}, err
@@ -437,6 +471,20 @@ func patchIDs(worktree string, base string, head string) ([]RefreshPatchID, erro
 		ids = append(ids, RefreshPatchID{PatchID: fields[0], Commit: commit})
 	}
 	return ids, nil
+}
+
+func remoteTrackingRef(worktree string, branch string) (string, error) {
+	output, err := gitOutput(worktree, "for-each-ref", "--format=%(refname:short)", "refs/remotes")
+	if err != nil {
+		return "", err
+	}
+	suffix := "/" + branch
+	for _, ref := range nonEmptyLines(output) {
+		if strings.HasSuffix(ref, suffix) {
+			return ref, nil
+		}
+	}
+	return "", nil
 }
 
 func verifyRefreshContribution(beforeFiles []string, afterFiles []string, beforePatchIDs []RefreshPatchID, afterPatchIDs []RefreshPatchID) RefreshVerification {

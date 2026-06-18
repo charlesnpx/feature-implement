@@ -231,6 +231,89 @@ func TestLocalGitRefreshBranchSmoke(t *testing.T) {
 	}
 }
 
+func TestLocalGitRefreshRejectsRemoteRefSmoke(t *testing.T) {
+	if os.Getenv(localGitSmokeEnv) != "1" {
+		t.Skipf("set %s=1 to run the local git refresh remote-ref smoke test", localGitSmokeEnv)
+	}
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git executable is unavailable")
+	}
+
+	root := t.TempDir()
+	hooksDir := filepath.Join(root, "no-hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitEnv := isolatedGitEnv(hooksDir)
+
+	repoDir := filepath.Join(root, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, gitPath, gitEnv, repoDir, "init")
+	runGit(t, gitPath, gitEnv, repoDir, "checkout", "-b", fixtureWorkspaceBaseRef)
+	runGit(t, gitPath, gitEnv, repoDir, "config", "user.email", "feature-smoke@example.test")
+	runGit(t, gitPath, gitEnv, repoDir, "config", "user.name", "Feature Smoke")
+	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, gitPath, gitEnv, repoDir, "add", "README.md")
+	runGit(t, gitPath, gitEnv, repoDir, "commit", "-m", "base")
+	baseSHA := strings.TrimSpace(runGitOutput(t, gitPath, gitEnv, repoDir, "rev-parse", "HEAD"))
+
+	fixture := newOnePlanWorkspaceFixture(t)
+	writeWorkspaceLock(t, fixture.Dir)
+	claim, err := Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	attempt, err := StartAttempt(AttemptStartOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		BaseSHA:      baseSHA,
+		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("StartAttempt: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(attempt.Worktree), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	worktreeAdded := false
+	t.Cleanup(func() {
+		if !worktreeAdded {
+			return
+		}
+		runGitCleanup(gitPath, gitEnv, repoDir, "worktree", "remove", "--force", attempt.Worktree)
+		runGitCleanup(gitPath, gitEnv, repoDir, "branch", "-D", attempt.Branch)
+	})
+	runGit(t, gitPath, gitEnv, repoDir, "worktree", "add", "-b", attempt.Branch, attempt.Worktree, attempt.BaseRef)
+	worktreeAdded = true
+	runGit(t, gitPath, gitEnv, repoDir, "update-ref", "refs/remotes/origin/"+attempt.Branch, baseSHA)
+
+	_, err = RefreshBranch(RefreshBranchOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Local:        true,
+		NewBase:      baseSHA,
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "has remote ref origin/"+attempt.Branch) {
+		t.Fatalf("RefreshBranch remote ref error = %v", err)
+	}
+}
+
 func runGit(t *testing.T, gitPath string, gitEnv []string, dir string, args ...string) {
 	t.Helper()
 	_ = runGitOutput(t, gitPath, gitEnv, dir, args...)
