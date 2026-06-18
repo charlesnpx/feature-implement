@@ -9,6 +9,19 @@ import (
 
 func TestValidateWritesDeterministicWorkspaceLock(t *testing.T) {
 	fixture := newMultiPlanWorkspaceFixture(t)
+	fixture.Manifest.ContractGates = []WorkspaceContractGate{{
+		ID:        "api-contract",
+		Producers: []string{"foundation:story-a"},
+		Consumers: []string{"sources:story-b"},
+		Artifacts: []WorkspaceArtifactSpec{{
+			ID:   "openapi",
+			Path: "./contracts/../contracts/openapi.yaml",
+		}},
+		Validation: WorkspaceGateValidation{
+			Commands: []string{"go test ./...", "feature workspace contract verify api-contract"},
+		},
+	}}
+	writeWorkspaceManifest(t, fixture.Dir, fixture.Manifest)
 
 	first, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir, WriteLock: true})
 	if err != nil {
@@ -46,6 +59,25 @@ func TestValidateWritesDeterministicWorkspaceLock(t *testing.T) {
 	}
 	if got := first.Lock.MergeUnits[1].Dependencies; len(got) != 1 || got[0] != "foundation:story-a" {
 		t.Fatalf("sources dependencies = %+v", got)
+	}
+	if len(first.Lock.ContractGates) != 1 {
+		t.Fatalf("contract gates = %+v", first.Lock.ContractGates)
+	}
+	gate := first.Lock.ContractGates[0]
+	if gate.ID != "api-contract" {
+		t.Fatalf("contract gate id = %q", gate.ID)
+	}
+	if len(gate.Producers) != 1 || gate.Producers[0] != "foundation:story-a" {
+		t.Fatalf("contract gate producers = %+v", gate.Producers)
+	}
+	if len(gate.Consumers) != 1 || gate.Consumers[0] != "sources:story-b" {
+		t.Fatalf("contract gate consumers = %+v", gate.Consumers)
+	}
+	if len(gate.Artifacts) != 1 || gate.Artifacts[0].ID != "openapi" || gate.Artifacts[0].Path != "contracts/openapi.yaml" {
+		t.Fatalf("contract gate artifacts = %+v", gate.Artifacts)
+	}
+	if len(gate.ValidationCommands) != 2 || gate.ValidationCommands[0] != "go test ./..." || gate.ValidationCommands[1] != "feature workspace contract verify api-contract" {
+		t.Fatalf("contract gate validation commands = %+v", gate.ValidationCommands)
 	}
 	if second.LockPath != first.LockPath {
 		t.Fatalf("lock path changed: %q != %q", second.LockPath, first.LockPath)
@@ -94,6 +126,32 @@ func TestValidateRejectsUnknownWorkspaceDependencyEndpoint(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsUnknownContractGateProducer(t *testing.T) {
+	fixture := newMultiPlanWorkspaceFixture(t)
+	fixture.Manifest.ContractGates = []WorkspaceContractGate{validContractGateForFixture()}
+	fixture.Manifest.ContractGates[0].Producers = []string{"foundation:missing"}
+	writeWorkspaceManifest(t, fixture.Dir, fixture.Manifest)
+
+	_, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir})
+
+	if err == nil || !strings.Contains(err.Error(), "contract gate api-contract: producer 1: unknown merge unit foundation:missing") {
+		t.Fatalf("Validate error = %v", err)
+	}
+}
+
+func TestValidateRejectsUnknownContractGateConsumer(t *testing.T) {
+	fixture := newMultiPlanWorkspaceFixture(t)
+	fixture.Manifest.ContractGates = []WorkspaceContractGate{validContractGateForFixture()}
+	fixture.Manifest.ContractGates[0].Consumers = []string{"sources:missing"}
+	writeWorkspaceManifest(t, fixture.Dir, fixture.Manifest)
+
+	_, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir})
+
+	if err == nil || !strings.Contains(err.Error(), "contract gate api-contract: consumer 1: unknown merge unit sources:missing") {
+		t.Fatalf("Validate error = %v", err)
+	}
+}
+
 func TestBuildLockRejectsDuplicateGlobalMergeUnitIDs(t *testing.T) {
 	fixture := newMultiPlanWorkspaceFixture(t)
 	lock := readFixturePlanLock(t, fixture.Plans["foundation"])
@@ -132,4 +190,19 @@ func mustReadWorkspaceManifest(t *testing.T, workspaceDir string) WorkspaceManif
 		t.Fatal(err)
 	}
 	return manifest
+}
+
+func validContractGateForFixture() WorkspaceContractGate {
+	return WorkspaceContractGate{
+		ID:        "api-contract",
+		Producers: []string{"foundation:story-a"},
+		Consumers: []string{"sources:story-b"},
+		Artifacts: []WorkspaceArtifactSpec{{
+			ID:   "openapi",
+			Path: "contracts/openapi.yaml",
+		}},
+		Validation: WorkspaceGateValidation{
+			Commands: []string{"go test ./..."},
+		},
+	}
 }

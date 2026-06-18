@@ -3,6 +3,7 @@ package workspace
 import (
 	"fmt"
 	"os"
+	"path"
 	"regexp"
 	"strings"
 
@@ -17,6 +18,7 @@ const (
 )
 
 var safeID = regexp.MustCompile(safeIDPattern)
+var windowsVolumePath = regexp.MustCompile(`^[A-Za-z]:`)
 
 type WorkspaceManifest struct {
 	SchemaVersion int                     `yaml:"schema_version" json:"schema_version"`
@@ -43,7 +45,13 @@ type WorkspaceContractGate struct {
 	ID         string                  `yaml:"id" json:"id"`
 	Producers  []string                `yaml:"producers" json:"producers"`
 	Consumers  []string                `yaml:"consumers" json:"consumers"`
+	Artifacts  []WorkspaceArtifactSpec `yaml:"artifacts" json:"artifacts"`
 	Validation WorkspaceGateValidation `yaml:"validation,omitempty" json:"validation,omitempty"`
+}
+
+type WorkspaceArtifactSpec struct {
+	ID   string `yaml:"id" json:"id"`
+	Path string `yaml:"path" json:"path"`
 }
 
 type WorkspaceGateValidation struct {
@@ -113,9 +121,26 @@ func ValidateManifest(manifest WorkspaceManifest) error {
 			return fmt.Errorf("dependency %d after: %w", i+1, err)
 		}
 	}
+	gateIDs := map[string]bool{}
 	for _, gate := range manifest.ContractGates {
 		if err := requireSafeID(gate.ID, "contract gate"); err != nil {
 			return err
+		}
+		if gateIDs[gate.ID] {
+			return fmt.Errorf("duplicate contract gate id %s", gate.ID)
+		}
+		gateIDs[gate.ID] = true
+		if len(gate.Producers) == 0 {
+			return fmt.Errorf("contract gate %s requires at least one producer", gate.ID)
+		}
+		if len(gate.Consumers) == 0 {
+			return fmt.Errorf("contract gate %s requires at least one consumer", gate.ID)
+		}
+		if len(gate.Artifacts) == 0 {
+			return fmt.Errorf("contract gate %s requires at least one artifact", gate.ID)
+		}
+		if len(gate.Validation.Commands) == 0 {
+			return fmt.Errorf("contract gate %s requires at least one validation command", gate.ID)
 		}
 		for i, producer := range gate.Producers {
 			if err := validateMergeUnitRef(producer, planIDs); err != nil {
@@ -127,6 +152,19 @@ func ValidateManifest(manifest WorkspaceManifest) error {
 				return fmt.Errorf("contract gate %s consumer %d: %w", gate.ID, i+1, err)
 			}
 		}
+		artifactIDs := map[string]bool{}
+		for i, artifact := range gate.Artifacts {
+			if err := requireSafeID(artifact.ID, "contract artifact"); err != nil {
+				return err
+			}
+			if artifactIDs[artifact.ID] {
+				return fmt.Errorf("contract gate %s duplicate artifact id %s", gate.ID, artifact.ID)
+			}
+			artifactIDs[artifact.ID] = true
+			if _, err := normalizeRepoArtifactPath(artifact.Path); err != nil {
+				return fmt.Errorf("contract gate %s artifact %d: %w", gate.ID, i+1, err)
+			}
+		}
 		for i, command := range gate.Validation.Commands {
 			if strings.TrimSpace(command) == "" {
 				return fmt.Errorf("contract gate %s validation command %d is blank", gate.ID, i+1)
@@ -134,6 +172,22 @@ func ValidateManifest(manifest WorkspaceManifest) error {
 		}
 	}
 	return nil
+}
+
+func normalizeRepoArtifactPath(value string) (string, error) {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return "", fmt.Errorf("artifact path is required")
+	}
+	slashPath := strings.ReplaceAll(raw, "\\", "/")
+	if path.IsAbs(slashPath) || windowsVolumePath.MatchString(slashPath) {
+		return "", fmt.Errorf("artifact path %q must be repository-relative", value)
+	}
+	cleaned := path.Clean(slashPath)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", fmt.Errorf("artifact path %q must stay within the repository", value)
+	}
+	return cleaned, nil
 }
 
 func ParseMergeUnitRef(value string) (MergeUnitRef, error) {

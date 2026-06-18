@@ -31,13 +31,14 @@ type ValidateResult struct {
 }
 
 type WorkspaceLock struct {
-	SchemaVersion int                      `json:"schema_version"`
-	WorkspaceID   string                   `json:"workspace_id"`
-	Repo          string                   `json:"repo"`
-	BaseRef       string                   `json:"base_ref"`
-	Remote        string                   `json:"remote"`
-	Plans         []WorkspacePlanLock      `json:"plans"`
-	MergeUnits    []WorkspaceMergeUnitLock `json:"merge_units"`
+	SchemaVersion int                         `json:"schema_version"`
+	WorkspaceID   string                      `json:"workspace_id"`
+	Repo          string                      `json:"repo"`
+	BaseRef       string                      `json:"base_ref"`
+	Remote        string                      `json:"remote"`
+	Plans         []WorkspacePlanLock         `json:"plans"`
+	MergeUnits    []WorkspaceMergeUnitLock    `json:"merge_units"`
+	ContractGates []WorkspaceContractGateLock `json:"contract_gates,omitempty"`
 }
 
 type WorkspacePlanLock struct {
@@ -53,6 +54,19 @@ type WorkspaceMergeUnitLock struct {
 	MergeUnitID  string   `json:"merge_unit_id"`
 	StoryIDs     []string `json:"story_ids"`
 	Dependencies []string `json:"dependencies,omitempty"`
+}
+
+type WorkspaceContractGateLock struct {
+	ID                 string                          `json:"id"`
+	Producers          []string                        `json:"producers"`
+	Consumers          []string                        `json:"consumers"`
+	Artifacts          []WorkspaceContractArtifactLock `json:"artifacts"`
+	ValidationCommands []string                        `json:"validation_commands"`
+}
+
+type WorkspaceContractArtifactLock struct {
+	ID   string `json:"id"`
+	Path string `json:"path"`
 }
 
 type loadedPlanLock struct {
@@ -112,6 +126,11 @@ func BuildLock(workspaceDir string, manifest WorkspaceManifest) (WorkspaceLock, 
 		return WorkspaceLock{}, err
 	}
 	lock.MergeUnits = mergeUnits
+	contractGates, err := buildContractGateLocks(manifest.ContractGates, knownMergeUnitSet(mergeUnits))
+	if err != nil {
+		return WorkspaceLock{}, err
+	}
+	lock.ContractGates = contractGates
 	return lock, nil
 }
 
@@ -211,6 +230,79 @@ func buildMergeUnitIndex(manifest WorkspaceManifest, plans []loadedPlanLock) ([]
 	}
 	sort.Slice(units, func(i, j int) bool { return units[i].ID < units[j].ID })
 	return units, nil
+}
+
+func knownMergeUnitSet(units []WorkspaceMergeUnitLock) map[string]bool {
+	known := map[string]bool{}
+	for _, unit := range units {
+		known[unit.ID] = true
+	}
+	return known
+}
+
+func buildContractGateLocks(gates []WorkspaceContractGate, knownMergeUnits map[string]bool) ([]WorkspaceContractGateLock, error) {
+	locked := make([]WorkspaceContractGateLock, 0, len(gates))
+	for _, gate := range gates {
+		producers, err := requireKnownMergeUnitRefs(gate.Producers, knownMergeUnits, "producer")
+		if err != nil {
+			return nil, fmt.Errorf("contract gate %s: %w", gate.ID, err)
+		}
+		consumers, err := requireKnownMergeUnitRefs(gate.Consumers, knownMergeUnits, "consumer")
+		if err != nil {
+			return nil, fmt.Errorf("contract gate %s: %w", gate.ID, err)
+		}
+		artifacts, err := lockContractArtifacts(gate.Artifacts)
+		if err != nil {
+			return nil, fmt.Errorf("contract gate %s: %w", gate.ID, err)
+		}
+		commands := make([]string, 0, len(gate.Validation.Commands))
+		for _, command := range gate.Validation.Commands {
+			commands = append(commands, command)
+		}
+		locked = append(locked, WorkspaceContractGateLock{
+			ID:                 gate.ID,
+			Producers:          producers,
+			Consumers:          consumers,
+			Artifacts:          artifacts,
+			ValidationCommands: commands,
+		})
+	}
+	sort.Slice(locked, func(i, j int) bool { return locked[i].ID < locked[j].ID })
+	return locked, nil
+}
+
+func requireKnownMergeUnitRefs(values []string, known map[string]bool, kind string) ([]string, error) {
+	refs := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for i, value := range values {
+		ref, err := requireKnownMergeUnitRef(value, known)
+		if err != nil {
+			return nil, fmt.Errorf("%s %d: %w", kind, i+1, err)
+		}
+		if seen[ref] {
+			return nil, fmt.Errorf("duplicate %s merge unit %s", kind, ref)
+		}
+		seen[ref] = true
+		refs = append(refs, ref)
+	}
+	sort.Strings(refs)
+	return refs, nil
+}
+
+func lockContractArtifacts(artifacts []WorkspaceArtifactSpec) ([]WorkspaceContractArtifactLock, error) {
+	locked := make([]WorkspaceContractArtifactLock, 0, len(artifacts))
+	for i, artifact := range artifacts {
+		path, err := normalizeRepoArtifactPath(artifact.Path)
+		if err != nil {
+			return nil, fmt.Errorf("artifact %d: %w", i+1, err)
+		}
+		locked = append(locked, WorkspaceContractArtifactLock{
+			ID:   artifact.ID,
+			Path: path,
+		})
+	}
+	sort.Slice(locked, func(i, j int) bool { return locked[i].ID < locked[j].ID })
+	return locked, nil
 }
 
 func planStories(lock planpkg.Lock) []planpkg.Story {
