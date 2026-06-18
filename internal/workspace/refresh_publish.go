@@ -110,6 +110,17 @@ func PublishRefresh(opts PublishRefreshOptions) (PublishRefreshResult, error) {
 		return PublishRefreshResult{}, fmt.Errorf("publish-refresh worktree %s does not match refreshed worktree %s", worktree, refresh.Worktree)
 	}
 	remote := opts.Remote
+	observedRemoteSHA, err := opts.remoteHeadResolver(worktree, remote, branch)
+	if err != nil {
+		return PublishRefreshResult{}, err
+	}
+	if observedRemoteSHA != opts.ExpectedRemoteSHA {
+		result, recordErr := appendRemoteBranchMovedRefreshEvent(opts, state, refresh, branch, worktree, remote, observedRemoteSHA, plannedAt)
+		if recordErr != nil {
+			return PublishRefreshResult{}, recordErr
+		}
+		return result, RemoteBranchMovedError{Result: result}
+	}
 	planned, err := PlanExternalProviderCommand(ExternalProviderPlanOptions{
 		WorkspaceDir:     opts.WorkspaceDir,
 		MergeUnitID:      opts.MergeUnitID,
@@ -129,18 +140,7 @@ func PublishRefresh(opts PublishRefreshOptions) (PublishRefreshResult, error) {
 	if err != nil {
 		return PublishRefreshResult{}, err
 	}
-	observedRemoteSHA, err := opts.remoteHeadResolver(worktree, remote, branch)
-	if err != nil {
-		return PublishRefreshResult{}, err
-	}
-	if observedRemoteSHA != opts.ExpectedRemoteSHA {
-		result, recordErr := appendRemoteBranchMovedRefreshEvent(opts, state, refresh, branch, worktree, remote, observedRemoteSHA, plannedAt)
-		if recordErr != nil {
-			return PublishRefreshResult{}, recordErr
-		}
-		return result, RemoteBranchMovedError{Result: result}
-	}
-	planned.Plan.ProviderCommand = forceWithLeasePushCommand(worktree, remote, branch, opts.ExpectedRemoteSHA)
+	planned.Plan.ProviderCommand = forceWithLeasePushCommand(worktree, remote, branch, refresh.PostHead, opts.ExpectedRemoteSHA)
 	if len(planned.Plan.Commands) >= 3 {
 		planned.Plan.Commands[2] = planned.Plan.ProviderCommand
 	}
@@ -261,14 +261,14 @@ func appendRemoteBranchMovedRefreshEvent(opts PublishRefreshOptions, state lease
 	}, nil
 }
 
-func forceWithLeasePushCommand(worktree string, remote string, branch string, expectedRemoteSHA string) string {
+func forceWithLeasePushCommand(worktree string, remote string, branch string, headSHA string, expectedRemoteSHA string) string {
 	return strings.Join([]string{
 		"git",
 		"-C", shellQuote(worktree),
 		"push",
 		shellQuote("--force-with-lease=refs/heads/" + branch + ":" + expectedRemoteSHA),
 		shellQuote(remote),
-		shellQuote("HEAD:refs/heads/" + branch),
+		shellQuote(headSHA + ":refs/heads/" + branch),
 	}, " ")
 }
 
