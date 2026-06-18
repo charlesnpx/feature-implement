@@ -35,6 +35,10 @@ func TestRebuildSchedulerViewEmptyJournalDefaultsFromLock(t *testing.T) {
 	if got := findSchedulerUnit(t, view, "sources:story-b").BlockedBy; !reflect.DeepEqual(got, []string{"foundation:story-a"}) {
 		t.Fatalf("blocked by = %+v", got)
 	}
+	conditions := findSchedulerUnit(t, view, "sources:story-b").BlockingConditions
+	if len(conditions) != 1 || conditions[0].Type != "dependency" || conditions[0].Resource != "foundation:story-a" {
+		t.Fatalf("blocking conditions = %+v", conditions)
+	}
 	if _, err := os.Stat(SchedulerViewPath(fixture.Dir)); err != nil {
 		t.Fatalf("scheduler view file missing: %v", err)
 	}

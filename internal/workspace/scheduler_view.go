@@ -37,16 +37,24 @@ type SchedulerView struct {
 }
 
 type SchedulerMergeUnitView struct {
-	ID               string                  `json:"id"`
-	PlanID           string                  `json:"plan_id"`
-	MergeUnitID      string                  `json:"merge_unit_id"`
-	StoryIDs         []string                `json:"story_ids"`
-	Dependencies     []string                `json:"dependencies,omitempty"`
-	Status           string                  `json:"status"`
-	BlockedBy        []string                `json:"blocked_by,omitempty"`
-	ActiveLease      *SchedulerLeaseView     `json:"active_lease,omitempty"`
-	CurrentAttempt   *SchedulerAttemptView   `json:"current_attempt,omitempty"`
-	ContractBindings []ContractBindingStatus `json:"contract_bindings,omitempty"`
+	ID                 string                       `json:"id"`
+	PlanID             string                       `json:"plan_id"`
+	MergeUnitID        string                       `json:"merge_unit_id"`
+	StoryIDs           []string                     `json:"story_ids"`
+	Dependencies       []string                     `json:"dependencies,omitempty"`
+	Status             string                       `json:"status"`
+	BlockedBy          []string                     `json:"blocked_by,omitempty"`
+	BlockingConditions []SchedulerBlockingCondition `json:"blocking_conditions,omitempty"`
+	ActiveLease        *SchedulerLeaseView          `json:"active_lease,omitempty"`
+	CurrentAttempt     *SchedulerAttemptView        `json:"current_attempt,omitempty"`
+	ContractBindings   []ContractBindingStatus      `json:"contract_bindings,omitempty"`
+}
+
+type SchedulerBlockingCondition struct {
+	Type       string `json:"type"`
+	Resource   string `json:"resource"`
+	ContractID string `json:"contract_id,omitempty"`
+	ArtifactID string `json:"artifact_id,omitempty"`
 }
 
 type SchedulerLeaseView struct {
@@ -176,10 +184,11 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 		view.Counts[unit.Status]++
 		if unit.Status == MergeUnitPending {
 			unit.BlockedBy = incompleteDependencies(unit.Dependencies, unitByID)
+			unit.BlockingConditions = schedulerBlockingConditions(unit.BlockedBy, unit.ContractBindings)
 			if unit.ActiveLease != nil {
 				continue
 			}
-			if len(unit.BlockedBy) == 0 {
+			if len(unit.BlockingConditions) == 0 {
 				view.Ready = append(view.Ready, unit.ID)
 			} else {
 				view.Blocked = append(view.Blocked, unit.ID)
@@ -410,6 +419,37 @@ func incompleteDependencies(dependencies []string, unitByID map[string]*Schedule
 	}
 	sort.Strings(blockedBy)
 	return blockedBy
+}
+
+func schedulerBlockingConditions(dependencies []string, bindings []ContractBindingStatus) []SchedulerBlockingCondition {
+	conditions := make([]SchedulerBlockingCondition, 0, len(dependencies)+len(bindings))
+	for _, dependency := range dependencies {
+		conditions = append(conditions, SchedulerBlockingCondition{
+			Type:     "dependency",
+			Resource: dependency,
+		})
+	}
+	for _, binding := range bindings {
+		if binding.Status != contractBindingStatusStale {
+			continue
+		}
+		conditions = append(conditions, SchedulerBlockingCondition{
+			Type:       "stale_contract",
+			Resource:   binding.ContractID + ":" + binding.ArtifactID,
+			ContractID: binding.ContractID,
+			ArtifactID: binding.ArtifactID,
+		})
+	}
+	sort.Slice(conditions, func(i, j int) bool {
+		if conditions[i].Type != conditions[j].Type {
+			return conditions[i].Type < conditions[j].Type
+		}
+		if conditions[i].Resource != conditions[j].Resource {
+			return conditions[i].Resource < conditions[j].Resource
+		}
+		return conditions[i].ContractID < conditions[j].ContractID
+	})
+	return conditions
 }
 
 func ensureLifecycleCounts(counts map[string]int) {
