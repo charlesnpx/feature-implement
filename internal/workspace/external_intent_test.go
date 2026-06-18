@@ -482,6 +482,16 @@ func TestRecordExternalIntentResultRejectsUnknownStatusAndDuplicate(t *testing.T
 func TestReconcileExternalIntentClearsUnresolvedFreezeAfterLeaseRelease(t *testing.T) {
 	fixture, claim, attempt, approval := newExternalIntentFixture(t, ExternalActionPush)
 	reserved := reserveExternalIntentForTest(t, fixture, claim, attempt, approval, "feature/test", "head-sha", "2026-06-17T10:03:00Z")
+	_, err := ReconcileExternalIntent(ExternalIntentReconcileOptions{
+		WorkspaceDir: fixture.Dir,
+		IntentID:     reserved.Intent.IntentID,
+		Operator:     "operator-a",
+		Details:      "operator confirmed no provider side effect",
+		Now:          fixedJournalTime("2026-06-17T10:03:30Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "has no recorded result while lease") {
+		t.Fatalf("reconcile while active lease error = %v", err)
+	}
 	if _, err := Release(LeaseOptions{
 		WorkspaceDir: fixture.Dir,
 		AgentID:      "worker-a",
@@ -522,6 +532,54 @@ func TestReconcileExternalIntentClearsUnresolvedFreezeAfterLeaseRelease(t *testi
 	}
 	if len(status.FrozenResources) != 0 {
 		t.Fatalf("unresolved freeze after reconcile = %+v", status.FrozenResources)
+	}
+}
+
+func TestLegacyReconciledByOperatorResultEventStillReplays(t *testing.T) {
+	fixture, claim, attempt, approval := newExternalIntentFixture(t, ExternalActionPush)
+	reserved := reserveExternalIntentForTest(t, fixture, claim, attempt, approval, "feature/test", "head-sha", "2026-06-17T10:03:00Z")
+	revisions, err := ResourceRevisions(fixture.Dir)
+	if err != nil {
+		t.Fatalf("ResourceRevisions: %v", err)
+	}
+	intentResource := ExternalIntentResource(reserved.Intent.IntentID)
+	affectedResources := append([]string{}, reserved.Intent.AffectedResources...)
+	readSet := map[string]int{
+		intentResource: revisions[intentResource],
+	}
+	writeSet := []string{intentResource}
+	for _, resource := range affectedResources {
+		readSet[resource] = revisions[resource]
+		writeSet = append(writeSet, resource)
+	}
+	if _, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: fixture.Dir,
+		Type:         EventExternalIntentResultRecorded,
+		Payload: map[string]any{
+			eventPayloadIntentIDKey:       reserved.Intent.IntentID,
+			eventPayloadMergeUnitIDKey:    claim.MergeUnitID,
+			eventPayloadAttemptIDKey:      attempt.AttemptID,
+			eventPayloadAgentIDKey:        "worker-a",
+			eventPayloadLeaseIDKey:        claim.LeaseID,
+			eventPayloadActionKey:         reserved.Intent.Action,
+			eventPayloadTargetKey:         reserved.Intent.Target,
+			eventPayloadStatusKey:         ExternalResultReconciledByOperator,
+			eventPayloadPolicyAcceptedKey: true,
+			eventPayloadDetailsKey:        "legacy operator result",
+		},
+		ReadSet:  readSet,
+		WriteSet: writeSet,
+		Now:      fixedJournalTime("2026-06-17T10:04:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent legacy reconciled result: %v", err)
+	}
+
+	status, err := Status(fixture.Dir)
+	if err != nil {
+		t.Fatalf("Status with legacy reconciled result: %v", err)
+	}
+	if len(status.FrozenResources) != 0 {
+		t.Fatalf("legacy reconciled result should clear freezes: %+v", status.FrozenResources)
 	}
 }
 

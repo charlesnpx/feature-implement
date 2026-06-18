@@ -3,6 +3,7 @@ package workspace
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 const (
@@ -360,7 +361,7 @@ func externalIntentRecordedResultFromEvent(event JournalEvent) (externalIntentRe
 	if err != nil {
 		return externalIntentRecordedResultSnapshot{}, err
 	}
-	normalizedStatus, err := normalizeExternalIntentResultStatus(status)
+	normalizedStatus, err := normalizeExternalIntentRecordedEventStatus(status)
 	if err != nil {
 		return externalIntentRecordedResultSnapshot{}, err
 	}
@@ -385,6 +386,21 @@ func externalIntentRecordedResultFromEvent(event JournalEvent) (externalIntentRe
 			event.EventHash,
 		),
 	}, nil
+}
+
+func normalizeExternalIntentRecordedEventStatus(value string) (string, error) {
+	status := strings.TrimSpace(strings.ToLower(value))
+	switch status {
+	case ExternalResultSucceeded,
+		ExternalResultNotPerformed,
+		ExternalResultFailedBeforeSideEffect,
+		ExternalResultFailedAfterSideEffect,
+		ExternalResultAmbiguous,
+		ExternalResultReconciledByOperator:
+		return status, nil
+	default:
+		return "", fmt.Errorf("unsupported external intent result status: %s", value)
+	}
 }
 
 type externalIntentReconciliationSnapshot struct {
