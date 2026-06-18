@@ -88,6 +88,9 @@ func PlanExternalProviderCommand(opts ExternalProviderPlanOptions) (ExternalProv
 	if err := validateAttemptLeaseOwner(reserveOpts.AttemptID, current.AgentID, current.LeaseID, reserveOpts.AgentID, reserveOpts.LeaseID); err != nil {
 		return ExternalProviderPlanResult{}, err
 	}
+	if err := validateExternalProviderPlanApproval(state.Events, reserveOpts, plannedAt); err != nil {
+		return ExternalProviderPlanResult{}, err
+	}
 	identity := deriveExternalIntentIdentity(state.View.WorkspaceID, reserveOpts, target)
 	intentResource := ExternalIntentResource(identity.intentID)
 	if observed := state.Revisions[intentResource]; observed != 0 {
@@ -154,6 +157,28 @@ func normalizeExternalProviderPlanOptions(opts ExternalProviderPlanOptions) (Ext
 		Now:              opts.Now,
 	}
 	return normalizeExternalIntentReserveOptions(reserveOpts)
+}
+
+func validateExternalProviderPlanApproval(events []JournalEvent, opts ExternalIntentReserveOptions, plannedAt time.Time) error {
+	approvals, err := approvalSnapshots(events)
+	if err != nil {
+		return err
+	}
+	approval, ok := approvals[opts.ApprovalID]
+	if !ok {
+		return fmt.Errorf("approval not found: %s", opts.ApprovalID)
+	}
+	return approvalMatches(approval, approvalMatchRequest{
+		mergeUnitID: opts.MergeUnitID,
+		attemptID:   opts.AttemptID,
+		action:      opts.Action,
+		scope:       opts.Scope,
+		pr:          opts.PR,
+		branch:      opts.Branch,
+		headSHA:     opts.RequestedHeadSHA,
+		baseSHA:     opts.ExpectedBaseSHA,
+		now:         plannedAt,
+	})
 }
 
 func externalProviderPlanView(opts ExternalIntentReserveOptions, worktree string, remote string, baseRef string, title string, prBody string, marker ExternalProviderMarker) (ExternalProviderPlanView, error) {

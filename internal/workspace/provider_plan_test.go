@@ -156,6 +156,83 @@ func TestPlanExternalProviderMergeAndRemoteDeleteCommands(t *testing.T) {
 	})
 }
 
+func TestPlanExternalProviderRequiresMatchingApproval(t *testing.T) {
+	t.Run("missing approval", func(t *testing.T) {
+		fixture, claim, attempt, _ := newExternalIntentFixture(t, ExternalActionPush)
+		_, err := PlanExternalProviderCommand(ExternalProviderPlanOptions{
+			WorkspaceDir:     fixture.Dir,
+			MergeUnitID:      claim.MergeUnitID,
+			AttemptID:        attempt.AttemptID,
+			AgentID:          "worker-a",
+			LeaseID:          claim.LeaseID,
+			ApprovalID:       "approval-missing",
+			Action:           ExternalActionPush,
+			Branch:           "feature/test",
+			RequestedHeadSHA: "head-sha",
+			ExpectedBaseSHA:  "base-sha",
+			Now:              fixedJournalTime("2026-06-17T10:03:00Z"),
+		})
+		if err == nil || !strings.Contains(err.Error(), "approval not found") {
+			t.Fatalf("PlanExternalProviderCommand error = %v, want missing approval", err)
+		}
+	})
+
+	t.Run("mismatched approval", func(t *testing.T) {
+		fixture, claim, attempt, approval := newExternalIntentFixture(t, ExternalActionPush)
+		_, err := PlanExternalProviderCommand(ExternalProviderPlanOptions{
+			WorkspaceDir:     fixture.Dir,
+			MergeUnitID:      claim.MergeUnitID,
+			AttemptID:        attempt.AttemptID,
+			AgentID:          "worker-a",
+			LeaseID:          claim.LeaseID,
+			ApprovalID:       approval.Approval.ApprovalID,
+			Action:           ExternalActionPush,
+			Branch:           "feature/test",
+			RequestedHeadSHA: "different-head",
+			ExpectedBaseSHA:  "base-sha",
+			Now:              fixedJournalTime("2026-06-17T10:03:00Z"),
+		})
+		if err == nil || !strings.Contains(err.Error(), "is for head head-sha, not different-head") {
+			t.Fatalf("PlanExternalProviderCommand error = %v, want head mismatch", err)
+		}
+	})
+
+	t.Run("exhausted approval", func(t *testing.T) {
+		fixture, claim, attempt, approval := newExternalIntentFixture(t, ExternalActionPush)
+		for i := 0; i < approval.Approval.MaxUses; i++ {
+			if _, err := ConsumeApproval(ApprovalConsumeOptions{
+				WorkspaceDir: fixture.Dir,
+				MergeUnitID:  claim.MergeUnitID,
+				AttemptID:    attempt.AttemptID,
+				ApprovalID:   approval.Approval.ApprovalID,
+				Action:       ExternalActionPush,
+				Branch:       "feature/test",
+				HeadSHA:      "head-sha",
+				BaseSHA:      "base-sha",
+				Now:          fixedJournalTime("2026-06-17T10:03:00Z"),
+			}); err != nil {
+				t.Fatalf("ConsumeApproval %d: %v", i, err)
+			}
+		}
+		_, err := PlanExternalProviderCommand(ExternalProviderPlanOptions{
+			WorkspaceDir:     fixture.Dir,
+			MergeUnitID:      claim.MergeUnitID,
+			AttemptID:        attempt.AttemptID,
+			AgentID:          "worker-a",
+			LeaseID:          claim.LeaseID,
+			ApprovalID:       approval.Approval.ApprovalID,
+			Action:           ExternalActionPush,
+			Branch:           "feature/test",
+			RequestedHeadSHA: "head-sha",
+			ExpectedBaseSHA:  "base-sha",
+			Now:              fixedJournalTime("2026-06-17T10:04:00Z"),
+		})
+		if err == nil || !strings.Contains(err.Error(), "has no uses remaining") {
+			t.Fatalf("PlanExternalProviderCommand error = %v, want exhausted approval", err)
+		}
+	})
+}
+
 func parseProviderMarker(t *testing.T, body string) ExternalProviderMarker {
 	t.Helper()
 	const prefix = "<!-- feature-workspace "
