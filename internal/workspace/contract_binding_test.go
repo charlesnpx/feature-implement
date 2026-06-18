@@ -107,6 +107,29 @@ func TestBindContractRejectsUnpublishedContract(t *testing.T) {
 	}
 }
 
+func TestBindContractRequiresBindCommandResults(t *testing.T) {
+	fixture := newContractWorkspaceFixture(t)
+	publishFixtureContract(t, fixture, "v1", "producer-commit-1", "2026-06-17T10:00:00Z")
+	claim, attempt := startFixtureConsumerAttempt(t, fixture, "2026-06-17T10")
+
+	_, err := BindContract(ContractBindOptions{
+		WorkspaceDir: fixture.Dir,
+		ContractID:   "api-contract",
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-consumer",
+		LeaseID:      claim.LeaseID,
+		Now:          fixedJournalTime("2026-06-17T10:09:00Z"),
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "workspace contract bind requires --command-result") {
+		t.Fatalf("BindContract error = %v", err)
+	}
+	if strings.Contains(err.Error(), "publish") {
+		t.Fatalf("bind validation should not report publish command: %v", err)
+	}
+}
+
 func TestContractBindingsAreAttemptScoped(t *testing.T) {
 	fixture := newContractWorkspaceFixture(t)
 	publishFixtureContract(t, fixture, "v1", "producer-commit-1", "2026-06-17T10:00:00Z")

@@ -163,6 +163,9 @@ func BindContract(opts ContractBindOptions) (ContractBindResult, error) {
 	if !found {
 		return ContractBindResult{}, fmt.Errorf("contract %s artifact %s is unpublished", gate.ID, artifact.ID)
 	}
+	if len(opts.CommandResults) == 0 {
+		return ContractBindResult{}, fmt.Errorf("workspace contract bind requires --command-result for each validation command")
+	}
 	commandResults, err := normalizeContractCommandResults(gate, opts.CommandResults)
 	if err != nil {
 		return ContractBindResult{}, err
