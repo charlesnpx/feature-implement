@@ -253,6 +253,8 @@ func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, attempts *
 		return externalIntents.Apply(event)
 	case EventBranchRefreshRecorded:
 		return refreshes.Apply(event)
+	case EventGateEvaluationRecorded:
+		return nil
 	default:
 		return fmt.Errorf("unknown scheduler event type %q", event.Type)
 	}
@@ -547,6 +549,9 @@ func readWorkspaceLock(path string) (WorkspaceLock, error) {
 	var lock WorkspaceLock
 	if err := json.Unmarshal(b, &lock); err != nil {
 		return WorkspaceLock{}, fmt.Errorf("parse %s: %w", filepath.Base(path), err)
+	}
+	if lock.GatePolicy.ID == "" || lock.GatePolicy.Version == "" || len(lock.GatePolicy.RetentionRules) == 0 {
+		return WorkspaceLock{}, fmt.Errorf("workspace lock missing gate_policy; run feature workspace validate <workspace-dir> --write-lock")
 	}
 	return lock, nil
 }

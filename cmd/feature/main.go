@@ -58,7 +58,7 @@ func usage(w io.Writer) {
   feature validate <plan-dir> [--write-lock] [--json]
   feature status <plan-dir> [--json]
   feature implement next|start|commit|push|open-pr|review|merge|cleanup <plan-dir> [--merge-unit <id>] [--write-state] [metadata flags] [--json]
-  feature workspace init|validate|status|next|heartbeat|release|recover|refresh-branch|publish-refresh|attempt|transition|contract|approve|external [args]
+  feature workspace init|validate|status|next|heartbeat|release|recover|refresh-branch|publish-refresh|evaluate-gates|attempt|transition|contract|approve|external [args]
   feature version`)
 }
 
@@ -303,7 +303,7 @@ func implementCommand(args []string) error {
 
 func workspaceCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("workspace requires subcommand: init, validate, status, next, heartbeat, release, recover, refresh-branch, publish-refresh, attempt, transition, contract, approve, or external")
+		return fmt.Errorf("workspace requires subcommand: init, validate, status, next, heartbeat, release, recover, refresh-branch, publish-refresh, evaluate-gates, attempt, transition, contract, approve, or external")
 	}
 	action := args[0]
 	if isHelpCommand(action) {
@@ -334,6 +334,8 @@ func workspaceCommand(args []string) error {
 		return workspaceRefreshBranch(args[1:])
 	case "publish-refresh":
 		return workspacePublishRefresh(args[1:])
+	case "evaluate-gates":
+		return workspaceEvaluateGates(args[1:])
 	case "attempt":
 		return workspaceAttempt(args[1:])
 	case "transition":
@@ -347,6 +349,40 @@ func workspaceCommand(args []string) error {
 	default:
 		return workspace.ErrNotImplemented(action)
 	}
+}
+
+func workspaceEvaluateGates(args []string) error {
+	fs := flag.NewFlagSet("workspace evaluate-gates", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	mergeUnitID := fs.String("merge-unit", "", "Merge unit ID")
+	attemptID := fs.String("attempt", "", "Attempt ID")
+	agentID := fs.String("agent", "", "Agent ID that owns the lease")
+	leaseID := fs.String("lease", "", "Lease ID")
+	asJSON := fs.Bool("json", false, "Emit JSON result")
+	if err := parsePermissive(fs, args, "merge-unit", "attempt", "agent", "lease"); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("workspace evaluate-gates requires <workspace-dir>")
+	}
+	result, err := workspace.EvaluateGates(workspace.GateEvaluateOptions{
+		WorkspaceDir: fs.Arg(0),
+		MergeUnitID:  *mergeUnitID,
+		AttemptID:    *attemptID,
+		AgentID:      *agentID,
+		LeaseID:      *leaseID,
+	})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(result)
+	}
+	fmt.Printf("gates %s attempt=%s input_hash=%s output_hash=%s\n", result.MergeUnitID, result.AttemptID, result.InputHash, result.OutputHash)
+	for _, gate := range result.Gates {
+		fmt.Printf("gate %s status=%s reason=%s\n", gate.Gate, gate.Status, gate.Reason)
+	}
+	return nil
 }
 
 func workspaceValidate(args []string) error {
@@ -1592,6 +1628,7 @@ func usageWorkspace(w io.Writer) {
   feature workspace recover <workspace-dir> [--json]
   feature workspace refresh-branch <workspace-dir> --local --merge-unit <id> --attempt <id> --agent <id> --lease <id> --new-base <ref> [--worktree <path>] [--backup-ref <ref>] [--command-result <command=status>] [--json]
   feature workspace publish-refresh <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --approval <id> --expected-remote-sha <sha> [--branch <name>] [--remote <name>] [--worktree <path>] [--scope <scope>] [--json]
+  feature workspace evaluate-gates <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> [--json]
   feature workspace attempt start <workspace-dir> --merge-unit <id> --agent <id> --lease <id> --base-sha <sha> [--mode fresh-from-base] [--json]
   feature workspace attempt abandon <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --reason <text> [--json]
   feature workspace transition <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --from <status> --to <status> --evidence <key=value> [--evidence <key=value>] [--json]
@@ -1654,6 +1691,11 @@ Refreshes an unpublished local attempt branch with backup, rebase evidence, cont
   feature workspace publish-refresh <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --approval <id> --expected-remote-sha <sha> [--branch <name>] [--remote <name>] [--worktree <path>] [--scope <scope>] [--json]
 
 Plans an approved force-with-lease publish of the latest successful local refresh.`)
+	case "evaluate-gates":
+		fmt.Fprintln(w, `Usage:
+  feature workspace evaluate-gates <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> [--json]
+
+Computes and records attempt-scoped review, contract, security, test, and merge approval gates.`)
 	case "transition":
 		fmt.Fprintln(w, `Usage:
   feature workspace transition <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --from <status> --to <status> --evidence <key=value> [--evidence <key=value>] [--json]

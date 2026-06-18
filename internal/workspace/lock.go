@@ -36,6 +36,7 @@ type WorkspaceLock struct {
 	Repo          string                      `json:"repo"`
 	BaseRef       string                      `json:"base_ref"`
 	Remote        string                      `json:"remote"`
+	GatePolicy    WorkspaceGatePolicyLock     `json:"gate_policy"`
 	Plans         []WorkspacePlanLock         `json:"plans"`
 	MergeUnits    []WorkspaceMergeUnitLock    `json:"merge_units"`
 	ContractGates []WorkspaceContractGateLock `json:"contract_gates,omitempty"`
@@ -67,6 +68,18 @@ type WorkspaceContractGateLock struct {
 type WorkspaceContractArtifactLock struct {
 	ID   string `json:"id"`
 	Path string `json:"path"`
+}
+
+type WorkspaceGatePolicyLock struct {
+	ID             string                                 `json:"id"`
+	Version        string                                 `json:"version"`
+	RetentionRules []WorkspaceGatePolicyRetentionRuleLock `json:"retention_rules"`
+}
+
+type WorkspaceGatePolicyRetentionRuleLock struct {
+	Evidence     string `json:"evidence"`
+	Scope        string `json:"scope"`
+	CarryForward bool   `json:"carry_forward"`
 }
 
 type loadedPlanLock struct {
@@ -104,6 +117,7 @@ func BuildLock(workspaceDir string, manifest WorkspaceManifest) (WorkspaceLock, 
 		Repo:          manifest.Repo,
 		BaseRef:       manifest.BaseRef,
 		Remote:        manifest.Remote,
+		GatePolicy:    defaultWorkspaceGatePolicyLock(),
 	}
 	loadedPlans := []loadedPlanLock{}
 	for _, plan := range manifest.Plans {
@@ -132,6 +146,18 @@ func BuildLock(workspaceDir string, manifest WorkspaceManifest) (WorkspaceLock, 
 	}
 	lock.ContractGates = contractGates
 	return lock, nil
+}
+
+func defaultWorkspaceGatePolicyLock() WorkspaceGatePolicyLock {
+	return WorkspaceGatePolicyLock{
+		ID:      "default-review-gates",
+		Version: "1",
+		RetentionRules: []WorkspaceGatePolicyRetentionRuleLock{
+			{Evidence: "reviews", Scope: "attempt", CarryForward: false},
+			{Evidence: "check_results", Scope: "attempt", CarryForward: false},
+			{Evidence: "refresh_inputs", Scope: "attempt", CarryForward: false},
+		},
+	}
 }
 
 func resolveWorkspacePath(workspaceDir string, path string) string {
