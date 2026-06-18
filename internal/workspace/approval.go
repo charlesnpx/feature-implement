@@ -616,7 +616,17 @@ func addApprovalRefreshInputReadSet(readSet map[string]int, revisions map[string
 }
 
 func approvalStaleInputsFromEvents(events []JournalEvent, approval approvalSnapshot) []string {
-	return approvalStaleInputsForValues(approval, latestRefreshInputValues(events, approval.MergeUnitID, approval.AttemptID))
+	if !isTightMergeApproval(approval) {
+		return nil
+	}
+	stale := approvalStaleInputsForValues(approval, latestRefreshInputValues(events, approval.MergeUnitID, approval.AttemptID))
+	changedAfterGrant := refreshInputsChangedAfterApproval(events, approval)
+	for _, input := range []string{refreshInputBase, refreshInputHead} {
+		if changedAfterGrant[input] && !containsString(stale, input) {
+			stale = append(stale, input)
+		}
+	}
+	return stale
 }
 
 func latestRefreshInputValues(events []JournalEvent, mergeUnitID string, attemptID string) map[string]string {
@@ -654,6 +664,34 @@ func approvalStaleInputsForValues(approval approvalSnapshot, inputValues map[str
 		stale = append(stale, refreshInputHead)
 	}
 	return stale
+}
+
+func refreshInputsChangedAfterApproval(events []JournalEvent, approval approvalSnapshot) map[string]bool {
+	changed := map[string]bool{}
+	seenApprovalGrant := false
+	for _, event := range events {
+		if event.Type == EventApprovalGranted {
+			approvalID, err := eventStringPayload(event, eventPayloadApprovalIDKey)
+			if err == nil && approvalID == approval.ApprovalID {
+				seenApprovalGrant = true
+			}
+			continue
+		}
+		if !seenApprovalGrant || event.Type != EventBranchRefreshRecorded {
+			continue
+		}
+		refresh, err := refreshSnapshotFromEvent(event)
+		if err != nil {
+			continue
+		}
+		if refresh.MergeUnitID != approval.MergeUnitID || refresh.AttemptID != approval.AttemptID {
+			continue
+		}
+		for _, change := range refresh.InputChanges {
+			changed[change.Input] = true
+		}
+	}
+	return changed
 }
 
 func approvalSnapshots(events []JournalEvent) (map[string]approvalSnapshot, error) {

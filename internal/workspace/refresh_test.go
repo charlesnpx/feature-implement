@@ -543,6 +543,58 @@ func TestStaleApprovalAccumulatesRefreshInputChanges(t *testing.T) {
 	}
 }
 
+func TestStaleApprovalRemainsStaleWhenRefreshValuesRevert(t *testing.T) {
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	granted, err := GrantApproval(ApprovalGrantOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Actions:      []string{"merge"},
+		PR:           "42",
+		HeadSHA:      "head-sha-1",
+		BaseSHA:      attempt.BaseSHA,
+		MaxUses:      1,
+		ExpiresAt:    time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC),
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("GrantApproval: %v", err)
+	}
+	appendRefreshEvidenceForTest(t, fixture, claim, attempt, attempt.BaseSHA, "base-sha-2", "head-sha-1", "head-sha-2", "2026-06-17T10:03:00Z")
+	appendRefreshEvidenceForTest(t, fixture, claim, attempt, "base-sha-2", attempt.BaseSHA, "head-sha-2", "head-sha-1", "2026-06-17T10:04:00Z")
+
+	status, err := Status(fixture.Dir)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	unit := findSchedulerUnit(t, SchedulerView{MergeUnits: status.MergeUnits}, claim.MergeUnitID)
+	if len(unit.Approvals) != 1 {
+		t.Fatalf("status approvals = %+v", unit.Approvals)
+	}
+	approval := unit.Approvals[0]
+	if approval.ApprovalID != granted.Approval.ApprovalID || approval.Status != "stale" || !stringSlicesEqual(approval.StaleInputs, []string{refreshInputBase, refreshInputHead}) {
+		t.Fatalf("stale approval after reverted refresh = %+v", approval)
+	}
+	check, err := CheckApproval(ApprovalCheckOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		Action:       "merge",
+		PR:           "42",
+		HeadSHA:      "head-sha-1",
+		BaseSHA:      attempt.BaseSHA,
+		Now:          fixedJournalTime("2026-06-17T10:05:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("CheckApproval: %v", err)
+	}
+	if check.Status != "denied" || len(check.Approvals) != 0 {
+		t.Fatalf("stale approval check after reverted refresh = %+v", check)
+	}
+}
+
 func TestAppendRefreshEventAfterMutationRejectsStaleAttempt(t *testing.T) {
 	fixture, claim, attempt := newApprovalAttemptFixture(t)
 	revisions, err := ResourceRevisions(fixture.Dir)
