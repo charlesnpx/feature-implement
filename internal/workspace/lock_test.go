@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	planpkg "github.com/charlesnpx/feature-implement/internal/plan"
 )
 
 func TestValidateWritesDeterministicWorkspaceLock(t *testing.T) {
@@ -222,6 +224,60 @@ func TestValidateReportsMissingPlanLock(t *testing.T) {
 
 	if err == nil || !strings.Contains(err.Error(), "plan sources lock") {
 		t.Fatalf("Validate error = %v", err)
+	}
+}
+
+func TestBuildLockAcceptsMatchingOrOmittedPlanLockBaseAndRemote(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+
+	if _, err := BuildLock(fixture.Dir, mustReadWorkspaceManifest(t, fixture.Dir)); err != nil {
+		t.Fatalf("BuildLock matching plan metadata: %v", err)
+	}
+
+	lock := readFixturePlanLock(t, fixture.Plans["foundation"])
+	lock.BaseRef = ""
+	lock.Remote = ""
+	writeFixturePlanLock(t, fixture.Plans["foundation"], lock)
+
+	if _, err := BuildLock(fixture.Dir, mustReadWorkspaceManifest(t, fixture.Dir)); err != nil {
+		t.Fatalf("BuildLock omitted plan metadata: %v", err)
+	}
+}
+
+func TestBuildLockRejectsMismatchedPlanLockBaseAndRemote(t *testing.T) {
+	tests := []struct {
+		name string
+		edit func(*planpkg.Lock)
+		want string
+	}{
+		{
+			name: "base ref",
+			edit: func(lock *planpkg.Lock) {
+				lock.BaseRef = "main"
+			},
+			want: `plan foundation lock base_ref "main" does not match workspace base_ref "workspace-orchestration"`,
+		},
+		{
+			name: "remote",
+			edit: func(lock *planpkg.Lock) {
+				lock.Remote = "upstream"
+			},
+			want: `plan foundation lock remote "upstream" does not match workspace remote "origin"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newOnePlanWorkspaceFixture(t)
+			lock := readFixturePlanLock(t, fixture.Plans["foundation"])
+			tt.edit(&lock)
+			writeFixturePlanLock(t, fixture.Plans["foundation"], lock)
+
+			_, err := BuildLock(fixture.Dir, mustReadWorkspaceManifest(t, fixture.Dir))
+
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("BuildLock error = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }
 
