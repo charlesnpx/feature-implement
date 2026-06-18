@@ -80,14 +80,9 @@ func TestWorkspaceNamespaceDoesNotChangeImplementCommandContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("feature implement --help failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
 	}
-	for _, want := range []string{
-		"feature implement next|start|commit|push|open-pr|review|merge|cleanup",
-		"[--write-state]",
-		"[metadata flags]",
-	} {
-		if !strings.Contains(stdout, want) {
-			t.Fatalf("implement help missing %q:\n%s", want, stdout)
-		}
+	wantUsage := "feature implement next|start|commit|push|open-pr|review|merge|cleanup <plan-dir> [--merge-unit <id>] [--write-state] [metadata flags] [--json]"
+	if !strings.Contains(stdout, wantUsage) {
+		t.Fatalf("implement help changed command contract:\n%s", stdout)
 	}
 	for _, forbidden := range []string{"feature workspace", "workspace attempt", "feature.workspace"} {
 		if strings.Contains(stdout, forbidden) {
@@ -95,12 +90,14 @@ func TestWorkspaceNamespaceDoesNotChangeImplementCommandContract(t *testing.T) {
 		}
 	}
 
-	stdout, stderr, err = runFeature(t, "implement", "workspace")
-	if err == nil {
-		t.Fatalf("feature implement workspace should fail")
-	}
-	if !strings.Contains(stderr, "unsupported implement action: workspace") {
-		t.Fatalf("expected unsupported implement action error:\nstdout=%s\nstderr=%s", stdout, stderr)
+	for _, action := range []string{"workspace", "attempt"} {
+		stdout, stderr, err = runFeature(t, "implement", action)
+		if err == nil {
+			t.Fatalf("feature implement %s should fail", action)
+		}
+		if !strings.Contains(stderr, "unsupported implement action: "+action) {
+			t.Fatalf("expected unsupported implement action error:\nstdout=%s\nstderr=%s", stdout, stderr)
+		}
 	}
 }
 
@@ -1066,13 +1063,14 @@ func TestInstallSkillsPlanAllCommandJSONDoesNotWrite(t *testing.T) {
 			}
 		}
 	}
-	for _, path := range []string{
-		filepath.Join(stage, ".local", "bin", "feature"),
-		filepath.Join(stage, ".codex", "skills", "feature", "SKILL.md"),
-		filepath.Join(stage, ".claude", "skills", "feature", "SKILL.md"),
-	} {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("plan should not write %s, stat err=%v", path, err)
+	if len(result.Targets) != 3 {
+		t.Fatalf("unexpected target set: %+v", result.Targets)
+	}
+	for target, files := range result.Targets {
+		for _, file := range files.Files {
+			if _, err := os.Stat(file.Path); !os.IsNotExist(err) {
+				t.Fatalf("plan target %s should not write %s, stat err=%v", target, file.Path, err)
+			}
 		}
 	}
 }
