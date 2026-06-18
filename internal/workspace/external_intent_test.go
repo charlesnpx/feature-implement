@@ -48,12 +48,36 @@ func TestReserveExternalIntentRecordsReservationAndIdempotency(t *testing.T) {
 	}
 	if last.Payload[eventPayloadIntentIDKey] != result.Intent.IntentID ||
 		last.Payload[eventPayloadIdempotencyKeyKey] != result.Intent.IdempotencyKey ||
-		last.Payload[eventPayloadTargetKey] != "branch:feature/test" {
+		last.Payload[eventPayloadTargetKey] != "branch:feature/test" ||
+		last.Payload[eventPayloadRequestedHeadSHAKey] != "head-sha" ||
+		last.Payload[eventPayloadExpectedBaseSHAKey] != "base-sha" {
 		t.Fatalf("intent payload = %+v", last.Payload)
 	}
+	usedCount, err := eventIntPayload(last, eventPayloadUsedCountKey)
+	if err != nil || usedCount != 1 {
+		t.Fatalf("intent used count = %d err=%v payload=%+v", usedCount, err, last.Payload)
+	}
 	assertContainsString(t, last.WriteSet, ExternalIntentResource(result.Intent.IntentID))
+	assertContainsString(t, last.WriteSet, ApprovalResource(approval.Approval.ApprovalID))
 	assertContainsString(t, last.WriteSet, ProviderTargetResource("push:branch:feature/test"))
 	assertContainsString(t, last.WriteSet, RemoteRefResource("feature/test"))
+
+	check, err := CheckApproval(ApprovalCheckOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		Action:       ExternalActionPush,
+		Branch:       "feature/test",
+		HeadSHA:      "head-sha",
+		BaseSHA:      "base-sha",
+		Now:          fixedJournalTime("2026-06-17T10:03:30Z"),
+	})
+	if err != nil {
+		t.Fatalf("CheckApproval after reserve: %v", err)
+	}
+	if check.Status != "approved" || len(check.Approvals) != 1 || check.Approvals[0].UsedCount != 1 {
+		t.Fatalf("approval after reserve = %+v", check)
+	}
 
 	duplicate, err := ReserveExternalIntent(ExternalIntentReserveOptions{
 		WorkspaceDir:     fixture.Dir,
@@ -71,6 +95,22 @@ func TestReserveExternalIntentRecordsReservationAndIdempotency(t *testing.T) {
 	var stale StaleResourceError
 	if err == nil || !errors.As(err, &stale) || stale.Resource != ExternalIntentResource(result.Intent.IntentID) {
 		t.Fatalf("duplicate reserve = %+v err=%v", duplicate, err)
+	}
+	check, err = CheckApproval(ApprovalCheckOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		Action:       ExternalActionPush,
+		Branch:       "feature/test",
+		HeadSHA:      "head-sha",
+		BaseSHA:      "base-sha",
+		Now:          fixedJournalTime("2026-06-17T10:05:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("CheckApproval after failed duplicate: %v", err)
+	}
+	if check.Status != "approved" || len(check.Approvals) != 1 || check.Approvals[0].UsedCount != 1 {
+		t.Fatalf("failed reservation consumed approval again: %+v", check)
 	}
 }
 
@@ -136,6 +176,159 @@ func TestReserveExternalIntentRequiresApproval(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "approval not found: missing-approval") {
 		t.Fatalf("missing approval error = %v", err)
+	}
+}
+
+func TestReserveExternalIntentConsumesOneUseApproval(t *testing.T) {
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	approval, err := GrantApproval(ApprovalGrantOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Actions:      []string{ExternalActionPush},
+		MaxUses:      1,
+		ExpiresIn:    time.Hour,
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("GrantApproval: %v", err)
+	}
+	if _, err := ReserveExternalIntent(ExternalIntentReserveOptions{
+		WorkspaceDir:     fixture.Dir,
+		MergeUnitID:      claim.MergeUnitID,
+		AttemptID:        attempt.AttemptID,
+		AgentID:          "worker-a",
+		LeaseID:          claim.LeaseID,
+		ApprovalID:       approval.Approval.ApprovalID,
+		Action:           ExternalActionPush,
+		Branch:           "feature/one",
+		RequestedHeadSHA: "head-sha-1",
+		ExpectedBaseSHA:  "base-sha",
+		Now:              fixedJournalTime("2026-06-17T10:03:00Z"),
+	}); err != nil {
+		t.Fatalf("ReserveExternalIntent first: %v", err)
+	}
+
+	_, err = ReserveExternalIntent(ExternalIntentReserveOptions{
+		WorkspaceDir:     fixture.Dir,
+		MergeUnitID:      claim.MergeUnitID,
+		AttemptID:        attempt.AttemptID,
+		AgentID:          "worker-a",
+		LeaseID:          claim.LeaseID,
+		ApprovalID:       approval.Approval.ApprovalID,
+		Action:           ExternalActionPush,
+		Branch:           "feature/two",
+		RequestedHeadSHA: "head-sha-2",
+		ExpectedBaseSHA:  "base-sha",
+		Now:              fixedJournalTime("2026-06-17T10:04:00Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "has no uses remaining") {
+		t.Fatalf("second reserve error = %v", err)
+	}
+}
+
+func TestReserveExternalIntentDuplicateOneUseReturnsStaleIntent(t *testing.T) {
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	approval, err := GrantApproval(ApprovalGrantOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Actions:      []string{ExternalActionPush},
+		MaxUses:      1,
+		ExpiresIn:    time.Hour,
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("GrantApproval: %v", err)
+	}
+	first, err := ReserveExternalIntent(ExternalIntentReserveOptions{
+		WorkspaceDir:     fixture.Dir,
+		MergeUnitID:      claim.MergeUnitID,
+		AttemptID:        attempt.AttemptID,
+		AgentID:          "worker-a",
+		LeaseID:          claim.LeaseID,
+		ApprovalID:       approval.Approval.ApprovalID,
+		Action:           ExternalActionPush,
+		Branch:           "feature/one",
+		RequestedHeadSHA: "head-sha-1",
+		ExpectedBaseSHA:  "base-sha",
+		Now:              fixedJournalTime("2026-06-17T10:03:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("ReserveExternalIntent first: %v", err)
+	}
+
+	_, err = ReserveExternalIntent(ExternalIntentReserveOptions{
+		WorkspaceDir:     fixture.Dir,
+		MergeUnitID:      claim.MergeUnitID,
+		AttemptID:        attempt.AttemptID,
+		AgentID:          "worker-a",
+		LeaseID:          claim.LeaseID,
+		ApprovalID:       approval.Approval.ApprovalID,
+		Action:           ExternalActionPush,
+		Branch:           "feature/one",
+		RequestedHeadSHA: "head-sha-1",
+		ExpectedBaseSHA:  "base-sha",
+		Now:              fixedJournalTime("2026-06-17T10:04:00Z"),
+	})
+	var stale StaleResourceError
+	if err == nil || !errors.As(err, &stale) || stale.Resource != ExternalIntentResource(first.Intent.IntentID) {
+		t.Fatalf("duplicate one-use reserve error = %v", err)
+	}
+}
+
+func TestApprovalReplayIgnoresLegacyIntentReservationWithoutApprovalWrite(t *testing.T) {
+	fixture, claim, attempt, approval := newExternalIntentFixture(t, ExternalActionPush)
+	intentID := "legacy-intent"
+	intentResource := ExternalIntentResource(intentID)
+	revisions, err := ResourceRevisions(fixture.Dir)
+	if err != nil {
+		t.Fatalf("ResourceRevisions: %v", err)
+	}
+	if _, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: fixture.Dir,
+		Type:         EventExternalIntentReserved,
+		Payload: map[string]any{
+			eventPayloadIntentIDKey:          intentID,
+			eventPayloadIdempotencyKeyKey:    "legacy-key",
+			eventPayloadMergeUnitIDKey:       claim.MergeUnitID,
+			eventPayloadAttemptIDKey:         attempt.AttemptID,
+			eventPayloadAgentIDKey:           "worker-a",
+			eventPayloadLeaseIDKey:           claim.LeaseID,
+			eventPayloadApprovalIDRefKey:     approval.Approval.ApprovalID,
+			eventPayloadActionKey:            ExternalActionPush,
+			eventPayloadScopeKey:             "merge-unit",
+			eventPayloadTargetKey:            "branch:feature/test",
+			eventPayloadBranchKey:            "feature/test",
+			eventPayloadRequestedHeadSHAKey:  "head-sha",
+			eventPayloadExpectedBaseSHAKey:   "base-sha",
+			eventPayloadAffectedResourcesKey: []string{ProviderTargetResource("push:branch:feature/test")},
+		},
+		ReadSet:  map[string]int{intentResource: revisions[intentResource]},
+		WriteSet: []string{intentResource},
+		Now:      fixedJournalTime("2026-06-17T10:03:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent legacy intent: %v", err)
+	}
+	check, err := CheckApproval(ApprovalCheckOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		Action:       ExternalActionPush,
+		Branch:       "feature/test",
+		HeadSHA:      "head-sha",
+		BaseSHA:      "base-sha",
+		Now:          fixedJournalTime("2026-06-17T10:04:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("CheckApproval: %v", err)
+	}
+	if check.Status != "approved" || len(check.Approvals) != 1 || check.Approvals[0].UsedCount != 0 {
+		t.Fatalf("legacy intent should not consume approval: %+v", check)
 	}
 }
 
