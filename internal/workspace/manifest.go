@@ -3,7 +3,7 @@ package workspace
 import (
 	"fmt"
 	"os"
-	"path/filepath"
+	"path"
 	"regexp"
 	"strings"
 
@@ -18,6 +18,7 @@ const (
 )
 
 var safeID = regexp.MustCompile(safeIDPattern)
+var windowsVolumePath = regexp.MustCompile(`^[A-Za-z]:`)
 
 type WorkspaceManifest struct {
 	SchemaVersion int                     `yaml:"schema_version" json:"schema_version"`
@@ -174,18 +175,19 @@ func ValidateManifest(manifest WorkspaceManifest) error {
 }
 
 func normalizeRepoArtifactPath(value string) (string, error) {
-	path := strings.TrimSpace(value)
-	if path == "" {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
 		return "", fmt.Errorf("artifact path is required")
 	}
-	if filepath.IsAbs(path) {
+	slashPath := strings.ReplaceAll(raw, "\\", "/")
+	if path.IsAbs(slashPath) || windowsVolumePath.MatchString(slashPath) {
 		return "", fmt.Errorf("artifact path %q must be repository-relative", value)
 	}
-	cleaned := filepath.Clean(path)
-	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+	cleaned := path.Clean(slashPath)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
 		return "", fmt.Errorf("artifact path %q must stay within the repository", value)
 	}
-	return filepath.ToSlash(cleaned), nil
+	return cleaned, nil
 }
 
 func ParseMergeUnitRef(value string) (MergeUnitRef, error) {

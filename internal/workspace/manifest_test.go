@@ -190,6 +190,20 @@ func TestValidateManifestRejectsMalformedMergeUnitReferences(t *testing.T) {
 			},
 			wantErr: "must stay within the repository",
 		},
+		{
+			name: "contract artifact escaping repository with backslash",
+			mutate: func(manifest *WorkspaceManifest) {
+				manifest.ContractGates[0].Artifacts = []WorkspaceArtifactSpec{{ID: "openapi", Path: `..\openapi.yaml`}}
+			},
+			wantErr: "must stay within the repository",
+		},
+		{
+			name: "contract artifact windows absolute path",
+			mutate: func(manifest *WorkspaceManifest) {
+				manifest.ContractGates[0].Artifacts = []WorkspaceArtifactSpec{{ID: "openapi", Path: `C:\contracts\openapi.yaml`}}
+			},
+			wantErr: "must be repository-relative",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
