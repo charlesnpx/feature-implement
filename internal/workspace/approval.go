@@ -615,6 +615,10 @@ func approvalSnapshots(events []JournalEvent) (map[string]approvalSnapshot, erro
 			if err != nil {
 				return nil, err
 			}
+			approvalResource := ApprovalResource(approvalID)
+			if !containsString(event.WriteSet, approvalResource) {
+				continue
+			}
 			approval, ok := approvals[approvalID]
 			if !ok {
 				return nil, fmt.Errorf("approval event %s references unknown approval %s", event.ID, approvalID)

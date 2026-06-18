@@ -119,6 +119,11 @@ func ReserveExternalIntent(opts ExternalIntentReserveOptions) (ExternalIntentRes
 	if !ok {
 		return ExternalIntentResult{}, fmt.Errorf("approval not found: %s", opts.ApprovalID)
 	}
+	identity := deriveExternalIntentIdentity(state.View.WorkspaceID, opts, target)
+	intentResource := ExternalIntentResource(identity.intentID)
+	if observed := state.Revisions[intentResource]; observed != 0 {
+		return ExternalIntentResult{}, StaleResourceError{Resource: intentResource, Expected: 0, Observed: observed}
+	}
 	if err := approvalMatches(approval, approvalMatchRequest{
 		mergeUnitID: opts.MergeUnitID,
 		attemptID:   opts.AttemptID,
@@ -132,8 +137,6 @@ func ReserveExternalIntent(opts ExternalIntentReserveOptions) (ExternalIntentRes
 	}); err != nil {
 		return ExternalIntentResult{}, err
 	}
-	identity := deriveExternalIntentIdentity(state.View.WorkspaceID, opts, target)
-	intentResource := ExternalIntentResource(identity.intentID)
 	approvalResource := ApprovalResource(opts.ApprovalID)
 	affectedResources := externalIntentAffectedResources(opts, target, state.View.BaseRef)
 	readSet := map[string]int{
