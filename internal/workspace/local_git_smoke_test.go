@@ -27,7 +27,7 @@ func TestLocalGitAttemptWorktreeSmoke(t *testing.T) {
 	}
 	gitEnv := isolatedGitEnv(hooksDir)
 
-	repoDir := filepath.Join(root, "repo")
+	repoDir := filepath.Join(root, "repo with spaces")
 	if err := os.MkdirAll(repoDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -43,6 +43,8 @@ func TestLocalGitAttemptWorktreeSmoke(t *testing.T) {
 	baseSHA := strings.TrimSpace(runGitOutput(t, gitPath, gitEnv, repoDir, "rev-parse", "HEAD"))
 
 	fixture := newOnePlanWorkspaceFixture(t)
+	fixture.Manifest.Repo = repoDir
+	writeWorkspaceManifest(t, fixture.Dir, fixture.Manifest)
 	writeWorkspaceLock(t, fixture.Dir)
 	claim, err := Next(NextOptions{
 		WorkspaceDir: fixture.Dir,
@@ -75,11 +77,15 @@ func TestLocalGitAttemptWorktreeSmoke(t *testing.T) {
 	if attempt.Worktree != wantWorktree {
 		t.Fatalf("attempt worktree = %q, want %q", attempt.Worktree, wantWorktree)
 	}
-	wantCommand := "git worktree add -b " + wantBranch + " " + wantWorktree + " " + baseSHA
+	wantCommand := "git -C " + shellQuote(repoDir) + " worktree add -b " + shellQuote(wantBranch) + " " + shellQuote(wantWorktree) + " " + shellQuote(baseSHA)
 	if len(attempt.Commands) != 1 || attempt.Commands[0] != wantCommand {
 		t.Fatalf("planned commands = %+v, want %q", attempt.Commands, wantCommand)
 	}
 
+	nonRepoDir := filepath.Join(root, "not-repo")
+	if err := os.Mkdir(nonRepoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Dir(attempt.Worktree), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +97,7 @@ func TestLocalGitAttemptWorktreeSmoke(t *testing.T) {
 		runGitCleanup(gitPath, gitEnv, repoDir, "worktree", "remove", "--force", attempt.Worktree)
 		runGitCleanup(gitPath, gitEnv, repoDir, "branch", "-D", attempt.Branch)
 	})
-	runGit(t, gitPath, gitEnv, repoDir, "worktree", "add", "-b", attempt.Branch, attempt.Worktree, attempt.BaseSHA)
+	runShellCommand(t, gitEnv, nonRepoDir, attempt.Commands[0])
 	worktreeAdded = true
 
 	gotBranch := strings.TrimSpace(runGitOutput(t, gitPath, gitEnv, attempt.Worktree, "rev-parse", "--abbrev-ref", "HEAD"))
@@ -576,6 +582,17 @@ func runGitOutput(t *testing.T, gitPath string, gitEnv []string, dir string, arg
 		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, string(output))
 	}
 	return string(output)
+}
+
+func runShellCommand(t *testing.T, env []string, dir string, command string) {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Dir = dir
+	cmd.Env = env
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", command, err, string(output))
+	}
 }
 
 func runGitCleanup(gitPath string, gitEnv []string, dir string, args ...string) {
