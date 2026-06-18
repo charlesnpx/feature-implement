@@ -75,6 +75,32 @@ func TestInvalidImplementActionHelpFails(t *testing.T) {
 	}
 }
 
+func TestWorkspaceNamespaceDoesNotChangeImplementCommandContract(t *testing.T) {
+	stdout, stderr, err := runFeature(t, "implement", "--help")
+	if err != nil {
+		t.Fatalf("feature implement --help failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	wantUsage := "feature implement next|start|commit|push|open-pr|review|merge|cleanup <plan-dir> [--merge-unit <id>] [--write-state] [metadata flags] [--json]"
+	if !strings.Contains(stdout, wantUsage) {
+		t.Fatalf("implement help changed command contract:\n%s", stdout)
+	}
+	for _, forbidden := range []string{"feature workspace", "workspace attempt", "feature.workspace"} {
+		if strings.Contains(stdout, forbidden) {
+			t.Fatalf("implement help leaked workspace contract %q:\n%s", forbidden, stdout)
+		}
+	}
+
+	for _, action := range []string{"workspace", "attempt"} {
+		stdout, stderr, err = runFeature(t, "implement", action)
+		if err == nil {
+			t.Fatalf("feature implement %s should fail", action)
+		}
+		if !strings.Contains(stderr, "unsupported implement action: "+action) {
+			t.Fatalf("expected unsupported implement action error:\nstdout=%s\nstderr=%s", stdout, stderr)
+		}
+	}
+}
+
 func TestWorkspaceCommandShell(t *testing.T) {
 	stdout, stderr, err := runFeature(t, "workspace", "--help")
 	if err != nil {
@@ -997,6 +1023,60 @@ func TestPlanExampleAndSchemaCommands(t *testing.T) {
 	}
 	if schema["title"] != "feature.plan.yaml" {
 		t.Fatalf("unexpected schema title: %+v", schema["title"])
+	}
+}
+
+func TestInstallSkillsPlanAllCommandJSONDoesNotWrite(t *testing.T) {
+	stage := t.TempDir()
+	stdout, stderr, err := runFeature(t, "install-skills", "--plan", "--target", "all", "--install-root", stage, "--json")
+	if err != nil {
+		t.Fatalf("feature install-skills plan all failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var result struct {
+		Schema    int    `json:"schema"`
+		Operation string `json:"operation"`
+		Kind      string `json:"kind"`
+		Targets   map[string]struct {
+			Files []map[string]json.RawMessage `json:"files"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("install-skills stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if result.Schema != 1 || result.Operation != "plan" || result.Kind != "delegated" {
+		t.Fatalf("install-skills metadata = %+v", result)
+	}
+	for _, target := range []string{"tools", "codex", "claude"} {
+		files, ok := result.Targets[target]
+		if !ok || len(files.Files) == 0 {
+			t.Fatalf("target %s missing from plan result: %+v", target, result.Targets)
+		}
+		for _, file := range files.Files {
+			pathRaw, ok := file["path"]
+			if !ok {
+				t.Fatalf("target %s file missing path: %+v", target, file)
+			}
+			var path string
+			if err := json.Unmarshal(pathRaw, &path); err != nil {
+				t.Fatalf("target %s path is not a string: %v", target, err)
+			}
+			if !strings.HasPrefix(path, stage+string(os.PathSeparator)) {
+				t.Fatalf("target %s planned path outside install root: %q", target, path)
+			}
+			if _, ok := file["sha256"]; ok {
+				t.Fatalf("plan target %s should omit sha256: %+v", target, file)
+			}
+		}
+	}
+	if len(result.Targets) != 3 {
+		t.Fatalf("unexpected target set: %+v", result.Targets)
+	}
+	entries, err := os.ReadDir(stage)
+	if err != nil {
+		t.Fatalf("read install root: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("plan should not write under install root: %+v", entries)
 	}
 }
 
