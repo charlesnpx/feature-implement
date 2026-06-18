@@ -197,6 +197,8 @@ func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, attempts *
 		return updateMergeUnitStatus(unitByID, attempts, lifecycles, leases, event, MergeUnitCompleted)
 	case EventMergeUnitFailed:
 		return updateMergeUnitStatus(unitByID, attempts, lifecycles, leases, event, MergeUnitFailed)
+	case EventContractPublished:
+		return nil
 	default:
 		return fmt.Errorf("unknown scheduler event type %q", event.Type)
 	}
