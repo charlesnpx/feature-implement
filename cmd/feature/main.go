@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/charlesnpx/feature-implement/internal/install"
 	"github.com/charlesnpx/feature-implement/internal/plan"
@@ -56,7 +57,7 @@ func usage(w io.Writer) {
   feature validate <plan-dir> [--write-lock] [--json]
   feature status <plan-dir> [--json]
   feature implement next|start|commit|push|open-pr|review|merge|cleanup <plan-dir> [--merge-unit <id>] [--write-state] [metadata flags] [--json]
-  feature workspace init|validate|status|next|heartbeat|release|recover|attempt|transition|contract [args]
+  feature workspace init|validate|status|next|heartbeat|release|recover|attempt|transition|contract|approve [args]
   feature version`)
 }
 
@@ -301,7 +302,7 @@ func implementCommand(args []string) error {
 
 func workspaceCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("workspace requires subcommand: init, validate, status, next, heartbeat, release, recover, attempt, transition, or contract")
+		return fmt.Errorf("workspace requires subcommand: init, validate, status, next, heartbeat, release, recover, attempt, transition, contract, or approve")
 	}
 	action := args[0]
 	if isHelpCommand(action) {
@@ -311,7 +312,7 @@ func workspaceCommand(args []string) error {
 	if !workspace.IsSupportedAction(action) {
 		return fmt.Errorf("unsupported workspace action: %s", action)
 	}
-	if action != "attempt" && action != "contract" && hasHelpFlag(args[1:]) {
+	if action != "attempt" && action != "contract" && action != "approve" && hasHelpFlag(args[1:]) {
 		usageWorkspaceAction(os.Stdout, action)
 		return nil
 	}
@@ -334,6 +335,8 @@ func workspaceCommand(args []string) error {
 		return workspaceTransition(args[1:])
 	case "contract":
 		return workspaceContract(args[1:])
+	case "approve":
+		return workspaceApprove(args[1:])
 	default:
 		return workspace.ErrNotImplemented(action)
 	}
@@ -861,6 +864,168 @@ func writeWorkspaceContractCheckText(result workspace.ContractCheckResult) {
 	}
 }
 
+func workspaceApprove(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("workspace approve requires subcommand: grant, check, or consume")
+	}
+	action := args[0]
+	if isHelpCommand(action) {
+		usageWorkspaceApprove(os.Stdout)
+		return nil
+	}
+	if action != "grant" && action != "check" && action != "consume" {
+		return fmt.Errorf("unsupported workspace approve action: %s", action)
+	}
+	if hasHelpFlag(args[1:]) {
+		usageWorkspaceApproveAction(os.Stdout, action)
+		return nil
+	}
+	switch action {
+	case "grant":
+		return workspaceApproveGrant(args[1:])
+	case "check":
+		return workspaceApproveCheck(args[1:])
+	case "consume":
+		return workspaceApproveConsume(args[1:])
+	default:
+		return workspace.ErrNotImplemented("approve " + action)
+	}
+}
+
+func workspaceApproveGrant(args []string) error {
+	fs := flag.NewFlagSet("workspace approve grant", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	mergeUnitID := fs.String("merge-unit", "", "Merge unit ID")
+	attemptID := fs.String("attempt", "", "Attempt ID")
+	agentID := fs.String("agent", "", "Agent ID that owns the lease")
+	leaseID := fs.String("lease", "", "Lease ID")
+	var actions stringFlags
+	fs.Var(&actions, "action", "Allowed action; repeatable or comma-separated")
+	scope := fs.String("scope", "", "Approval scope; defaults to merge-unit")
+	pr := fs.String("pr", "", "Optional PR number or URL")
+	branch := fs.String("branch", "", "Optional branch constraint")
+	headSHA := fs.String("head-sha", "", "Optional head SHA constraint")
+	baseSHA := fs.String("base-sha", "", "Optional base SHA constraint")
+	maxUses := fs.Int("max-uses", 1, "Maximum number of uses")
+	expiresIn := fs.String("expires-in", "", "Duration until expiry, for example 30m")
+	expiresAt := fs.String("expires-at", "", "RFC3339 expiry timestamp")
+	asJSON := fs.Bool("json", false, "Emit JSON result")
+	if err := parsePermissive(fs, args, "merge-unit", "attempt", "agent", "lease", "action", "scope", "pr", "branch", "head-sha", "base-sha", "max-uses", "expires-in", "expires-at"); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("workspace approve grant requires <workspace-dir>")
+	}
+	parsedExpiresIn, parsedExpiresAt, err := parseApprovalExpiry(*expiresIn, *expiresAt)
+	if err != nil {
+		return err
+	}
+	result, err := workspace.GrantApproval(workspace.ApprovalGrantOptions{
+		WorkspaceDir: fs.Arg(0),
+		MergeUnitID:  *mergeUnitID,
+		AttemptID:    *attemptID,
+		AgentID:      *agentID,
+		LeaseID:      *leaseID,
+		Actions:      actions,
+		Scope:        *scope,
+		PR:           *pr,
+		Branch:       *branch,
+		HeadSHA:      *headSHA,
+		BaseSHA:      *baseSHA,
+		MaxUses:      *maxUses,
+		ExpiresIn:    parsedExpiresIn,
+		ExpiresAt:    parsedExpiresAt,
+	})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(result)
+	}
+	fmt.Printf("approved %s actions=%s expires_at=%s max_uses=%d\n", result.Approval.ApprovalID, strings.Join(result.Approval.Actions, ","), result.Approval.ExpiresAt, result.Approval.MaxUses)
+	return nil
+}
+
+func workspaceApproveCheck(args []string) error {
+	fs := flag.NewFlagSet("workspace approve check", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	mergeUnitID := fs.String("merge-unit", "", "Merge unit ID")
+	attemptID := fs.String("attempt", "", "Attempt ID")
+	action := fs.String("action", "", "Action to check")
+	scope := fs.String("scope", "", "Approval scope; defaults to merge-unit")
+	pr := fs.String("pr", "", "Optional PR number or URL")
+	branch := fs.String("branch", "", "Optional branch constraint")
+	headSHA := fs.String("head-sha", "", "Optional head SHA constraint")
+	baseSHA := fs.String("base-sha", "", "Optional base SHA constraint")
+	asJSON := fs.Bool("json", false, "Emit JSON result")
+	if err := parsePermissive(fs, args, "merge-unit", "attempt", "action", "scope", "pr", "branch", "head-sha", "base-sha"); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("workspace approve check requires <workspace-dir>")
+	}
+	result, err := workspace.CheckApproval(workspace.ApprovalCheckOptions{
+		WorkspaceDir: fs.Arg(0),
+		MergeUnitID:  *mergeUnitID,
+		AttemptID:    *attemptID,
+		Action:       *action,
+		Scope:        *scope,
+		PR:           *pr,
+		Branch:       *branch,
+		HeadSHA:      *headSHA,
+		BaseSHA:      *baseSHA,
+	})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(result)
+	}
+	fmt.Printf("approval %s action=%s matches=%d\n", result.Status, result.Action, len(result.Approvals))
+	return nil
+}
+
+func workspaceApproveConsume(args []string) error {
+	fs := flag.NewFlagSet("workspace approve consume", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	approvalID := fs.String("approval", "", "Approval ID")
+	mergeUnitID := fs.String("merge-unit", "", "Merge unit ID")
+	attemptID := fs.String("attempt", "", "Attempt ID")
+	action := fs.String("action", "", "Action to consume")
+	scope := fs.String("scope", "", "Approval scope; defaults to merge-unit")
+	pr := fs.String("pr", "", "Optional PR number or URL")
+	branch := fs.String("branch", "", "Optional branch constraint")
+	headSHA := fs.String("head-sha", "", "Optional head SHA constraint")
+	baseSHA := fs.String("base-sha", "", "Optional base SHA constraint")
+	asJSON := fs.Bool("json", false, "Emit JSON result")
+	if err := parsePermissive(fs, args, "approval", "merge-unit", "attempt", "action", "scope", "pr", "branch", "head-sha", "base-sha"); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("workspace approve consume requires <workspace-dir>")
+	}
+	result, err := workspace.ConsumeApproval(workspace.ApprovalConsumeOptions{
+		WorkspaceDir: fs.Arg(0),
+		ApprovalID:   *approvalID,
+		MergeUnitID:  *mergeUnitID,
+		AttemptID:    *attemptID,
+		Action:       *action,
+		Scope:        *scope,
+		PR:           *pr,
+		Branch:       *branch,
+		HeadSHA:      *headSHA,
+		BaseSHA:      *baseSHA,
+	})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(result)
+	}
+	fmt.Printf("consumed %s used=%d/%d\n", result.Approval.ApprovalID, result.Approval.UsedCount, result.Approval.MaxUses)
+	return nil
+}
+
 func writeJSON(value any) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetEscapeHTML(false)
@@ -951,6 +1116,40 @@ func parseCommandResultFlags(values []string) ([]workspace.ContractCommandResult
 		results = append(results, workspace.ContractCommandResult{Command: command, Status: status})
 	}
 	return results, nil
+}
+
+type stringFlags []string
+
+func (f *stringFlags) String() string {
+	return strings.Join(*f, ",")
+}
+
+func (f *stringFlags) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
+
+func parseApprovalExpiry(expiresIn string, expiresAt string) (time.Duration, time.Time, error) {
+	expiresIn = strings.TrimSpace(expiresIn)
+	expiresAt = strings.TrimSpace(expiresAt)
+	if expiresIn != "" && expiresAt != "" {
+		return 0, time.Time{}, fmt.Errorf("--expires-in and --expires-at are mutually exclusive")
+	}
+	if expiresIn == "" && expiresAt == "" {
+		return 0, time.Time{}, nil
+	}
+	if expiresIn != "" {
+		duration, err := time.ParseDuration(expiresIn)
+		if err != nil {
+			return 0, time.Time{}, fmt.Errorf("parse --expires-in: %w", err)
+		}
+		return duration, time.Time{}, nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, expiresAt)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("parse --expires-at: %w", err)
+	}
+	return 0, parsed, nil
 }
 
 func reorderFlags(args []string, valueFlags ...string) ([]string, []string) {
@@ -1064,6 +1263,9 @@ func usageWorkspace(w io.Writer) {
   feature workspace contract verify <workspace-dir> --contract <id> [--artifact <id>] [--json]
   feature workspace contract bind <workspace-dir> --contract <id> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --command-result <command=status> [--command-result <command=status>] [--artifact <id>] [--json]
   feature workspace contract check-contracts <workspace-dir> --merge-unit <id> --attempt <id> [--json]
+  feature workspace approve grant <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --action <action> (--expires-in <duration> | --expires-at <timestamp>) [scope and target flags] [--json]
+  feature workspace approve check <workspace-dir> --merge-unit <id> --attempt <id> --action <action> [scope and target flags] [--json]
+  feature workspace approve consume <workspace-dir> --approval <id> --merge-unit <id> --attempt <id> --action <action> [scope and target flags] [--json]
 
 Coordinates validated feature plans through a workspace-level orchestration layer.`)
 }
@@ -1114,6 +1316,8 @@ Records local lifecycle movement for the current active attempt.`)
 		usageWorkspaceAttempt(w)
 	case "contract":
 		usageWorkspaceContract(w)
+	case "approve":
+		usageWorkspaceApprove(w)
 	default:
 		usageWorkspace(w)
 	}
@@ -1172,6 +1376,37 @@ Binds the current consumer attempt to the latest published contract artifact.`)
 Reports missing, current, and stale contract bindings for a consumer attempt.`)
 	default:
 		usageWorkspaceContract(w)
+	}
+}
+
+func usageWorkspaceApprove(w io.Writer) {
+	fmt.Fprintln(w, `Usage:
+  feature workspace approve grant <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --action <action> (--expires-in <duration> | --expires-at <timestamp>) [--scope <scope>] [--pr <id>] [--branch <name>] [--head-sha <sha>] [--base-sha <sha>] [--max-uses <n>] [--json]
+  feature workspace approve check <workspace-dir> --merge-unit <id> --attempt <id> --action <action> [--scope <scope>] [--pr <id>] [--branch <name>] [--head-sha <sha>] [--base-sha <sha>] [--json]
+  feature workspace approve consume <workspace-dir> --approval <id> --merge-unit <id> --attempt <id> --action <action> [--scope <scope>] [--pr <id>] [--branch <name>] [--head-sha <sha>] [--base-sha <sha>] [--json]
+
+Grants, checks, and consumes scoped external-write approval capabilities.`)
+}
+
+func usageWorkspaceApproveAction(w io.Writer, action string) {
+	switch action {
+	case "grant":
+		fmt.Fprintln(w, `Usage:
+  feature workspace approve grant <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --action <action> (--expires-in <duration> | --expires-at <timestamp>) [--scope <scope>] [--pr <id>] [--branch <name>] [--head-sha <sha>] [--base-sha <sha>] [--max-uses <n>] [--json]
+
+Grants a scoped, attempt-local approval capability.`)
+	case "check":
+		fmt.Fprintln(w, `Usage:
+  feature workspace approve check <workspace-dir> --merge-unit <id> --attempt <id> --action <action> [--scope <scope>] [--pr <id>] [--branch <name>] [--head-sha <sha>] [--base-sha <sha>] [--json]
+
+Reports active approvals matching a target action and scope.`)
+	case "consume":
+		fmt.Fprintln(w, `Usage:
+  feature workspace approve consume <workspace-dir> --approval <id> --merge-unit <id> --attempt <id> --action <action> [--scope <scope>] [--pr <id>] [--branch <name>] [--head-sha <sha>] [--base-sha <sha>] [--json]
+
+Consumes one use of a matching approval capability.`)
+	default:
+		usageWorkspaceApprove(w)
 	}
 }
 

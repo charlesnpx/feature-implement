@@ -37,6 +37,10 @@ func TestHelpCommandsExitSuccessfully(t *testing.T) {
 		{"workspace", "contract", "verify", "--help"},
 		{"workspace", "contract", "bind", "--help"},
 		{"workspace", "contract", "check-contracts", "--help"},
+		{"workspace", "approve", "--help"},
+		{"workspace", "approve", "grant", "--help"},
+		{"workspace", "approve", "check", "--help"},
+		{"workspace", "approve", "consume", "--help"},
 	}
 	for _, args := range tests {
 		stdout, stderr, err := runFeature(t, args...)
@@ -122,6 +126,7 @@ func TestWorkspaceCommandShell(t *testing.T) {
 		"feature workspace attempt",
 		"feature workspace transition",
 		"feature workspace contract",
+		"feature workspace approve",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("workspace help missing %q:\n%s", want, stdout)
@@ -849,6 +854,143 @@ func TestWorkspaceTransitionCommandJSON(t *testing.T) {
 	}
 	if transitioned.Evidence["worktree"] != attempt.Worktree {
 		t.Fatalf("transition evidence = %+v", transitioned.Evidence)
+	}
+}
+
+func TestWorkspaceApproveCommandGrantCheckConsumeJSON(t *testing.T) {
+	workspaceDir := workspaceWithPlanLocks(t)
+	if _, stderr, err := runFeature(t, "workspace", "validate", workspaceDir, "--write-lock", "--json"); err != nil {
+		t.Fatalf("feature workspace validate failed: %v\nstderr=%s", err, stderr)
+	}
+	stdout, stderr, err := runFeature(t, "workspace", "next", workspaceDir, "--agent", "worker-a", "--claim", "--json")
+	if err != nil {
+		t.Fatalf("feature workspace next failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var claim struct {
+		MergeUnitID string `json:"merge_unit_id"`
+		LeaseID     string `json:"lease_id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &claim); err != nil {
+		t.Fatalf("claim stdout is not JSON: %v\n%s", err, stdout)
+	}
+	stdout, stderr, err = runFeature(t,
+		"workspace", "attempt", "start", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--agent", "worker-a",
+		"--lease", claim.LeaseID,
+		"--base-sha", "base-sha-cli",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace attempt start failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var attempt struct {
+		AttemptID string `json:"attempt_id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &attempt); err != nil {
+		t.Fatalf("attempt stdout is not JSON: %v\n%s", err, stdout)
+	}
+
+	stdout, stderr, err = runFeature(t,
+		"workspace", "approve", "grant", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--attempt", attempt.AttemptID,
+		"--agent", "worker-a",
+		"--lease", claim.LeaseID,
+		"--action", "push",
+		"--branch", "feature/test",
+		"--expires-in", "1h",
+		"--max-uses", "1",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace approve grant failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var granted struct {
+		Status   string `json:"status"`
+		Approval struct {
+			ApprovalID string   `json:"approval_id"`
+			Actions    []string `json:"actions"`
+			Branch     string   `json:"branch"`
+			MaxUses    int      `json:"max_uses"`
+			UsedCount  int      `json:"used_count"`
+			Status     string   `json:"status"`
+		} `json:"approval"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &granted); err != nil {
+		t.Fatalf("grant stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if granted.Status != "granted" || granted.Approval.ApprovalID == "" || granted.Approval.Branch != "feature/test" || granted.Approval.MaxUses != 1 || granted.Approval.Status != "active" {
+		t.Fatalf("grant result = %+v", granted)
+	}
+
+	stdout, stderr, err = runFeature(t,
+		"workspace", "approve", "check", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--attempt", attempt.AttemptID,
+		"--action", "push",
+		"--branch", "feature/test",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace approve check failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var checked struct {
+		Status    string `json:"status"`
+		Action    string `json:"action"`
+		Approvals []struct {
+			ApprovalID string `json:"approval_id"`
+		} `json:"approvals"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &checked); err != nil {
+		t.Fatalf("check stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if checked.Status != "approved" || checked.Action != "push" || len(checked.Approvals) != 1 || checked.Approvals[0].ApprovalID != granted.Approval.ApprovalID {
+		t.Fatalf("check result = %+v", checked)
+	}
+
+	stdout, stderr, err = runFeature(t,
+		"workspace", "approve", "consume", workspaceDir,
+		"--approval", granted.Approval.ApprovalID,
+		"--merge-unit", claim.MergeUnitID,
+		"--attempt", attempt.AttemptID,
+		"--action", "push",
+		"--branch", "feature/test",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("feature workspace approve consume failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	var consumed struct {
+		Status   string `json:"status"`
+		Approval struct {
+			ApprovalID string `json:"approval_id"`
+			MaxUses    int    `json:"max_uses"`
+			UsedCount  int    `json:"used_count"`
+			Status     string `json:"status"`
+		} `json:"approval"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &consumed); err != nil {
+		t.Fatalf("consume stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if consumed.Status != "consumed" || consumed.Approval.ApprovalID != granted.Approval.ApprovalID || consumed.Approval.UsedCount != 1 || consumed.Approval.MaxUses != 1 || consumed.Approval.Status != "exhausted" {
+		t.Fatalf("consume result = %+v", consumed)
+	}
+
+	stdout, stderr, err = runFeature(t,
+		"workspace", "approve", "consume", workspaceDir,
+		"--approval", granted.Approval.ApprovalID,
+		"--merge-unit", claim.MergeUnitID,
+		"--attempt", attempt.AttemptID,
+		"--action", "push",
+		"--branch", "feature/test",
+		"--json",
+	)
+	if err == nil {
+		t.Fatalf("second feature workspace approve consume should fail\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+	if !strings.Contains(stderr, "has no uses remaining") {
+		t.Fatalf("second consume error = %q", stderr)
 	}
 }
 
