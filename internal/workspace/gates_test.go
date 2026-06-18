@@ -63,6 +63,12 @@ func TestEvaluateGatesRecordsDefaultDeterministicEvaluation(t *testing.T) {
 	if got, _ := last.Payload[eventPayloadOutputHashKey].(string); got != second.OutputHash {
 		t.Fatalf("event output hash = %q, want %q", got, second.OutputHash)
 	}
+	if got := last.ReadSet[RefreshResource(claim.MergeUnitID+":"+attempt.AttemptID)]; got != 0 {
+		t.Fatalf("refresh read-set revision = %d", got)
+	}
+	if got := last.ReadSet[ApprovalAttemptResource(claim.MergeUnitID, attempt.AttemptID)]; got != 0 {
+		t.Fatalf("approval attempt read-set revision = %d", got)
+	}
 }
 
 func TestEvaluateGatesMarksTestRerunRequiredAfterRefresh(t *testing.T) {
@@ -249,6 +255,82 @@ func TestEvaluateGatesIgnoresPriorAttemptContractCheckResults(t *testing.T) {
 	}
 	if statuses := gateStatusesByName(second.Gates); statuses["contract"] != GateStatusBlocked {
 		t.Fatalf("fresh attempt carried contract check result: %+v", second.Gates)
+	}
+}
+
+func TestEvaluateGatesBlocksFailedContractCommandResult(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	fixture.Manifest.ContractGates = []WorkspaceContractGate{{
+		ID:        "api-contract",
+		Producers: []string{"foundation:story-a"},
+		Consumers: []string{"foundation:story-a"},
+		Artifacts: []WorkspaceArtifactSpec{{
+			ID:   "openapi",
+			Path: "contracts/openapi.yaml",
+		}},
+		Validation: WorkspaceGateValidation{
+			Commands: []string{"go test ./..."},
+		},
+	}}
+	writeWorkspaceManifest(t, fixture.Dir, fixture.Manifest)
+	contractPath := filepath.Join(fixture.Dir, "contracts", "openapi.yaml")
+	if err := os.MkdirAll(filepath.Dir(contractPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(contractPath, []byte("openapi: 3.1.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir, WriteLock: true}); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	claim, attempt := startGateEvaluationAttempt(t, fixture.Dir)
+	if _, err := PublishContract(ContractPublishOptions{
+		WorkspaceDir:        fixture.Dir,
+		ContractID:          "api-contract",
+		Version:             "v1",
+		ProducerMergeUnitID: claim.MergeUnitID,
+		ProducerCommit:      "producer-sha",
+		CommandResults:      []ContractCommandResult{{Command: "go test ./...", Status: "passed"}},
+		Now:                 fixedWorkspaceTime("2026-01-02T15:03:05Z"),
+	}); err != nil {
+		t.Fatalf("PublishContract: %v", err)
+	}
+	if _, err := BindContract(ContractBindOptions{
+		WorkspaceDir:   fixture.Dir,
+		ContractID:     "api-contract",
+		MergeUnitID:    claim.MergeUnitID,
+		AttemptID:      attempt.AttemptID,
+		AgentID:        claim.AgentID,
+		LeaseID:        claim.LeaseID,
+		CommandResults: []ContractCommandResult{{Command: "go test ./...", Status: "failed"}},
+		Now:            fixedWorkspaceTime("2026-01-02T15:04:05Z"),
+	}); err != nil {
+		t.Fatalf("BindContract: %v", err)
+	}
+
+	result, err := EvaluateGates(GateEvaluateOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      claim.AgentID,
+		LeaseID:      claim.LeaseID,
+		Now:          fixedWorkspaceTime("2026-01-02T15:05:05Z"),
+	})
+	if err != nil {
+		t.Fatalf("EvaluateGates: %v", err)
+	}
+	found := false
+	for _, gate := range result.Gates {
+		if gate.Gate != "contract" {
+			continue
+		}
+		found = true
+		if gate.Status != GateStatusBlocked || gate.Reason != "contract_command_failed:go test ./..." {
+			t.Fatalf("contract gate = %+v", gate)
+		}
+	}
+	if !found {
+		t.Fatalf("contract gate missing: %+v", result.Gates)
 	}
 }
 

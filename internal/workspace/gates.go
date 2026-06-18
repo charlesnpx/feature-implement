@@ -308,6 +308,9 @@ func evaluateGateStatuses(input gateEvaluationInput) []GateStatusView {
 }
 
 func contractGateStatus(contracts []ContractBindingStatus) string {
+	if failedContractCommand(contracts) != "" {
+		return GateStatusBlocked
+	}
 	switch aggregateContractBindingStatus(contracts) {
 	case "none", contractBindingStatusCurrent:
 		return GateStatusPassed
@@ -317,11 +320,23 @@ func contractGateStatus(contracts []ContractBindingStatus) string {
 }
 
 func contractGateReason(contracts []ContractBindingStatus) string {
+	if failed := failedContractCommand(contracts); failed != "" {
+		return "contract_command_failed:" + failed
+	}
 	status := aggregateContractBindingStatus(contracts)
 	if status == "none" || status == contractBindingStatusCurrent {
 		return ""
 	}
 	return "contract_bindings_" + status
+}
+
+func failedContractCommand(contracts []ContractBindingStatus) string {
+	for _, binding := range contracts {
+		if failed := firstFailedRefreshCommand(binding.CommandResults); failed != "" {
+			return failed
+		}
+	}
+	return ""
 }
 
 func testGateStatus(refresh *gateRefreshInput) string {
@@ -365,6 +380,10 @@ func mergeApprovalGateReason(approvals []ApprovalView) string {
 func gateEvaluationReadSet(revisions map[string]int, input gateEvaluationInput, resources ...string) map[string]int {
 	readSet := map[string]int{}
 	addGateReadSetResources(readSet, revisions, resources...)
+	addGateReadSetResources(readSet, revisions,
+		RefreshResource(input.MergeUnitID+":"+input.AttemptID),
+		ApprovalAttemptResource(input.MergeUnitID, input.AttemptID),
+	)
 	if input.Refresh != nil {
 		addGateReadSetResources(readSet, revisions, input.Refresh.Resource)
 		for _, change := range input.Refresh.InputChanges {
