@@ -1807,7 +1807,7 @@ func TestWorkspaceExternalRefreshRecoverySmokeCommandJSON(t *testing.T) {
 			t.Fatalf("operator-reconciled report = %+v", report)
 		}
 
-		appendExpiredWorkspaceSmokeLease(t, workspaceDir, "sources:story-b", "lease-expired-smoke", "worker-expired")
+		appendExpiredWorkspaceSmokeLease(t, workspaceDir, claim.MergeUnitID, "lease-expired-smoke", "worker-expired")
 		var recovered workspaceSmokeRecoverResult
 		runFeatureJSON(t, &recovered, "workspace", "recover", workspaceDir, "--json")
 		if recovered.Status != "recovered" || recovered.RecoveredCount != 1 {
@@ -1815,6 +1815,7 @@ func TestWorkspaceExternalRefreshRecoverySmokeCommandJSON(t *testing.T) {
 		}
 		if len(recovered.Actions) != 1 ||
 			recovered.Actions[0].Type != workspacepkg.RecoveryActionRecoveredLease ||
+			recovered.Actions[0].MergeUnitID != claim.MergeUnitID ||
 			recovered.Actions[0].LeaseID != "lease-expired-smoke" ||
 			recovered.Actions[0].Status != "recovered" {
 			t.Fatalf("recover actions = %+v", recovered.Actions)
