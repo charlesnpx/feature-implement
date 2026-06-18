@@ -1596,6 +1596,541 @@ func TestWorkspaceContractBindAndCheckContractsCommandJSON(t *testing.T) {
 	}
 }
 
+func TestWorkspaceContractGateQueueSmokeCommandJSON(t *testing.T) {
+	t.Run("queues ready consumer", func(t *testing.T) {
+		ready := prepareContractGateQueueSmoke(t)
+
+		queued := queueContractGateSmoke(t, ready)
+		if queued.Status != "queued" ||
+			queued.Queue == nil ||
+			queued.Queue.MergeUnitID != ready.ConsumerClaim.MergeUnitID ||
+			queued.Queue.AttemptID != ready.ConsumerAttempt.AttemptID ||
+			queued.Queue.Branch != ready.ConsumerAttempt.Branch ||
+			queued.Queue.HeadSHA != ready.HeadSHA ||
+			queued.Queue.BaseSHA != ready.BaseSHA ||
+			queued.Queue.Position != 1 ||
+			queued.Queue.ApprovalID != ready.ApprovalID {
+			t.Fatalf("queue result = %+v", queued)
+		}
+		if queued.Queue.GateInputHash != ready.Evaluation.InputHash || queued.Queue.GateOutputHash != ready.Evaluation.OutputHash {
+			t.Fatalf("queue gate hashes = %+v, evaluation=%+v", queued.Queue, ready.Evaluation)
+		}
+
+		var status struct {
+			MergeQueue []struct {
+				QueueID     string `json:"queue_id"`
+				MergeUnitID string `json:"merge_unit_id"`
+				Position    int    `json:"position"`
+			} `json:"merge_queue"`
+			MergeUnits []workspaceSmokeStatusUnit `json:"merge_units"`
+		}
+		runFeatureJSON(t, &status, "workspace", "status", ready.WorkspaceDir, "--json")
+		if len(status.MergeQueue) != 1 ||
+			status.MergeQueue[0].QueueID != queued.Queue.QueueID ||
+			status.MergeQueue[0].MergeUnitID != ready.ConsumerClaim.MergeUnitID ||
+			status.MergeQueue[0].Position != 1 {
+			t.Fatalf("status merge queue = %+v", status.MergeQueue)
+		}
+		consumer := findWorkspaceStatusUnitForSmoke(t, status.MergeUnits, ready.ConsumerClaim.MergeUnitID)
+		if consumer.MergeQueue == nil || consumer.MergeQueue.QueueID != queued.Queue.QueueID {
+			t.Fatalf("consumer queue status = %+v", consumer.MergeQueue)
+		}
+		if len(consumer.ContractBindings) != 1 || consumer.ContractBindings[0].ContractID != "api-contract" || consumer.ContractBindings[0].Status != "current" {
+			t.Fatalf("consumer contract bindings = %+v", consumer.ContractBindings)
+		}
+	})
+
+	t.Run("stale contract blocks queue", func(t *testing.T) {
+		ready := prepareContractGateQueueSmoke(t)
+		if err := os.WriteFile(filepath.Join(ready.WorkspaceDir, "contracts", "openapi.yaml"), []byte("openapi: 3.1.0\ninfo:\n  title: v2\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var published struct {
+			Status       string `json:"status"`
+			ArtifactHash string `json:"artifact_hash"`
+		}
+		runFeatureJSON(t, &published,
+			"workspace", "contract", "publish", ready.WorkspaceDir,
+			"--contract", "api-contract",
+			"--version", "v2",
+			"--producer-merge-unit", "foundation:story-a",
+			"--producer-commit", "producer-commit-v2",
+			"--command-result", "go test ./...=passed",
+			"--json",
+		)
+		if published.Status != "published" || published.ArtifactHash == "" {
+			t.Fatalf("second publish = %+v", published)
+		}
+
+		blocked := queueContractGateSmoke(t, ready)
+		if blocked.Status != "blocked" || !workspaceSmokeHasBlockingCondition(blocked.BlockingConditions, "stale_contract") {
+			t.Fatalf("stale contract queue result = %+v", blocked)
+		}
+	})
+
+	t.Run("stale gate inputs block queue", func(t *testing.T) {
+		ready := prepareContractGateQueueSmoke(t)
+		appendWorkspaceSmokeRefresh(t, ready.WorkspaceDir, ready.ConsumerClaim.MergeUnitID, ready.ConsumerAttempt.AttemptID, ready.ConsumerAttempt.Branch, ready.ConsumerAttempt.Worktree, ready.BaseSHA, "consumer-base-sha-v2", ready.HeadSHA, "head-sha-v2")
+
+		blocked := queueContractGateSmokeWithSHAs(t, ready, "head-sha-v2", "consumer-base-sha-v2")
+		if blocked.Status != "blocked" ||
+			!workspaceSmokeHasBlockingCondition(blocked.BlockingConditions, "stale_gate_evaluation") ||
+			!workspaceSmokeHasGateBlockingCondition(blocked.BlockingConditions, "test", workspacepkg.GateStatusRerunRequired) {
+			t.Fatalf("stale gate queue result = %+v", blocked)
+		}
+	})
+}
+
+type workspaceSmokeClaim struct {
+	Status      string `json:"status"`
+	MergeUnitID string `json:"merge_unit_id"`
+	LeaseID     string `json:"lease_id"`
+	AgentID     string `json:"agent_id"`
+}
+
+type workspaceSmokeAttempt struct {
+	Status    string `json:"status"`
+	AttemptID string `json:"attempt_id"`
+	Branch    string `json:"branch"`
+	Worktree  string `json:"worktree"`
+	BaseSHA   string `json:"base_sha"`
+}
+
+type workspaceSmokeGateStatus struct {
+	Gate   string `json:"gate"`
+	Status string `json:"status"`
+	Reason string `json:"reason"`
+}
+
+type workspaceSmokeEvaluation struct {
+	Status     string                     `json:"status"`
+	InputHash  string                     `json:"input_hash"`
+	OutputHash string                     `json:"output_hash"`
+	Gates      []workspaceSmokeGateStatus `json:"gates"`
+}
+
+type workspaceSmokeReady struct {
+	WorkspaceDir    string
+	ConsumerClaim   workspaceSmokeClaim
+	ConsumerAttempt workspaceSmokeAttempt
+	ApprovalID      string
+	Evaluation      workspaceSmokeEvaluation
+	HeadSHA         string
+	BaseSHA         string
+}
+
+type workspaceSmokeBlockingCondition struct {
+	Type           string `json:"type"`
+	Status         string `json:"status"`
+	Gate           string `json:"gate"`
+	RequiredAction string `json:"required_action"`
+}
+
+type workspaceSmokeQueueResult struct {
+	Status string `json:"status"`
+	Queue  *struct {
+		QueueID        string `json:"queue_id"`
+		MergeUnitID    string `json:"merge_unit_id"`
+		AttemptID      string `json:"attempt_id"`
+		ApprovalID     string `json:"approval_id"`
+		Branch         string `json:"branch"`
+		HeadSHA        string `json:"head_sha"`
+		BaseSHA        string `json:"base_sha"`
+		Position       int    `json:"position"`
+		GateInputHash  string `json:"gate_input_hash"`
+		GateOutputHash string `json:"gate_output_hash"`
+	} `json:"queue"`
+	BlockingConditions []workspaceSmokeBlockingCondition `json:"blocking_conditions"`
+}
+
+type workspaceSmokeStatusUnit struct {
+	ID               string `json:"id"`
+	ContractBindings []struct {
+		ContractID string `json:"contract_id"`
+		Status     string `json:"status"`
+	} `json:"contract_bindings"`
+	MergeQueue *struct {
+		QueueID  string `json:"queue_id"`
+		Position int    `json:"position"`
+	} `json:"merge_queue"`
+}
+
+func prepareContractGateQueueSmoke(t *testing.T) workspaceSmokeReady {
+	t.Helper()
+	workspaceDir := workspaceWithContractPlanLocks(t)
+	var validated struct {
+		Status string `json:"status"`
+	}
+	runFeatureJSON(t, &validated, "workspace", "validate", workspaceDir, "--write-lock", "--json")
+	if validated.Status != "valid" {
+		t.Fatalf("validate = %+v", validated)
+	}
+
+	producerClaim := claimWorkspaceForSmoke(t, workspaceDir, "worker-producer")
+	if producerClaim.MergeUnitID != "foundation:story-a" {
+		t.Fatalf("producer claim = %+v", producerClaim)
+	}
+	producerAttempt := startWorkspaceAttemptForSmoke(t, workspaceDir, producerClaim, "producer-base-sha-v1")
+	transitionWorkspaceForSmoke(t, workspaceDir, producerClaim, producerAttempt, "pending", "in_progress", "worktree="+producerAttempt.Worktree)
+
+	var published struct {
+		Status              string `json:"status"`
+		ProducerMergeUnitID string `json:"producer_merge_unit_id"`
+		ProducerCommit      string `json:"producer_commit"`
+		ArtifactHash        string `json:"artifact_hash"`
+	}
+	runFeatureJSON(t, &published,
+		"workspace", "contract", "publish", workspaceDir,
+		"--contract", "api-contract",
+		"--version", "v1",
+		"--attempt", producerAttempt.AttemptID,
+		"--agent", producerClaim.AgentID,
+		"--lease", producerClaim.LeaseID,
+		"--producer-commit", "producer-commit-v1",
+		"--command-result", "go test ./...=passed",
+		"--json",
+	)
+	if published.Status != "published" || published.ProducerMergeUnitID != producerClaim.MergeUnitID || published.ProducerCommit != "producer-commit-v1" || published.ArtifactHash == "" {
+		t.Fatalf("publish = %+v", published)
+	}
+	transitionWorkspaceForSmoke(t, workspaceDir, producerClaim, producerAttempt, "in_progress", "completed", "commit_sha=producer-commit-v1")
+
+	consumerClaim := claimWorkspaceForSmoke(t, workspaceDir, "worker-consumer")
+	if consumerClaim.MergeUnitID != "sources:story-b" {
+		t.Fatalf("consumer claim = %+v", consumerClaim)
+	}
+	consumerAttempt := startWorkspaceAttemptForSmoke(t, workspaceDir, consumerClaim, "consumer-base-sha-v1")
+
+	var beforeBind struct {
+		Status   string `json:"status"`
+		Bindings []struct {
+			ContractID string `json:"contract_id"`
+			Status     string `json:"status"`
+		} `json:"bindings"`
+	}
+	runFeatureJSON(t, &beforeBind,
+		"workspace", "contract", "check-contracts", workspaceDir,
+		"--merge-unit", consumerClaim.MergeUnitID,
+		"--attempt", consumerAttempt.AttemptID,
+		"--json",
+	)
+	if beforeBind.Status != "missing" || len(beforeBind.Bindings) != 1 || beforeBind.Bindings[0].Status != "missing" {
+		t.Fatalf("check before bind = %+v", beforeBind)
+	}
+
+	var bound struct {
+		Status       string `json:"status"`
+		ArtifactHash string `json:"artifact_hash"`
+	}
+	runFeatureJSON(t, &bound,
+		"workspace", "contract", "bind", workspaceDir,
+		"--contract", "api-contract",
+		"--merge-unit", consumerClaim.MergeUnitID,
+		"--attempt", consumerAttempt.AttemptID,
+		"--agent", consumerClaim.AgentID,
+		"--lease", consumerClaim.LeaseID,
+		"--command-result", "go test ./...=passed",
+		"--json",
+	)
+	if bound.Status != "bound" || bound.ArtifactHash == "" {
+		t.Fatalf("bind = %+v", bound)
+	}
+	assertWorkspaceStatusContractCurrentForSmoke(t, workspaceDir, consumerClaim.MergeUnitID)
+
+	headSHA := "head-sha-v1"
+	baseSHA := consumerAttempt.BaseSHA
+	appendWorkspaceSmokeRefresh(t, workspaceDir, consumerClaim.MergeUnitID, consumerAttempt.AttemptID, consumerAttempt.Branch, consumerAttempt.Worktree, baseSHA, baseSHA, headSHA, headSHA)
+	approvalID := grantWorkspaceSmokeMergeApproval(t, workspaceDir, consumerClaim, consumerAttempt, headSHA, baseSHA)
+
+	evaluation := evaluateWorkspaceSmokeGates(t, workspaceDir, consumerClaim, consumerAttempt)
+	assertWorkspaceSmokeGateStatus(t, evaluation.Gates, "contract", workspacepkg.GateStatusPassed)
+	assertWorkspaceSmokeGateStatus(t, evaluation.Gates, "merge_approval", workspacepkg.GateStatusPassed)
+	assertWorkspaceSmokeGateStatus(t, evaluation.Gates, "review", workspacepkg.GateStatusPending)
+	assertWorkspaceSmokeGateStatus(t, evaluation.Gates, "security", workspacepkg.GateStatusPending)
+	assertWorkspaceSmokeGateStatus(t, evaluation.Gates, "test", workspacepkg.GateStatusPending)
+
+	for _, gate := range []string{"review", "security", "test"} {
+		overrideWorkspaceSmokeGate(t, workspaceDir, consumerClaim, consumerAttempt, evaluation.InputHash, gate, headSHA, baseSHA)
+	}
+	evaluation = evaluateWorkspaceSmokeGates(t, workspaceDir, consumerClaim, consumerAttempt)
+	assertWorkspaceSmokeGateStatus(t, evaluation.Gates, "contract", workspacepkg.GateStatusPassed)
+	assertWorkspaceSmokeGateStatus(t, evaluation.Gates, "merge_approval", workspacepkg.GateStatusPassed)
+	assertWorkspaceSmokeGateStatus(t, evaluation.Gates, "review", workspacepkg.GateStatusRetainedByOperator)
+	assertWorkspaceSmokeGateStatus(t, evaluation.Gates, "security", workspacepkg.GateStatusRetainedByOperator)
+	assertWorkspaceSmokeGateStatus(t, evaluation.Gates, "test", workspacepkg.GateStatusRetainedByOperator)
+
+	return workspaceSmokeReady{
+		WorkspaceDir:    workspaceDir,
+		ConsumerClaim:   consumerClaim,
+		ConsumerAttempt: consumerAttempt,
+		ApprovalID:      approvalID,
+		Evaluation:      evaluation,
+		HeadSHA:         headSHA,
+		BaseSHA:         baseSHA,
+	}
+}
+
+func claimWorkspaceForSmoke(t *testing.T, workspaceDir string, agentID string) workspaceSmokeClaim {
+	t.Helper()
+	var claim workspaceSmokeClaim
+	runFeatureJSON(t, &claim, "workspace", "next", workspaceDir, "--agent", agentID, "--claim", "--json")
+	if claim.Status != "claimed" || claim.AgentID != agentID || claim.MergeUnitID == "" || claim.LeaseID == "" {
+		t.Fatalf("claim = %+v", claim)
+	}
+	return claim
+}
+
+func startWorkspaceAttemptForSmoke(t *testing.T, workspaceDir string, claim workspaceSmokeClaim, baseSHA string) workspaceSmokeAttempt {
+	t.Helper()
+	var attempt workspaceSmokeAttempt
+	runFeatureJSON(t, &attempt,
+		"workspace", "attempt", "start", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--agent", claim.AgentID,
+		"--lease", claim.LeaseID,
+		"--base-sha", baseSHA,
+		"--json",
+	)
+	if attempt.Status != "started" || attempt.AttemptID == "" || attempt.Branch == "" || attempt.Worktree == "" || attempt.BaseSHA != baseSHA {
+		t.Fatalf("attempt = %+v", attempt)
+	}
+	return attempt
+}
+
+func transitionWorkspaceForSmoke(t *testing.T, workspaceDir string, claim workspaceSmokeClaim, attempt workspaceSmokeAttempt, from string, to string, evidence string) {
+	t.Helper()
+	var transitioned struct {
+		Status string `json:"status"`
+		From   string `json:"from"`
+		To     string `json:"to"`
+	}
+	runFeatureJSON(t, &transitioned,
+		"workspace", "transition", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--attempt", attempt.AttemptID,
+		"--agent", claim.AgentID,
+		"--lease", claim.LeaseID,
+		"--from", from,
+		"--to", to,
+		"--evidence", evidence,
+		"--json",
+	)
+	if transitioned.Status != "transitioned" || transitioned.From != from || transitioned.To != to {
+		t.Fatalf("transition = %+v", transitioned)
+	}
+}
+
+func grantWorkspaceSmokeMergeApproval(t *testing.T, workspaceDir string, claim workspaceSmokeClaim, attempt workspaceSmokeAttempt, headSHA string, baseSHA string) string {
+	t.Helper()
+	var granted struct {
+		Status   string `json:"status"`
+		Approval struct {
+			ApprovalID string `json:"approval_id"`
+			Status     string `json:"status"`
+		} `json:"approval"`
+	}
+	runFeatureJSON(t, &granted,
+		"workspace", "approve", "grant", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--attempt", attempt.AttemptID,
+		"--agent", claim.AgentID,
+		"--lease", claim.LeaseID,
+		"--action", "merge",
+		"--branch", attempt.Branch,
+		"--head-sha", headSHA,
+		"--base-sha", baseSHA,
+		"--expires-in", "1h",
+		"--max-uses", "1",
+		"--json",
+	)
+	if granted.Status != "granted" || granted.Approval.Status != "active" || granted.Approval.ApprovalID == "" {
+		t.Fatalf("approval = %+v", granted)
+	}
+	return granted.Approval.ApprovalID
+}
+
+func evaluateWorkspaceSmokeGates(t *testing.T, workspaceDir string, claim workspaceSmokeClaim, attempt workspaceSmokeAttempt) workspaceSmokeEvaluation {
+	t.Helper()
+	var evaluation workspaceSmokeEvaluation
+	runFeatureJSON(t, &evaluation,
+		"workspace", "evaluate-gates", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--attempt", attempt.AttemptID,
+		"--agent", claim.AgentID,
+		"--lease", claim.LeaseID,
+		"--json",
+	)
+	if evaluation.Status != "recorded" || evaluation.InputHash == "" || evaluation.OutputHash == "" {
+		t.Fatalf("evaluation = %+v", evaluation)
+	}
+	return evaluation
+}
+
+func overrideWorkspaceSmokeGate(t *testing.T, workspaceDir string, claim workspaceSmokeClaim, attempt workspaceSmokeAttempt, inputHash string, gate string, headSHA string, baseSHA string) {
+	t.Helper()
+	var override struct {
+		Status   string `json:"status"`
+		Override struct {
+			Gate   string `json:"gate"`
+			Status string `json:"status"`
+		} `json:"override"`
+	}
+	runFeatureJSON(t, &override,
+		"workspace", "gate", "override", workspaceDir,
+		"--merge-unit", claim.MergeUnitID,
+		"--attempt", attempt.AttemptID,
+		"--gate", gate,
+		"--status", workspacepkg.GateStatusRetainedByOperator,
+		"--reason", "operator accepted smoke readiness",
+		"--input-hash", inputHash,
+		"--head-sha", headSHA,
+		"--base-sha", baseSHA,
+		"--operator", "operator-a",
+		"--expires-in", "1h",
+		"--json",
+	)
+	if override.Status != "recorded" || override.Override.Gate != gate || override.Override.Status != workspacepkg.GateStatusRetainedByOperator {
+		t.Fatalf("override = %+v", override)
+	}
+}
+
+func queueContractGateSmoke(t *testing.T, ready workspaceSmokeReady) workspaceSmokeQueueResult {
+	t.Helper()
+	return queueContractGateSmokeWithSHAs(t, ready, ready.HeadSHA, ready.BaseSHA)
+}
+
+func queueContractGateSmokeWithSHAs(t *testing.T, ready workspaceSmokeReady, headSHA string, baseSHA string) workspaceSmokeQueueResult {
+	t.Helper()
+	var result workspaceSmokeQueueResult
+	runFeatureJSON(t, &result,
+		"workspace", "queue", "enter", ready.WorkspaceDir,
+		"--merge-unit", ready.ConsumerClaim.MergeUnitID,
+		"--attempt", ready.ConsumerAttempt.AttemptID,
+		"--agent", ready.ConsumerClaim.AgentID,
+		"--lease", ready.ConsumerClaim.LeaseID,
+		"--approval", ready.ApprovalID,
+		"--branch", ready.ConsumerAttempt.Branch,
+		"--head-sha", headSHA,
+		"--base-sha", baseSHA,
+		"--json",
+	)
+	return result
+}
+
+func appendWorkspaceSmokeRefresh(t *testing.T, workspaceDir string, mergeUnitID string, attemptID string, branch string, worktree string, oldBase string, newBase string, preHead string, postHead string) {
+	t.Helper()
+	revisions, err := workspacepkg.ResourceRevisions(workspaceDir)
+	if err != nil {
+		t.Fatalf("ResourceRevisions: %v", err)
+	}
+	refreshResource := workspacepkg.RefreshResource(mergeUnitID + ":" + attemptID)
+	readSet := map[string]int{refreshResource: revisions[refreshResource]}
+	writeSet := []string{refreshResource}
+	inputChanges := []any{}
+	if oldBase != "" && newBase != "" && oldBase != newBase {
+		resource := workspacepkg.RefreshInputResource(mergeUnitID, attemptID, "base")
+		readSet[resource] = revisions[resource]
+		writeSet = append(writeSet, resource)
+		inputChanges = append(inputChanges, map[string]any{
+			"input":     "base",
+			"old_value": oldBase,
+			"new_value": newBase,
+			"resource":  resource,
+		})
+	}
+	if preHead != "" && postHead != "" && preHead != postHead {
+		resource := workspacepkg.RefreshInputResource(mergeUnitID, attemptID, "head")
+		readSet[resource] = revisions[resource]
+		writeSet = append(writeSet, resource)
+		inputChanges = append(inputChanges, map[string]any{
+			"input":     "head",
+			"old_value": preHead,
+			"new_value": postHead,
+			"resource":  resource,
+		})
+	}
+	payload := map[string]any{
+		"merge_unit_id": mergeUnitID,
+		"attempt_id":    attemptID,
+		"status":        workspacepkg.RefreshStatusSucceeded,
+		"evidence_path": "state/refresh-smoke.json",
+		"branch":        branch,
+		"worktree":      worktree,
+		"old_base":      oldBase,
+		"new_base":      newBase,
+		"pre_head":      preHead,
+		"post_head":     postHead,
+		"backup_ref":    "backup/smoke",
+	}
+	if len(inputChanges) > 0 {
+		payload["input_changes"] = inputChanges
+	}
+	if _, err := workspacepkg.AppendEvent(workspacepkg.AppendEventOptions{
+		WorkspaceDir: workspaceDir,
+		Type:         workspacepkg.EventBranchRefreshRecorded,
+		Payload:      payload,
+		ReadSet:      readSet,
+		WriteSet:     writeSet,
+		Now:          fixedFeatureTime("2026-06-17T10:00:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent refresh: %v", err)
+	}
+}
+
+func assertWorkspaceStatusContractCurrentForSmoke(t *testing.T, workspaceDir string, mergeUnitID string) {
+	t.Helper()
+	var status struct {
+		MergeUnits []workspaceSmokeStatusUnit `json:"merge_units"`
+	}
+	runFeatureJSON(t, &status, "workspace", "status", workspaceDir, "--json")
+	unit := findWorkspaceStatusUnitForSmoke(t, status.MergeUnits, mergeUnitID)
+	if len(unit.ContractBindings) != 1 || unit.ContractBindings[0].ContractID != "api-contract" || unit.ContractBindings[0].Status != "current" {
+		t.Fatalf("status contract bindings = %+v", unit.ContractBindings)
+	}
+}
+
+func findWorkspaceStatusUnitForSmoke(t *testing.T, units []workspaceSmokeStatusUnit, mergeUnitID string) workspaceSmokeStatusUnit {
+	t.Helper()
+	for _, unit := range units {
+		if unit.ID == mergeUnitID {
+			return unit
+		}
+	}
+	t.Fatalf("merge unit %s missing from status: %+v", mergeUnitID, units)
+	return workspaceSmokeStatusUnit{}
+}
+
+func assertWorkspaceSmokeGateStatus(t *testing.T, gates []workspaceSmokeGateStatus, gate string, status string) {
+	t.Helper()
+	for _, item := range gates {
+		if item.Gate == gate {
+			if item.Status != status {
+				t.Fatalf("gate %s status = %s, want %s in %+v", gate, item.Status, status, gates)
+			}
+			return
+		}
+	}
+	t.Fatalf("gate %s missing from %+v", gate, gates)
+}
+
+func workspaceSmokeHasBlockingCondition(conditions []workspaceSmokeBlockingCondition, conditionType string) bool {
+	for _, condition := range conditions {
+		if condition.Type == conditionType {
+			return true
+		}
+	}
+	return false
+}
+
+func workspaceSmokeHasGateBlockingCondition(conditions []workspaceSmokeBlockingCondition, gate string, status string) bool {
+	for _, condition := range conditions {
+		if condition.Type == "gate" && condition.Gate == gate && condition.Status == status {
+			return true
+		}
+	}
+	return false
+}
+
 func TestWorkspaceCLISmokeRebuildsStatusFromJournal(t *testing.T) {
 	workspaceDir := workspaceWithTwoPlanLocks(t)
 	stdout, stderr, err := runFeature(t, "workspace", "validate", workspaceDir, "--write-lock", "--json")
@@ -2061,6 +2596,17 @@ func runFeature(t *testing.T, args ...string) (string, string, error) {
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	return stdout.String(), stderr.String(), err
+}
+
+func runFeatureJSON(t *testing.T, result any, args ...string) {
+	t.Helper()
+	stdout, stderr, err := runFeature(t, args...)
+	if err != nil {
+		t.Fatalf("feature %s failed: %v\nstdout=%s\nstderr=%s", strings.Join(args, " "), err, stdout, stderr)
+	}
+	if err := json.Unmarshal([]byte(stdout), result); err != nil {
+		t.Fatalf("feature %s did not emit JSON: %v\nstdout=%s\nstderr=%s", strings.Join(args, " "), err, stdout, stderr)
+	}
 }
 
 func stringSliceContains(values []string, want string) bool {
