@@ -110,6 +110,10 @@ func PublishRefresh(opts PublishRefreshOptions) (PublishRefreshResult, error) {
 		return PublishRefreshResult{}, fmt.Errorf("publish-refresh worktree %s does not match refreshed worktree %s", worktree, refresh.Worktree)
 	}
 	remote := opts.Remote
+	reserveOpts := publishRefreshReserveOptions(opts, branch, refresh.PostHead)
+	if err := validatePublishRefreshRemoteObservationApproval(state.Events, state.View.WorkspaceID, reserveOpts, plannedAt); err != nil {
+		return PublishRefreshResult{}, err
+	}
 	observedRemoteSHA, err := opts.remoteHeadResolver(worktree, remote, branch)
 	if err != nil {
 		return PublishRefreshResult{}, err
@@ -122,17 +126,17 @@ func PublishRefresh(opts PublishRefreshOptions) (PublishRefreshResult, error) {
 		return result, RemoteBranchMovedError{Result: result}
 	}
 	planned, err := PlanExternalProviderCommand(ExternalProviderPlanOptions{
-		WorkspaceDir:     opts.WorkspaceDir,
-		MergeUnitID:      opts.MergeUnitID,
-		AttemptID:        opts.AttemptID,
-		AgentID:          opts.AgentID,
-		LeaseID:          opts.LeaseID,
-		ApprovalID:       opts.ApprovalID,
-		Action:           ExternalActionPush,
-		Scope:            opts.Scope,
-		Branch:           branch,
-		RequestedHeadSHA: refresh.PostHead,
-		ExpectedBaseSHA:  opts.ExpectedRemoteSHA,
+		WorkspaceDir:     reserveOpts.WorkspaceDir,
+		MergeUnitID:      reserveOpts.MergeUnitID,
+		AttemptID:        reserveOpts.AttemptID,
+		AgentID:          reserveOpts.AgentID,
+		LeaseID:          reserveOpts.LeaseID,
+		ApprovalID:       reserveOpts.ApprovalID,
+		Action:           reserveOpts.Action,
+		Scope:            reserveOpts.Scope,
+		Branch:           reserveOpts.Branch,
+		RequestedHeadSHA: reserveOpts.RequestedHeadSHA,
+		ExpectedBaseSHA:  reserveOpts.ExpectedBaseSHA,
 		Remote:           remote,
 		Worktree:         worktree,
 		Now:              func() time.Time { return plannedAt },
@@ -160,6 +164,63 @@ func PublishRefresh(opts PublishRefreshOptions) (PublishRefreshResult, error) {
 		Intent:            planned.Intent,
 		Plan:              planned.Plan,
 	}, nil
+}
+
+func publishRefreshReserveOptions(opts PublishRefreshOptions, branch string, headSHA string) ExternalIntentReserveOptions {
+	return ExternalIntentReserveOptions{
+		WorkspaceDir:     opts.WorkspaceDir,
+		MergeUnitID:      opts.MergeUnitID,
+		AttemptID:        opts.AttemptID,
+		AgentID:          opts.AgentID,
+		LeaseID:          opts.LeaseID,
+		ApprovalID:       opts.ApprovalID,
+		Action:           ExternalActionPush,
+		Scope:            opts.Scope,
+		Branch:           branch,
+		RequestedHeadSHA: headSHA,
+		ExpectedBaseSHA:  opts.ExpectedRemoteSHA,
+		Now:              opts.Now,
+	}
+}
+
+func validatePublishRefreshRemoteObservationApproval(events []JournalEvent, workspaceID string, opts ExternalIntentReserveOptions, plannedAt time.Time) error {
+	approvalErr := validateExternalProviderPlanApproval(events, opts, plannedAt)
+	if approvalErr == nil {
+		return nil
+	}
+	approvals, err := approvalSnapshots(events)
+	if err != nil {
+		return err
+	}
+	if _, ok := approvals[opts.ApprovalID]; !ok {
+		return approvalErr
+	}
+	if publishRefreshHasRecordedFailedIntent(events, workspaceID, opts) {
+		return nil
+	}
+	return approvalErr
+}
+
+func publishRefreshHasRecordedFailedIntent(events []JournalEvent, workspaceID string, opts ExternalIntentReserveOptions) bool {
+	target, err := externalIntentTarget(opts.Action, opts.Branch, opts.PR)
+	if err != nil {
+		return false
+	}
+	identity := deriveExternalIntentIdentity(workspaceID, opts, target)
+	intents, err := externalIntentSnapshots(events)
+	if err != nil {
+		return false
+	}
+	intent, ok := intents[identity.intentID]
+	if !ok || intent.ApprovalID != opts.ApprovalID || intent.Result == nil {
+		return false
+	}
+	switch intent.Result.Status {
+	case ExternalResultNotPerformed, ExternalResultFailedBeforeSideEffect:
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizePublishRefreshOptions(opts PublishRefreshOptions) (PublishRefreshOptions, time.Time, error) {

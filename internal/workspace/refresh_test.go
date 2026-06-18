@@ -528,7 +528,8 @@ func TestPublishRefreshRequiresApproval(t *testing.T) {
 		ExpectedRemoteSHA: "remote-sha-1",
 		Now:               fixedJournalTime("2026-06-17T10:03:00Z"),
 		remoteHeadResolver: func(worktree string, remote string, branch string) (string, error) {
-			return "remote-sha-1", nil
+			t.Fatal("remote resolver should not run before approval validation")
+			return "", nil
 		},
 	})
 	if err == nil || !strings.Contains(err.Error(), "approval not found") {
@@ -536,6 +537,34 @@ func TestPublishRefreshRequiresApproval(t *testing.T) {
 	}
 	if got := len(readTestJournalEvents(t, fixture.Dir)); got != before {
 		t.Fatalf("missing approval should not append events: got %d want %d", got, before)
+	}
+}
+
+func TestPublishRefreshRejectsMismatchedApprovalBeforeRemoteRead(t *testing.T) {
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	appendRefreshEventForTest(t, fixture, claim, attempt, RefreshStatusSucceeded, attempt.BaseSHA, "base-sha-2", "2026-06-17T10:02:00Z")
+	approval := grantPublishRefreshApprovalForTest(t, fixture, claim, attempt, "different-head", "remote-sha-1", "2026-06-17T10:03:00Z")
+	before := len(readTestJournalEvents(t, fixture.Dir))
+
+	_, err := PublishRefresh(PublishRefreshOptions{
+		WorkspaceDir:      fixture.Dir,
+		MergeUnitID:       claim.MergeUnitID,
+		AttemptID:         attempt.AttemptID,
+		AgentID:           "worker-a",
+		LeaseID:           claim.LeaseID,
+		ApprovalID:        approval.Approval.ApprovalID,
+		ExpectedRemoteSHA: "remote-sha-1",
+		Now:               fixedJournalTime("2026-06-17T10:04:00Z"),
+		remoteHeadResolver: func(worktree string, remote string, branch string) (string, error) {
+			t.Fatal("remote resolver should not run before approval target validation")
+			return "", nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "is for head different-head, not post-base-sha-2") {
+		t.Fatalf("PublishRefresh error = %v, want head mismatch", err)
+	}
+	if got := len(readTestJournalEvents(t, fixture.Dir)); got != before {
+		t.Fatalf("mismatched approval should not append events: got %d want %d", got, before)
 	}
 }
 
