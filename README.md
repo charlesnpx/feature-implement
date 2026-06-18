@@ -55,6 +55,27 @@ Workspace-managed workers should claim a merge unit with `feature workspace next
 
 Agents refreshing workspace branches should follow the [agent rebase hygiene guide](docs/agent-rebase-hygiene.md). It defines local unpublished refresh rules, published branch force-with-lease boundaries, backup and verification evidence, and the distinction from the separate `rebase-up` workflow.
 
+### Workspace Recovery Reports
+
+Use `feature workspace status --json` to inspect scheduler state before taking recovery action. The JSON includes `blockers`, grouped by blocker `type` and `required_action`, plus `external_intents` so operators can distinguish tool-proven provider results from operator reconciliation.
+
+Use `feature workspace recover --json` after a long-running or interrupted campaign. The command records `actions` for recovered expired leases and returns `remaining_blockers` for work that still needs operator or agent action.
+
+Common recovery flows:
+
+- `dependency` / `complete_dependencies`: finish or fail the producer merge unit before claiming the consumer.
+- `stale_contract` / `bind_contract`: re-run contract validation for the consumer and bind the latest contract publication.
+- `stale_approval` / `grant_merge_approval`: refresh the branch or approval inputs and issue a new merge approval.
+- `frozen_resource` / `record_result`: record the external intent result while the owning lease is still active.
+- `frozen_resource` / `operator_reconcile`: after the lease is gone or the provider result is ambiguous, reconcile only when an operator has verified the external state.
+
+External intent report `result_source` values are intentionally distinct:
+
+- `tool`: the provider command completed with a tool-proven successful result.
+- `operator`: an operator reconciled the intent after an ambiguous or unresolved external write.
+- `policy`: policy accepted a non-success provider result.
+- `unresolved`: no result has been recorded yet.
+
 ## Manifest Contract
 
 `$feature` and `/feature` create a `feature.plan.yaml` manifest, then `feature plan materialize` turns it into epic, feature, and story Markdown folders.

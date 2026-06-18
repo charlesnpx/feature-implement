@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 type StatusResult struct {
@@ -17,7 +18,9 @@ type StatusResult struct {
 	Counts          map[string]int             `json:"counts"`
 	Ready           []string                   `json:"ready"`
 	Blocked         []string                   `json:"blocked"`
+	Blockers        []WorkspaceBlockerGroup    `json:"blockers,omitempty"`
 	FrozenResources []ExternalIntentFreezeView `json:"frozen_resources,omitempty"`
+	ExternalIntents []ExternalIntentReport     `json:"external_intents,omitempty"`
 	MergeQueue      []MergeQueueEntryView      `json:"merge_queue,omitempty"`
 	MergeUnits      []SchedulerMergeUnitView   `json:"merge_units"`
 }
@@ -34,9 +37,22 @@ func Status(workspaceDir string) (StatusResult, error) {
 		return StatusResult{}, err
 	}
 
-	view, err := RebuildSchedulerView(workspaceDir)
+	observedAt := time.Now()
+	view, err := rebuildSchedulerViewAt(workspaceDir, observedAt)
 	if err != nil {
 		return StatusResult{}, fmt.Errorf("workspace status: %w", err)
+	}
+	events, err := readJournalEvents(EventsPath(workspaceDir))
+	if err != nil {
+		return StatusResult{}, err
+	}
+	activeLeases, err := activeLeaseSnapshots(events, observedAt)
+	if err != nil {
+		return StatusResult{}, err
+	}
+	externalIntents, err := externalIntentReports(events, activeLeases)
+	if err != nil {
+		return StatusResult{}, err
 	}
 	return StatusResult{
 		Status:          "ok",
@@ -49,7 +65,9 @@ func Status(workspaceDir string) (StatusResult, error) {
 		Counts:          cloneCounts(view.Counts),
 		Ready:           append([]string{}, view.Ready...),
 		Blocked:         append([]string{}, view.Blocked...),
+		Blockers:        workspaceBlockerGroups(view),
 		FrozenResources: append([]ExternalIntentFreezeView{}, view.FrozenResources...),
+		ExternalIntents: externalIntents,
 		MergeQueue:      append([]MergeQueueEntryView{}, view.MergeQueue...),
 		MergeUnits:      append([]SchedulerMergeUnitView{}, view.MergeUnits...),
 	}, nil

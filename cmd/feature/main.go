@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -588,6 +589,12 @@ func writeWorkspaceStatusText(result workspace.StatusResult) {
 	if len(result.Blocked) > 0 {
 		fmt.Printf("blocked %s\n", strings.Join(blockedWorkspaceUnitSummaries(result), ", "))
 	}
+	if len(result.Blockers) > 0 {
+		writeWorkspaceBlockerGroups(result.Blockers)
+	}
+	if len(result.ExternalIntents) > 0 {
+		writeWorkspaceExternalIntentSummary(result.ExternalIntents)
+	}
 }
 
 func blockedWorkspaceUnitSummaries(result workspace.StatusResult) []string {
@@ -822,12 +829,62 @@ func workspacePublishRefresh(args []string) error {
 
 func writeWorkspaceRecoverText(result workspace.RecoverResult) {
 	fmt.Printf("recovered %d leases\n", result.RecoveredCount)
+	if len(result.Actions) > 0 {
+		for _, action := range result.Actions {
+			fmt.Printf("action %s merge_unit=%s lease=%s agent=%s status=%s\n", action.Type, action.MergeUnitID, action.LeaseID, action.AgentID, action.Status)
+		}
+	}
 	if len(result.Ready) > 0 {
 		fmt.Printf("ready %s\n", strings.Join(result.Ready, ", "))
 	}
 	if len(result.Leased) > 0 {
 		fmt.Printf("leased %s\n", strings.Join(result.Leased, ", "))
 	}
+	if len(result.Blocked) > 0 {
+		fmt.Printf("blocked %s\n", strings.Join(result.Blocked, ", "))
+	}
+	if len(result.RemainingBlockers) > 0 {
+		writeWorkspaceBlockerGroups(result.RemainingBlockers)
+	}
+	if len(result.ExternalIntents) > 0 {
+		writeWorkspaceExternalIntentSummary(result.ExternalIntents)
+	}
+}
+
+func writeWorkspaceBlockerGroups(groups []workspace.WorkspaceBlockerGroup) {
+	fmt.Println("blockers")
+	for _, group := range groups {
+		requiredAction := group.RequiredAction
+		if requiredAction == "" {
+			requiredAction = "none"
+		}
+		fmt.Printf("  %s required_action=%s count=%d", group.Type, requiredAction, group.Count)
+		if len(group.MergeUnits) > 0 {
+			fmt.Printf(" merge_units=%s", strings.Join(group.MergeUnits, ","))
+		}
+		fmt.Println()
+	}
+}
+
+func writeWorkspaceExternalIntentSummary(intents []workspace.ExternalIntentReport) {
+	counts := map[string]int{}
+	for _, intent := range intents {
+		key := intent.ResultSource
+		if intent.ResultStatus != "" {
+			key += ":" + intent.ResultStatus
+		}
+		counts[key]++
+	}
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%d", key, counts[key]))
+	}
+	fmt.Printf("external_intents %s\n", strings.Join(parts, " "))
 }
 
 func workspaceTransition(args []string) error {
