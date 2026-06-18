@@ -112,18 +112,22 @@ func Init(opts InitOptions) (InitResult, error) {
 		return InitResult{}, fmt.Errorf("workspace init requires --manifest")
 	}
 	sourceManifestPath := filepath.Clean(opts.ManifestPath)
-	manifestPath, copied, err := canonicalizeInitManifest(sourceManifestPath)
-	if err != nil {
-		return InitResult{}, err
-	}
+	manifestPath := canonicalInitManifestPath(sourceManifestPath)
 	workspaceDir := filepath.Dir(manifestPath)
-	manifest, err := ReadManifest(manifestPath)
+	manifest, err := ReadManifest(sourceManifestPath)
 	if err != nil {
 		return InitResult{}, err
 	}
 	lock, err := BuildLock(workspaceDir, manifest)
 	if err != nil {
 		return InitResult{}, err
+	}
+	copied := false
+	if sourceManifestPath != manifestPath {
+		if err := copyManifestSameDir(sourceManifestPath, manifestPath); err != nil {
+			return InitResult{}, err
+		}
+		copied = true
 	}
 	result := InitResult{
 		Status:         "initialized",
@@ -155,15 +159,11 @@ func Init(opts InitOptions) (InitResult, error) {
 	return result, nil
 }
 
-func canonicalizeInitManifest(sourcePath string) (string, bool, error) {
-	canonicalPath := filepath.Join(filepath.Dir(sourcePath), ManifestFileName)
+func canonicalInitManifestPath(sourcePath string) string {
 	if filepath.Base(sourcePath) == ManifestFileName {
-		return sourcePath, false, nil
+		return sourcePath
 	}
-	if err := copyManifestSameDir(sourcePath, canonicalPath); err != nil {
-		return "", false, err
-	}
-	return canonicalPath, true, nil
+	return filepath.Join(filepath.Dir(sourcePath), ManifestFileName)
 }
 
 func copyManifestSameDir(sourcePath string, targetPath string) error {
@@ -180,6 +180,14 @@ func copyManifestSameDir(sourcePath string, targetPath string) error {
 	}
 	b, err := os.ReadFile(sourcePath)
 	if err != nil {
+		return err
+	}
+	if existing, err := os.ReadFile(targetPath); err == nil {
+		if string(existing) != string(b) {
+			return fmt.Errorf("workspace init refused to overwrite existing %s with different contents; move the manifest beside %s or remove the existing canonical manifest after verifying relative plans[].path values", ManifestFileName, ManifestFileName)
+		}
+		return nil
+	} else if !os.IsNotExist(err) {
 		return err
 	}
 	return os.WriteFile(targetPath, b, 0o644)

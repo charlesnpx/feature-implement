@@ -306,6 +306,64 @@ func TestWorkspaceInitCommandCanonicalizesSameDirectoryManifest(t *testing.T) {
 	}
 }
 
+func TestWorkspaceInitCommandDoesNotOverwriteCanonicalManifestOnFailure(t *testing.T) {
+	workspaceDir := workspaceWithPlanLocks(t)
+	canonicalPath := filepath.Join(workspaceDir, "feature.workspace.yaml")
+	canonicalBytes, err := os.ReadFile(canonicalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonCanonicalPath := filepath.Join(workspaceDir, "workspace.yaml")
+	invalidManifest := strings.Replace(string(canonicalBytes), "path: plans/foundation", "path: plans/missing", 1)
+	if err := os.WriteFile(nonCanonicalPath, []byte(invalidManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := runFeature(t, "workspace", "init", "--manifest", nonCanonicalPath, "--write-lock", "--json")
+	if err == nil {
+		t.Fatalf("feature workspace init should fail for missing plan lock")
+	}
+	if !strings.Contains(stderr, "plan foundation lock:") {
+		t.Fatalf("expected missing plan lock error:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+	afterBytes, err := os.ReadFile(canonicalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterBytes, canonicalBytes) {
+		t.Fatalf("failed init overwrote canonical manifest:\n%s", afterBytes)
+	}
+}
+
+func TestWorkspaceInitCommandRefusesDifferentCanonicalManifest(t *testing.T) {
+	workspaceDir := workspaceWithPlanLocks(t)
+	canonicalPath := filepath.Join(workspaceDir, "feature.workspace.yaml")
+	canonicalBytes, err := os.ReadFile(canonicalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonCanonicalPath := filepath.Join(workspaceDir, "workspace.yaml")
+	alternateManifest := strings.Replace(string(canonicalBytes), "remote: origin", "remote: upstream", 1)
+	if err := os.WriteFile(nonCanonicalPath, []byte(alternateManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := runFeature(t, "workspace", "init", "--manifest", nonCanonicalPath, "--json")
+	if err == nil {
+		t.Fatalf("feature workspace init should refuse different canonical manifest")
+	}
+	if !strings.Contains(stderr, "refused to overwrite existing feature.workspace.yaml with different contents") {
+		t.Fatalf("expected overwrite refusal:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+	afterBytes, err := os.ReadFile(canonicalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterBytes, canonicalBytes) {
+		t.Fatalf("overwrite refusal changed canonical manifest:\n%s", afterBytes)
+	}
+}
+
 func TestWorkspaceValidateCommandWritesLock(t *testing.T) {
 	workspaceDir := workspaceWithPlanLocks(t)
 
