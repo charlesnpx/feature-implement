@@ -1664,7 +1664,7 @@ func TestWorkspaceContractGateQueueSmokeCommandJSON(t *testing.T) {
 		blocked := queueContractGateSmokeWithSHAs(t, ready, "head-sha-v2", "consumer-base-sha-v2")
 		if blocked.Status != "blocked" ||
 			!workspaceSmokeHasBlockingCondition(blocked.BlockingConditions, "stale_gate_evaluation") ||
-			!workspaceSmokeHasBlockingCondition(blocked.BlockingConditions, "gate") {
+			!workspaceSmokeHasGateBlockingCondition(blocked.BlockingConditions, "test", workspacepkg.GateStatusRerunRequired) {
 			t.Fatalf("stale gate queue result = %+v", blocked)
 		}
 	})
@@ -2100,6 +2100,15 @@ func assertWorkspaceSmokeGateStatus(t *testing.T, gates []workspaceSmokeGateStat
 func workspaceSmokeHasBlockingCondition(conditions []workspaceSmokeBlockingCondition, conditionType string) bool {
 	for _, condition := range conditions {
 		if condition.Type == conditionType {
+			return true
+		}
+	}
+	return false
+}
+
+func workspaceSmokeHasGateBlockingCondition(conditions []workspaceSmokeBlockingCondition, gate string, status string) bool {
+	for _, condition := range conditions {
+		if condition.Type == "gate" && condition.Gate == gate && condition.Status == status {
 			return true
 		}
 	}
