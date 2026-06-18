@@ -204,6 +204,7 @@ type gateOverrideSnapshot struct {
 	PolicyID      string
 	PolicyVersion string
 	FromStatus    string
+	EvidenceRev   int
 }
 
 type gateEvaluationInput struct {
@@ -752,8 +753,8 @@ func normalizeGateEvidenceOptions(opts GateEvidenceOptions) (GateEvidenceOptions
 	}
 	opts.Command = strings.TrimSpace(opts.Command)
 	opts.Reviewer = strings.TrimSpace(opts.Reviewer)
-	if opts.Command == "" && opts.Reviewer == "" {
-		return GateEvidenceOptions{}, time.Time{}, fmt.Errorf("workspace gate record requires --command or --reviewer")
+	if err := validateGateEvidenceSource(opts.Gate, opts.Command, opts.Reviewer, "workspace gate record"); err != nil {
+		return GateEvidenceOptions{}, time.Time{}, err
 	}
 	opts.Summary = strings.TrimSpace(opts.Summary)
 	if opts.Summary == "" {
@@ -838,6 +839,10 @@ func evaluateGateStatusesWithOverrides(events []JournalEvent, input gateEvaluati
 	if err != nil {
 		return nil, err
 	}
+	revisions, err := replayResourceRevisions(events)
+	if err != nil {
+		return nil, err
+	}
 	overrides, err := gateOverrideSnapshots(events)
 	if err != nil {
 		return nil, err
@@ -845,7 +850,8 @@ func evaluateGateStatusesWithOverrides(events []JournalEvent, input gateEvaluati
 	baseSHA, headSHA := gateInputSHAs(input)
 	for i, gate := range gates {
 		override, ok := overrides[gateOverrideKey(input.MergeUnitID, input.AttemptID, gate.Gate)]
-		if !ok || !override.Applies(inputHash, baseSHA, headSHA, evaluatedAt) {
+		evidenceResource := GateEvidenceResource(input.MergeUnitID, input.AttemptID, gate.Gate)
+		if !ok || !override.Applies(inputHash, baseSHA, headSHA, evaluatedAt, revisions[evidenceResource]) {
 			continue
 		}
 		gates[i] = GateStatusView{
@@ -1198,8 +1204,8 @@ func gateEvidenceFromEvent(event JournalEvent) (gateEvidenceSnapshot, error) {
 	}
 	command := optionalStringPayload(event, eventPayloadCommandKey)
 	reviewer := optionalStringPayload(event, eventPayloadReviewerKey)
-	if command == "" && reviewer == "" {
-		return gateEvidenceSnapshot{}, fmt.Errorf("gate evidence event %s requires command or reviewer", event.ID)
+	if err := validateGateEvidenceSource(gate, command, reviewer, fmt.Sprintf("gate evidence event %s", event.ID)); err != nil {
+		return gateEvidenceSnapshot{}, err
 	}
 	summary, err := eventStringPayload(event, eventPayloadSummaryKey)
 	if err != nil {
@@ -1241,6 +1247,20 @@ func gateEvidenceFromEvent(event JournalEvent) (gateEvidenceSnapshot, error) {
 		PolicyID:      policyID,
 		PolicyVersion: policyVersion,
 	}, nil
+}
+
+func validateGateEvidenceSource(gate string, command string, reviewer string, context string) error {
+	switch gate {
+	case "security", "test":
+		if command == "" {
+			return fmt.Errorf("%s requires --command for %s gate", context, gate)
+		}
+	case "review":
+		if command == "" && reviewer == "" {
+			return fmt.Errorf("%s requires --command or --reviewer", context)
+		}
+	}
+	return nil
 }
 
 func (evidence gateEvidenceSnapshot) Applies(inputHash string, baseSHA string, headSHA string) bool {
@@ -1360,6 +1380,7 @@ func gateOverrideFromEvent(event JournalEvent) (gateOverrideSnapshot, error) {
 	if !containsString(event.WriteSet, resource) {
 		return gateOverrideSnapshot{}, fmt.Errorf("gate override event %s missing write_set resource %s", event.ID, resource)
 	}
+	evidenceResource := GateEvidenceResource(mergeUnitID, attemptID, gate)
 	return gateOverrideSnapshot{
 		OverrideID:    overrideID,
 		MergeUnitID:   mergeUnitID,
@@ -1375,10 +1396,11 @@ func gateOverrideFromEvent(event JournalEvent) (gateOverrideSnapshot, error) {
 		PolicyID:      policyID,
 		PolicyVersion: policyVersion,
 		FromStatus:    fromStatus,
+		EvidenceRev:   event.ReadSet[evidenceResource],
 	}, nil
 }
 
-func (o gateOverrideSnapshot) Applies(inputHash string, baseSHA string, headSHA string, at time.Time) bool {
+func (o gateOverrideSnapshot) Applies(inputHash string, baseSHA string, headSHA string, at time.Time, evidenceRevision int) bool {
 	if !at.Before(o.ExpiresAt) || o.InputHash != inputHash {
 		return false
 	}
@@ -1386,6 +1408,9 @@ func (o gateOverrideSnapshot) Applies(inputHash string, baseSHA string, headSHA 
 		return false
 	}
 	if headSHA == "" || o.HeadSHA != headSHA {
+		return false
+	}
+	if o.EvidenceRev != evidenceRevision {
 		return false
 	}
 	return true

@@ -1912,7 +1912,7 @@ func usageWorkspace(w io.Writer) {
   feature workspace publish-refresh <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --approval <id> --expected-remote-sha <sha> [--branch <name>] [--remote <name>] [--worktree <path>] [--scope <scope>] [--json]
   feature workspace evaluate-gates <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> [--json]
   feature workspace gate override <workspace-dir> --merge-unit <id> --attempt <id> --gate <gate> --status retained_by_operator --reason <text> --input-hash <hash> --head-sha <sha> --base-sha <sha> --operator <id> (--expires-in <duration> | --expires-at <timestamp>) [--json]
-  feature workspace gate record <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --gate <review|security|test> --status <passed|blocked> --input-hash <hash> --head-sha <sha> --base-sha <sha> (--command <cmd> | --reviewer <id>) --summary <text> [--json]
+  feature workspace gate record <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --gate <review|security|test> --status <passed|blocked> --input-hash <hash> --head-sha <sha> --base-sha <sha> [--command <cmd>] [--reviewer <id>] --summary <text> [--json]
   feature workspace queue enter <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> (--branch <name> | --pr <id>) --head-sha <sha> --base-sha <sha> [--approval <id>] [--scope <scope>] [--json]
   feature workspace attempt start <workspace-dir> --merge-unit <id> --agent <id> --lease <id> --base-sha <sha> [--mode fresh-from-base] [--json]
   feature workspace attempt abandon <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --reason <text> [--json]
@@ -2006,9 +2006,9 @@ Records local lifecycle movement for the current active attempt.`)
 func usageWorkspaceGate(w io.Writer) {
 	fmt.Fprintln(w, `Usage:
   feature workspace gate override <workspace-dir> --merge-unit <id> --attempt <id> --gate <gate> --status retained_by_operator --reason <text> --input-hash <hash> --head-sha <sha> --base-sha <sha> --operator <id> (--expires-in <duration> | --expires-at <timestamp>) [--json]
-  feature workspace gate record <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --gate <review|security|test> --status <passed|blocked> --input-hash <hash> --head-sha <sha> --base-sha <sha> (--command <cmd> | --reviewer <id>) --summary <text> [--json]
+  feature workspace gate record <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --gate <review|security|test> --status <passed|blocked> --input-hash <hash> --head-sha <sha> --base-sha <sha> [--command <cmd>] [--reviewer <id>] --summary <text> [--json]
 
-Records scoped operator overrides and tool-proven gate evidence. Both are pinned to evaluator input hash, head SHA, and base SHA.`)
+Records scoped operator overrides and tool-proven gate evidence. Both are pinned to evaluator input hash, head SHA, and base SHA. Security and test evidence require --command; review evidence requires --command or --reviewer.`)
 }
 
 func usageWorkspaceGateAction(w io.Writer, action string) {
@@ -2020,9 +2020,9 @@ func usageWorkspaceGateAction(w io.Writer, action string) {
 Records a retained_by_operator override for an overridable gate.`)
 	case "record":
 		fmt.Fprintln(w, `Usage:
-  feature workspace gate record <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --gate <review|security|test> --status <passed|blocked> --input-hash <hash> --head-sha <sha> --base-sha <sha> (--command <cmd> | --reviewer <id>) --summary <text> [--json]
+  feature workspace gate record <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --gate <review|security|test> --status <passed|blocked> --input-hash <hash> --head-sha <sha> --base-sha <sha> [--command <cmd>] [--reviewer <id>] --summary <text> [--json]
 
-Records tool-proven review, security, or test evidence for the current attempt.`)
+Records tool-proven review, security, or test evidence for the current attempt. Security and test gates require --command; review requires --command or --reviewer.`)
 	default:
 		usageWorkspaceGate(w)
 	}

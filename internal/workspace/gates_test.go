@@ -585,6 +585,25 @@ func TestRecordGateEvidenceRejectsMissingFields(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "requires --command or --reviewer") {
 		t.Fatalf("missing source error = %v", err)
 	}
+	for _, gate := range []string{"security", "test"} {
+		_, err = RecordGateEvidence(GateEvidenceOptions{
+			WorkspaceDir: "workspace",
+			MergeUnitID:  "foundation:story-a",
+			AttemptID:    "foundation:story-a:attempt-1",
+			AgentID:      "worker-a",
+			LeaseID:      "lease-a",
+			Gate:         gate,
+			Status:       GateStatusPassed,
+			InputHash:    "input-hash",
+			HeadSHA:      "head-sha",
+			BaseSHA:      "base-sha",
+			Reviewer:     "reviewer-a",
+			Summary:      "missing command",
+		})
+		if err == nil || !strings.Contains(err.Error(), "requires --command for "+gate+" gate") {
+			t.Fatalf("missing command error for %s = %v", gate, err)
+		}
+	}
 	_, err = RecordGateEvidence(GateEvidenceOptions{
 		WorkspaceDir: "workspace",
 		MergeUnitID:  "foundation:story-a",
@@ -618,6 +637,35 @@ func TestRecordGateEvidenceRejectsMissingFields(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "unsupported gate evidence status") {
 		t.Fatalf("unsupported status error = %v", err)
+	}
+}
+
+func TestGateEvidenceEventRejectsReviewerOnlyTestEvidence(t *testing.T) {
+	event := JournalEvent{
+		ID:   "event-gate-evidence",
+		Type: EventGateEvidenceRecorded,
+		Payload: map[string]any{
+			eventPayloadEvidenceIDKey:       "evidence-a",
+			eventPayloadMergeUnitIDKey:      "foundation:story-a",
+			eventPayloadAttemptIDKey:        "foundation:story-a:attempt-1",
+			eventPayloadAgentIDKey:          "worker-a",
+			eventPayloadLeaseIDKey:          "lease-a",
+			eventPayloadGateKey:             "test",
+			eventPayloadStatusKey:           GateStatusPassed,
+			eventPayloadInputHashKey:        "input-hash",
+			eventPayloadHeadSHAKey:          "head-sha",
+			eventPayloadBaseSHAKey:          "base-sha",
+			eventPayloadReviewerKey:         "reviewer-a",
+			eventPayloadSummaryKey:          "reviewer-only test evidence",
+			eventPayloadPolicyIDKey:         "policy-a",
+			eventPayloadPolicyVersionKey:    "v1",
+			eventPayloadEvaluatorVersionKey: GateEvaluatorVersion,
+		},
+		WriteSet: []string{GateEvidenceResource("foundation:story-a", "foundation:story-a:attempt-1", "test")},
+	}
+	err := validateGateEvidenceEvent(event)
+	if err == nil || !strings.Contains(err.Error(), "requires --command for test gate") {
+		t.Fatalf("gate evidence event validation error = %v", err)
 	}
 }
 
@@ -691,6 +739,75 @@ func TestOverrideGateFromStatusReflectsToolEvidence(t *testing.T) {
 	gate := gateStatusByName(after.Gates)["security"]
 	if gate.Status != GateStatusRetainedByOperator || gate.ComputedStatus != GateStatusBlocked || gate.OverrideID != override.Override.OverrideID {
 		t.Fatalf("security gate after override = %+v", gate)
+	}
+}
+
+func TestNewerToolEvidenceStalesOlderOverride(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	if _, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir, WriteLock: true}); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	claim, attempt := startGateEvaluationAttempt(t, fixture.Dir)
+	appendGateRefreshEvent(t, fixture.Dir, claim, attempt, attempt.BaseSHA, attempt.BaseSHA, "head-sha-first", "head-sha-first", "2026-01-02T15:03:00Z")
+	evaluation, err := EvaluateGates(GateEvaluateOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      claim.AgentID,
+		LeaseID:      claim.LeaseID,
+		Now:          fixedWorkspaceTime("2026-01-02T15:04:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("EvaluateGates: %v", err)
+	}
+	override, err := OverrideGate(GateOverrideOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		Gate:         "security",
+		Status:       GateStatusRetainedByOperator,
+		Reason:       "operator accepted pending scan",
+		InputHash:    evaluation.InputHash,
+		HeadSHA:      "head-sha-first",
+		BaseSHA:      attempt.BaseSHA,
+		Operator:     "operator-a",
+		ExpiresIn:    time.Hour,
+		Now:          fixedWorkspaceTime("2026-01-02T15:05:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("OverrideGate: %v", err)
+	}
+	if _, err := RecordGateEvidence(GateEvidenceOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      claim.AgentID,
+		LeaseID:      claim.LeaseID,
+		Gate:         "security",
+		Status:       GateStatusBlocked,
+		InputHash:    evaluation.InputHash,
+		HeadSHA:      "head-sha-first",
+		BaseSHA:      attempt.BaseSHA,
+		Command:      "gosec ./...",
+		Summary:      "security scan blocked after override",
+		Now:          fixedWorkspaceTime("2026-01-02T15:06:00Z"),
+	}); err != nil {
+		t.Fatalf("RecordGateEvidence: %v", err)
+	}
+	after, err := EvaluateGates(GateEvaluateOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      claim.AgentID,
+		LeaseID:      claim.LeaseID,
+		Now:          fixedWorkspaceTime("2026-01-02T15:07:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("EvaluateGates after evidence: %v", err)
+	}
+	gate := gateStatusByName(after.Gates)["security"]
+	if gate.Status != GateStatusBlocked || gate.OverrideID == override.Override.OverrideID {
+		t.Fatalf("newer evidence should stale older override: gate=%+v override=%+v", gate, override.Override)
 	}
 }
 
