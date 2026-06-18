@@ -31,6 +31,7 @@ const (
 	eventPayloadPolicyVersionKey    = "policy_version"
 	eventPayloadGatesKey            = "gates"
 	eventPayloadGateKey             = "gate"
+	eventPayloadComputedStatusKey   = "computed_status"
 	eventPayloadFromStatusKey       = "from_status"
 )
 
@@ -727,6 +728,18 @@ func gateStatusPayload(gates []GateStatusView) []any {
 		}
 		if gate.Reason != "" {
 			item["reason"] = gate.Reason
+		}
+		if gate.ComputedStatus != "" {
+			item[eventPayloadComputedStatusKey] = gate.ComputedStatus
+		}
+		if gate.OverrideID != "" {
+			item[eventPayloadOverrideIDKey] = gate.OverrideID
+		}
+		if gate.Operator != "" {
+			item[eventPayloadOperatorKey] = gate.Operator
+		}
+		if gate.ExpiresAt != "" {
+			item[eventPayloadExpiresAtKey] = gate.ExpiresAt
 		}
 		payload = append(payload, item)
 	}

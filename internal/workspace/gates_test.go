@@ -401,6 +401,32 @@ func TestOverrideGateAppliesRetainedByOperator(t *testing.T) {
 	if !found {
 		t.Fatalf("security gate missing: %+v", after.Gates)
 	}
+	events, err := readJournalEvents(EventsPath(fixture.Dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := events[len(events)-1]
+	gatesPayload, ok := last.Payload[eventPayloadGatesKey].([]any)
+	if !ok {
+		t.Fatalf("gate payload missing from event: %+v", last.Payload)
+	}
+	foundPayload := false
+	for _, raw := range gatesPayload {
+		item, ok := raw.(map[string]any)
+		if !ok || item[eventPayloadGateKey] != "security" {
+			continue
+		}
+		foundPayload = true
+		if item[eventPayloadComputedStatusKey] != GateStatusPending ||
+			item[eventPayloadOverrideIDKey] != override.Override.OverrideID ||
+			item[eventPayloadOperatorKey] != "operator-a" ||
+			item[eventPayloadExpiresAtKey] != override.Override.ExpiresAt {
+			t.Fatalf("security gate event payload = %+v", item)
+		}
+	}
+	if !foundPayload {
+		t.Fatalf("security gate missing from event payload: %+v", gatesPayload)
+	}
 }
 
 func TestOverrideGateBecomesStaleWhenInputsChange(t *testing.T) {
