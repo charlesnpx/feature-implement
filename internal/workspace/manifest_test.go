@@ -30,6 +30,9 @@ func TestReadManifestValidWorkspace(t *testing.T) {
 	if gate.ID != "core-contracts" || len(gate.Producers) != 1 || len(gate.Consumers) != 1 {
 		t.Fatalf("contract gate did not parse: %+v", gate)
 	}
+	if len(gate.Artifacts) != 1 || gate.Artifacts[0].ID != "openapi" || gate.Artifacts[0].Path != "contracts/openapi.yaml" {
+		t.Fatalf("artifacts = %+v", gate.Artifacts)
+	}
 	if len(gate.Validation.Commands) != 1 || gate.Validation.Commands[0] != "go test ./..." {
 		t.Fatalf("validation commands = %+v", gate.Validation.Commands)
 	}
@@ -180,6 +183,13 @@ func TestValidateManifestRejectsMalformedMergeUnitReferences(t *testing.T) {
 			},
 			wantErr: "references unknown plan missing",
 		},
+		{
+			name: "contract artifact escaping repository",
+			mutate: func(manifest *WorkspaceManifest) {
+				manifest.ContractGates[0].Artifacts = []WorkspaceArtifactSpec{{ID: "openapi", Path: "../openapi.yaml"}}
+			},
+			wantErr: "must stay within the repository",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -223,6 +233,10 @@ func validWorkspace() WorkspaceManifest {
 			ID:        "core-contracts",
 			Producers: []string{"foundation:story-id-namespaces"},
 			Consumers: []string{"sources:story-source-schema"},
+			Artifacts: []WorkspaceArtifactSpec{{
+				ID:   "openapi",
+				Path: "contracts/openapi.yaml",
+			}},
 			Validation: WorkspaceGateValidation{
 				Commands: []string{"go test ./..."},
 			},
@@ -250,6 +264,9 @@ contract_gates:
       - foundation:story-id-namespaces
     consumers:
       - sources:story-source-schema
+    artifacts:
+      - id: openapi
+        path: contracts/openapi.yaml
     validation:
       commands:
         - go test ./...
