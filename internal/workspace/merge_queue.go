@@ -488,12 +488,7 @@ func evaluateMergeQueueReadiness(lock WorkspaceLock, events []JournalEvent, view
 	}
 	baseSHA, headSHA := gateInputSHAs(input)
 	if baseSHA == "" || headSHA == "" {
-		conditions = append(conditions, SchedulerBlockingCondition{
-			Type:           "missing_refresh",
-			Resource:       RefreshResource(attempt.MergeUnitID + ":" + attempt.AttemptID),
-			AttemptID:      attempt.AttemptID,
-			RequiredAction: mergeQueueRequiredActionRefresh,
-		})
+		conditions = appendMissingRefreshCondition(conditions, attempt.MergeUnitID, attempt.AttemptID)
 	} else if baseSHA != candidate.BaseSHA || headSHA != candidate.HeadSHA {
 		conditions = append(conditions, SchedulerBlockingCondition{
 			Type:           "stale_refresh_input",
@@ -530,6 +525,20 @@ func evaluateMergeQueueReadiness(lock WorkspaceLock, events []JournalEvent, view
 		GateInputHash:  inputHash,
 		GateOutputHash: outputHash,
 	}, conditions, nil
+}
+
+func appendMissingRefreshCondition(conditions []SchedulerBlockingCondition, mergeUnitID string, attemptID string) []SchedulerBlockingCondition {
+	for _, condition := range conditions {
+		if condition.Type == "missing_refresh" && condition.AttemptID == attemptID {
+			return conditions
+		}
+	}
+	return append(conditions, SchedulerBlockingCondition{
+		Type:           "missing_refresh",
+		Resource:       RefreshResource(mergeUnitID + ":" + attemptID),
+		AttemptID:      attemptID,
+		RequiredAction: mergeQueueRequiredActionRefresh,
+	})
 }
 
 func mergeQueueStructuralConditions(view SchedulerView, unitByID map[string]*SchedulerMergeUnitView, unit SchedulerMergeUnitView, attemptID string) []SchedulerBlockingCondition {

@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -96,6 +97,65 @@ func TestQueuedMergeUnitIsNotReadyAfterLeaseRelease(t *testing.T) {
 	}
 	if next.Status != "none" {
 		t.Fatalf("queued unit should not be claimable: %+v", next)
+	}
+}
+
+func TestQueueMergeUnitRequiresRefreshEvidence(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	if _, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir, WriteLock: true}); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	claim, attempt := startGateEvaluationAttempt(t, fixture.Dir)
+
+	blocked, err := QueueMergeUnit(MergeQueueOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      claim.AgentID,
+		LeaseID:      claim.LeaseID,
+		Branch:       attempt.Branch,
+		HeadSHA:      "head-sha-first",
+		BaseSHA:      attempt.BaseSHA,
+		Now:          fixedWorkspaceTime("2026-01-02T15:02:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("QueueMergeUnit before refresh: %v", err)
+	}
+	if blocked.Status != "blocked" || !hasBlockingConditionWithAction(blocked.BlockingConditions, "missing_refresh", mergeQueueRequiredActionRefresh) {
+		t.Fatalf("missing refresh block result = %+v", blocked)
+	}
+
+	lock, err := readWorkspaceLock(filepath.Join(fixture.Dir, LockFileName))
+	if err != nil {
+		t.Fatalf("readWorkspaceLock: %v", err)
+	}
+	view, err := buildSchedulerViewAt(lock, readTestJournalEvents(t, fixture.Dir), fixedWorkspaceTime("2026-01-02T15:02:30Z")())
+	if err != nil {
+		t.Fatalf("buildSchedulerViewAt: %v", err)
+	}
+	unit := findSchedulerUnit(t, view, claim.MergeUnitID)
+	if !hasBlockingConditionWithAction(unit.BlockingConditions, "missing_refresh", mergeQueueRequiredActionRefresh) {
+		t.Fatalf("status missing refresh blockers = %+v", unit.BlockingConditions)
+	}
+
+	ready := prepareQueueReadiness(t, fixture, claim, attempt, "2026-01-02T15")
+	queued, err := QueueMergeUnit(MergeQueueOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      claim.AgentID,
+		LeaseID:      claim.LeaseID,
+		ApprovalID:   ready.Approval.Approval.ApprovalID,
+		Branch:       attempt.Branch,
+		HeadSHA:      ready.HeadSHA,
+		BaseSHA:      ready.BaseSHA,
+		Now:          fixedWorkspaceTime("2026-01-02T15:09:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("QueueMergeUnit after refresh: %v", err)
+	}
+	if queued.Status != mergeQueueStatusQueued || queued.Queue == nil {
+		t.Fatalf("queue after refresh = %+v", queued)
 	}
 }
 
@@ -449,6 +509,15 @@ func queueClaimFromNext(claim NextResult) gateClaimFixture {
 func hasBlockingCondition(conditions []SchedulerBlockingCondition, conditionType string) bool {
 	for _, condition := range conditions {
 		if condition.Type == conditionType {
+			return true
+		}
+	}
+	return false
+}
+
+func hasBlockingConditionWithAction(conditions []SchedulerBlockingCondition, conditionType string, requiredAction string) bool {
+	for _, condition := range conditions {
+		if condition.Type == conditionType && condition.RequiredAction == requiredAction {
 			return true
 		}
 	}
