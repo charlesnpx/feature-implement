@@ -216,6 +216,11 @@ func ReserveExternalIntent(opts ExternalIntentReserveOptions) (ExternalIntentRes
 	}); err != nil {
 		return ExternalIntentResult{}, err
 	}
+	if opts.Action == ExternalActionMerge {
+		if err := validateCurrentRefreshHead(state.Events, current, "external merge intent reserve"); err != nil {
+			return ExternalIntentResult{}, err
+		}
+	}
 	if staleInputs := approvalStaleInputsFromEvents(state.Events, approval); len(staleInputs) > 0 {
 		return ExternalIntentResult{}, fmt.Errorf("approval %s is stale after refresh changed %s", approval.ApprovalID, strings.Join(staleInputs, ", "))
 	}

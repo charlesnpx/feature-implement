@@ -498,6 +498,11 @@ func evaluateMergeQueueReadiness(lock WorkspaceLock, events []JournalEvent, view
 			RequiredAction: mergeQueueRequiredActionRefresh,
 		})
 	}
+	if condition, stale, err := currentRefreshHeadCondition(events, attempt); err != nil {
+		return mergeQueueEvaluation{}, nil, err
+	} else if stale {
+		conditions = append(conditions, condition)
+	}
 	latestGate, ok, err := latestGateEvaluation(events, attempt.MergeUnitID, attempt.AttemptID)
 	if err != nil {
 		return mergeQueueEvaluation{}, nil, err

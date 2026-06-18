@@ -211,6 +211,17 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 		}
 		view.Counts[unit.Status]++
 		refreshConditions := refreshes.Conditions(unit.ID, attemptID)
+		if attemptID != "" {
+			if attempt := attempts.Current(unit.ID); attempt != nil {
+				condition, stale, err := currentRefreshHeadCondition(events, *attempt)
+				if err != nil {
+					return SchedulerView{}, err
+				}
+				if stale {
+					refreshConditions = append(refreshConditions, condition)
+				}
+			}
+		}
 		if attemptID != "" && unit.ActiveLease != nil && len(frozenResources) == 0 {
 			if _, ok := latestRefresh(events, unit.ID, attemptID); !ok {
 				refreshConditions = appendMissingRefreshCondition(refreshConditions, unit.ID, attemptID)
