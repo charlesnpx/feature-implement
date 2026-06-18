@@ -126,6 +126,19 @@ func newRefreshTracker() *refreshTracker {
 	return &refreshTracker{latestByMergeUnit: map[string]refreshSnapshot{}}
 }
 
+func refreshTrackerFromEvents(events []JournalEvent) (*refreshTracker, error) {
+	tracker := newRefreshTracker()
+	for _, event := range events {
+		if event.Type != EventBranchRefreshRecorded {
+			continue
+		}
+		if err := tracker.Apply(event); err != nil {
+			return nil, err
+		}
+	}
+	return tracker, nil
+}
+
 func (t *refreshTracker) Apply(event JournalEvent) error {
 	snapshot, err := refreshSnapshotFromEvent(event)
 	if err != nil {
@@ -151,6 +164,18 @@ func (t *refreshTracker) Conditions(mergeUnitID string, attemptID string) []Sche
 		RequiredAction: "rerun_local_refresh",
 		EvidencePath:   snapshot.EvidencePath,
 	}}
+}
+
+func validateRefreshConditionsClear(operation string, mergeUnitID string, attemptID string, refreshes *refreshTracker) error {
+	if refreshes == nil {
+		return nil
+	}
+	blocked := refreshes.Conditions(mergeUnitID, attemptID)
+	if len(blocked) == 0 {
+		return nil
+	}
+	condition := blocked[0]
+	return fmt.Errorf("%s blocked by %s %s; requires %s", operation, condition.Type, condition.Resource, condition.RequiredAction)
 }
 
 func RefreshBranch(opts RefreshBranchOptions) (RefreshBranchResult, error) {

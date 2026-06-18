@@ -229,11 +229,11 @@ func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, attempts *
 	case EventAttemptAbandoned:
 		return abandonSchedulerAttempt(unitByID, attempts, lifecycles, event)
 	case EventMergeUnitStarted:
-		return updateMergeUnitStatus(unitByID, attempts, lifecycles, leases, externalIntents, event, MergeUnitInProgress)
+		return updateMergeUnitStatus(unitByID, attempts, lifecycles, leases, externalIntents, refreshes, event, MergeUnitInProgress)
 	case EventMergeUnitCompleted:
-		return updateMergeUnitStatus(unitByID, attempts, lifecycles, leases, externalIntents, event, MergeUnitCompleted)
+		return updateMergeUnitStatus(unitByID, attempts, lifecycles, leases, externalIntents, refreshes, event, MergeUnitCompleted)
 	case EventMergeUnitFailed:
-		return updateMergeUnitStatus(unitByID, attempts, lifecycles, leases, externalIntents, event, MergeUnitFailed)
+		return updateMergeUnitStatus(unitByID, attempts, lifecycles, leases, externalIntents, refreshes, event, MergeUnitFailed)
 	case EventContractPublished:
 		return nil
 	case EventContractBound:
@@ -267,7 +267,7 @@ func abandonSchedulerAttempt(unitByID map[string]*SchedulerMergeUnitView, attemp
 	return nil
 }
 
-func updateMergeUnitStatus(unitByID map[string]*SchedulerMergeUnitView, attempts *attemptTracker, lifecycles *lifecycleTracker, leases *leaseTracker, externalIntents *externalIntentTracker, event JournalEvent, status string) error {
+func updateMergeUnitStatus(unitByID map[string]*SchedulerMergeUnitView, attempts *attemptTracker, lifecycles *lifecycleTracker, leases *leaseTracker, externalIntents *externalIntentTracker, refreshes *refreshTracker, event JournalEvent, status string) error {
 	unitID, err := eventStringPayload(event, eventPayloadMergeUnitIDKey)
 	if err != nil {
 		return err
@@ -284,7 +284,7 @@ func updateMergeUnitStatus(unitByID map[string]*SchedulerMergeUnitView, attempts
 	if err != nil {
 		return err
 	}
-	if err := validateTransitionEventPayload(event, unit.Status, status, attempt, leases.ActiveAt(unitID, occurredAt), externalIntents); err != nil {
+	if err := validateTransitionEventPayload(event, unit.Status, status, attempt, leases.ActiveAt(unitID, occurredAt), externalIntents, refreshes); err != nil {
 		return err
 	}
 	unit.Status = status
@@ -292,7 +292,7 @@ func updateMergeUnitStatus(unitByID map[string]*SchedulerMergeUnitView, attempts
 	return nil
 }
 
-func validateTransitionEventPayload(event JournalEvent, currentStatus string, targetStatus string, attempt *attemptSnapshot, activeLease *activeLeaseSnapshot, externalIntents *externalIntentTracker) error {
+func validateTransitionEventPayload(event JournalEvent, currentStatus string, targetStatus string, attempt *attemptSnapshot, activeLease *activeLeaseSnapshot, externalIntents *externalIntentTracker, refreshes *refreshTracker) error {
 	from, to, evidence, ok, err := eventTransitionPayload(event)
 	if err != nil {
 		return err
@@ -332,6 +332,9 @@ func validateTransitionEventPayload(event JournalEvent, currentStatus string, ta
 	}
 	normalizedEvidence, err := normalizeTransitionEvidence(from, to, evidence, *attempt)
 	if err != nil {
+		return err
+	}
+	if err := validateRefreshConditionsClear(fmt.Sprintf("scheduler event %s", event.ID), attempt.MergeUnitID, attempt.AttemptID, refreshes); err != nil {
 		return err
 	}
 	activeLeases := map[string]activeLeaseSnapshot{}

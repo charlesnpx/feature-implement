@@ -115,6 +115,97 @@ func TestRefreshVerificationFailureBlocksCurrentAttempt(t *testing.T) {
 	}
 }
 
+func TestRefreshVerificationFailureBlocksCurrentAttemptTransitions(t *testing.T) {
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	if _, err := Transition(TransitionOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		From:         MergeUnitPending,
+		To:           MergeUnitInProgress,
+		Evidence:     map[string]any{evidenceWorktreeKey: attempt.Worktree},
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	}); err != nil {
+		t.Fatalf("Transition start: %v", err)
+	}
+	appendRefreshEventForTest(t, fixture, claim, attempt, RefreshStatusVerificationFailed, attempt.BaseSHA, "base-sha-2", "2026-06-17T10:03:00Z")
+
+	_, err := Transition(TransitionOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		From:         MergeUnitInProgress,
+		To:           MergeUnitCompleted,
+		Evidence:     map[string]any{evidenceCommitSHAKey: "commit-sha-1"},
+		Now:          fixedJournalTime("2026-06-17T10:04:00Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "refresh_verification_failed") || !strings.Contains(err.Error(), "requires rerun_local_refresh") {
+		t.Fatalf("blocked completion error = %v", err)
+	}
+
+	appendRefreshEventForTest(t, fixture, claim, attempt, RefreshStatusSucceeded, "base-sha-2", "base-sha-3", "2026-06-17T10:05:00Z")
+	completed, err := Transition(TransitionOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		From:         MergeUnitInProgress,
+		To:           MergeUnitCompleted,
+		Evidence:     map[string]any{evidenceCommitSHAKey: "commit-sha-1"},
+		Now:          fixedJournalTime("2026-06-17T10:06:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Transition after successful refresh: %v", err)
+	}
+	if completed.EventType != EventMergeUnitCompleted {
+		t.Fatalf("completed = %+v", completed)
+	}
+}
+
+func TestRefreshVerificationFailureRejectsTransitionReplay(t *testing.T) {
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	if _, err := Transition(TransitionOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		From:         MergeUnitPending,
+		To:           MergeUnitInProgress,
+		Evidence:     map[string]any{evidenceWorktreeKey: attempt.Worktree},
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	}); err != nil {
+		t.Fatalf("Transition start: %v", err)
+	}
+	appendRefreshEventForTest(t, fixture, claim, attempt, RefreshStatusVerificationFailed, attempt.BaseSHA, "base-sha-2", "2026-06-17T10:03:00Z")
+
+	revisions, err := ResourceRevisions(fixture.Dir)
+	if err != nil {
+		t.Fatalf("ResourceRevisions: %v", err)
+	}
+	if err := appendTransitionEvent(fixture.Dir, TransitionOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		From:         MergeUnitInProgress,
+		To:           MergeUnitCompleted,
+	}, EventMergeUnitCompleted, map[string]any{evidenceCommitSHAKey: "commit-sha-1"}, revisions, fixedJournalTime("2026-06-17T10:04:00Z")()); err != nil {
+		t.Fatalf("appendTransitionEvent: %v", err)
+	}
+
+	_, err = RebuildSchedulerView(fixture.Dir)
+	if err == nil || !strings.Contains(err.Error(), "refresh_verification_failed") || !strings.Contains(err.Error(), "requires rerun_local_refresh") {
+		t.Fatalf("replay error = %v", err)
+	}
+}
+
 func TestLatestRefreshAdvancesBaselineAfterSuccessOrFailure(t *testing.T) {
 	fixture, claim, attempt := newApprovalAttemptFixture(t)
 	first := appendRefreshEventForTest(t, fixture, claim, attempt, RefreshStatusSucceeded, "base-sha-1", "base-sha-2", "2026-06-17T10:02:00Z")
