@@ -171,6 +171,7 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 	freezesByResource := externalIntentFreezesByResource(view.FrozenResources)
 	for i := range view.MergeUnits {
 		unit := &view.MergeUnits[i]
+		frozenResources := freezesByResource[MergeUnitResource(unit.ID)]
 		if lease, ok := activeLeases[unit.ID]; ok {
 			unit.ActiveLease = &SchedulerLeaseView{
 				LeaseID:        lease.LeaseID,
@@ -210,12 +211,17 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 		}
 		view.Counts[unit.Status]++
 		refreshConditions := refreshes.Conditions(unit.ID, attemptID)
+		if attemptID != "" && unit.ActiveLease != nil && len(frozenResources) == 0 {
+			if _, ok := latestRefresh(events, unit.ID, attemptID); !ok {
+				refreshConditions = appendMissingRefreshCondition(refreshConditions, unit.ID, attemptID)
+			}
+		}
 		if len(refreshConditions) > 0 {
 			unit.BlockingConditions = append(unit.BlockingConditions, refreshConditions...)
 		}
 		if unit.Status == MergeUnitPending {
 			unit.BlockedBy = incompleteDependencies(unit.Dependencies, unitByID)
-			unit.BlockingConditions = schedulerBlockingConditions(unit.BlockedBy, unit.ContractBindings, freezesByResource[MergeUnitResource(unit.ID)], refreshConditions)
+			unit.BlockingConditions = schedulerBlockingConditions(unit.BlockedBy, unit.ContractBindings, frozenResources, refreshConditions)
 		}
 	}
 	ensureLifecycleCounts(view.Counts)
