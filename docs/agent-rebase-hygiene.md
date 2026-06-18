@@ -83,15 +83,19 @@ Do not delete backup refs automatically.
 
 ## Published Branch Refresh
 
-Published branch refresh is an external write. It requires explicit approval, external intent reservation, provider execution, and result recording before the remote branch is rewritten.
+Published branch refresh is an external write. Before rewriting the remote branch, agents must have explicit approval and a reserved external intent. The provider command performs the rewrite, and the intent result must be recorded immediately after the provider command reports its outcome.
 
-Before planning the write:
+Before planning the write, capture and validate the expected remote head:
 
 ```sh
 expected_remote_sha="$(git ls-remote origin "refs/heads/$branch" | awk '{print $1}')"
+if [ -z "$expected_remote_sha" ]; then
+  echo "remote_branch_moved"
+  exit 1
+fi
 ```
 
-After local preservation checks pass, the remote update must use force-with-lease against the expected remote SHA:
+After local preservation checks pass, the remote update must use force-with-lease against that exact expected SHA:
 
 ```sh
 git -C <worktree> push \
@@ -99,7 +103,7 @@ git -C <worktree> push \
   origin "HEAD:$branch"
 ```
 
-If the remote head is missing unexpectedly or no longer equals `expected_remote_sha`, stop and block with `remote_branch_moved`. Do not fall back to a plain force push.
+If the push rejects because the remote no longer equals `expected_remote_sha`, stop and block with `remote_branch_moved`. Do not fall back to a plain force push.
 
 Agents must not run published rewrites directly. Use the workspace external-write protocol, or the dedicated `publish-refresh` command when available, so approval, intent, expected remote SHA, and result evidence are captured.
 
