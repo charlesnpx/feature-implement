@@ -582,6 +582,47 @@ func TestPublishRefreshRemoteMovedRecordsBlockingCondition(t *testing.T) {
 	}
 }
 
+func TestPublishRefreshRemoteMovedRecordsAfterLeaseHeartbeat(t *testing.T) {
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	appendRefreshEventForTest(t, fixture, claim, attempt, RefreshStatusSucceeded, attempt.BaseSHA, "base-sha-2", "2026-06-17T10:02:00Z")
+	approval := grantPublishRefreshApprovalForTest(t, fixture, claim, attempt, "post-base-sha-2", "remote-sha-1", "2026-06-17T10:03:00Z")
+
+	result, err := PublishRefresh(PublishRefreshOptions{
+		WorkspaceDir:      fixture.Dir,
+		MergeUnitID:       claim.MergeUnitID,
+		AttemptID:         attempt.AttemptID,
+		AgentID:           "worker-a",
+		LeaseID:           claim.LeaseID,
+		ApprovalID:        approval.Approval.ApprovalID,
+		ExpectedRemoteSHA: "remote-sha-1",
+		Now:               fixedJournalTime("2026-06-17T10:04:00Z"),
+		remoteHeadResolver: func(worktree string, remote string, branch string) (string, error) {
+			if _, err := Heartbeat(LeaseOptions{
+				WorkspaceDir:  fixture.Dir,
+				AgentID:       "worker-a",
+				LeaseID:       claim.LeaseID,
+				LeaseDuration: 14 * 24 * time.Hour,
+				Now:           fixedJournalTime("2026-06-17T10:05:00Z"),
+			}); err != nil {
+				t.Fatalf("Heartbeat during remote resolution: %v", err)
+			}
+			return "remote-sha-2", nil
+		},
+	})
+	var moved RemoteBranchMovedError
+	if err == nil || !errors.As(err, &moved) {
+		t.Fatalf("PublishRefresh error = %v, want RemoteBranchMovedError", err)
+	}
+	if result.Status != RefreshStatusRemoteBranchMoved || result.EventID == "" {
+		t.Fatalf("remote moved result after heartbeat = %+v", result)
+	}
+	events := readTestJournalEvents(t, fixture.Dir)
+	last := events[len(events)-1]
+	if last.Type != EventBranchRefreshRecorded || last.Timestamp != "2026-06-17T10:05:00Z" {
+		t.Fatalf("last event = %+v", last)
+	}
+}
+
 func appendRefreshEventForTest(t *testing.T, fixture workspaceFixture, claim NextResult, attempt AttemptResult, status string, oldBase string, newBase string, at string) string {
 	t.Helper()
 	revisions, err := ResourceRevisions(fixture.Dir)

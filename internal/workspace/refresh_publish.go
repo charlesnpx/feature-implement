@@ -212,6 +212,7 @@ func appendRemoteBranchMovedRefreshEvent(opts PublishRefreshOptions, state lease
 	if observed == "" {
 		observed = "<missing>"
 	}
+	expectedRefreshRevision := state.Revisions[RefreshResource(opts.MergeUnitID+":"+opts.AttemptID)]
 	evidence := RefreshEvidence{
 		SchemaVersion: 1,
 		WorkspaceID:   state.View.WorkspaceID,
@@ -237,7 +238,7 @@ func appendRemoteBranchMovedRefreshEvent(opts PublishRefreshOptions, state lease
 	if err != nil {
 		return PublishRefreshResult{}, err
 	}
-	result, err := appendRefreshEvent(opts.WorkspaceDir, state, evidence, evidencePath, recordedAt, state.Revisions[RefreshResource(opts.MergeUnitID+":"+opts.AttemptID)])
+	refreshResult, err := appendRefreshEventAfterMutation(opts.WorkspaceDir, evidence, evidencePath, recordedAt, expectedRefreshRevision, opts.Now)
 	if err != nil {
 		return PublishRefreshResult{}, err
 	}
@@ -254,9 +255,9 @@ func appendRemoteBranchMovedRefreshEvent(opts PublishRefreshOptions, state lease
 		HeadSHA:           refresh.PostHead,
 		ExpectedRemoteSHA: opts.ExpectedRemoteSHA,
 		ObservedRemoteSHA: observedRemoteSHA,
-		EvidencePath:      evidencePath,
-		EventID:           result.EventID,
-		EventHash:         result.EventHash,
+		EvidencePath:      refreshResult.EvidencePath,
+		EventID:           refreshResult.EventID,
+		EventHash:         refreshResult.EventHash,
 	}, nil
 }
 

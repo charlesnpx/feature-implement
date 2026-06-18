@@ -1588,7 +1588,7 @@ func usageWorkspace(w io.Writer) {
   feature workspace release <workspace-dir> --agent <id> --lease <id> [--json]
   feature workspace recover <workspace-dir> [--json]
   feature workspace refresh-branch <workspace-dir> --local --merge-unit <id> --attempt <id> --agent <id> --lease <id> --new-base <ref> [--worktree <path>] [--backup-ref <ref>] [--command-result <command=status>] [--json]
-  feature workspace publish-refresh <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --approval <id> --expected-remote-sha <sha> [--branch <name>] [--remote <name>] [--worktree <path>] [--json]
+  feature workspace publish-refresh <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --approval <id> --expected-remote-sha <sha> [--branch <name>] [--remote <name>] [--worktree <path>] [--scope <scope>] [--json]
   feature workspace attempt start <workspace-dir> --merge-unit <id> --agent <id> --lease <id> --base-sha <sha> [--mode fresh-from-base] [--json]
   feature workspace attempt abandon <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --reason <text> [--json]
   feature workspace transition <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --from <status> --to <status> --evidence <key=value> [--evidence <key=value>] [--json]
