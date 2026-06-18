@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -11,6 +12,7 @@ import (
 
 const (
 	DefaultLeaseDuration = 30 * time.Minute
+	nextClaimMaxAttempts = 100
 
 	EventLeaseGranted     = "lease.granted"
 	EventLeaseHeartbeat   = "lease.heartbeat"
@@ -199,15 +201,9 @@ type attemptSnapshot struct {
 }
 
 func Next(opts NextOptions) (NextResult, error) {
-	if opts.WorkspaceDir == "" {
-		return NextResult{}, fmt.Errorf("workspace next requires <workspace-dir>")
-	}
-	if !opts.Claim {
-		return NextResult{}, fmt.Errorf("workspace next currently requires --claim")
-	}
-	opts.AgentID = strings.TrimSpace(opts.AgentID)
-	if opts.AgentID == "" {
-		return NextResult{}, fmt.Errorf("workspace next --claim requires --agent")
+	opts, err := normalizeNextOptions(opts)
+	if err != nil {
+		return NextResult{}, err
 	}
 	now := time.Now
 	if opts.Now != nil {
@@ -220,13 +216,53 @@ func Next(opts NextOptions) (NextResult, error) {
 	if leaseDuration < 0 {
 		return NextResult{}, fmt.Errorf("lease duration must be non-negative")
 	}
-	claimedAt := now()
+	var lastRetryable error
+	for attempt := 0; attempt < nextClaimMaxAttempts; attempt++ {
+		result, err := nextOnce(opts, now(), leaseDuration)
+		if err == nil {
+			return result, nil
+		}
+		var retryable retryableClaimRaceError
+		if !errors.As(err, &retryable) {
+			return NextResult{}, err
+		}
+		lastRetryable = retryable.err
+		delay := attempt + 1
+		if delay > 10 {
+			delay = 10
+		}
+		time.Sleep(time.Duration(delay) * time.Millisecond)
+	}
+	if lastRetryable != nil {
+		return NextResult{}, fmt.Errorf("workspace next claim did not stabilize after %d attempts: %w", nextClaimMaxAttempts, lastRetryable)
+	}
+	return NextResult{}, fmt.Errorf("workspace next claim did not stabilize after %d attempts", nextClaimMaxAttempts)
+}
 
+func normalizeNextOptions(opts NextOptions) (NextOptions, error) {
+	if opts.WorkspaceDir == "" {
+		return NextOptions{}, fmt.Errorf("workspace next requires <workspace-dir>")
+	}
+	if !opts.Claim {
+		return NextOptions{}, fmt.Errorf("workspace next currently requires --claim")
+	}
+	opts.AgentID = strings.TrimSpace(opts.AgentID)
+	if opts.AgentID == "" {
+		return NextOptions{}, fmt.Errorf("workspace next --claim requires --agent")
+	}
+	return opts, nil
+}
+
+func nextOnce(opts NextOptions, claimedAt time.Time, leaseDuration time.Duration) (NextResult, error) {
 	lock, err := readWorkspaceLock(filepath.Join(opts.WorkspaceDir, LockFileName))
 	if err != nil {
 		return NextResult{}, err
 	}
 	events, err := readJournalEvents(EventsPath(opts.WorkspaceDir))
+	if err != nil {
+		return NextResult{}, err
+	}
+	claimedAt, err = observedAtAfterEvents(events, claimedAt)
 	if err != nil {
 		return NextResult{}, err
 	}
@@ -244,7 +280,11 @@ func Next(opts NextOptions) (NextResult, error) {
 		if unit == nil {
 			return NextResult{}, fmt.Errorf("ready merge unit %s missing from scheduler view", mergeUnitID)
 		}
-		return claimReadyMergeUnit(opts, view, *unit, claimedAt, leaseDuration, revisions)
+		result, err := claimReadyMergeUnit(opts, view, *unit, claimedAt, leaseDuration, revisions)
+		if err != nil && isRetryableClaimError(err) {
+			return NextResult{}, retryableClaimRaceError{err: err}
+		}
+		return result, err
 	}
 	return NextResult{
 		Status:       "none",
@@ -252,6 +292,42 @@ func Next(opts NextOptions) (NextResult, error) {
 		WorkspaceID:  view.WorkspaceID,
 		BaseRef:      view.BaseRef,
 	}, nil
+}
+
+type retryableClaimRaceError struct {
+	err error
+}
+
+func (e retryableClaimRaceError) Error() string {
+	return e.err.Error()
+}
+
+func (e retryableClaimRaceError) Unwrap() error {
+	return e.err
+}
+
+func observedAtAfterEvents(events []JournalEvent, observedAt time.Time) (time.Time, error) {
+	for _, event := range events {
+		occurredAt, err := eventTimestamp(event)
+		if err != nil {
+			return time.Time{}, err
+		}
+		if observedAt.Before(occurredAt) {
+			observedAt = occurredAt
+		}
+	}
+	return observedAt, nil
+}
+
+func isRetryableClaimError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var stale StaleResourceError
+	if errors.As(err, &stale) {
+		return true
+	}
+	return strings.Contains(err.Error(), "workspace journal lock is held")
 }
 
 func Heartbeat(opts LeaseOptions) (LeaseResult, error) {
