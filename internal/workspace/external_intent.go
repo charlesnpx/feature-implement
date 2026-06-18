@@ -12,11 +12,13 @@ import (
 const (
 	EventExternalIntentReserved       = "external_intent.reserved"
 	EventExternalIntentResultRecorded = "external_intent.result_recorded"
+	EventExternalIntentReconciled     = "external_intent.reconciled"
 
 	eventPayloadIntentIDKey          = "intent_id"
 	eventPayloadIdempotencyKeyKey    = "idempotency_key"
 	eventPayloadActionKey            = "action"
 	eventPayloadTargetKey            = "target"
+	eventPayloadOperatorKey          = "operator"
 	eventPayloadApprovalIDRefKey     = "approval_id"
 	eventPayloadRequestedHeadSHAKey  = "requested_head_sha"
 	eventPayloadExpectedBaseSHAKey   = "expected_base_sha"
@@ -66,6 +68,14 @@ type ExternalIntentResultRecordOptions struct {
 	Now            func() time.Time
 }
 
+type ExternalIntentReconcileOptions struct {
+	WorkspaceDir string
+	IntentID     string
+	Operator     string
+	Details      string
+	Now          func() time.Time
+}
+
 type ExternalIntentResult struct {
 	Status       string             `json:"status"`
 	WorkspaceDir string             `json:"workspace_dir"`
@@ -77,6 +87,17 @@ type ExternalIntentResult struct {
 }
 
 type ExternalIntentResultRecordResult struct {
+	Status       string                           `json:"status"`
+	WorkspaceDir string                           `json:"workspace_dir"`
+	WorkspaceID  string                           `json:"workspace_id"`
+	BaseRef      string                           `json:"base_ref"`
+	Intent       ExternalIntentView               `json:"intent"`
+	Result       ExternalIntentRecordedResultView `json:"result"`
+	EventID      string                           `json:"event_id,omitempty"`
+	EventHash    string                           `json:"event_hash,omitempty"`
+}
+
+type ExternalIntentReconcileResult struct {
 	Status       string                           `json:"status"`
 	WorkspaceDir string                           `json:"workspace_dir"`
 	WorkspaceID  string                           `json:"workspace_id"`
@@ -112,6 +133,7 @@ type ExternalIntentRecordedResultView struct {
 	PolicyAccepted bool   `json:"policy_accepted"`
 	Accepted       bool   `json:"accepted"`
 	Details        string `json:"details,omitempty"`
+	Operator       string `json:"operator,omitempty"`
 	EventID        string `json:"event_id,omitempty"`
 	EventHash      string `json:"event_hash,omitempty"`
 }
@@ -126,6 +148,10 @@ func ProviderTargetResource(target string) string {
 
 func RemoteRefResource(branch string) string {
 	return resourceKey("remote_ref", branch)
+}
+
+func QueueSlotResource(id string) string {
+	return resourceKey("queue_slot", id)
 }
 
 func ReserveExternalIntent(opts ExternalIntentReserveOptions) (ExternalIntentResult, error) {
@@ -183,6 +209,9 @@ func ReserveExternalIntent(opts ExternalIntentReserveOptions) (ExternalIntentRes
 	}
 	approvalResource := ApprovalResource(opts.ApprovalID)
 	affectedResources := externalIntentAffectedResources(opts, target, state.View.BaseRef)
+	if err := validateResourcesNotFrozen(state.Events, affectedResources, "external intent reserve"); err != nil {
+		return ExternalIntentResult{}, err
+	}
 	readSet := map[string]int{
 		LeaseResource(opts.MergeUnitID):     state.Revisions[LeaseResource(opts.MergeUnitID)],
 		MergeUnitResource(opts.MergeUnitID): state.Revisions[MergeUnitResource(opts.MergeUnitID)],
@@ -310,7 +339,7 @@ func RecordExternalIntentResult(opts ExternalIntentResultRecordOptions) (Externa
 	if err != nil {
 		return ExternalIntentResultRecordResult{}, err
 	}
-	recorded := externalIntentRecordedResultView(opts.Status, opts.PolicyAccepted, opts.Details, event.ID, event.EventHash)
+	recorded := externalIntentRecordedResultView(opts.Status, opts.PolicyAccepted, opts.Details, "", event.ID, event.EventHash)
 	intent.Result = &recorded
 	intent.Status = recorded.Status
 	return ExternalIntentResultRecordResult{
@@ -320,6 +349,72 @@ func RecordExternalIntentResult(opts ExternalIntentResultRecordOptions) (Externa
 		BaseRef:      state.View.BaseRef,
 		Intent:       intent.ExternalIntentView,
 		Result:       recorded,
+		EventID:      event.ID,
+		EventHash:    event.EventHash,
+	}, nil
+}
+
+func ReconcileExternalIntent(opts ExternalIntentReconcileOptions) (ExternalIntentReconcileResult, error) {
+	opts, reconciledAt, err := normalizeExternalIntentReconcileOptions(opts)
+	if err != nil {
+		return ExternalIntentReconcileResult{}, err
+	}
+	state, err := loadLeaseOperationState(opts.WorkspaceDir, reconciledAt)
+	if err != nil {
+		return ExternalIntentReconcileResult{}, err
+	}
+	intents, err := externalIntentSnapshots(state.Events)
+	if err != nil {
+		return ExternalIntentReconcileResult{}, err
+	}
+	intent, ok := intents[opts.IntentID]
+	if !ok {
+		return ExternalIntentReconcileResult{}, fmt.Errorf("external intent not found: %s", opts.IntentID)
+	}
+	if intent.Result == nil {
+		return ExternalIntentReconcileResult{}, fmt.Errorf("external intent %s has no recorded result to reconcile", opts.IntentID)
+	}
+	if intent.Result.Status != ExternalResultAmbiguous {
+		return ExternalIntentReconcileResult{}, fmt.Errorf("external intent %s result %s does not require reconciliation", opts.IntentID, intent.Result.Status)
+	}
+	intentResource := ExternalIntentResource(opts.IntentID)
+	readSet := map[string]int{
+		intentResource: state.Revisions[intentResource],
+	}
+	writeSet := []string{intentResource}
+	for _, resource := range intent.AffectedResources {
+		readSet[resource] = state.Revisions[resource]
+		writeSet = append(writeSet, resource)
+	}
+	event, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: opts.WorkspaceDir,
+		Type:         EventExternalIntentReconciled,
+		Payload: map[string]any{
+			eventPayloadIntentIDKey:    opts.IntentID,
+			eventPayloadMergeUnitIDKey: intent.MergeUnitID,
+			eventPayloadAttemptIDKey:   intent.AttemptID,
+			eventPayloadOperatorKey:    opts.Operator,
+			eventPayloadActionKey:      intent.Action,
+			eventPayloadTargetKey:      intent.Target,
+			eventPayloadDetailsKey:     opts.Details,
+		},
+		ReadSet:  readSet,
+		WriteSet: writeSet,
+		Now:      func() time.Time { return reconciledAt },
+	})
+	if err != nil {
+		return ExternalIntentReconcileResult{}, err
+	}
+	reconciled := externalIntentRecordedResultView(ExternalResultReconciledByOperator, true, opts.Details, opts.Operator, event.ID, event.EventHash)
+	intent.Result = &reconciled
+	intent.Status = reconciled.Status
+	return ExternalIntentReconcileResult{
+		Status:       "reconciled",
+		WorkspaceDir: opts.WorkspaceDir,
+		WorkspaceID:  state.View.WorkspaceID,
+		BaseRef:      state.View.BaseRef,
+		Intent:       intent.ExternalIntentView,
+		Result:       reconciled,
 		EventID:      event.ID,
 		EventHash:    event.EventHash,
 	}, nil
@@ -427,6 +522,29 @@ func normalizeExternalIntentResultStatus(value string) (string, error) {
 	}
 }
 
+func normalizeExternalIntentReconcileOptions(opts ExternalIntentReconcileOptions) (ExternalIntentReconcileOptions, time.Time, error) {
+	if opts.WorkspaceDir == "" {
+		return ExternalIntentReconcileOptions{}, time.Time{}, fmt.Errorf("workspace external intent reconcile requires <workspace-dir>")
+	}
+	opts.IntentID = strings.TrimSpace(opts.IntentID)
+	if opts.IntentID == "" {
+		return ExternalIntentReconcileOptions{}, time.Time{}, fmt.Errorf("workspace external intent reconcile requires --intent")
+	}
+	opts.Operator = strings.TrimSpace(opts.Operator)
+	if opts.Operator == "" {
+		return ExternalIntentReconcileOptions{}, time.Time{}, fmt.Errorf("workspace external intent reconcile requires --operator")
+	}
+	opts.Details = strings.TrimSpace(opts.Details)
+	if opts.Details == "" {
+		return ExternalIntentReconcileOptions{}, time.Time{}, fmt.Errorf("workspace external intent reconcile requires --details")
+	}
+	now := time.Now
+	if opts.Now != nil {
+		now = opts.Now
+	}
+	return opts, now(), nil
+}
+
 func externalIntentTarget(action string, branch string, pr string) (string, error) {
 	hasBranch := branch != ""
 	hasPR := pr != ""
@@ -511,17 +629,21 @@ func externalIntentView(opts ExternalIntentReserveOptions, identity externalInte
 	}
 }
 
-func externalIntentRecordedResultView(status string, policyAccepted bool, details string, eventID string, eventHash string) ExternalIntentRecordedResultView {
+func externalIntentRecordedResultView(status string, policyAccepted bool, details string, operator string, eventID string, eventHash string) ExternalIntentRecordedResultView {
 	return ExternalIntentRecordedResultView{
 		Status:         status,
 		PolicyAccepted: policyAccepted,
 		Accepted:       externalIntentResultAccepted(status, policyAccepted),
 		Details:        details,
+		Operator:       operator,
 		EventID:        eventID,
 		EventHash:      eventHash,
 	}
 }
 
 func externalIntentResultAccepted(status string, policyAccepted bool) bool {
+	if status == ExternalResultAmbiguous {
+		return false
+	}
 	return status == ExternalResultSucceeded || status == ExternalResultReconciledByOperator || policyAccepted
 }

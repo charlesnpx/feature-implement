@@ -1,6 +1,17 @@
 package workspace
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+)
+
+const (
+	externalIntentFreezeStatusUnresolved = "unresolved"
+	externalIntentFreezeStatusAmbiguous  = "ambiguous"
+
+	externalIntentFreezeActionRecordResult      = "record_result"
+	externalIntentFreezeActionOperatorReconcile = "operator_reconcile"
+)
 
 type externalIntentSnapshot struct {
 	ExternalIntentView
@@ -10,6 +21,17 @@ type externalIntentSnapshot struct {
 
 type externalIntentTracker struct {
 	intents map[string]externalIntentSnapshot
+}
+
+type ExternalIntentFreezeView struct {
+	Resource       string `json:"resource"`
+	IntentID       string `json:"intent_id"`
+	MergeUnitID    string `json:"merge_unit_id"`
+	AttemptID      string `json:"attempt_id"`
+	Action         string `json:"action"`
+	Target         string `json:"target"`
+	Status         string `json:"status"`
+	RequiredAction string `json:"required_action"`
 }
 
 func newExternalIntentTracker() *externalIntentTracker {
@@ -75,6 +97,41 @@ func (t *externalIntentTracker) Apply(event JournalEvent) error {
 		intent.Result = &result.view
 		intent.Status = result.view.Status
 		t.intents[result.intentID] = intent
+	case EventExternalIntentReconciled:
+		reconciliation, err := externalIntentReconciliationFromEvent(event)
+		if err != nil {
+			return err
+		}
+		intent, ok := t.intents[reconciliation.intentID]
+		if !ok {
+			return fmt.Errorf("external intent reconciliation event %s references unknown intent %s", event.ID, reconciliation.intentID)
+		}
+		if intent.Result == nil {
+			return fmt.Errorf("external intent reconciliation event %s references intent %s without a result", event.ID, reconciliation.intentID)
+		}
+		if intent.Result.Status != ExternalResultAmbiguous {
+			return fmt.Errorf("external intent reconciliation event %s references non-ambiguous intent %s result %s", event.ID, reconciliation.intentID, intent.Result.Status)
+		}
+		if reconciliation.mergeUnitID != intent.MergeUnitID {
+			return fmt.Errorf("external intent reconciliation event %s merge unit %s does not match intent %s", event.ID, reconciliation.mergeUnitID, intent.MergeUnitID)
+		}
+		if reconciliation.attemptID != intent.AttemptID {
+			return fmt.Errorf("external intent reconciliation event %s attempt %s does not match intent %s", event.ID, reconciliation.attemptID, intent.AttemptID)
+		}
+		if reconciliation.action != intent.Action {
+			return fmt.Errorf("external intent reconciliation event %s action %s does not match intent %s", event.ID, reconciliation.action, intent.Action)
+		}
+		if reconciliation.target != intent.Target {
+			return fmt.Errorf("external intent reconciliation event %s target %s does not match intent %s", event.ID, reconciliation.target, intent.Target)
+		}
+		for _, resource := range intent.AffectedResources {
+			if !containsString(event.WriteSet, resource) {
+				return fmt.Errorf("external intent reconciliation event %s must write affected resource %s", event.ID, resource)
+			}
+		}
+		intent.Result = &reconciliation.view
+		intent.Status = reconciliation.view.Status
+		t.intents[reconciliation.intentID] = intent
 	}
 	return nil
 }
@@ -82,6 +139,78 @@ func (t *externalIntentTracker) Apply(event JournalEvent) error {
 func (t *externalIntentTracker) Intent(id string) (externalIntentSnapshot, bool) {
 	intent, ok := t.intents[id]
 	return intent, ok
+}
+
+func (t *externalIntentTracker) Freezes() []ExternalIntentFreezeView {
+	freezes := []ExternalIntentFreezeView{}
+	for _, intent := range t.intents {
+		status, requiredAction, frozen := intent.freezeState()
+		if !frozen {
+			continue
+		}
+		for _, resource := range intent.AffectedResources {
+			freezes = append(freezes, ExternalIntentFreezeView{
+				Resource:       resource,
+				IntentID:       intent.IntentID,
+				MergeUnitID:    intent.MergeUnitID,
+				AttemptID:      intent.AttemptID,
+				Action:         intent.Action,
+				Target:         intent.Target,
+				Status:         status,
+				RequiredAction: requiredAction,
+			})
+		}
+	}
+	sort.Slice(freezes, func(i, j int) bool {
+		if freezes[i].Resource != freezes[j].Resource {
+			return freezes[i].Resource < freezes[j].Resource
+		}
+		return freezes[i].IntentID < freezes[j].IntentID
+	})
+	return freezes
+}
+
+func (intent externalIntentSnapshot) freezeState() (string, string, bool) {
+	if intent.Result == nil {
+		return externalIntentFreezeStatusUnresolved, externalIntentFreezeActionRecordResult, true
+	}
+	if intent.Result.Status == ExternalResultAmbiguous {
+		return externalIntentFreezeStatusAmbiguous, externalIntentFreezeActionOperatorReconcile, true
+	}
+	return "", "", false
+}
+
+func externalIntentFreezes(events []JournalEvent) ([]ExternalIntentFreezeView, error) {
+	tracker := newExternalIntentTracker()
+	for _, event := range events {
+		if err := tracker.Apply(event); err != nil {
+			return nil, err
+		}
+	}
+	return tracker.Freezes(), nil
+}
+
+func validateResourcesNotFrozen(events []JournalEvent, resources []string, operation string) error {
+	freezes, err := externalIntentFreezes(events)
+	if err != nil {
+		return err
+	}
+	freezeByResource := externalIntentFreezesByResource(freezes)
+	for _, resource := range resources {
+		if frozen := freezeByResource[resource]; len(frozen) > 0 {
+			first := frozen[0]
+			return fmt.Errorf("%s blocked by frozen resource %s from external intent %s (%s; requires %s)", operation, first.Resource, first.IntentID, first.Status, first.RequiredAction)
+		}
+	}
+	return nil
+}
+
+func externalIntentFreezesByResource(freezes []ExternalIntentFreezeView) map[string][]ExternalIntentFreezeView {
+	byResource := map[string][]ExternalIntentFreezeView{}
+	for _, freeze := range freezes {
+		byResource[freeze.Resource] = append(byResource[freeze.Resource], freeze)
+	}
+	return byResource
 }
 
 func validateExternalIntentCompletionEvidence(eventID string, evidence map[string]any, mergeUnitID string, attemptID string, externalIntents *externalIntentTracker) error {
@@ -254,6 +383,63 @@ func externalIntentRecordedResultFromEvent(event JournalEvent) (externalIntentRe
 			normalizedStatus,
 			policyAccepted,
 			optionalStringPayload(event, eventPayloadDetailsKey),
+			"",
+			event.ID,
+			event.EventHash,
+		),
+	}, nil
+}
+
+type externalIntentReconciliationSnapshot struct {
+	intentID    string
+	mergeUnitID string
+	attemptID   string
+	operator    string
+	action      string
+	target      string
+	view        ExternalIntentRecordedResultView
+}
+
+func externalIntentReconciliationFromEvent(event JournalEvent) (externalIntentReconciliationSnapshot, error) {
+	intentID, err := eventStringPayload(event, eventPayloadIntentIDKey)
+	if err != nil {
+		return externalIntentReconciliationSnapshot{}, err
+	}
+	if !containsString(event.WriteSet, ExternalIntentResource(intentID)) {
+		return externalIntentReconciliationSnapshot{}, fmt.Errorf("external intent reconciliation event %s must write %s", event.ID, ExternalIntentResource(intentID))
+	}
+	mergeUnitID, err := eventStringPayload(event, eventPayloadMergeUnitIDKey)
+	if err != nil {
+		return externalIntentReconciliationSnapshot{}, err
+	}
+	attemptID, err := eventStringPayload(event, eventPayloadAttemptIDKey)
+	if err != nil {
+		return externalIntentReconciliationSnapshot{}, err
+	}
+	operator, err := eventStringPayload(event, eventPayloadOperatorKey)
+	if err != nil {
+		return externalIntentReconciliationSnapshot{}, err
+	}
+	action, err := eventStringPayload(event, eventPayloadActionKey)
+	if err != nil {
+		return externalIntentReconciliationSnapshot{}, err
+	}
+	target, err := eventStringPayload(event, eventPayloadTargetKey)
+	if err != nil {
+		return externalIntentReconciliationSnapshot{}, err
+	}
+	return externalIntentReconciliationSnapshot{
+		intentID:    intentID,
+		mergeUnitID: mergeUnitID,
+		attemptID:   attemptID,
+		operator:    operator,
+		action:      action,
+		target:      target,
+		view: externalIntentRecordedResultView(
+			ExternalResultReconciledByOperator,
+			true,
+			optionalStringPayload(event, eventPayloadDetailsKey),
+			operator,
 			event.ID,
 			event.EventHash,
 		),

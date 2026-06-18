@@ -1048,14 +1048,14 @@ func workspaceExternal(args []string) error {
 
 func workspaceExternalIntent(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("workspace external intent requires subcommand: reserve or result")
+		return fmt.Errorf("workspace external intent requires subcommand: reserve, result, or reconcile")
 	}
 	action := args[0]
 	if isHelpCommand(action) {
 		usageWorkspaceExternalIntent(os.Stdout)
 		return nil
 	}
-	if action != "reserve" && action != "result" {
+	if action != "reserve" && action != "result" && action != "reconcile" {
 		return fmt.Errorf("unsupported workspace external intent action: %s", action)
 	}
 	if hasHelpFlag(args[1:]) {
@@ -1067,6 +1067,8 @@ func workspaceExternalIntent(args []string) error {
 		return workspaceExternalIntentReserve(args[1:])
 	case "result":
 		return workspaceExternalIntentResult(args[1:])
+	case "reconcile":
+		return workspaceExternalIntentReconcile(args[1:])
 	default:
 		return fmt.Errorf("unsupported workspace external intent action: %s", action)
 	}
@@ -1153,6 +1155,35 @@ func workspaceExternalIntentResult(args []string) error {
 		return writeJSON(result)
 	}
 	fmt.Printf("recorded %s status=%s accepted=%t\n", result.Intent.IntentID, result.Result.Status, result.Result.Accepted)
+	return nil
+}
+
+func workspaceExternalIntentReconcile(args []string) error {
+	fs := flag.NewFlagSet("workspace external intent reconcile", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	intentID := fs.String("intent", "", "External intent ID")
+	operator := fs.String("operator", "", "Operator identity")
+	details := fs.String("details", "", "Reconciliation details")
+	asJSON := fs.Bool("json", false, "Emit JSON result")
+	if err := parsePermissive(fs, args, "intent", "operator", "details"); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("workspace external intent reconcile requires <workspace-dir>")
+	}
+	result, err := workspace.ReconcileExternalIntent(workspace.ExternalIntentReconcileOptions{
+		WorkspaceDir: fs.Arg(0),
+		IntentID:     *intentID,
+		Operator:     *operator,
+		Details:      *details,
+	})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(result)
+	}
+	fmt.Printf("reconciled %s operator=%s\n", result.Intent.IntentID, result.Result.Operator)
 	return nil
 }
 
@@ -1547,14 +1578,16 @@ func usageWorkspaceExternal(w io.Writer) {
 	fmt.Fprintln(w, `Usage:
   feature workspace external intent reserve <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --approval <id> --action <push|open-pr|merge|remote-delete> (--branch <name> | --pr <id>) --head-sha <sha> --base-sha <sha> [--scope <scope>] [--json]
   feature workspace external intent result <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --intent <id> --status <status> [--policy-accepted] [--details <text>] [--json]
+  feature workspace external intent reconcile <workspace-dir> --intent <id> --operator <id> --details <text> [--json]
 
-Reserves external provider-write intents and records provider results without executing provider commands.`)
+Reserves external provider-write intents, records provider results, and reconciles ambiguous outcomes without executing provider commands.`)
 }
 
 func usageWorkspaceExternalIntent(w io.Writer) {
 	fmt.Fprintln(w, `Usage:
   feature workspace external intent reserve <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --approval <id> --action <push|open-pr|merge|remote-delete> (--branch <name> | --pr <id>) --head-sha <sha> --base-sha <sha> [--scope <scope>] [--json]
   feature workspace external intent result <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --intent <id> --status <succeeded|not_performed|failed_before_side_effect|failed_after_side_effect|ambiguous|reconciled_by_operator> [--policy-accepted] [--details <text>] [--json]
+  feature workspace external intent reconcile <workspace-dir> --intent <id> --operator <id> --details <text> [--json]
 
 Manages external provider-write intent records.`)
 }
@@ -1571,6 +1604,11 @@ Reserves an external write intent after validating the current attempt and requi
   feature workspace external intent result <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --intent <id> --status <succeeded|not_performed|failed_before_side_effect|failed_after_side_effect|ambiguous|reconciled_by_operator> [--policy-accepted] [--details <text>] [--json]
 
 Records the observed provider result for a reserved external write intent.`)
+	case "reconcile":
+		fmt.Fprintln(w, `Usage:
+  feature workspace external intent reconcile <workspace-dir> --intent <id> --operator <id> --details <text> [--json]
+
+Records operator reconciliation for an ambiguous external write intent.`)
 	default:
 		usageWorkspaceExternalIntent(w)
 	}

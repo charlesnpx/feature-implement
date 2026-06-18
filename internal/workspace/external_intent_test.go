@@ -496,7 +496,7 @@ func TestExternalIntentCompletionRequiresAcceptedResult(t *testing.T) {
 			},
 			Now: fixedJournalTime("2026-06-17T10:05:00Z"),
 		})
-		if err == nil || !strings.Contains(err.Error(), "has no recorded result") {
+		if err == nil || !strings.Contains(err.Error(), "blocked by frozen resource") || !strings.Contains(err.Error(), "requires record_result") {
 			t.Fatalf("missing result error = %v", err)
 		}
 	})
@@ -585,6 +585,193 @@ func TestExternalIntentCompletionRequiresAcceptedResult(t *testing.T) {
 	})
 }
 
+func TestUnresolvedExternalIntentFreezesStatusAndBlocksOverlappingIntent(t *testing.T) {
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	approval, err := GrantApproval(ApprovalGrantOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Actions:      []string{ExternalActionPush},
+		MaxUses:      2,
+		ExpiresIn:    time.Hour,
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("GrantApproval: %v", err)
+	}
+	reserved, err := ReserveExternalIntent(ExternalIntentReserveOptions{
+		WorkspaceDir:     fixture.Dir,
+		MergeUnitID:      claim.MergeUnitID,
+		AttemptID:        attempt.AttemptID,
+		AgentID:          "worker-a",
+		LeaseID:          claim.LeaseID,
+		ApprovalID:       approval.Approval.ApprovalID,
+		Action:           ExternalActionPush,
+		Branch:           "feature/test",
+		RequestedHeadSHA: "head-sha-1",
+		ExpectedBaseSHA:  "base-sha",
+		Now:              fixedJournalTime("2026-06-17T10:03:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("ReserveExternalIntent: %v", err)
+	}
+
+	status, err := Status(fixture.Dir)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	assertFrozenResource(t, status.FrozenResources, MergeUnitResource(claim.MergeUnitID), reserved.Intent.IntentID, externalIntentFreezeActionRecordResult)
+	assertFrozenResource(t, status.FrozenResources, ProviderTargetResource("push:branch:feature/test"), reserved.Intent.IntentID, externalIntentFreezeActionRecordResult)
+	assertFrozenResource(t, status.FrozenResources, RemoteRefResource("feature/test"), reserved.Intent.IntentID, externalIntentFreezeActionRecordResult)
+
+	_, err = ReserveExternalIntent(ExternalIntentReserveOptions{
+		WorkspaceDir:     fixture.Dir,
+		MergeUnitID:      claim.MergeUnitID,
+		AttemptID:        attempt.AttemptID,
+		AgentID:          "worker-a",
+		LeaseID:          claim.LeaseID,
+		ApprovalID:       approval.Approval.ApprovalID,
+		Action:           ExternalActionPush,
+		Branch:           "feature/test",
+		RequestedHeadSHA: "head-sha-2",
+		ExpectedBaseSHA:  "base-sha",
+		Now:              fixedJournalTime("2026-06-17T10:04:00Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "external intent reserve blocked by frozen resource") {
+		t.Fatalf("overlapping reserve error = %v", err)
+	}
+
+	if _, err := Release(LeaseOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Now:          fixedJournalTime("2026-06-17T10:05:00Z"),
+	}); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	status, err = Status(fixture.Dir)
+	if err != nil {
+		t.Fatalf("Status after release: %v", err)
+	}
+	unit := findSchedulerUnit(t, SchedulerView{MergeUnits: status.MergeUnits}, claim.MergeUnitID)
+	if len(status.Blocked) != 1 || status.Blocked[0] != claim.MergeUnitID || len(unit.BlockingConditions) != 1 {
+		t.Fatalf("blocked status = blocked %+v unit %+v", status.Blocked, unit)
+	}
+	condition := unit.BlockingConditions[0]
+	if condition.Type != "frozen_resource" || condition.IntentID != reserved.Intent.IntentID || condition.RequiredAction != externalIntentFreezeActionRecordResult {
+		t.Fatalf("freeze blocking condition = %+v", condition)
+	}
+}
+
+func TestAmbiguousMergeFreezeRequiresOperatorReconciliation(t *testing.T) {
+	fixture, claim, attempt, approval := newExternalIntentFixture(t, ExternalActionMerge)
+	startExternalIntentLifecycle(t, fixture, claim, attempt)
+	reserved, err := ReserveExternalIntent(ExternalIntentReserveOptions{
+		WorkspaceDir:     fixture.Dir,
+		MergeUnitID:      claim.MergeUnitID,
+		AttemptID:        attempt.AttemptID,
+		AgentID:          "worker-a",
+		LeaseID:          claim.LeaseID,
+		ApprovalID:       approval.Approval.ApprovalID,
+		Action:           ExternalActionMerge,
+		PR:               "35",
+		RequestedHeadSHA: "head-sha",
+		ExpectedBaseSHA:  "base-sha",
+		Now:              fixedJournalTime("2026-06-17T10:04:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("ReserveExternalIntent: %v", err)
+	}
+	recorded, err := RecordExternalIntentResult(ExternalIntentResultRecordOptions{
+		WorkspaceDir:   fixture.Dir,
+		MergeUnitID:    claim.MergeUnitID,
+		AttemptID:      attempt.AttemptID,
+		AgentID:        "worker-a",
+		LeaseID:        claim.LeaseID,
+		IntentID:       reserved.Intent.IntentID,
+		Status:         ExternalResultAmbiguous,
+		PolicyAccepted: true,
+		Details:        "provider timeout after merge request",
+		Now:            fixedJournalTime("2026-06-17T10:05:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("RecordExternalIntentResult: %v", err)
+	}
+	if recorded.Result.Accepted {
+		t.Fatalf("ambiguous result must not be accepted by policy override: %+v", recorded.Result)
+	}
+
+	status, err := Status(fixture.Dir)
+	if err != nil {
+		t.Fatalf("Status ambiguous: %v", err)
+	}
+	assertFrozenResource(t, status.FrozenResources, MergeUnitResource(claim.MergeUnitID), reserved.Intent.IntentID, externalIntentFreezeActionOperatorReconcile)
+	assertFrozenResource(t, status.FrozenResources, ProviderTargetResource("merge:pr:35"), reserved.Intent.IntentID, externalIntentFreezeActionOperatorReconcile)
+	assertFrozenResource(t, status.FrozenResources, RemoteRefResource("workspace-orchestration"), reserved.Intent.IntentID, externalIntentFreezeActionOperatorReconcile)
+
+	_, err = Transition(TransitionOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		From:         MergeUnitInProgress,
+		To:           MergeUnitCompleted,
+		Evidence: map[string]any{
+			evidenceCommitSHAKey:        "commit-sha-1",
+			evidenceExternalIntentIDKey: reserved.Intent.IntentID,
+		},
+		Now: fixedJournalTime("2026-06-17T10:06:00Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires operator_reconcile") {
+		t.Fatalf("ambiguous transition error = %v", err)
+	}
+
+	reconciled, err := ReconcileExternalIntent(ExternalIntentReconcileOptions{
+		WorkspaceDir: fixture.Dir,
+		IntentID:     reserved.Intent.IntentID,
+		Operator:     "operator-a",
+		Details:      "confirmed merge completed remotely",
+		Now:          fixedJournalTime("2026-06-17T10:07:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("ReconcileExternalIntent: %v", err)
+	}
+	if reconciled.Result.Status != ExternalResultReconciledByOperator || !reconciled.Result.Accepted || reconciled.Result.Operator != "operator-a" {
+		t.Fatalf("reconciled result = %+v", reconciled)
+	}
+	status, err = Status(fixture.Dir)
+	if err != nil {
+		t.Fatalf("Status reconciled: %v", err)
+	}
+	if len(status.FrozenResources) != 0 {
+		t.Fatalf("frozen resources after reconcile = %+v", status.FrozenResources)
+	}
+
+	completed, err := Transition(TransitionOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		From:         MergeUnitInProgress,
+		To:           MergeUnitCompleted,
+		Evidence: map[string]any{
+			evidenceCommitSHAKey:        "commit-sha-1",
+			evidenceExternalIntentIDKey: reserved.Intent.IntentID,
+		},
+		Now: fixedJournalTime("2026-06-17T10:08:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Transition after reconcile: %v", err)
+	}
+	if completed.EventType != EventMergeUnitCompleted {
+		t.Fatalf("completed = %+v", completed)
+	}
+}
+
 func newExternalIntentFixture(t *testing.T, action string) (workspaceFixture, NextResult, AttemptResult, ApprovalResult) {
 	t.Helper()
 	fixture, claim, attempt := newApprovalAttemptFixture(t)
@@ -659,4 +846,14 @@ func assertContainsString(t *testing.T, values []string, want string) {
 		}
 	}
 	t.Fatalf("%q missing from %+v", want, values)
+}
+
+func assertFrozenResource(t *testing.T, freezes []ExternalIntentFreezeView, resource string, intentID string, requiredAction string) {
+	t.Helper()
+	for _, freeze := range freezes {
+		if freeze.Resource == resource && freeze.IntentID == intentID && freeze.RequiredAction == requiredAction {
+			return
+		}
+	}
+	t.Fatalf("freeze %s intent=%s action=%s missing from %+v", resource, intentID, requiredAction, freezes)
 }

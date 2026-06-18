@@ -26,14 +26,15 @@ const (
 )
 
 type SchedulerView struct {
-	SchemaVersion int                      `json:"schema_version"`
-	WorkspaceID   string                   `json:"workspace_id"`
-	BaseRef       string                   `json:"base_ref"`
-	MergeUnits    []SchedulerMergeUnitView `json:"merge_units"`
-	Counts        map[string]int           `json:"counts"`
-	Ready         []string                 `json:"ready"`
-	Blocked       []string                 `json:"blocked"`
-	Leased        []string                 `json:"leased"`
+	SchemaVersion   int                        `json:"schema_version"`
+	WorkspaceID     string                     `json:"workspace_id"`
+	BaseRef         string                     `json:"base_ref"`
+	MergeUnits      []SchedulerMergeUnitView   `json:"merge_units"`
+	Counts          map[string]int             `json:"counts"`
+	Ready           []string                   `json:"ready"`
+	Blocked         []string                   `json:"blocked"`
+	Leased          []string                   `json:"leased"`
+	FrozenResources []ExternalIntentFreezeView `json:"frozen_resources,omitempty"`
 }
 
 type SchedulerMergeUnitView struct {
@@ -51,10 +52,15 @@ type SchedulerMergeUnitView struct {
 }
 
 type SchedulerBlockingCondition struct {
-	Type       string `json:"type"`
-	Resource   string `json:"resource"`
-	ContractID string `json:"contract_id,omitempty"`
-	ArtifactID string `json:"artifact_id,omitempty"`
+	Type           string `json:"type"`
+	Resource       string `json:"resource"`
+	ContractID     string `json:"contract_id,omitempty"`
+	ArtifactID     string `json:"artifact_id,omitempty"`
+	IntentID       string `json:"intent_id,omitempty"`
+	Action         string `json:"action,omitempty"`
+	Target         string `json:"target,omitempty"`
+	Status         string `json:"status,omitempty"`
+	RequiredAction string `json:"required_action,omitempty"`
 }
 
 type SchedulerLeaseView struct {
@@ -143,6 +149,8 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 			return SchedulerView{}, err
 		}
 	}
+	view.FrozenResources = externalIntents.Freezes()
+	freezesByResource := externalIntentFreezesByResource(view.FrozenResources)
 	activeLeases, err := activeLeaseSnapshots(events, now)
 	if err != nil {
 		return SchedulerView{}, err
@@ -185,7 +193,7 @@ func buildSchedulerViewAt(lock WorkspaceLock, events []JournalEvent, now time.Ti
 		view.Counts[unit.Status]++
 		if unit.Status == MergeUnitPending {
 			unit.BlockedBy = incompleteDependencies(unit.Dependencies, unitByID)
-			unit.BlockingConditions = schedulerBlockingConditions(unit.BlockedBy, unit.ContractBindings)
+			unit.BlockingConditions = schedulerBlockingConditions(unit.BlockedBy, unit.ContractBindings, freezesByResource[MergeUnitResource(unit.ID)])
 			if unit.ActiveLease != nil {
 				continue
 			}
@@ -225,7 +233,7 @@ func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, attempts *
 		return nil
 	case EventApprovalGranted, EventApprovalConsumed:
 		return nil
-	case EventExternalIntentReserved, EventExternalIntentResultRecorded:
+	case EventExternalIntentReserved, EventExternalIntentResultRecorded, EventExternalIntentReconciled:
 		return externalIntents.Apply(event)
 	default:
 		return fmt.Errorf("unknown scheduler event type %q", event.Type)
@@ -316,6 +324,10 @@ func validateTransitionEventPayload(event JournalEvent, currentStatus string, ta
 	normalizedEvidence, err := normalizeTransitionEvidence(from, to, evidence, *attempt)
 	if err != nil {
 		return err
+	}
+	if frozen := externalIntentFreezesByResource(externalIntents.Freezes())[MergeUnitResource(attempt.MergeUnitID)]; len(frozen) > 0 {
+		first := frozen[0]
+		return fmt.Errorf("scheduler event %s blocked by frozen resource %s from external intent %s (%s; requires %s)", event.ID, first.Resource, first.IntentID, first.Status, first.RequiredAction)
 	}
 	if targetStatus != MergeUnitCompleted {
 		return nil
@@ -432,8 +444,8 @@ func incompleteDependencies(dependencies []string, unitByID map[string]*Schedule
 	return blockedBy
 }
 
-func schedulerBlockingConditions(dependencies []string, bindings []ContractBindingStatus) []SchedulerBlockingCondition {
-	conditions := make([]SchedulerBlockingCondition, 0, len(dependencies)+len(bindings))
+func schedulerBlockingConditions(dependencies []string, bindings []ContractBindingStatus, freezes []ExternalIntentFreezeView) []SchedulerBlockingCondition {
+	conditions := make([]SchedulerBlockingCondition, 0, len(dependencies)+len(bindings)+len(freezes))
 	for _, dependency := range dependencies {
 		conditions = append(conditions, SchedulerBlockingCondition{
 			Type:     "dependency",
@@ -449,6 +461,17 @@ func schedulerBlockingConditions(dependencies []string, bindings []ContractBindi
 			Resource:   binding.ContractID + ":" + binding.ArtifactID,
 			ContractID: binding.ContractID,
 			ArtifactID: binding.ArtifactID,
+		})
+	}
+	for _, freeze := range freezes {
+		conditions = append(conditions, SchedulerBlockingCondition{
+			Type:           "frozen_resource",
+			Resource:       freeze.Resource,
+			IntentID:       freeze.IntentID,
+			Action:         freeze.Action,
+			Target:         freeze.Target,
+			Status:         freeze.Status,
+			RequiredAction: freeze.RequiredAction,
 		})
 	}
 	sort.Slice(conditions, func(i, j int) bool {
