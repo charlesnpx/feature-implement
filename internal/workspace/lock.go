@@ -182,7 +182,15 @@ func copyManifestSameDir(sourcePath string, targetPath string) error {
 	if err != nil {
 		return err
 	}
-	if existing, err := os.ReadFile(targetPath); err == nil {
+	info, err := os.Lstat(targetPath)
+	if err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("workspace init refused to overwrite existing non-regular %s", ManifestFileName)
+		}
+		existing, err := os.ReadFile(targetPath)
+		if err != nil {
+			return err
+		}
 		if string(existing) != string(b) {
 			return fmt.Errorf("workspace init refused to overwrite existing %s with different contents; move the manifest beside %s or remove the existing canonical manifest after verifying relative plans[].path values", ManifestFileName, ManifestFileName)
 		}
