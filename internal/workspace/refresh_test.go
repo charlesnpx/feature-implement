@@ -221,6 +221,65 @@ func TestLatestRefreshAdvancesBaselineAfterSuccessOrFailure(t *testing.T) {
 	}
 }
 
+func TestAppendRefreshEventAfterMutationUsesFreshLeaseRevision(t *testing.T) {
+	fixture, claim, attempt := newApprovalAttemptFixture(t)
+	revisions, err := ResourceRevisions(fixture.Dir)
+	if err != nil {
+		t.Fatalf("ResourceRevisions: %v", err)
+	}
+	resource := RefreshResource(claim.MergeUnitID + ":" + attempt.AttemptID)
+	originalRefreshRevision := revisions[resource]
+
+	if _, err := Heartbeat(LeaseOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		Now:          fixedJournalTime("2026-06-17T10:02:00Z"),
+	}); err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+
+	evidencePath := filepath.Join(StateDirName, "evidence", "refresh", "fresh-lease.json")
+	evidence := RefreshEvidence{
+		SchemaVersion:      1,
+		WorkspaceID:        fixture.Manifest.ID,
+		BaseRef:            fixtureWorkspaceBaseRef,
+		MergeUnitID:        claim.MergeUnitID,
+		AttemptID:          attempt.AttemptID,
+		AgentID:            "worker-a",
+		LeaseID:            claim.LeaseID,
+		Local:              true,
+		Branch:             attempt.Branch,
+		Worktree:           attempt.Worktree,
+		OldBase:            attempt.BaseSHA,
+		NewBase:            "new-base-sha",
+		PreHead:            "pre-head-sha",
+		PostHead:           "post-head-sha",
+		BackupRef:          "backup-ref",
+		ChangedFilesBefore: []string{"M\tREADME.md"},
+		ChangedFilesAfter:  []string{"M\tREADME.md"},
+		PatchIDsBefore:     []RefreshPatchID{{PatchID: "patch-a", Commit: "commit-a"}},
+		PatchIDsAfter:      []RefreshPatchID{{PatchID: "patch-a", Commit: "commit-b"}},
+		Verification: RefreshVerification{
+			Status:                RefreshStatusSucceeded,
+			ChangedFilesPreserved: true,
+			PatchIDsPreserved:     true,
+		},
+	}
+	result, err := appendRefreshEventAfterMutation(fixture.Dir, evidence, evidencePath, fixedJournalTime("2026-06-17T10:02:30Z")(), originalRefreshRevision)
+	if err != nil {
+		t.Fatalf("appendRefreshEventAfterMutation: %v", err)
+	}
+	if result.Status != RefreshStatusSucceeded || result.EvidencePath != evidencePath || result.EventID == "" {
+		t.Fatalf("refresh result = %+v", result)
+	}
+	events := readTestJournalEvents(t, fixture.Dir)
+	latest, ok := latestRefresh(events, claim.MergeUnitID, attempt.AttemptID)
+	if !ok || latest.Status != RefreshStatusSucceeded || latest.EvidencePath != evidencePath {
+		t.Fatalf("latest refresh = %+v ok=%v", latest, ok)
+	}
+}
+
 func appendRefreshEventForTest(t *testing.T, fixture workspaceFixture, claim NextResult, attempt AttemptResult, status string, oldBase string, newBase string, at string) string {
 	t.Helper()
 	revisions, err := ResourceRevisions(fixture.Dir)

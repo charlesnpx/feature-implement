@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,6 +19,8 @@ const (
 
 	RefreshStatusSucceeded          = "refreshed"
 	RefreshStatusVerificationFailed = "verification_failed"
+
+	refreshAppendMaxAttempts = 3
 
 	eventPayloadOldBaseKey      = "old_base"
 	eventPayloadNewBaseKey      = "new_base"
@@ -216,6 +219,8 @@ func RefreshBranch(opts RefreshBranchOptions) (RefreshBranchResult, error) {
 	if err != nil {
 		return RefreshBranchResult{}, err
 	}
+	refreshResource := RefreshResource(opts.MergeUnitID + ":" + opts.AttemptID)
+	originalRefreshRevision := state.Revisions[refreshResource]
 	evidence, err := runLocalRefresh(opts, state.View.WorkspaceID, state.View.BaseRef, state.Events, current, worktree, commandResults, refreshedAt)
 	if err != nil {
 		return RefreshBranchResult{}, err
@@ -224,7 +229,7 @@ func RefreshBranch(opts RefreshBranchOptions) (RefreshBranchResult, error) {
 	if err != nil {
 		return RefreshBranchResult{}, err
 	}
-	result, err := appendRefreshEvent(opts.WorkspaceDir, state, evidence, evidencePath, refreshedAt)
+	result, err := appendRefreshEventAfterMutation(opts.WorkspaceDir, evidence, evidencePath, refreshedAt, originalRefreshRevision)
 	if err != nil {
 		return RefreshBranchResult{}, err
 	}
@@ -425,7 +430,11 @@ func runLocalRefresh(opts RefreshBranchOptions, workspaceID string, baseRef stri
 		return RefreshEvidence{}, err
 	}
 	if _, err := gitOutput(worktree, "rebase", "--onto", newBase, oldBase, branch); err != nil {
-		return RefreshEvidence{}, err
+		postHead := preHead
+		if head, headErr := gitOutput(worktree, "rev-parse", "HEAD"); headErr == nil {
+			postHead = strings.TrimSpace(head)
+		}
+		return failedRefreshEvidence(opts, workspaceID, baseRef, branch, worktree, oldBase, newBase, preHead, postHead, backupRef, beforeFiles, beforePatchIDs, commandResults, "rebase failed: "+err.Error()), nil
 	}
 	postHead, err := gitOutput(worktree, "rev-parse", "HEAD")
 	if err != nil {
@@ -464,6 +473,33 @@ func runLocalRefresh(opts RefreshBranchOptions, workspaceID string, baseRef stri
 		CommandResults:     commandResults,
 		Verification:       verification,
 	}, nil
+}
+
+func failedRefreshEvidence(opts RefreshBranchOptions, workspaceID string, baseRef string, branch string, worktree string, oldBase string, newBase string, preHead string, postHead string, backupRef string, beforeFiles []string, beforePatchIDs []RefreshPatchID, commandResults []ContractCommandResult, reason string) RefreshEvidence {
+	return RefreshEvidence{
+		SchemaVersion:      1,
+		WorkspaceID:        workspaceID,
+		BaseRef:            baseRef,
+		MergeUnitID:        opts.MergeUnitID,
+		AttemptID:          opts.AttemptID,
+		AgentID:            opts.AgentID,
+		LeaseID:            opts.LeaseID,
+		Local:              true,
+		Branch:             branch,
+		Worktree:           worktree,
+		OldBase:            oldBase,
+		NewBase:            newBase,
+		PreHead:            preHead,
+		PostHead:           postHead,
+		BackupRef:          backupRef,
+		ChangedFilesBefore: append([]string(nil), beforeFiles...),
+		PatchIDsBefore:     append([]RefreshPatchID(nil), beforePatchIDs...),
+		CommandResults:     commandResults,
+		Verification: RefreshVerification{
+			Status:        RefreshStatusVerificationFailed,
+			FailureReason: strings.TrimSpace(reason),
+		},
+	}
 }
 
 func changedFiles(worktree string, base string, head string) ([]string, error) {
@@ -566,7 +602,39 @@ func firstFailedRefreshCommand(commandResults []ContractCommandResult) string {
 	return ""
 }
 
-func appendRefreshEvent(workspaceDir string, state leaseOperationState, evidence RefreshEvidence, evidencePath string, refreshedAt time.Time) (RefreshBranchResult, error) {
+func appendRefreshEventAfterMutation(workspaceDir string, evidence RefreshEvidence, evidencePath string, refreshedAt time.Time, expectedRefreshRevision int) (RefreshBranchResult, error) {
+	var lastErr error
+	refreshResource := RefreshResource(evidence.MergeUnitID + ":" + evidence.AttemptID)
+	for attempt := 0; attempt < refreshAppendMaxAttempts; attempt++ {
+		recordedAt := time.Now()
+		if recordedAt.Before(refreshedAt) {
+			recordedAt = refreshedAt
+		}
+		state, err := loadLeaseOperationState(workspaceDir, recordedAt)
+		if err != nil {
+			return RefreshBranchResult{}, err
+		}
+		recordedAt, err = observedAtAfterEvents(state.Events, recordedAt)
+		if err != nil {
+			return RefreshBranchResult{}, err
+		}
+		result, err := appendRefreshEvent(workspaceDir, state, evidence, evidencePath, recordedAt, expectedRefreshRevision)
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+		var stale StaleResourceError
+		if !errors.As(err, &stale) || stale.Resource == refreshResource {
+			return RefreshBranchResult{}, err
+		}
+		if stale.Resource != LeaseResource(evidence.MergeUnitID) && stale.Resource != MergeUnitResource(evidence.MergeUnitID) {
+			return RefreshBranchResult{}, err
+		}
+	}
+	return RefreshBranchResult{}, lastErr
+}
+
+func appendRefreshEvent(workspaceDir string, state leaseOperationState, evidence RefreshEvidence, evidencePath string, refreshedAt time.Time, expectedRefreshRevision int) (RefreshBranchResult, error) {
 	resource := RefreshResource(evidence.MergeUnitID + ":" + evidence.AttemptID)
 	event, err := AppendEvent(AppendEventOptions{
 		WorkspaceDir: workspaceDir,
@@ -589,7 +657,7 @@ func appendRefreshEvent(workspaceDir string, state leaseOperationState, evidence
 		ReadSet: map[string]int{
 			LeaseResource(evidence.MergeUnitID):     state.Revisions[LeaseResource(evidence.MergeUnitID)],
 			MergeUnitResource(evidence.MergeUnitID): state.Revisions[MergeUnitResource(evidence.MergeUnitID)],
-			resource:                                state.Revisions[resource],
+			resource:                                expectedRefreshRevision,
 		},
 		WriteSet: []string{resource},
 		Now:      func() time.Time { return refreshedAt },
