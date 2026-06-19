@@ -22,6 +22,7 @@ const (
 	GateStatusPending            = "pending"
 	GateStatusBlocked            = "blocked"
 	GateStatusRerunRequired      = "rerun_required"
+	GateStatusStale              = "stale"
 	GateStatusRetainedByOperator = "retained_by_operator"
 
 	eventPayloadOverrideIDKey       = "override_id"
@@ -876,7 +877,15 @@ func evaluateGateStatusesWithEvidence(events []JournalEvent, input gateEvaluatio
 	baseSHA, headSHA := gateInputSHAs(input)
 	for i, gate := range gates {
 		evidence, ok := evidenceByGate[gateEvidenceKey(input.MergeUnitID, input.AttemptID, gate.Gate)]
-		if !ok || !evidence.Applies(inputHash, baseSHA, headSHA) {
+		if !ok {
+			continue
+		}
+		if !evidence.Applies(inputHash, baseSHA, headSHA) {
+			gates[i] = GateStatusView{
+				Gate:   gate.Gate,
+				Status: GateStatusStale,
+				Reason: staleGateEvidenceReason(gate.Gate),
+			}
 			continue
 		}
 		gates[i] = GateStatusView{
@@ -890,6 +899,10 @@ func evaluateGateStatusesWithEvidence(events []JournalEvent, input gateEvaluatio
 		}
 	}
 	return gates, nil
+}
+
+func staleGateEvidenceReason(gate string) string {
+	return "stale_attempt_" + gate + "_evidence"
 }
 
 func gateStatusByName(gates []GateStatusView) map[string]GateStatusView {

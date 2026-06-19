@@ -518,6 +518,206 @@ func TestRecordGateEvidenceAppliesToolEvidence(t *testing.T) {
 	}
 }
 
+func TestEvaluateGatesReportsStaleToolEvidenceAfterHeadChange(t *testing.T) {
+	cases := []struct {
+		name     string
+		gate     string
+		command  string
+		reviewer string
+	}{
+		{name: "review", gate: "review", reviewer: "reviewer-a"},
+		{name: "security", gate: "security", command: "gosec ./..."},
+		{name: "test", gate: "test", command: "go test ./..."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newOnePlanWorkspaceFixture(t)
+			if _, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir, WriteLock: true}); err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+			claim, attempt := startGateEvaluationAttempt(t, fixture.Dir)
+			appendGateRefreshEvent(t, fixture.Dir, claim, attempt, attempt.BaseSHA, attempt.BaseSHA, "head-sha-first", "head-sha-first", "2026-01-02T15:03:00Z")
+			first, err := EvaluateGates(GateEvaluateOptions{
+				WorkspaceDir: fixture.Dir,
+				MergeUnitID:  claim.MergeUnitID,
+				AttemptID:    attempt.AttemptID,
+				AgentID:      claim.AgentID,
+				LeaseID:      claim.LeaseID,
+				Now:          fixedWorkspaceTime("2026-01-02T15:04:00Z"),
+			})
+			if err != nil {
+				t.Fatalf("EvaluateGates first: %v", err)
+			}
+			if _, err := RecordGateEvidence(GateEvidenceOptions{
+				WorkspaceDir: fixture.Dir,
+				MergeUnitID:  claim.MergeUnitID,
+				AttemptID:    attempt.AttemptID,
+				AgentID:      claim.AgentID,
+				LeaseID:      claim.LeaseID,
+				Gate:         tc.gate,
+				Status:       GateStatusPassed,
+				InputHash:    first.InputHash,
+				HeadSHA:      "head-sha-first",
+				BaseSHA:      attempt.BaseSHA,
+				Command:      tc.command,
+				Reviewer:     tc.reviewer,
+				Summary:      tc.gate + " evidence passed",
+				Now:          fixedWorkspaceTime("2026-01-02T15:05:00Z"),
+			}); err != nil {
+				t.Fatalf("RecordGateEvidence first: %v", err)
+			}
+			appendGateRefreshEvent(t, fixture.Dir, claim, attempt, attempt.BaseSHA, attempt.BaseSHA, "head-sha-first", "head-sha-second", "2026-01-02T15:06:00Z")
+
+			stale, err := EvaluateGates(GateEvaluateOptions{
+				WorkspaceDir: fixture.Dir,
+				MergeUnitID:  claim.MergeUnitID,
+				AttemptID:    attempt.AttemptID,
+				AgentID:      claim.AgentID,
+				LeaseID:      claim.LeaseID,
+				Now:          fixedWorkspaceTime("2026-01-02T15:07:00Z"),
+			})
+			if err != nil {
+				t.Fatalf("EvaluateGates stale: %v", err)
+			}
+			staleGate := gateStatusByName(stale.Gates)[tc.gate]
+			if staleGate.Status != GateStatusStale ||
+				staleGate.Reason != staleGateEvidenceReason(tc.gate) ||
+				staleGate.EvidenceID != "" {
+				t.Fatalf("stale %s gate = %+v", tc.gate, staleGate)
+			}
+
+			evidence, err := RecordGateEvidence(GateEvidenceOptions{
+				WorkspaceDir: fixture.Dir,
+				MergeUnitID:  claim.MergeUnitID,
+				AttemptID:    attempt.AttemptID,
+				AgentID:      claim.AgentID,
+				LeaseID:      claim.LeaseID,
+				Gate:         tc.gate,
+				Status:       GateStatusPassed,
+				InputHash:    stale.InputHash,
+				HeadSHA:      "head-sha-second",
+				BaseSHA:      attempt.BaseSHA,
+				Command:      tc.command,
+				Reviewer:     tc.reviewer,
+				Summary:      tc.gate + " current evidence passed",
+				Now:          fixedWorkspaceTime("2026-01-02T15:08:00Z"),
+			})
+			if err != nil {
+				t.Fatalf("RecordGateEvidence current: %v", err)
+			}
+			current, err := EvaluateGates(GateEvaluateOptions{
+				WorkspaceDir: fixture.Dir,
+				MergeUnitID:  claim.MergeUnitID,
+				AttemptID:    attempt.AttemptID,
+				AgentID:      claim.AgentID,
+				LeaseID:      claim.LeaseID,
+				Now:          fixedWorkspaceTime("2026-01-02T15:09:00Z"),
+			})
+			if err != nil {
+				t.Fatalf("EvaluateGates current: %v", err)
+			}
+			currentGate := gateStatusByName(current.Gates)[tc.gate]
+			if currentGate.Status != GateStatusPassed ||
+				currentGate.Reason != "tool_evidence_recorded" ||
+				currentGate.EvidenceID != evidence.Evidence.EvidenceID {
+				t.Fatalf("current %s gate = %+v", tc.gate, currentGate)
+			}
+		})
+	}
+}
+
+func TestEvaluateGatesDoesNotTreatPriorAttemptToolEvidenceAsCurrent(t *testing.T) {
+	fixture := newOnePlanWorkspaceFixture(t)
+	if _, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir, WriteLock: true}); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	claim, firstAttempt := startGateEvaluationAttempt(t, fixture.Dir)
+	appendGateRefreshEvent(t, fixture.Dir, claim, firstAttempt, firstAttempt.BaseSHA, firstAttempt.BaseSHA, "head-sha-first", "head-sha-first", "2026-01-02T15:03:00Z")
+	first, err := EvaluateGates(GateEvaluateOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    firstAttempt.AttemptID,
+		AgentID:      claim.AgentID,
+		LeaseID:      claim.LeaseID,
+		Now:          fixedWorkspaceTime("2026-01-02T15:04:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("EvaluateGates first: %v", err)
+	}
+	for _, evidence := range []struct {
+		gate     string
+		command  string
+		reviewer string
+	}{
+		{gate: "review", reviewer: "reviewer-a"},
+		{gate: "security", command: "gosec ./..."},
+		{gate: "test", command: "go test ./..."},
+	} {
+		if _, err := RecordGateEvidence(GateEvidenceOptions{
+			WorkspaceDir: fixture.Dir,
+			MergeUnitID:  claim.MergeUnitID,
+			AttemptID:    firstAttempt.AttemptID,
+			AgentID:      claim.AgentID,
+			LeaseID:      claim.LeaseID,
+			Gate:         evidence.gate,
+			Status:       GateStatusPassed,
+			InputHash:    first.InputHash,
+			HeadSHA:      "head-sha-first",
+			BaseSHA:      firstAttempt.BaseSHA,
+			Command:      evidence.command,
+			Reviewer:     evidence.reviewer,
+			Summary:      evidence.gate + " evidence passed",
+			Now:          fixedWorkspaceTime("2026-01-02T15:05:00Z"),
+		}); err != nil {
+			t.Fatalf("RecordGateEvidence %s: %v", evidence.gate, err)
+		}
+	}
+	if _, err := AbandonAttempt(AttemptAbandonOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    firstAttempt.AttemptID,
+		AgentID:      claim.AgentID,
+		LeaseID:      claim.LeaseID,
+		Reason:       "fresh attempt",
+		Now:          fixedWorkspaceTime("2026-01-02T15:06:00Z"),
+	}); err != nil {
+		t.Fatalf("AbandonAttempt: %v", err)
+	}
+	secondAttempt, err := StartAttempt(AttemptStartOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AgentID:      claim.AgentID,
+		LeaseID:      claim.LeaseID,
+		BaseSHA:      "base-sha-second",
+		Now:          fixedWorkspaceTime("2026-01-02T15:07:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("StartAttempt second: %v", err)
+	}
+
+	second, err := EvaluateGates(GateEvaluateOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    secondAttempt.AttemptID,
+		AgentID:      claim.AgentID,
+		LeaseID:      claim.LeaseID,
+		Now:          fixedWorkspaceTime("2026-01-02T15:08:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("EvaluateGates second: %v", err)
+	}
+	gates := gateStatusByName(second.Gates)
+	for _, gateName := range []string{"review", "security", "test"} {
+		gate := gates[gateName]
+		if gate.Status == GateStatusPassed || gate.Status == GateStatusStale || gate.EvidenceID != "" {
+			t.Fatalf("prior attempt %s evidence leaked into fresh attempt: %+v", gateName, gate)
+		}
+		if gate.Reason != "no_attempt_"+gateName+"_evidence" {
+			t.Fatalf("fresh attempt %s gate reason = %+v", gateName, gate)
+		}
+	}
+}
+
 func TestRecordGateEvidenceRejectsStaleInputs(t *testing.T) {
 	fixture := newOnePlanWorkspaceFixture(t)
 	if _, err := Validate(ValidateOptions{WorkspaceDir: fixture.Dir, WriteLock: true}); err != nil {
