@@ -272,9 +272,15 @@ func appendTargetFlags(parts []string, opts ExternalIntentReserveOptions) []stri
 func providerCommand(opts ExternalIntentReserveOptions, worktree string, remote string, baseRef string, title string, prBody string) (string, error) {
 	switch opts.Action {
 	case ExternalActionPush:
-		return fmt.Sprintf("git -C %s push -u %s %s", shellQuote(worktree), shellQuote(remote), shellQuote("HEAD:"+opts.Branch)), nil
+		return strings.Join([]string{
+			localHeadCheckCommand(worktree, opts.RequestedHeadSHA),
+			"&&",
+			"git", "-C", shellQuote(worktree), "push", "-u", shellQuote(remote), shellQuote(opts.RequestedHeadSHA + ":refs/heads/" + opts.Branch),
+		}, " "), nil
 	case ExternalActionOpenPR:
 		parts := []string{
+			remoteBranchHeadCheckCommand(worktree, remote, opts.Branch, opts.RequestedHeadSHA),
+			"&&",
 			"cd", shellQuote(worktree), "&&", "gh pr create",
 			"--base", shellQuote(baseRef),
 			"--head", shellQuote(opts.Branch),
@@ -283,6 +289,7 @@ func providerCommand(opts ExternalIntentReserveOptions, worktree string, remote 
 			parts = append(parts, "--title", shellQuote(strings.TrimSpace(title)))
 		}
 		parts = append(parts, "--body", shellQuote(prBody))
+		parts = append(parts, "&&", remoteBranchHeadCheckCommand(worktree, remote, opts.Branch, opts.RequestedHeadSHA))
 		return strings.Join(parts, " "), nil
 	case ExternalActionMerge:
 		target := opts.PR
@@ -295,6 +302,14 @@ func providerCommand(opts ExternalIntentReserveOptions, worktree string, remote 
 	default:
 		return "", fmt.Errorf("unsupported external provider action: %s", opts.Action)
 	}
+}
+
+func localHeadCheckCommand(worktree string, headSHA string) string {
+	return "test \"$(git -C " + shellQuote(worktree) + " rev-parse HEAD)\" = " + shellQuote(headSHA)
+}
+
+func remoteBranchHeadCheckCommand(worktree string, remote string, branch string, headSHA string) string {
+	return "test \"$(git -C " + shellQuote(worktree) + " ls-remote " + shellQuote(remote) + " " + shellQuote("refs/heads/"+branch) + " | awk '{print $1}')\" = " + shellQuote(headSHA)
 }
 
 func providerPRBody(body string, marker ExternalProviderMarker) (string, error) {
