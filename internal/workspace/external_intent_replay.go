@@ -219,11 +219,18 @@ func validateExternalIntentCompletionEvidence(eventID string, evidence map[strin
 	if err != nil {
 		return err
 	}
-	if len(intentIDs) == 0 {
-		return nil
-	}
 	if externalIntents == nil {
 		return fmt.Errorf("transition event %s cannot validate external intents", eventID)
+	}
+	required := requiredCompletionExternalIntents(externalIntents, mergeUnitID, attemptID)
+	if len(intentIDs) == 0 {
+		if len(required) == 0 {
+			return nil
+		}
+		return fmt.Errorf("transition event %s missing required external intent %s for action %s", eventID, required[0].IntentID, required[0].Action)
+	}
+	if !listProvided && len(required) > 1 {
+		return fmt.Errorf("transition event %s evidence %s cannot cover %d required external intents; use %s", eventID, evidenceExternalIntentIDKey, len(required), evidenceExternalIntentIDsKey)
 	}
 	included := map[string]bool{}
 	for _, intentID := range intentIDs {
@@ -232,17 +239,29 @@ func validateExternalIntentCompletionEvidence(eventID string, evidence map[strin
 			return err
 		}
 	}
-	if listProvided {
-		for _, intent := range externalIntents.intents {
-			if intent.MergeUnitID != mergeUnitID || intent.AttemptID != attemptID || !isCompletionExternalIntentAction(intent.Action) {
-				continue
-			}
-			if !included[intent.IntentID] {
-				return fmt.Errorf("transition event %s missing required external intent %s for action %s", eventID, intent.IntentID, intent.Action)
-			}
+	for _, intent := range required {
+		if !included[intent.IntentID] {
+			return fmt.Errorf("transition event %s missing required external intent %s for action %s", eventID, intent.IntentID, intent.Action)
 		}
 	}
 	return nil
+}
+
+func requiredCompletionExternalIntents(externalIntents *externalIntentTracker, mergeUnitID string, attemptID string) []externalIntentSnapshot {
+	required := []externalIntentSnapshot{}
+	for _, intent := range externalIntents.intents {
+		if intent.MergeUnitID != mergeUnitID || intent.AttemptID != attemptID || !isCompletionExternalIntentAction(intent.Action) {
+			continue
+		}
+		required = append(required, intent)
+	}
+	sort.Slice(required, func(i, j int) bool {
+		if required[i].Action != required[j].Action {
+			return required[i].Action < required[j].Action
+		}
+		return required[i].IntentID < required[j].IntentID
+	})
+	return required
 }
 
 func externalIntentCompletionEvidenceIDs(eventID string, evidence map[string]any) ([]string, bool, error) {

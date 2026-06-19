@@ -854,6 +854,30 @@ func TestExternalIntentCompletionListRejectsMissingRequiredIntent(t *testing.T) 
 	}
 }
 
+func TestExternalIntentCompletionRejectsOmittedReservedIntentEvidence(t *testing.T) {
+	fixture, claim, attempt, approval := newExternalIntentFixture(t, ExternalActionPush)
+	intent := reserveExternalIntentForTest(t, fixture, claim, attempt, approval, "feature/test", "head-sha", "2026-06-17T10:04:00Z")
+	recordExternalIntentResultForTest(t, fixture.Dir, claim.MergeUnitID, attempt.AttemptID, "worker-a", claim.LeaseID, intent.Intent.IntentID, ExternalResultSucceeded, false, "2026-06-17T10:04:10Z")
+	startExternalIntentLifecycle(t, fixture, claim, attempt)
+
+	_, err := Transition(TransitionOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		From:         MergeUnitInProgress,
+		To:           MergeUnitCompleted,
+		Evidence: map[string]any{
+			evidenceCommitSHAKey: "commit-sha-1",
+		},
+		Now: fixedJournalTime("2026-06-17T10:05:00Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "missing required external intent "+intent.Intent.IntentID) {
+		t.Fatalf("omitted required intent error = %v", err)
+	}
+}
+
 func TestExternalIntentCompletionListRejectsUnacceptedAndUnknownIntents(t *testing.T) {
 	t.Run("unknown", func(t *testing.T) {
 		fixture, claim, attempt := newApprovalAttemptFixture(t)
