@@ -38,21 +38,50 @@ dependencies: []
 6. Run `feature workspace init --manifest <workspace-dir>/feature.workspace.yaml --write-lock --json`.
 7. After workspace initialization, treat `feature.plan.lock.json` as read-only input. Do not hand-edit it and do not use direct plan lifecycle write-state commands for workspace-managed execution.
 
-Recovery and claim checks:
+Supervisor flow:
 
-1. Run `feature workspace status <workspace-dir> --json`.
-2. Run `feature workspace recover <workspace-dir> --json`.
-3. Re-run `feature workspace status <workspace-dir> --json` after recovery records actions, and resolve any blockers before claiming work.
-4. Claim work with `feature workspace next <workspace-dir> --agent <id> --claim --json`.
-5. Start the claimed attempt with `feature workspace attempt start <workspace-dir> --merge-unit <id> --agent <id> --lease <id> --base-sha <sha> --json`, then execute the returned worktree command before spawning or acting as the worker.
+1. Run `feature workspace status <workspace-dir> --json`, then `feature workspace recover <workspace-dir> --json`, then status again. Resolve blockers before claiming work.
+2. Claim work with `feature workspace next <workspace-dir> --agent <id> --claim --json`.
+3. Start the claimed attempt with `feature workspace attempt start <workspace-dir> --merge-unit <id> --agent <id> --lease <id> --base-sha <sha> --json`.
+4. Treat the attempt-start JSON as the worker packet. It includes `workspace_id`, `repo`, `base_ref`, global `merge_unit_id`, `plan_id`, `plan_merge_unit_id`, `story_ids`, `dependencies`, `attempt_id`, `lease_id`, `branch`, `worktree`, `base_sha`, and `commands`.
+5. Execute every returned `commands[]` worktree command before spawning or acting as the worker.
+6. Record the local lifecycle start with `feature workspace transition ... --from pending --to in_progress --evidence worktree=<worktree> --json`.
+7. Keep the lease alive with `feature workspace heartbeat <workspace-dir> --agent <id> --lease <id> --json` during long implementation, review, or external-write waits.
+8. If work cannot continue, either release the lease before an attempt starts or abandon/fail the attempt with explicit evidence instead of leaving stale state for the next worker.
 
-Workflow:
+Worker flow:
 
-1. Keep supervisor state in workspace commands: status, recover, claim, attempt start, heartbeat, transition, gate, queue, and external intent commands.
-2. Keep worker edits confined to the attempt worktree returned by the workspace command packet.
+1. Work only in the `worktree` from the worker packet, and read only the packet's `plan_id`, `plan_merge_unit_id`, `story_ids`, and dependency context for the assigned implementation.
+2. Implement the story, run repo checks, and commit locally on the packet `branch`.
 3. Run a PR review loop with a maximum of 10 fresh-review iterations. Spawn a Claude subagent to review the opened PR. Use branch-diff review only when PR creation is not approved.
-4. Refresh the branch after the final implementation commit or review-fix commit, evaluate gates from that refreshed evidence to get the input hash, record tool-proven review, security, or test evidence with `feature workspace gate record`, rerun `feature workspace evaluate-gates` so the recorded output hash includes that evidence, and use those same base/head SHAs when entering the merge queue. Any later fix commit stales the refresh evidence; refresh again before gate evaluation, approval matching, or queue entry.
-5. External writes remain approval-gated. Reserve and record workspace external intents for push, PR creation, merge, and cleanup actions so workspace state reflects the provider result before claiming completion.
+4. After the final implementation commit or review-fix commit, refresh the branch with `feature workspace refresh-branch --local`. Include validation command results with `--command-result <command=status>`.
+5. Run `feature workspace evaluate-gates` using the refreshed attempt, then record tool-proven review, security, or test evidence with `feature workspace gate record` using the returned input hash, head SHA, and base SHA.
+6. Rerun `feature workspace evaluate-gates` after recording evidence. The queue, approval, and external-write steps must use the same refreshed head/base SHAs. Any later commit stales the refresh and gate evidence; refresh and evaluate again.
+7. Enter the merge queue only after dependencies, contract checks, gates, approvals, and blockers are clear.
+
+External writes:
+
+External writes remain explicitly approval-gated by the operator. Do not push, create PRs, merge, or delete remote branches unless the operator has approved that action for the exact branch or PR plus head/base SHAs.
+
+After operator approval, record a scoped approval capability with `feature workspace approve grant` using the same action, branch or PR, head SHA, and base SHA that the provider command will use.
+
+For each approved provider action, use `feature workspace external plan` and execute the returned commands in order: `approval_command`, `intent_command`, `provider_command`, then `result_command` after provider success. If the provider command fails and did not already record a result, record `failed_before_side_effect`, `failed_after_side_effect`, or `ambiguous` with `feature workspace external intent result`.
+
+Use separate approvals and separate external intents for `push`, `open-pr`, `merge`, and `remote-delete`. Remote branch deletion must only be planned after accepted merge external intent evidence exists for the same attempt and matching head/base SHAs.
+
+Complete the merge unit only after accepted external intent evidence proves the required provider writes are done. If the attempt entered the merge queue, completion requires accepted merge evidence:
+
+```sh
+feature workspace transition <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --from in_progress --to completed --evidence commit_sha=<head-sha> --evidence external_intent_ids=<intent-id>[,<intent-id>...] --json
+```
+
+Use failure transitions for abandoned work that should not be retried as-is:
+
+```sh
+feature workspace transition <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --from in_progress --to failed --evidence reason=<reason> --json
+```
+
+Command order:
 
 ```sh
 feature validate <plan-dir> --write-lock --json
@@ -61,6 +90,17 @@ feature workspace status <workspace-dir> --json
 feature workspace recover <workspace-dir> --json
 feature workspace next <workspace-dir> --agent <id> --claim --json
 feature workspace attempt start <workspace-dir> --merge-unit <id> --agent <id> --lease <id> --base-sha <sha> --json
+feature workspace transition <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --from pending --to in_progress --evidence worktree=<worktree> --json
+feature workspace heartbeat <workspace-dir> --agent <id> --lease <lease-id> --json
+feature workspace refresh-branch <workspace-dir> --local --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --new-base <base-ref> --worktree <worktree> --command-result '<command>=passed' --json
+feature workspace evaluate-gates <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --json
+feature workspace gate record <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --gate test --status passed --input-hash <hash> --head-sha <head-sha> --base-sha <base-sha> --command '<command>' --summary '<summary>' --json
+feature workspace evaluate-gates <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --json
+feature workspace queue enter <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --branch <branch> --head-sha <head-sha> --base-sha <base-sha> --approval <approval-id> --json
+feature workspace approve grant <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --action push --branch <branch> --head-sha <head-sha> --base-sha <base-sha> --expires-in <duration> --json
+feature workspace external plan <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --approval <approval-id> --action push --branch <branch> --head-sha <head-sha> --base-sha <base-sha> --json
+feature workspace external intent result <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --intent <intent-id> --status succeeded --details '<details>' --json
+feature workspace transition <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --from in_progress --to completed --evidence commit_sha=<head-sha> --evidence external_intent_ids=<intent-id>[,<intent-id>...] --json
 ```
 
 The plan lock is immutable source input after workspace initialization. Record lifecycle changes only through workspace state commands.
