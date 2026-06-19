@@ -215,17 +215,61 @@ func externalIntentFreezesByResource(freezes []ExternalIntentFreezeView) map[str
 }
 
 func validateExternalIntentCompletionEvidence(eventID string, evidence map[string]any, mergeUnitID string, attemptID string, externalIntents *externalIntentTracker) error {
-	value, ok := evidence[evidenceExternalIntentIDKey]
-	if !ok {
+	intentIDs, listProvided, err := externalIntentCompletionEvidenceIDs(eventID, evidence)
+	if err != nil {
+		return err
+	}
+	if len(intentIDs) == 0 {
 		return nil
 	}
-	intentID, ok := value.(string)
-	if !ok || intentID == "" {
-		return fmt.Errorf("transition event %s evidence %s must be a string", eventID, evidenceExternalIntentIDKey)
-	}
 	if externalIntents == nil {
-		return fmt.Errorf("transition event %s cannot validate external intent %s", eventID, intentID)
+		return fmt.Errorf("transition event %s cannot validate external intents", eventID)
 	}
+	included := map[string]bool{}
+	for _, intentID := range intentIDs {
+		included[intentID] = true
+		if err := validateExternalIntentCompletionID(eventID, intentID, mergeUnitID, attemptID, listProvided, externalIntents); err != nil {
+			return err
+		}
+	}
+	if listProvided {
+		for _, intent := range externalIntents.intents {
+			if intent.MergeUnitID != mergeUnitID || intent.AttemptID != attemptID || !isCompletionExternalIntentAction(intent.Action) {
+				continue
+			}
+			if !included[intent.IntentID] {
+				return fmt.Errorf("transition event %s missing required external intent %s for action %s", eventID, intent.IntentID, intent.Action)
+			}
+		}
+	}
+	return nil
+}
+
+func externalIntentCompletionEvidenceIDs(eventID string, evidence map[string]any) ([]string, bool, error) {
+	_, hasSingular := evidence[evidenceExternalIntentIDKey]
+	_, hasList := evidence[evidenceExternalIntentIDsKey]
+	if hasSingular && hasList {
+		return nil, false, fmt.Errorf("transition event %s evidence must use %s or %s, not both", eventID, evidenceExternalIntentIDKey, evidenceExternalIntentIDsKey)
+	}
+	if hasSingular {
+		value := evidence[evidenceExternalIntentIDKey]
+		intentID, ok := value.(string)
+		if !ok || strings.TrimSpace(intentID) == "" {
+			return nil, false, fmt.Errorf("transition event %s evidence %s must be a string", eventID, evidenceExternalIntentIDKey)
+		}
+		return []string{strings.TrimSpace(intentID)}, false, nil
+	}
+	if !hasList {
+		return nil, false, nil
+	}
+	intentIDs, err := normalizeExternalIntentIDList(evidence[evidenceExternalIntentIDsKey], evidenceExternalIntentIDsKey)
+	if err != nil {
+		return nil, false, fmt.Errorf("transition event %s %w", eventID, err)
+	}
+	return intentIDs, true, nil
+}
+
+func validateExternalIntentCompletionID(eventID string, intentID string, mergeUnitID string, attemptID string, listProvided bool, externalIntents *externalIntentTracker) error {
 	intent, ok := externalIntents.Intent(intentID)
 	if !ok {
 		return fmt.Errorf("transition event %s references unknown external intent %s", eventID, intentID)
@@ -236,13 +280,28 @@ func validateExternalIntentCompletionEvidence(eventID string, evidence map[strin
 	if intent.AttemptID != attemptID {
 		return fmt.Errorf("transition event %s external intent %s is for attempt %s, not %s", eventID, intentID, intent.AttemptID, attemptID)
 	}
+	if listProvided && !isCompletionExternalIntentAction(intent.Action) {
+		return fmt.Errorf("transition event %s external intent %s action %s is cleanup-only, not required for completion", eventID, intentID, intent.Action)
+	}
 	if intent.Result == nil {
 		return fmt.Errorf("transition event %s external intent %s has no recorded result", eventID, intentID)
+	}
+	if intent.Result.Status == ExternalResultAmbiguous {
+		return fmt.Errorf("transition event %s external intent %s result is ambiguous", eventID, intentID)
 	}
 	if !intent.Result.Accepted {
 		return fmt.Errorf("transition event %s external intent %s result %s is not accepted", eventID, intentID, intent.Result.Status)
 	}
 	return nil
+}
+
+func isCompletionExternalIntentAction(action string) bool {
+	switch action {
+	case ExternalActionPush, ExternalActionOpenPR, ExternalActionMerge:
+		return true
+	default:
+		return false
+	}
 }
 
 func externalIntentReservedFromEvent(event JournalEvent) (externalIntentSnapshot, error) {

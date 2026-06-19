@@ -759,6 +759,278 @@ func TestExternalIntentCompletionRequiresAcceptedResult(t *testing.T) {
 	})
 }
 
+func TestExternalIntentCompletionAcceptsRequiredIntentList(t *testing.T) {
+	ready := newQueueReadyAttemptFixture(t)
+	pushApproval := grantExternalIntentApprovalForTest(t, ready.Fixture.Dir, ready.Claim.MergeUnitID, ready.Attempt.AttemptID, ready.Claim.AgentID, ready.Claim.LeaseID, ExternalActionPush, ready.Attempt.Branch, "", ready.HeadSHA, ready.BaseSHA, "2026-01-02T15:09:00Z")
+	openPRApproval := grantExternalIntentApprovalForTest(t, ready.Fixture.Dir, ready.Claim.MergeUnitID, ready.Attempt.AttemptID, ready.Claim.AgentID, ready.Claim.LeaseID, ExternalActionOpenPR, ready.Attempt.Branch, "", ready.HeadSHA, ready.BaseSHA, "2026-01-02T15:09:10Z")
+	pushIntent := reserveExternalIntentActionForTest(t, ready.Fixture.Dir, ready.Claim.MergeUnitID, ready.Attempt.AttemptID, ready.Claim.AgentID, ready.Claim.LeaseID, pushApproval.Approval.ApprovalID, ExternalActionPush, ready.Attempt.Branch, "", ready.HeadSHA, ready.BaseSHA, "2026-01-02T15:09:20Z")
+	recordExternalIntentResultForTest(t, ready.Fixture.Dir, ready.Claim.MergeUnitID, ready.Attempt.AttemptID, ready.Claim.AgentID, ready.Claim.LeaseID, pushIntent.Intent.IntentID, ExternalResultSucceeded, false, "2026-01-02T15:09:30Z")
+	openPRIntent := reserveExternalIntentActionForTest(t, ready.Fixture.Dir, ready.Claim.MergeUnitID, ready.Attempt.AttemptID, ready.Claim.AgentID, ready.Claim.LeaseID, openPRApproval.Approval.ApprovalID, ExternalActionOpenPR, ready.Attempt.Branch, "", ready.HeadSHA, ready.BaseSHA, "2026-01-02T15:09:40Z")
+	recordExternalIntentResultForTest(t, ready.Fixture.Dir, ready.Claim.MergeUnitID, ready.Attempt.AttemptID, ready.Claim.AgentID, ready.Claim.LeaseID, openPRIntent.Intent.IntentID, ExternalResultSucceeded, false, "2026-01-02T15:09:50Z")
+	startExternalIntentLifecycleAt(t, ready.Fixture.Dir, ready.Claim.MergeUnitID, ready.Attempt.AttemptID, ready.Claim.AgentID, ready.Claim.LeaseID, ready.Attempt.Worktree, "2026-01-02T15:10:10Z")
+
+	completed, err := Transition(TransitionOptions{
+		WorkspaceDir: ready.Fixture.Dir,
+		MergeUnitID:  ready.Claim.MergeUnitID,
+		AttemptID:    ready.Attempt.AttemptID,
+		AgentID:      ready.Claim.AgentID,
+		LeaseID:      ready.Claim.LeaseID,
+		From:         MergeUnitInProgress,
+		To:           MergeUnitCompleted,
+		Evidence: map[string]any{
+			evidenceCommitSHAKey: "commit-sha-1",
+			evidenceExternalIntentIDsKey: []string{
+				pushIntent.Intent.IntentID,
+				openPRIntent.Intent.IntentID,
+			},
+		},
+		Now: fixedWorkspaceTime("2026-01-02T15:10:40Z"),
+	})
+	if err != nil {
+		t.Fatalf("Transition complete: %v", err)
+	}
+	intentIDs, ok := completed.Evidence[evidenceExternalIntentIDsKey].([]string)
+	if completed.EventType != EventMergeUnitCompleted || !ok || len(intentIDs) != 2 {
+		t.Fatalf("completed = %+v", completed)
+	}
+}
+
+func TestExternalIntentCompletionListAcceptsMergeIntent(t *testing.T) {
+	ready := newQueueReadyAttemptFixture(t)
+	if _, err := queueMergeReadyAttempt(t, ready, "", ready.Attempt.Branch, "2026-01-02T15:09:00Z"); err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	startExternalIntentLifecycleAt(t, ready.Fixture.Dir, ready.Claim.MergeUnitID, ready.Attempt.AttemptID, ready.Claim.AgentID, ready.Claim.LeaseID, ready.Attempt.Worktree, "2026-01-02T15:09:30Z")
+	mergeIntent := reserveExternalIntentActionForTest(t, ready.Fixture.Dir, ready.Claim.MergeUnitID, ready.Attempt.AttemptID, ready.Claim.AgentID, ready.Claim.LeaseID, ready.Approval.Approval.ApprovalID, ExternalActionMerge, ready.Attempt.Branch, "", ready.HeadSHA, ready.BaseSHA, "2026-01-02T15:10:00Z")
+	recordExternalIntentResultForTest(t, ready.Fixture.Dir, ready.Claim.MergeUnitID, ready.Attempt.AttemptID, ready.Claim.AgentID, ready.Claim.LeaseID, mergeIntent.Intent.IntentID, ExternalResultSucceeded, false, "2026-01-02T15:11:00Z")
+
+	completed, err := Transition(TransitionOptions{
+		WorkspaceDir: ready.Fixture.Dir,
+		MergeUnitID:  ready.Claim.MergeUnitID,
+		AttemptID:    ready.Attempt.AttemptID,
+		AgentID:      ready.Claim.AgentID,
+		LeaseID:      ready.Claim.LeaseID,
+		From:         MergeUnitInProgress,
+		To:           MergeUnitCompleted,
+		Evidence: map[string]any{
+			evidenceCommitSHAKey:         "commit-sha-1",
+			evidenceExternalIntentIDsKey: []string{mergeIntent.Intent.IntentID},
+		},
+		Now: fixedWorkspaceTime("2026-01-02T15:12:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Transition complete: %v", err)
+	}
+	if completed.EventType != EventMergeUnitCompleted {
+		t.Fatalf("completed = %+v", completed)
+	}
+}
+
+func TestExternalIntentCompletionListRejectsMissingRequiredIntent(t *testing.T) {
+	fixture, claim, attempt, pushApproval := newExternalIntentFixture(t, ExternalActionPush)
+	openPRApproval := grantExternalIntentApprovalForTest(t, fixture.Dir, claim.MergeUnitID, attempt.AttemptID, "worker-a", claim.LeaseID, ExternalActionOpenPR, "feature/test", "", "head-sha", "base-sha", "2026-06-17T10:02:10Z")
+	pushIntent := reserveExternalIntentActionForTest(t, fixture.Dir, claim.MergeUnitID, attempt.AttemptID, "worker-a", claim.LeaseID, pushApproval.Approval.ApprovalID, ExternalActionPush, "feature/test", "", "head-sha", "base-sha", "2026-06-17T10:04:00Z")
+	recordExternalIntentResultForTest(t, fixture.Dir, claim.MergeUnitID, attempt.AttemptID, "worker-a", claim.LeaseID, pushIntent.Intent.IntentID, ExternalResultSucceeded, false, "2026-06-17T10:04:10Z")
+	openPRIntent := reserveExternalIntentActionForTest(t, fixture.Dir, claim.MergeUnitID, attempt.AttemptID, "worker-a", claim.LeaseID, openPRApproval.Approval.ApprovalID, ExternalActionOpenPR, "feature/test", "", "head-sha", "base-sha", "2026-06-17T10:04:20Z")
+	recordExternalIntentResultForTest(t, fixture.Dir, claim.MergeUnitID, attempt.AttemptID, "worker-a", claim.LeaseID, openPRIntent.Intent.IntentID, ExternalResultSucceeded, false, "2026-06-17T10:04:30Z")
+	startExternalIntentLifecycle(t, fixture, claim, attempt)
+
+	_, err := Transition(TransitionOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		From:         MergeUnitInProgress,
+		To:           MergeUnitCompleted,
+		Evidence: map[string]any{
+			evidenceCommitSHAKey:         "commit-sha-1",
+			evidenceExternalIntentIDsKey: []string{pushIntent.Intent.IntentID},
+		},
+		Now: fixedJournalTime("2026-06-17T10:05:00Z"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "missing required external intent "+openPRIntent.Intent.IntentID) {
+		t.Fatalf("missing required intent error = %v", err)
+	}
+}
+
+func TestExternalIntentCompletionListRejectsUnacceptedAndUnknownIntents(t *testing.T) {
+	t.Run("unknown", func(t *testing.T) {
+		fixture, claim, attempt := newApprovalAttemptFixture(t)
+		startExternalIntentLifecycle(t, fixture, claim, attempt)
+
+		_, err := Transition(TransitionOptions{
+			WorkspaceDir: fixture.Dir,
+			MergeUnitID:  claim.MergeUnitID,
+			AttemptID:    attempt.AttemptID,
+			AgentID:      "worker-a",
+			LeaseID:      claim.LeaseID,
+			From:         MergeUnitInProgress,
+			To:           MergeUnitCompleted,
+			Evidence: map[string]any{
+				evidenceCommitSHAKey:         "commit-sha-1",
+				evidenceExternalIntentIDsKey: []string{"intent-missing"},
+			},
+			Now: fixedJournalTime("2026-06-17T10:04:00Z"),
+		})
+		if err == nil || !strings.Contains(err.Error(), "references unknown external intent intent-missing") {
+			t.Fatalf("unknown intent error = %v", err)
+		}
+	})
+
+	t.Run("not accepted", func(t *testing.T) {
+		fixture, claim, attempt, approval := newExternalIntentFixture(t, ExternalActionPush)
+		intent := reserveExternalIntentForTest(t, fixture, claim, attempt, approval, "feature/test", "head-sha", "2026-06-17T10:04:00Z")
+		recordExternalIntentResultForTest(t, fixture.Dir, claim.MergeUnitID, attempt.AttemptID, "worker-a", claim.LeaseID, intent.Intent.IntentID, ExternalResultFailedAfterSideEffect, false, "2026-06-17T10:04:10Z")
+		startExternalIntentLifecycle(t, fixture, claim, attempt)
+
+		_, err := Transition(TransitionOptions{
+			WorkspaceDir: fixture.Dir,
+			MergeUnitID:  claim.MergeUnitID,
+			AttemptID:    attempt.AttemptID,
+			AgentID:      "worker-a",
+			LeaseID:      claim.LeaseID,
+			From:         MergeUnitInProgress,
+			To:           MergeUnitCompleted,
+			Evidence: map[string]any{
+				evidenceCommitSHAKey:         "commit-sha-1",
+				evidenceExternalIntentIDsKey: []string{intent.Intent.IntentID},
+			},
+			Now: fixedJournalTime("2026-06-17T10:05:00Z"),
+		})
+		if err == nil || !strings.Contains(err.Error(), "result failed_after_side_effect is not accepted") {
+			t.Fatalf("unaccepted intent error = %v", err)
+		}
+	})
+
+	t.Run("ambiguous", func(t *testing.T) {
+		fixture, claim, attempt, approval := newExternalIntentFixture(t, ExternalActionPush)
+		startExternalIntentLifecycle(t, fixture, claim, attempt)
+		intent := reserveExternalIntentForTest(t, fixture, claim, attempt, approval, "feature/test", "head-sha", "2026-06-17T10:04:00Z")
+		recordExternalIntentResultForTest(t, fixture.Dir, claim.MergeUnitID, attempt.AttemptID, "worker-a", claim.LeaseID, intent.Intent.IntentID, ExternalResultAmbiguous, true, "2026-06-17T10:04:10Z")
+
+		_, err := Transition(TransitionOptions{
+			WorkspaceDir: fixture.Dir,
+			MergeUnitID:  claim.MergeUnitID,
+			AttemptID:    attempt.AttemptID,
+			AgentID:      "worker-a",
+			LeaseID:      claim.LeaseID,
+			From:         MergeUnitInProgress,
+			To:           MergeUnitCompleted,
+			Evidence: map[string]any{
+				evidenceCommitSHAKey:         "commit-sha-1",
+				evidenceExternalIntentIDsKey: []string{intent.Intent.IntentID},
+			},
+			Now: fixedJournalTime("2026-06-17T10:05:00Z"),
+		})
+		if err == nil || !strings.Contains(err.Error(), "blocked by frozen resource") || !strings.Contains(err.Error(), "requires operator_reconcile") {
+			t.Fatalf("ambiguous intent error = %v", err)
+		}
+	})
+}
+
+func TestExternalIntentCompletionListAllowsReconciledRequiredIntent(t *testing.T) {
+	fixture, claim, attempt, approval := newExternalIntentFixture(t, ExternalActionPush)
+	intent := reserveExternalIntentForTest(t, fixture, claim, attempt, approval, "feature/test", "head-sha", "2026-06-17T10:04:00Z")
+	recordExternalIntentResultForTest(t, fixture.Dir, claim.MergeUnitID, attempt.AttemptID, "worker-a", claim.LeaseID, intent.Intent.IntentID, ExternalResultAmbiguous, true, "2026-06-17T10:04:10Z")
+	if _, err := ReconcileExternalIntent(ExternalIntentReconcileOptions{
+		WorkspaceDir: fixture.Dir,
+		IntentID:     intent.Intent.IntentID,
+		Operator:     "operator-a",
+		Details:      "provider side effect verified",
+		Now:          fixedJournalTime("2026-06-17T10:04:20Z"),
+	}); err != nil {
+		t.Fatalf("ReconcileExternalIntent: %v", err)
+	}
+	startExternalIntentLifecycle(t, fixture, claim, attempt)
+
+	completed, err := Transition(TransitionOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		From:         MergeUnitInProgress,
+		To:           MergeUnitCompleted,
+		Evidence: map[string]any{
+			evidenceCommitSHAKey:         "commit-sha-1",
+			evidenceExternalIntentIDsKey: []string{intent.Intent.IntentID},
+		},
+		Now: fixedJournalTime("2026-06-17T10:05:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Transition complete: %v", err)
+	}
+	if completed.EventType != EventMergeUnitCompleted {
+		t.Fatalf("completed = %+v", completed)
+	}
+}
+
+func TestRemoteDeleteCleanupIntentAfterCompletionDoesNotBlockDependentReadiness(t *testing.T) {
+	fixture := newChainedDAGFixture(t).Workspace
+	writeWorkspaceLock(t, fixture.Dir)
+	claim, err := Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-a",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	attempt, err := StartAttempt(AttemptStartOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		BaseSHA:      "base-sha",
+		Now:          fixedJournalTime("2026-06-17T10:01:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("StartAttempt: %v", err)
+	}
+	startExternalIntentLifecycle(t, fixture, claim, attempt)
+	if _, err := Transition(TransitionOptions{
+		WorkspaceDir: fixture.Dir,
+		MergeUnitID:  claim.MergeUnitID,
+		AttemptID:    attempt.AttemptID,
+		AgentID:      "worker-a",
+		LeaseID:      claim.LeaseID,
+		From:         MergeUnitInProgress,
+		To:           MergeUnitCompleted,
+		Evidence:     map[string]any{evidenceCommitSHAKey: "commit-sha-1"},
+		Now:          fixedJournalTime("2026-06-17T10:04:00Z"),
+	}); err != nil {
+		t.Fatalf("Transition complete: %v", err)
+	}
+	cleanupApproval := grantExternalIntentApprovalForTest(t, fixture.Dir, claim.MergeUnitID, attempt.AttemptID, "worker-a", claim.LeaseID, ExternalActionRemoteDelete, attempt.Branch, "", "head-sha", "base-sha", "2026-06-17T10:05:00Z")
+	cleanup := reserveExternalIntentActionForTest(t, fixture.Dir, claim.MergeUnitID, attempt.AttemptID, "worker-a", claim.LeaseID, cleanupApproval.Approval.ApprovalID, ExternalActionRemoteDelete, attempt.Branch, "", "head-sha", "base-sha", "2026-06-17T10:05:10Z")
+
+	status, err := Status(fixture.Dir)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	report := findExternalIntentReportByID(t, status.ExternalIntents, cleanup.Intent.IntentID)
+	if report.Purpose != ExternalIntentPurposeCleanup {
+		t.Fatalf("cleanup report = %+v", report)
+	}
+	if !containsString(status.Ready, "sources:story-b") {
+		t.Fatalf("cleanup intent should not block dependent readiness: ready=%+v blockers=%+v", status.Ready, status.Blockers)
+	}
+	next, err := Next(NextOptions{
+		WorkspaceDir: fixture.Dir,
+		AgentID:      "worker-b",
+		Claim:        true,
+		Now:          fixedJournalTime("2026-06-17T10:06:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Next dependent: %v", err)
+	}
+	if next.MergeUnitID != "sources:story-b" {
+		t.Fatalf("dependent claim = %+v", next)
+	}
+}
+
 func TestUnresolvedExternalIntentFreezesStatusAndBlocksOverlappingIntent(t *testing.T) {
 	fixture, claim, attempt := newApprovalAttemptFixture(t)
 	approval, err := GrantApproval(ApprovalGrantOptions{
@@ -990,6 +1262,70 @@ func newExternalIntentFixture(t *testing.T, action string) (workspaceFixture, Ne
 	return fixture, claim, attempt, approval
 }
 
+func grantExternalIntentApprovalForTest(t *testing.T, workspaceDir string, mergeUnitID string, attemptID string, agentID string, leaseID string, action string, branch string, pr string, headSHA string, baseSHA string, at string) ApprovalResult {
+	t.Helper()
+	approval, err := GrantApproval(ApprovalGrantOptions{
+		WorkspaceDir: workspaceDir,
+		MergeUnitID:  mergeUnitID,
+		AttemptID:    attemptID,
+		AgentID:      agentID,
+		LeaseID:      leaseID,
+		Actions:      []string{action},
+		Branch:       branch,
+		PR:           pr,
+		HeadSHA:      headSHA,
+		BaseSHA:      baseSHA,
+		MaxUses:      1,
+		ExpiresIn:    time.Hour,
+		Now:          fixedJournalTime(at),
+	})
+	if err != nil {
+		t.Fatalf("GrantApproval %s: %v", action, err)
+	}
+	return approval
+}
+
+func reserveExternalIntentActionForTest(t *testing.T, workspaceDir string, mergeUnitID string, attemptID string, agentID string, leaseID string, approvalID string, action string, branch string, pr string, headSHA string, baseSHA string, at string) ExternalIntentResult {
+	t.Helper()
+	result, err := ReserveExternalIntent(ExternalIntentReserveOptions{
+		WorkspaceDir:     workspaceDir,
+		MergeUnitID:      mergeUnitID,
+		AttemptID:        attemptID,
+		AgentID:          agentID,
+		LeaseID:          leaseID,
+		ApprovalID:       approvalID,
+		Action:           action,
+		Branch:           branch,
+		PR:               pr,
+		RequestedHeadSHA: headSHA,
+		ExpectedBaseSHA:  baseSHA,
+		Now:              fixedJournalTime(at),
+	})
+	if err != nil {
+		t.Fatalf("ReserveExternalIntent %s: %v", action, err)
+	}
+	return result
+}
+
+func recordExternalIntentResultForTest(t *testing.T, workspaceDir string, mergeUnitID string, attemptID string, agentID string, leaseID string, intentID string, status string, policyAccepted bool, at string) ExternalIntentResultRecordResult {
+	t.Helper()
+	result, err := RecordExternalIntentResult(ExternalIntentResultRecordOptions{
+		WorkspaceDir:   workspaceDir,
+		MergeUnitID:    mergeUnitID,
+		AttemptID:      attemptID,
+		AgentID:        agentID,
+		LeaseID:        leaseID,
+		IntentID:       intentID,
+		Status:         status,
+		PolicyAccepted: policyAccepted,
+		Now:            fixedJournalTime(at),
+	})
+	if err != nil {
+		t.Fatalf("RecordExternalIntentResult %s: %v", intentID, err)
+	}
+	return result
+}
+
 func reserveExternalIntentForTest(t *testing.T, fixture workspaceFixture, claim NextResult, attempt AttemptResult, approval ApprovalResult, branch string, headSHA string, at string) ExternalIntentResult {
 	t.Helper()
 	result, err := ReserveExternalIntent(ExternalIntentReserveOptions{
@@ -1013,19 +1349,35 @@ func reserveExternalIntentForTest(t *testing.T, fixture workspaceFixture, claim 
 
 func startExternalIntentLifecycle(t *testing.T, fixture workspaceFixture, claim NextResult, attempt AttemptResult) {
 	t.Helper()
+	startExternalIntentLifecycleAt(t, fixture.Dir, claim.MergeUnitID, attempt.AttemptID, "worker-a", claim.LeaseID, attempt.Worktree, "2026-06-17T10:03:00Z")
+}
+
+func startExternalIntentLifecycleAt(t *testing.T, workspaceDir string, mergeUnitID string, attemptID string, agentID string, leaseID string, worktree string, at string) {
+	t.Helper()
 	if _, err := Transition(TransitionOptions{
-		WorkspaceDir: fixture.Dir,
-		MergeUnitID:  claim.MergeUnitID,
-		AttemptID:    attempt.AttemptID,
-		AgentID:      "worker-a",
-		LeaseID:      claim.LeaseID,
+		WorkspaceDir: workspaceDir,
+		MergeUnitID:  mergeUnitID,
+		AttemptID:    attemptID,
+		AgentID:      agentID,
+		LeaseID:      leaseID,
 		From:         MergeUnitPending,
 		To:           MergeUnitInProgress,
-		Evidence:     map[string]any{evidenceWorktreeKey: attempt.Worktree},
-		Now:          fixedJournalTime("2026-06-17T10:03:00Z"),
+		Evidence:     map[string]any{evidenceWorktreeKey: worktree},
+		Now:          fixedJournalTime(at),
 	}); err != nil {
 		t.Fatalf("Transition start: %v", err)
 	}
+}
+
+func findExternalIntentReportByID(t *testing.T, reports []ExternalIntentReport, intentID string) ExternalIntentReport {
+	t.Helper()
+	for _, report := range reports {
+		if report.IntentID == intentID {
+			return report
+		}
+	}
+	t.Fatalf("external intent report %s missing from %+v", intentID, reports)
+	return ExternalIntentReport{}
 }
 
 func assertContainsString(t *testing.T, values []string, want string) {

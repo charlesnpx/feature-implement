@@ -9,6 +9,9 @@ const (
 	ExternalIntentResultSourcePolicy     = "policy"
 	ExternalIntentResultSourceProvider   = "provider"
 
+	ExternalIntentPurposeCompletion = "completion"
+	ExternalIntentPurposeCleanup    = "cleanup"
+
 	RecoveryActionRecoveredLease = "recovered_lease"
 )
 
@@ -41,6 +44,7 @@ type ExternalIntentReport struct {
 	MergeUnitID    string `json:"merge_unit_id"`
 	AttemptID      string `json:"attempt_id"`
 	Action         string `json:"action"`
+	Purpose        string `json:"purpose"`
 	Target         string `json:"target"`
 	Status         string `json:"status"`
 	ResultStatus   string `json:"result_status,omitempty"`
@@ -177,6 +181,7 @@ func externalIntentReports(events []JournalEvent, activeLeases map[string]active
 			MergeUnitID:    intent.MergeUnitID,
 			AttemptID:      intent.AttemptID,
 			Action:         intent.Action,
+			Purpose:        externalIntentPurpose(intent.Action),
 			Target:         intent.Target,
 			Status:         intent.Status,
 			ResultSource:   ExternalIntentResultSourceUnresolved,
@@ -201,6 +206,13 @@ func externalIntentReports(events []JournalEvent, activeLeases map[string]active
 		return reports[i].IntentID < reports[j].IntentID
 	})
 	return reports, nil
+}
+
+func externalIntentPurpose(action string) string {
+	if action == ExternalActionRemoteDelete {
+		return ExternalIntentPurposeCleanup
+	}
+	return ExternalIntentPurposeCompletion
 }
 
 func externalIntentResultSource(result ExternalIntentRecordedResultView) string {
