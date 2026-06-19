@@ -681,7 +681,11 @@ func Transition(opts TransitionOptions) (TransitionResult, error) {
 			return TransitionResult{}, err
 		}
 		tracker := &externalIntentTracker{intents: externalIntents}
-		if err := validateExternalIntentCompletionEvidence("transition", evidence, opts.MergeUnitID, opts.AttemptID, tracker); err != nil {
+		requireMerge, err := transitionRequiresMergeEvidence(state.Events, state.View.MergeQueue, opts.MergeUnitID, opts.AttemptID)
+		if err != nil {
+			return TransitionResult{}, err
+		}
+		if err := validateExternalIntentCompletionEvidence("transition", evidence, opts.MergeUnitID, opts.AttemptID, tracker, requireMerge); err != nil {
 			return TransitionResult{}, err
 		}
 	}
@@ -702,6 +706,24 @@ func Transition(opts TransitionOptions) (TransitionResult, error) {
 		EventType:    eventType,
 		Evidence:     evidence,
 	}, nil
+}
+
+func transitionRequiresMergeEvidence(events []JournalEvent, queue []MergeQueueEntryView, mergeUnitID string, attemptID string) (bool, error) {
+	if mergeQueueViewHasAttempt(queue, mergeUnitID, attemptID) {
+		return true, nil
+	}
+	approvals, err := approvalSnapshots(events)
+	if err != nil {
+		return false, err
+	}
+	for _, approval := range approvals {
+		if approval.MergeUnitID == mergeUnitID &&
+			approval.AttemptID == attemptID &&
+			containsString(approval.Actions, ExternalActionMerge) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func claimReadyMergeUnit(opts NextOptions, view SchedulerView, unit SchedulerMergeUnitView, claimedAt time.Time, leaseDuration time.Duration, revisions map[string]int) (NextResult, error) {

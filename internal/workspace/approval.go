@@ -715,71 +715,13 @@ func refreshInputsChangedAfterApproval(events []JournalEvent, approval approvalS
 }
 
 func approvalSnapshots(events []JournalEvent) (map[string]approvalSnapshot, error) {
-	approvals := map[string]approvalSnapshot{}
-	for i, event := range events {
-		priorEvents := events[:i]
-		switch event.Type {
-		case EventApprovalGranted:
-			approval, err := approvalGrantedFromEvent(event)
-			if err != nil {
-				return nil, err
-			}
-			approvals[approval.ApprovalID] = approval
-		case EventApprovalConsumed:
-			approvalID, err := eventStringPayload(event, eventPayloadApprovalIDKey)
-			if err != nil {
-				return nil, err
-			}
-			approval, ok := approvals[approvalID]
-			if !ok {
-				return nil, fmt.Errorf("approval event %s references unknown approval %s", event.ID, approvalID)
-			}
-			if err := validateApprovalConsumedEvent(event, approval); err != nil {
-				return nil, err
-			}
-			if err := validateApprovalEventNotStale(event, priorEvents, approval); err != nil {
-				return nil, err
-			}
-			usedCount, err := eventIntPayload(event, eventPayloadUsedCountKey)
-			if err != nil {
-				return nil, err
-			}
-			if usedCount != approval.UsedCount+1 {
-				return nil, fmt.Errorf("approval event %s payload %s is %d, want %d", event.ID, eventPayloadUsedCountKey, usedCount, approval.UsedCount+1)
-			}
-			approval.UsedCount++
-			approvals[approvalID] = approval
-		case EventExternalIntentReserved:
-			approvalID, err := eventStringPayload(event, eventPayloadApprovalIDRefKey)
-			if err != nil {
-				return nil, err
-			}
-			approvalResource := ApprovalResource(approvalID)
-			if !containsString(event.WriteSet, approvalResource) {
-				continue
-			}
-			approval, ok := approvals[approvalID]
-			if !ok {
-				return nil, fmt.Errorf("approval event %s references unknown approval %s", event.ID, approvalID)
-			}
-			if err := validateExternalIntentApprovalConsumptionEvent(event, approval); err != nil {
-				return nil, err
-			}
-			if err := validateApprovalEventNotStale(event, priorEvents, approval); err != nil {
-				return nil, err
-			}
-			usedCount, err := eventIntPayload(event, eventPayloadUsedCountKey)
-			if err != nil {
-				return nil, err
-			}
-			if usedCount != approval.UsedCount+1 {
-				return nil, fmt.Errorf("approval event %s payload %s is %d, want %d", event.ID, eventPayloadUsedCountKey, usedCount, approval.UsedCount+1)
-			}
-			approval.UsedCount++
-			approvals[approvalID] = approval
+	tracker := newApprovalReplayTracker()
+	for _, event := range events {
+		if err := tracker.Apply(event); err != nil {
+			return nil, err
 		}
 	}
-	return approvals, nil
+	return tracker.Snapshots(), nil
 }
 
 func validateApprovalEventNotStale(event JournalEvent, priorEvents []JournalEvent, approval approvalSnapshot) error {

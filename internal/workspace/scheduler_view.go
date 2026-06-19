@@ -153,16 +153,14 @@ func buildSchedulerViewAt(workspaceDir string, lock WorkspaceLock, events []Jour
 	leases := newLeaseTracker()
 	externalIntents := newExternalIntentTracker()
 	refreshes := newRefreshTracker()
+	approvals := newApprovalReplayTracker()
 	queues := newMergeQueueTracker()
 	for _, event := range events {
-		if err := applySchedulerEvent(unitByID, attempts, lifecycles, leases, externalIntents, refreshes, queues, event); err != nil {
+		if err := applySchedulerEvent(unitByID, attempts, lifecycles, leases, externalIntents, refreshes, approvals, queues, event); err != nil {
 			return SchedulerView{}, err
 		}
 	}
-	approvals, err := approvalSnapshots(events)
-	if err != nil {
-		return SchedulerView{}, err
-	}
+	approvalSnapshots := approvals.Snapshots()
 	activeLeases, err := activeLeaseSnapshots(events, now)
 	if err != nil {
 		return SchedulerView{}, err
@@ -198,7 +196,7 @@ func buildSchedulerViewAt(workspaceDir string, lock WorkspaceLock, events []Jour
 		if unit.CurrentAttempt != nil {
 			attemptID = unit.CurrentAttempt.AttemptID
 		}
-		unitApprovals := approvalViewsForStatus(approvals, events, unit.ID, attemptID, now)
+		unitApprovals := approvalViewsForStatus(approvalSnapshots, events, unit.ID, attemptID, now)
 		if len(unitApprovals) > 0 {
 			unit.Approvals = unitApprovals
 		}
@@ -236,7 +234,7 @@ func buildSchedulerViewAt(workspaceDir string, lock WorkspaceLock, events []Jour
 		}
 	}
 	ensureLifecycleCounts(view.Counts)
-	if err := populateMergeQueue(workspaceDir, &view, lock, events, unitByID, attempts, approvals, queues, now); err != nil {
+	if err := populateMergeQueue(workspaceDir, &view, lock, events, unitByID, attempts, approvalSnapshots, queues, now); err != nil {
 		return SchedulerView{}, err
 	}
 	for i := range view.MergeUnits {
@@ -256,7 +254,10 @@ func buildSchedulerViewAt(workspaceDir string, lock WorkspaceLock, events []Jour
 	return view, nil
 }
 
-func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, attempts *attemptTracker, lifecycles *lifecycleTracker, leases *leaseTracker, externalIntents *externalIntentTracker, refreshes *refreshTracker, queues *mergeQueueTracker, event JournalEvent) error {
+func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, attempts *attemptTracker, lifecycles *lifecycleTracker, leases *leaseTracker, externalIntents *externalIntentTracker, refreshes *refreshTracker, approvals *approvalReplayTracker, queues *mergeQueueTracker, event JournalEvent) error {
+	if err := approvals.Apply(event); err != nil {
+		return err
+	}
 	switch event.Type {
 	case EventWorkspaceCreated, EventWorkspaceValidated:
 		return nil
@@ -267,11 +268,11 @@ func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, attempts *
 	case EventAttemptAbandoned:
 		return abandonSchedulerAttempt(unitByID, attempts, lifecycles, event)
 	case EventMergeUnitStarted:
-		return updateMergeUnitStatus(unitByID, attempts, lifecycles, leases, externalIntents, refreshes, event, MergeUnitInProgress)
+		return updateMergeUnitStatus(unitByID, attempts, lifecycles, leases, externalIntents, refreshes, approvals, queues, event, MergeUnitInProgress)
 	case EventMergeUnitCompleted:
-		return updateMergeUnitStatus(unitByID, attempts, lifecycles, leases, externalIntents, refreshes, event, MergeUnitCompleted)
+		return updateMergeUnitStatus(unitByID, attempts, lifecycles, leases, externalIntents, refreshes, approvals, queues, event, MergeUnitCompleted)
 	case EventMergeUnitFailed:
-		return updateMergeUnitStatus(unitByID, attempts, lifecycles, leases, externalIntents, refreshes, event, MergeUnitFailed)
+		return updateMergeUnitStatus(unitByID, attempts, lifecycles, leases, externalIntents, refreshes, approvals, queues, event, MergeUnitFailed)
 	case EventContractPublished:
 		return nil
 	case EventContractBound:
@@ -318,7 +319,7 @@ func abandonSchedulerAttempt(unitByID map[string]*SchedulerMergeUnitView, attemp
 	return nil
 }
 
-func updateMergeUnitStatus(unitByID map[string]*SchedulerMergeUnitView, attempts *attemptTracker, lifecycles *lifecycleTracker, leases *leaseTracker, externalIntents *externalIntentTracker, refreshes *refreshTracker, event JournalEvent, status string) error {
+func updateMergeUnitStatus(unitByID map[string]*SchedulerMergeUnitView, attempts *attemptTracker, lifecycles *lifecycleTracker, leases *leaseTracker, externalIntents *externalIntentTracker, refreshes *refreshTracker, approvals *approvalReplayTracker, queues *mergeQueueTracker, event JournalEvent, status string) error {
 	unitID, err := eventStringPayload(event, eventPayloadMergeUnitIDKey)
 	if err != nil {
 		return err
@@ -335,7 +336,7 @@ func updateMergeUnitStatus(unitByID map[string]*SchedulerMergeUnitView, attempts
 	if err != nil {
 		return err
 	}
-	if err := validateTransitionEventPayload(event, unit.Status, status, attempt, leases.ActiveAt(unitID, occurredAt), externalIntents, refreshes); err != nil {
+	if err := validateTransitionEventPayload(event, unit.Status, status, attempt, leases.ActiveAt(unitID, occurredAt), externalIntents, refreshes, approvals, queues); err != nil {
 		return err
 	}
 	unit.Status = status
@@ -343,7 +344,7 @@ func updateMergeUnitStatus(unitByID map[string]*SchedulerMergeUnitView, attempts
 	return nil
 }
 
-func validateTransitionEventPayload(event JournalEvent, currentStatus string, targetStatus string, attempt *attemptSnapshot, activeLease *activeLeaseSnapshot, externalIntents *externalIntentTracker, refreshes *refreshTracker) error {
+func validateTransitionEventPayload(event JournalEvent, currentStatus string, targetStatus string, attempt *attemptSnapshot, activeLease *activeLeaseSnapshot, externalIntents *externalIntentTracker, refreshes *refreshTracker, approvals *approvalReplayTracker, queues *mergeQueueTracker) error {
 	from, to, evidence, ok, err := eventTransitionPayload(event)
 	if err != nil {
 		return err
@@ -399,7 +400,115 @@ func validateTransitionEventPayload(event JournalEvent, currentStatus string, ta
 	if targetStatus != MergeUnitCompleted {
 		return nil
 	}
-	return validateExternalIntentCompletionEvidence(event.ID, normalizedEvidence, attempt.MergeUnitID, attempt.AttemptID, externalIntents)
+	requireMerge := queues != nil && queues.HasAttempt(attempt.MergeUnitID, attempt.AttemptID)
+	if !requireMerge && approvals != nil {
+		requireMerge = approvals.RequiresMergeEvidence(attempt.MergeUnitID, attempt.AttemptID)
+	}
+	return validateExternalIntentCompletionEvidence(event.ID, normalizedEvidence, attempt.MergeUnitID, attempt.AttemptID, externalIntents, requireMerge)
+}
+
+type approvalReplayTracker struct {
+	events    []JournalEvent
+	approvals map[string]approvalSnapshot
+}
+
+func newApprovalReplayTracker() *approvalReplayTracker {
+	return &approvalReplayTracker{approvals: map[string]approvalSnapshot{}}
+}
+
+func (t *approvalReplayTracker) Apply(event JournalEvent) error {
+	if t == nil {
+		return nil
+	}
+	priorEvents := t.events
+	switch event.Type {
+	case EventApprovalGranted:
+		approval, err := approvalGrantedFromEvent(event)
+		if err != nil {
+			return err
+		}
+		t.approvals[approval.ApprovalID] = approval
+	case EventApprovalConsumed:
+		approvalID, err := eventStringPayload(event, eventPayloadApprovalIDKey)
+		if err != nil {
+			return err
+		}
+		approval, ok := t.approvals[approvalID]
+		if !ok {
+			return fmt.Errorf("approval event %s references unknown approval %s", event.ID, approvalID)
+		}
+		if err := validateApprovalConsumedEvent(event, approval); err != nil {
+			return err
+		}
+		if err := validateApprovalEventNotStale(event, priorEvents, approval); err != nil {
+			return err
+		}
+		usedCount, err := eventIntPayload(event, eventPayloadUsedCountKey)
+		if err != nil {
+			return err
+		}
+		if usedCount != approval.UsedCount+1 {
+			return fmt.Errorf("approval event %s payload %s is %d, want %d", event.ID, eventPayloadUsedCountKey, usedCount, approval.UsedCount+1)
+		}
+		approval.UsedCount++
+		t.approvals[approvalID] = approval
+	case EventExternalIntentReserved:
+		approvalID, err := eventStringPayload(event, eventPayloadApprovalIDRefKey)
+		if err != nil {
+			return err
+		}
+		approvalResource := ApprovalResource(approvalID)
+		if !containsString(event.WriteSet, approvalResource) {
+			break
+		}
+		approval, ok := t.approvals[approvalID]
+		if !ok {
+			return fmt.Errorf("approval event %s references unknown approval %s", event.ID, approvalID)
+		}
+		if err := validateExternalIntentApprovalConsumptionEvent(event, approval); err != nil {
+			return err
+		}
+		if err := validateApprovalEventNotStale(event, priorEvents, approval); err != nil {
+			return err
+		}
+		usedCount, err := eventIntPayload(event, eventPayloadUsedCountKey)
+		if err != nil {
+			return err
+		}
+		if usedCount != approval.UsedCount+1 {
+			return fmt.Errorf("approval event %s payload %s is %d, want %d", event.ID, eventPayloadUsedCountKey, usedCount, approval.UsedCount+1)
+		}
+		approval.UsedCount++
+		t.approvals[approvalID] = approval
+	}
+	t.events = append(t.events, event)
+	return nil
+}
+
+func (t *approvalReplayTracker) Snapshots() map[string]approvalSnapshot {
+	if t == nil {
+		return map[string]approvalSnapshot{}
+	}
+	snapshots := make(map[string]approvalSnapshot, len(t.approvals))
+	for id, approval := range t.approvals {
+		approval.Actions = append([]string(nil), approval.Actions...)
+		snapshots[id] = approval
+	}
+	return snapshots
+}
+
+func (t *approvalReplayTracker) RequiresMergeEvidence(mergeUnitID string, attemptID string) bool {
+	if t == nil {
+		return false
+	}
+	for _, approval := range t.approvals {
+		if approval.MergeUnitID == mergeUnitID &&
+			approval.AttemptID == attemptID &&
+			containsString(approval.Actions, ExternalActionMerge) {
+			return true
+		}
+	}
+	return false
 }
 
 type leaseTracker struct {

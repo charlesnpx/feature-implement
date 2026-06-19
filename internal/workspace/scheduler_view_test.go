@@ -112,6 +112,34 @@ func TestRebuildSchedulerViewReplaysMergeUnitTransition(t *testing.T) {
 	}
 }
 
+func TestRebuildSchedulerViewRejectsMergeApprovedCompletionWithoutMergeEvidence(t *testing.T) {
+	ready := newQueueReadyAttemptFixture(t)
+	startExternalIntentLifecycleAt(t, ready.Fixture.Dir, ready.Claim.MergeUnitID, ready.Attempt.AttemptID, ready.Claim.AgentID, ready.Claim.LeaseID, ready.Attempt.Worktree, "2026-01-02T15:08:40Z")
+	if _, err := AppendEvent(AppendEventOptions{
+		WorkspaceDir: ready.Fixture.Dir,
+		Type:         EventMergeUnitCompleted,
+		Payload: map[string]any{
+			eventPayloadMergeUnitIDKey: ready.Claim.MergeUnitID,
+			eventPayloadAttemptIDKey:   ready.Attempt.AttemptID,
+			eventPayloadAgentIDKey:     ready.Claim.AgentID,
+			eventPayloadLeaseIDKey:     ready.Claim.LeaseID,
+			eventPayloadFromKey:        MergeUnitInProgress,
+			eventPayloadToKey:          MergeUnitCompleted,
+			eventPayloadEvidenceKey:    map[string]any{evidenceCommitSHAKey: "commit-sha-1"},
+		},
+		WriteSet: []string{MergeUnitResource(ready.Claim.MergeUnitID)},
+		Now:      fixedWorkspaceTime("2026-01-02T15:09:00Z"),
+	}); err != nil {
+		t.Fatalf("AppendEvent completion: %v", err)
+	}
+
+	_, err := RebuildSchedulerView(ready.Fixture.Dir)
+
+	if err == nil || !strings.Contains(err.Error(), "requires accepted merge external intent evidence") {
+		t.Fatalf("RebuildSchedulerView error = %v", err)
+	}
+}
+
 func TestRebuildSchedulerViewRejectsUnknownEvent(t *testing.T) {
 	fixture := newIndependentDAGFixture(t).Workspace
 	writeWorkspaceLock(t, fixture.Dir)

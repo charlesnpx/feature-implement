@@ -398,6 +398,23 @@ func (t *mergeQueueTracker) Entries() []mergeQueueSnapshot {
 	return entries
 }
 
+func (t *mergeQueueTracker) HasAttempt(mergeUnitID string, attemptID string) bool {
+	if t == nil {
+		return false
+	}
+	_, ok := t.entries[mergeQueueAttemptKey(mergeUnitID, attemptID)]
+	return ok
+}
+
+func mergeQueueViewHasAttempt(entries []MergeQueueEntryView, mergeUnitID string, attemptID string) bool {
+	for _, entry := range entries {
+		if entry.MergeUnitID == mergeUnitID && entry.AttemptID == attemptID {
+			return true
+		}
+	}
+	return false
+}
+
 func populateMergeQueue(workspaceDir string, view *SchedulerView, lock WorkspaceLock, events []JournalEvent, unitByID map[string]*SchedulerMergeUnitView, attempts *attemptTracker, approvals map[string]approvalSnapshot, queues *mergeQueueTracker, now time.Time) error {
 	position := 1
 	for _, entry := range queues.Entries() {
