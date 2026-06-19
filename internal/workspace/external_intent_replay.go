@@ -214,7 +214,7 @@ func externalIntentFreezesByResource(freezes []ExternalIntentFreezeView) map[str
 	return byResource
 }
 
-func validateExternalIntentCompletionEvidence(eventID string, evidence map[string]any, mergeUnitID string, attemptID string, externalIntents *externalIntentTracker) error {
+func validateExternalIntentCompletionEvidence(eventID string, evidence map[string]any, mergeUnitID string, attemptID string, externalIntents *externalIntentTracker, requireMerge bool) error {
 	intentIDs, listProvided, err := externalIntentCompletionEvidenceIDs(eventID, evidence)
 	if err != nil {
 		return err
@@ -224,25 +224,33 @@ func validateExternalIntentCompletionEvidence(eventID string, evidence map[strin
 	}
 	required := requiredCompletionExternalIntents(externalIntents, mergeUnitID, attemptID)
 	if len(intentIDs) == 0 {
-		if len(required) == 0 {
+		if len(required) == 0 && !requireMerge {
 			return nil
 		}
-		return fmt.Errorf("transition event %s missing required external intent %s for action %s", eventID, required[0].IntentID, required[0].Action)
+		return fmt.Errorf("transition event %s requires accepted merge external intent evidence", eventID)
 	}
 	if !listProvided && len(required) > 1 {
 		return fmt.Errorf("transition event %s evidence %s cannot cover %d required external intents; use %s", eventID, evidenceExternalIntentIDKey, len(required), evidenceExternalIntentIDsKey)
 	}
+	hasMerge := false
 	included := map[string]bool{}
 	for _, intentID := range intentIDs {
 		included[intentID] = true
 		if err := validateExternalIntentCompletionID(eventID, intentID, mergeUnitID, attemptID, listProvided, externalIntents); err != nil {
 			return err
 		}
+		intent, _ := externalIntents.Intent(intentID)
+		if intent.Action == ExternalActionMerge {
+			hasMerge = true
+		}
 	}
 	for _, intent := range required {
 		if !included[intent.IntentID] {
 			return fmt.Errorf("transition event %s missing required external intent %s for action %s", eventID, intent.IntentID, intent.Action)
 		}
+	}
+	if !hasMerge {
+		return fmt.Errorf("transition event %s requires accepted merge external intent evidence", eventID)
 	}
 	return nil
 }
