@@ -92,6 +92,9 @@ func PlanExternalProviderCommand(opts ExternalProviderPlanOptions) (ExternalProv
 	if err := validateExternalProviderPlanApproval(state.Events, reserveOpts, plannedAt); err != nil {
 		return ExternalProviderPlanResult{}, err
 	}
+	if err := validateExternalProviderPlanMergeEvidence(state.Events, reserveOpts); err != nil {
+		return ExternalProviderPlanResult{}, err
+	}
 	identity := deriveExternalIntentIdentity(state.View.WorkspaceID, reserveOpts, target)
 	intentResource := ExternalIntentResource(identity.intentID)
 	if observed := state.Revisions[intentResource]; observed != 0 {
@@ -188,10 +191,30 @@ func validateExternalProviderPlanApproval(events []JournalEvent, opts ExternalIn
 	return nil
 }
 
+func validateExternalProviderPlanMergeEvidence(events []JournalEvent, opts ExternalIntentReserveOptions) error {
+	if opts.Action != ExternalActionRemoteDelete {
+		return nil
+	}
+	intents, err := externalIntentSnapshots(events)
+	if err != nil {
+		return err
+	}
+	for _, intent := range intents {
+		if intent.MergeUnitID == opts.MergeUnitID &&
+			intent.AttemptID == opts.AttemptID &&
+			intent.Action == ExternalActionMerge &&
+			intent.Result != nil &&
+			intent.Result.Accepted {
+			return nil
+		}
+	}
+	return fmt.Errorf("remote-delete provider plan requires accepted merge external intent evidence for merge unit %s attempt %s", opts.MergeUnitID, opts.AttemptID)
+}
+
 func externalProviderPlanView(opts ExternalIntentReserveOptions, worktree string, remote string, baseRef string, title string, prBody string, marker ExternalProviderMarker) (ExternalProviderPlanView, error) {
 	approvalCommand := approvalCheckCommand(opts)
 	intentCommand := intentReserveCommand(opts)
-	providerCommand, err := providerCommand(opts, worktree, remote, baseRef, title, prBody)
+	providerCommand, err := providerCommand(opts, worktree, remote, baseRef, title, prBody, marker.IntentID)
 	if err != nil {
 		return ExternalProviderPlanView{}, err
 	}
@@ -245,6 +268,10 @@ func intentReserveCommand(opts ExternalIntentReserveOptions) string {
 }
 
 func intentResultCommand(opts ExternalIntentReserveOptions, intentID string) string {
+	return intentResultCommandWithStatus(opts, intentID, ExternalResultSucceeded, "provider command completed")
+}
+
+func intentResultCommandWithStatus(opts ExternalIntentReserveOptions, intentID string, status string, details string) string {
 	return strings.Join([]string{
 		"feature workspace external intent result",
 		shellQuote(opts.WorkspaceDir),
@@ -253,8 +280,8 @@ func intentResultCommand(opts ExternalIntentReserveOptions, intentID string) str
 		"--agent", shellQuote(opts.AgentID),
 		"--lease", shellQuote(opts.LeaseID),
 		"--intent", shellQuote(intentID),
-		"--status", ExternalResultSucceeded,
-		"--details", shellQuote("provider command completed"),
+		"--status", shellQuote(status),
+		"--details", shellQuote(details),
 		"--json",
 	}, " ")
 }
@@ -269,7 +296,7 @@ func appendTargetFlags(parts []string, opts ExternalIntentReserveOptions) []stri
 	return parts
 }
 
-func providerCommand(opts ExternalIntentReserveOptions, worktree string, remote string, baseRef string, title string, prBody string) (string, error) {
+func providerCommand(opts ExternalIntentReserveOptions, worktree string, remote string, baseRef string, title string, prBody string, intentID string) (string, error) {
 	switch opts.Action {
 	case ExternalActionPush:
 		return strings.Join([]string{
@@ -296,9 +323,25 @@ func providerCommand(opts ExternalIntentReserveOptions, worktree string, remote 
 		if target == "" {
 			target = opts.Branch
 		}
-		return strings.Join([]string{"cd", shellQuote(worktree), "&&", "gh pr merge", shellQuote(target), "--merge"}, " "), nil
+		return strings.Join([]string{
+			mergePRHeadBaseCheckCommand(target, opts.RequestedHeadSHA, opts.ExpectedBaseSHA),
+			"||",
+			providerFailureResultBlock(opts, intentID, ExternalResultFailedBeforeSideEffect, "merge preflight head/base mismatch"),
+			"&&",
+			"(", "cd", shellQuote(worktree), "&&", "gh pr merge", shellQuote(target), "--merge", "--match-head-commit", shellQuote(opts.RequestedHeadSHA), ")",
+			"||",
+			providerFailureResultBlock(opts, intentID, ExternalResultAmbiguous, "merge provider command failed after preflight"),
+		}, " "), nil
 	case ExternalActionRemoteDelete:
-		return fmt.Sprintf("git -C %s push %s --delete %s", shellQuote(worktree), shellQuote(remote), shellQuote(opts.Branch)), nil
+		return strings.Join([]string{
+			remoteBranchHeadCheckCommand(worktree, remote, opts.Branch, opts.RequestedHeadSHA),
+			"||",
+			providerFailureResultBlock(opts, intentID, ExternalResultFailedBeforeSideEffect, "remote-delete preflight head mismatch"),
+			"&&",
+			"git", "-C", shellQuote(worktree), "push", shellQuote(remote), shellQuote("--force-with-lease=refs/heads/" + opts.Branch + ":" + opts.RequestedHeadSHA), shellQuote(":refs/heads/" + opts.Branch),
+			"||",
+			providerFailureResultBlock(opts, intentID, ExternalResultAmbiguous, "remote-delete provider command failed after preflight"),
+		}, " "), nil
 	default:
 		return "", fmt.Errorf("unsupported external provider action: %s", opts.Action)
 	}
@@ -310,6 +353,15 @@ func localHeadCheckCommand(worktree string, headSHA string) string {
 
 func remoteBranchHeadCheckCommand(worktree string, remote string, branch string, headSHA string) string {
 	return "test \"$(git -C " + shellQuote(worktree) + " ls-remote " + shellQuote(remote) + " " + shellQuote("refs/heads/"+branch) + " | awk '{print $1}')\" = " + shellQuote(headSHA)
+}
+
+func mergePRHeadBaseCheckCommand(target string, headSHA string, baseSHA string) string {
+	jq := ".headRefOid + \" \" + .baseRefOid"
+	return "test \"$(gh pr view " + shellQuote(target) + " --json headRefOid,baseRefOid --jq " + shellQuote(jq) + ")\" = " + shellQuote(headSHA+" "+baseSHA)
+}
+
+func providerFailureResultBlock(opts ExternalIntentReserveOptions, intentID string, status string, details string) string {
+	return "{ " + intentResultCommandWithStatus(opts, intentID, status, details) + "; exit 1; }"
 }
 
 func providerPRBody(body string, marker ExternalProviderMarker) (string, error) {
