@@ -203,6 +203,8 @@ func validateExternalProviderPlanMergeEvidence(events []JournalEvent, opts Exter
 		if intent.MergeUnitID == opts.MergeUnitID &&
 			intent.AttemptID == opts.AttemptID &&
 			intent.Action == ExternalActionMerge &&
+			intent.RequestedHeadSHA == opts.RequestedHeadSHA &&
+			intent.ExpectedBaseSHA == opts.ExpectedBaseSHA &&
 			intent.Result != nil &&
 			intent.Result.Accepted {
 			return nil
@@ -324,7 +326,7 @@ func providerCommand(opts ExternalIntentReserveOptions, worktree string, remote 
 			target = opts.Branch
 		}
 		return strings.Join([]string{
-			mergePRHeadBaseCheckCommand(target, opts.RequestedHeadSHA, opts.ExpectedBaseSHA),
+			mergePRHeadBaseCheckCommand(worktree, target, opts.RequestedHeadSHA, opts.ExpectedBaseSHA),
 			"||",
 			providerFailureResultBlock(opts, intentID, ExternalResultFailedBeforeSideEffect, "merge preflight head/base mismatch"),
 			"&&",
@@ -355,9 +357,9 @@ func remoteBranchHeadCheckCommand(worktree string, remote string, branch string,
 	return "test \"$(git -C " + shellQuote(worktree) + " ls-remote " + shellQuote(remote) + " " + shellQuote("refs/heads/"+branch) + " | awk '{print $1}')\" = " + shellQuote(headSHA)
 }
 
-func mergePRHeadBaseCheckCommand(target string, headSHA string, baseSHA string) string {
+func mergePRHeadBaseCheckCommand(worktree string, target string, headSHA string, baseSHA string) string {
 	jq := ".headRefOid + \" \" + .baseRefOid"
-	return "test \"$(gh pr view " + shellQuote(target) + " --json headRefOid,baseRefOid --jq " + shellQuote(jq) + ")\" = " + shellQuote(headSHA+" "+baseSHA)
+	return "test \"$(cd " + shellQuote(worktree) + " && gh pr view " + shellQuote(target) + " --json headRefOid,baseRefOid --jq " + shellQuote(jq) + ")\" = " + shellQuote(headSHA+" "+baseSHA)
 }
 
 func providerFailureResultBlock(opts ExternalIntentReserveOptions, intentID string, status string, details string) string {
