@@ -546,6 +546,58 @@ func TestRecordExternalIntentResultRejectsUnknownStatusAndDuplicate(t *testing.T
 	}
 }
 
+func TestRecordExternalIntentResultMismatchOutcomesBlockSuccess(t *testing.T) {
+	t.Run("merge preflight failure", func(t *testing.T) {
+		ready := newQueueReadyAttemptFixture(t)
+		if _, err := queueMergeReadyAttempt(t, ready, "", ready.Attempt.Branch, "2026-01-02T15:09:00Z"); err != nil {
+			t.Fatalf("queue: %v", err)
+		}
+		startExternalIntentLifecycleAt(t, ready.Fixture.Dir, ready.Claim.MergeUnitID, ready.Attempt.AttemptID, ready.Claim.AgentID, ready.Claim.LeaseID, ready.Attempt.Worktree, "2026-01-02T15:09:30Z")
+		intent := reserveExternalIntentActionForTest(t, ready.Fixture.Dir, ready.Claim.MergeUnitID, ready.Attempt.AttemptID, ready.Claim.AgentID, ready.Claim.LeaseID, ready.Approval.Approval.ApprovalID, ExternalActionMerge, ready.Attempt.Branch, "", ready.HeadSHA, ready.BaseSHA, "2026-01-02T15:10:00Z")
+		recorded := recordExternalIntentResultForTest(t, ready.Fixture.Dir, ready.Claim.MergeUnitID, ready.Attempt.AttemptID, ready.Claim.AgentID, ready.Claim.LeaseID, intent.Intent.IntentID, ExternalResultFailedBeforeSideEffect, false, "2026-01-02T15:11:00Z")
+		if recorded.Result.Accepted {
+			t.Fatalf("failed-before-side-effect should not be accepted: %+v", recorded.Result)
+		}
+
+		_, err := RecordExternalIntentResult(ExternalIntentResultRecordOptions{
+			WorkspaceDir: ready.Fixture.Dir,
+			MergeUnitID:  ready.Claim.MergeUnitID,
+			AttemptID:    ready.Attempt.AttemptID,
+			AgentID:      ready.Claim.AgentID,
+			LeaseID:      ready.Claim.LeaseID,
+			IntentID:     intent.Intent.IntentID,
+			Status:       ExternalResultSucceeded,
+			Now:          fixedJournalTime("2026-01-02T15:12:00Z"),
+		})
+		if err == nil || !strings.Contains(err.Error(), "already has result failed_before_side_effect") {
+			t.Fatalf("success after failed preflight error = %v", err)
+		}
+	})
+
+	t.Run("remote delete ambiguous", func(t *testing.T) {
+		fixture, claim, attempt, approval := newExternalIntentFixture(t, ExternalActionRemoteDelete)
+		intent := reserveExternalIntentActionForTest(t, fixture.Dir, claim.MergeUnitID, attempt.AttemptID, claim.AgentID, claim.LeaseID, approval.Approval.ApprovalID, ExternalActionRemoteDelete, "feature/test", "", "head-sha", "base-sha", "2026-06-17T10:03:00Z")
+		recorded := recordExternalIntentResultForTest(t, fixture.Dir, claim.MergeUnitID, attempt.AttemptID, claim.AgentID, claim.LeaseID, intent.Intent.IntentID, ExternalResultAmbiguous, false, "2026-06-17T10:04:00Z")
+		if recorded.Result.Accepted {
+			t.Fatalf("ambiguous result should not be accepted: %+v", recorded.Result)
+		}
+
+		_, err := RecordExternalIntentResult(ExternalIntentResultRecordOptions{
+			WorkspaceDir: fixture.Dir,
+			MergeUnitID:  claim.MergeUnitID,
+			AttemptID:    attempt.AttemptID,
+			AgentID:      claim.AgentID,
+			LeaseID:      claim.LeaseID,
+			IntentID:     intent.Intent.IntentID,
+			Status:       ExternalResultSucceeded,
+			Now:          fixedJournalTime("2026-06-17T10:05:00Z"),
+		})
+		if err == nil || !strings.Contains(err.Error(), "already has result ambiguous") {
+			t.Fatalf("success after ambiguous cleanup error = %v", err)
+		}
+	})
+}
+
 func TestReconcileExternalIntentClearsUnresolvedFreezeAfterLeaseRelease(t *testing.T) {
 	fixture, claim, attempt, approval := newExternalIntentFixture(t, ExternalActionPush)
 	reserved := reserveExternalIntentForTest(t, fixture, claim, attempt, approval, "feature/test", "head-sha", "2026-06-17T10:03:00Z")
