@@ -205,3 +205,37 @@ Optional local git smoke, which creates `.git` metadata only inside temp test di
 ```sh
 FEATURE_WORKSPACE_LOCAL_GIT_SMOKE=1 go test ./internal/workspace -run TestLocalGitAttemptWorktreeSmoke -count=1
 ```
+
+Workspace parallel e2e smoke, which uses only local temp git fixtures and does not perform GitHub writes:
+
+```sh
+go test ./internal/workspace -run TestWorkspaceParallelEndToEndSmoke -count=1
+```
+
+### Local Experimental Validation
+
+To test an unmerged branch under an experimental CLI name, rebuild the binary locally:
+
+```sh
+go build -o "$HOME/tmp/feature-implement-exp" ./cmd/feature
+"$HOME/tmp/feature-implement-exp" version
+```
+
+Stage the current branch's skills into a temp root before touching global skill folders:
+
+```sh
+stage="$(mktemp -d)"
+./install-skill.sh --install --target codex --json --install-root "$stage"
+```
+
+Only after hidden-folder write approval, install the binary on PATH, install the staged Codex skills under experimental names, and rewrite the command examples to call `feature-implement-exp`:
+
+```sh
+mkdir -p "$HOME/.local/bin"
+cp "$HOME/tmp/feature-implement-exp" "$HOME/.local/bin/feature-implement-exp"
+mkdir -p "$HOME/.codex/skills/feature-exp" "$HOME/.codex/skills/feature-exp:implement"
+cp -R "$stage/.codex/skills/feature/." "$HOME/.codex/skills/feature-exp/"
+cp -R "$stage/.codex/skills/feature:implement/." "$HOME/.codex/skills/feature-exp:implement/"
+perl -0pi -e 's/name: "feature"/name: "feature-exp"/; s/\$feature/\$feature-exp/g; s/`feature /`feature-implement-exp /g; s/^feature /feature-implement-exp /mg' "$HOME/.codex/skills/feature-exp/SKILL.md"
+perl -0pi -e 's/name: "feature:implement"/name: "feature-exp:implement"/; s/\$feature:implement/\$feature-exp:implement/g; s/\$feature/\$feature-exp/g; s/`feature /`feature-implement-exp /g; s/^feature /feature-implement-exp /mg' "$HOME/.codex/skills/feature-exp:implement/SKILL.md"
+```
