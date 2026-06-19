@@ -96,11 +96,12 @@ feature workspace refresh-branch <workspace-dir> --local --merge-unit <id> --att
 feature workspace evaluate-gates <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --json
 feature workspace gate record <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --gate test --status passed --input-hash <hash> --head-sha <head-sha> --base-sha <base-sha> --command '<command>' --summary '<summary>' --json
 feature workspace evaluate-gates <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --json
-feature workspace queue enter <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --branch <branch> --head-sha <head-sha> --base-sha <base-sha> --approval <approval-id> --json
-feature workspace approve grant <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --action push --branch <branch> --head-sha <head-sha> --base-sha <base-sha> --expires-in <duration> --json
-feature workspace external plan <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --approval <approval-id> --action push --branch <branch> --head-sha <head-sha> --base-sha <base-sha> --json
-feature workspace external intent result <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --intent <intent-id> --status succeeded --details '<details>' --json
-feature workspace transition <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --from in_progress --to completed --evidence commit_sha=<head-sha> --evidence external_intent_ids=<intent-id>[,<intent-id>...] --json
+feature workspace approve grant <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --action merge --branch <branch> --head-sha <head-sha> --base-sha <base-sha> --expires-in <duration> --json
+feature workspace evaluate-gates <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --json
+feature workspace queue enter <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --branch <branch> --head-sha <head-sha> --base-sha <base-sha> --approval <merge-approval-id> --json
+feature workspace external plan <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --approval <merge-approval-id> --action merge --branch <branch> --head-sha <head-sha> --base-sha <base-sha> --json
+feature workspace external intent result <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --intent <merge-intent-id> --status succeeded --details '<details>' --json
+feature workspace transition <workspace-dir> --merge-unit <id> --attempt <attempt-id> --agent <id> --lease <lease-id> --from in_progress --to completed --evidence commit_sha=<head-sha> --evidence external_intent_ids=<merge-intent-id>[,<intent-id>...] --json
 ```
 
 The plan lock is immutable source input after workspace initialization. Record lifecycle changes only through workspace state commands.
