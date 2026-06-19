@@ -953,7 +953,7 @@ func writeWorkspaceBlockerGroups(groups []workspace.WorkspaceBlockerGroup) {
 func writeWorkspaceExternalIntentSummary(intents []workspace.ExternalIntentReport) {
 	counts := map[string]int{}
 	for _, intent := range intents {
-		key := intent.ResultSource
+		key := intent.Purpose + ":" + intent.ResultSource
 		if intent.ResultStatus != "" {
 			key += ":" + intent.ResultStatus
 		}
@@ -1989,7 +1989,8 @@ Computes and records attempt-scoped review, contract, security, test, and merge 
 		fmt.Fprintln(w, `Usage:
   feature workspace transition <workspace-dir> --merge-unit <id> --attempt <id> --agent <id> --lease <id> --from <status> --to <status> --evidence <key=value> [--evidence <key=value>] [--json]
 
-Records local lifecycle movement for the current active attempt.`)
+Records local lifecycle movement for the current active attempt.
+For completion after external writes, use --evidence external_intent_ids=<id1,id2>. The legacy --evidence external_intent_id=<id> remains supported for one intent.`)
 	case "attempt":
 		usageWorkspaceAttempt(w)
 	case "contract":

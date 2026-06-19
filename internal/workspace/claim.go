@@ -37,10 +37,11 @@ const (
 	eventPayloadToKey             = "to"
 	eventPayloadEvidenceKey       = "evidence"
 
-	evidenceWorktreeKey         = "worktree"
-	evidenceCommitSHAKey        = "commit_sha"
-	evidenceReasonKey           = "reason"
-	evidenceExternalIntentIDKey = "external_intent_id"
+	evidenceWorktreeKey          = "worktree"
+	evidenceCommitSHAKey         = "commit_sha"
+	evidenceReasonKey            = "reason"
+	evidenceExternalIntentIDKey  = "external_intent_id"
+	evidenceExternalIntentIDsKey = "external_intent_ids"
 
 	attemptStatusActive    = "active"
 	attemptStatusAbandoned = "abandoned"
@@ -999,7 +1000,7 @@ func appendTransitionEvent(workspaceDir string, opts TransitionOptions, eventTyp
 		mergeUnitResource: revisions[mergeUnitResource],
 		refreshResource:   revisions[refreshResource],
 	}
-	if intentID, ok := evidence[evidenceExternalIntentIDKey].(string); ok && intentID != "" {
+	for _, intentID := range externalIntentEvidenceIDs(evidence) {
 		intentResource := ExternalIntentResource(intentID)
 		readSet[intentResource] = revisions[intentResource]
 	}
@@ -1291,6 +1292,14 @@ func normalizeTransitionEvidence(from string, to string, evidence map[string]any
 		if key == "" {
 			return nil, fmt.Errorf("transition evidence key is required")
 		}
+		if key == evidenceExternalIntentIDsKey {
+			intentIDs, err := normalizeExternalIntentIDList(value, key)
+			if err != nil {
+				return nil, err
+			}
+			normalized[key] = intentIDs
+			continue
+		}
 		text, ok := value.(string)
 		if !ok {
 			return nil, fmt.Errorf("transition evidence %s must be a string", key)
@@ -1322,6 +1331,61 @@ func normalizeTransitionEvidence(from string, to string, evidence map[string]any
 		return nil, fmt.Errorf("unsupported workspace transition: %s -> %s", from, to)
 	}
 	return normalized, nil
+}
+
+func normalizeExternalIntentIDList(value any, key string) ([]string, error) {
+	var raw []string
+	switch typed := value.(type) {
+	case string:
+		parts := strings.Split(typed, ",")
+		raw = make([]string, 0, len(parts))
+		for _, part := range parts {
+			raw = append(raw, part)
+		}
+	case []string:
+		raw = append([]string{}, typed...)
+	case []any:
+		raw = make([]string, 0, len(typed))
+		for i, item := range typed {
+			text, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("transition evidence %s[%d] must be a string", key, i)
+			}
+			raw = append(raw, text)
+		}
+	default:
+		return nil, fmt.Errorf("transition evidence %s must be a comma-separated string or string array", key)
+	}
+	intentIDs := make([]string, 0, len(raw))
+	seen := map[string]bool{}
+	for _, item := range raw {
+		intentID := strings.TrimSpace(item)
+		if intentID == "" {
+			return nil, fmt.Errorf("transition evidence %s contains an empty intent id", key)
+		}
+		if seen[intentID] {
+			return nil, fmt.Errorf("transition evidence %s contains duplicate intent id %s", key, intentID)
+		}
+		seen[intentID] = true
+		intentIDs = append(intentIDs, intentID)
+	}
+	if len(intentIDs) == 0 {
+		return nil, fmt.Errorf("transition evidence %s requires at least one intent id", key)
+	}
+	sort.Strings(intentIDs)
+	return intentIDs, nil
+}
+
+func externalIntentEvidenceIDs(evidence map[string]any) []string {
+	ids := []string{}
+	if intentID, ok := evidence[evidenceExternalIntentIDKey].(string); ok && strings.TrimSpace(intentID) != "" {
+		ids = append(ids, strings.TrimSpace(intentID))
+	}
+	if values, ok := evidence[evidenceExternalIntentIDsKey].([]string); ok {
+		ids = append(ids, values...)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func requiredStringEvidence(evidence map[string]any, key string) (string, error) {
