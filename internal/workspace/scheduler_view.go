@@ -289,6 +289,8 @@ func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, attempts *
 		return refreshes.Apply(event)
 	case EventGateEvaluationRecorded:
 		return nil
+	case EventGateEvidenceRecorded:
+		return validateGateEvidenceEvent(event)
 	case EventGateOverrideRecorded:
 		return validateGateOverrideEvent(event)
 	case EventMergeQueueEntered, EventMergeQueueStale:

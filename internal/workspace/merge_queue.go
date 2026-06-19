@@ -302,6 +302,9 @@ func mergeQueueReadSet(revisions map[string]int, events []JournalEvent, attempt 
 	for _, resource := range allGateOverrideResources(entry.MergeUnitID, entry.AttemptID) {
 		readSet[resource] = revisions[resource]
 	}
+	for _, resource := range allGateEvidenceResources(entry.MergeUnitID, entry.AttemptID) {
+		readSet[resource] = revisions[resource]
+	}
 	if refresh, ok := latestRefresh(events, attempt.MergeUnitID, attempt.AttemptID); ok {
 		readSet[refresh.Resource] = revisions[refresh.Resource]
 		for _, change := range refresh.InputChanges {
