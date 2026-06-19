@@ -265,23 +265,36 @@ func TestPlanExternalProviderRemoteDeleteRequiresMatchingMergeEvidence(t *testin
 	startExternalIntentLifecycleAt(t, ready.Fixture.Dir, ready.Claim.MergeUnitID, ready.Attempt.AttemptID, ready.Claim.AgentID, ready.Claim.LeaseID, ready.Attempt.Worktree, "2026-01-02T15:09:30Z")
 	mergeIntent := reserveExternalIntentActionForTest(t, ready.Fixture.Dir, ready.Claim.MergeUnitID, ready.Attempt.AttemptID, ready.Claim.AgentID, ready.Claim.LeaseID, ready.Approval.Approval.ApprovalID, ExternalActionMerge, ready.Attempt.Branch, "", ready.HeadSHA, ready.BaseSHA, "2026-01-02T15:10:00Z")
 	recordExternalIntentResultForTest(t, ready.Fixture.Dir, ready.Claim.MergeUnitID, ready.Attempt.AttemptID, ready.Claim.AgentID, ready.Claim.LeaseID, mergeIntent.Intent.IntentID, ExternalResultSucceeded, false, "2026-01-02T15:11:00Z")
-	approval := grantExternalIntentApprovalForTest(t, ready.Fixture.Dir, ready.Claim.MergeUnitID, ready.Attempt.AttemptID, ready.Claim.AgentID, ready.Claim.LeaseID, ExternalActionRemoteDelete, ready.Attempt.Branch, "", "different-head-sha", ready.BaseSHA, "2026-01-02T15:12:00Z")
+	tests := []struct {
+		name    string
+		headSHA string
+		baseSHA string
+		at      string
+	}{
+		{name: "head mismatch", headSHA: "different-head-sha", baseSHA: ready.BaseSHA, at: "2026-01-02T15:12:00Z"},
+		{name: "base mismatch", headSHA: ready.HeadSHA, baseSHA: "different-base-sha", at: "2026-01-02T15:13:00Z"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			approval := grantExternalIntentApprovalForTest(t, ready.Fixture.Dir, ready.Claim.MergeUnitID, ready.Attempt.AttemptID, ready.Claim.AgentID, ready.Claim.LeaseID, ExternalActionRemoteDelete, ready.Attempt.Branch, "", tt.headSHA, tt.baseSHA, tt.at)
 
-	_, err := PlanExternalProviderCommand(ExternalProviderPlanOptions{
-		WorkspaceDir:     ready.Fixture.Dir,
-		MergeUnitID:      ready.Claim.MergeUnitID,
-		AttemptID:        ready.Attempt.AttemptID,
-		AgentID:          ready.Claim.AgentID,
-		LeaseID:          ready.Claim.LeaseID,
-		ApprovalID:       approval.Approval.ApprovalID,
-		Action:           ExternalActionRemoteDelete,
-		Branch:           ready.Attempt.Branch,
-		RequestedHeadSHA: "different-head-sha",
-		ExpectedBaseSHA:  ready.BaseSHA,
-		Now:              fixedJournalTime("2026-01-02T15:13:00Z"),
-	})
-	if err == nil || !strings.Contains(err.Error(), "requires accepted merge external intent evidence") {
-		t.Fatalf("PlanExternalProviderCommand remote-delete mismatched evidence error = %v", err)
+			_, err := PlanExternalProviderCommand(ExternalProviderPlanOptions{
+				WorkspaceDir:     ready.Fixture.Dir,
+				MergeUnitID:      ready.Claim.MergeUnitID,
+				AttemptID:        ready.Attempt.AttemptID,
+				AgentID:          ready.Claim.AgentID,
+				LeaseID:          ready.Claim.LeaseID,
+				ApprovalID:       approval.Approval.ApprovalID,
+				Action:           ExternalActionRemoteDelete,
+				Branch:           ready.Attempt.Branch,
+				RequestedHeadSHA: tt.headSHA,
+				ExpectedBaseSHA:  tt.baseSHA,
+				Now:              fixedJournalTime("2026-01-02T15:14:00Z"),
+			})
+			if err == nil || !strings.Contains(err.Error(), "requires accepted merge external intent evidence") {
+				t.Fatalf("PlanExternalProviderCommand remote-delete mismatched evidence error = %v", err)
+			}
+		})
 	}
 }
 
