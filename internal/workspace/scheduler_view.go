@@ -1,0 +1,706 @@
+package workspace
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"time"
+)
+
+const (
+	SchedulerViewFileName = "scheduler.view.json"
+
+	MergeUnitPending    = "pending"
+	MergeUnitInProgress = "in_progress"
+	MergeUnitCompleted  = "completed"
+	MergeUnitFailed     = "failed"
+
+	EventWorkspaceCreated      = "workspace.created"
+	EventWorkspaceValidated    = "workspace.validated"
+	EventMergeUnitStarted      = "merge_unit.started"
+	EventMergeUnitCompleted    = "merge_unit.completed"
+	EventMergeUnitFailed       = "merge_unit.failed"
+	eventPayloadMergeUnitIDKey = "merge_unit_id"
+)
+
+type SchedulerView struct {
+	SchemaVersion   int                        `json:"schema_version"`
+	WorkspaceID     string                     `json:"workspace_id"`
+	Repo            string                     `json:"repo"`
+	BaseRef         string                     `json:"base_ref"`
+	MergeUnits      []SchedulerMergeUnitView   `json:"merge_units"`
+	MergeQueue      []MergeQueueEntryView      `json:"merge_queue,omitempty"`
+	Counts          map[string]int             `json:"counts"`
+	Ready           []string                   `json:"ready"`
+	Blocked         []string                   `json:"blocked"`
+	Leased          []string                   `json:"leased"`
+	FrozenResources []ExternalIntentFreezeView `json:"frozen_resources,omitempty"`
+}
+
+type SchedulerMergeUnitView struct {
+	ID                 string                       `json:"id"`
+	PlanID             string                       `json:"plan_id"`
+	MergeUnitID        string                       `json:"merge_unit_id"`
+	StoryIDs           []string                     `json:"story_ids"`
+	Dependencies       []string                     `json:"dependencies,omitempty"`
+	Status             string                       `json:"status"`
+	BlockedBy          []string                     `json:"blocked_by,omitempty"`
+	BlockingConditions []SchedulerBlockingCondition `json:"blocking_conditions,omitempty"`
+	ActiveLease        *SchedulerLeaseView          `json:"active_lease,omitempty"`
+	CurrentAttempt     *SchedulerAttemptView        `json:"current_attempt,omitempty"`
+	ContractBindings   []ContractBindingStatus      `json:"contract_bindings,omitempty"`
+	Approvals          []ApprovalView               `json:"approvals,omitempty"`
+	MergeQueue         *MergeQueueEntryView         `json:"merge_queue,omitempty"`
+}
+
+type SchedulerBlockingCondition struct {
+	Type           string `json:"type"`
+	Resource       string `json:"resource"`
+	AttemptID      string `json:"attempt_id,omitempty"`
+	ContractID     string `json:"contract_id,omitempty"`
+	ArtifactID     string `json:"artifact_id,omitempty"`
+	IntentID       string `json:"intent_id,omitempty"`
+	Action         string `json:"action,omitempty"`
+	Target         string `json:"target,omitempty"`
+	Status         string `json:"status,omitempty"`
+	RequiredAction string `json:"required_action,omitempty"`
+	EvidencePath   string `json:"evidence_path,omitempty"`
+	Gate           string `json:"gate,omitempty"`
+}
+
+type SchedulerLeaseView struct {
+	LeaseID        string `json:"lease_id"`
+	AgentID        string `json:"agent_id"`
+	LeaseExpiresAt string `json:"lease_expires_at"`
+}
+
+type SchedulerAttemptView struct {
+	AttemptID     string `json:"attempt_id"`
+	AttemptNumber int    `json:"attempt_number"`
+	AgentID       string `json:"agent_id"`
+	LeaseID       string `json:"lease_id"`
+	Branch        string `json:"branch"`
+	Worktree      string `json:"worktree"`
+	BaseRef       string `json:"base_ref"`
+	BaseSHA       string `json:"base_sha"`
+	Mode          string `json:"mode"`
+	Status        string `json:"status"`
+}
+
+func SchedulerViewPath(workspaceDir string) string {
+	return filepath.Join(StateDir(workspaceDir), SchedulerViewFileName)
+}
+
+func RebuildSchedulerView(workspaceDir string) (SchedulerView, error) {
+	return rebuildSchedulerViewAt(workspaceDir, time.Now())
+}
+
+func rebuildSchedulerViewAt(workspaceDir string, now time.Time) (SchedulerView, error) {
+	lock, err := readWorkspaceLock(filepath.Join(workspaceDir, LockFileName))
+	if err != nil {
+		return SchedulerView{}, err
+	}
+	events, err := readJournalEvents(EventsPath(workspaceDir))
+	if err != nil {
+		return SchedulerView{}, err
+	}
+	view, err := buildSchedulerViewAt(workspaceDir, lock, events, now)
+	if err != nil {
+		return SchedulerView{}, err
+	}
+	if err := os.MkdirAll(StateDir(workspaceDir), 0o755); err != nil {
+		return SchedulerView{}, err
+	}
+	if err := writeStableJSON(SchedulerViewPath(workspaceDir), view); err != nil {
+		return SchedulerView{}, err
+	}
+	return view, nil
+}
+
+func BuildSchedulerView(lock WorkspaceLock, events []JournalEvent) (SchedulerView, error) {
+	return buildSchedulerViewAt("", lock, events, time.Now())
+}
+
+func buildSchedulerViewAt(workspaceDir string, lock WorkspaceLock, events []JournalEvent, now time.Time) (SchedulerView, error) {
+	if _, err := replayResourceRevisions(events); err != nil {
+		return SchedulerView{}, err
+	}
+	view := SchedulerView{
+		SchemaVersion: 1,
+		WorkspaceID:   lock.WorkspaceID,
+		Repo:          lock.Repo,
+		BaseRef:       lock.BaseRef,
+		Counts:        map[string]int{},
+	}
+	for _, unit := range lock.MergeUnits {
+		view.MergeUnits = append(view.MergeUnits, SchedulerMergeUnitView{
+			ID:           unit.ID,
+			PlanID:       unit.PlanID,
+			MergeUnitID:  unit.MergeUnitID,
+			StoryIDs:     append([]string(nil), unit.StoryIDs...),
+			Dependencies: append([]string(nil), unit.Dependencies...),
+			Status:       MergeUnitPending,
+		})
+	}
+	unitByID := map[string]*SchedulerMergeUnitView{}
+	for i := range view.MergeUnits {
+		unitByID[view.MergeUnits[i].ID] = &view.MergeUnits[i]
+	}
+	attempts := newAttemptTracker()
+	lifecycles := newLifecycleTracker()
+	leases := newLeaseTracker()
+	externalIntents := newExternalIntentTracker()
+	refreshes := newRefreshTracker()
+	approvals := newApprovalReplayTracker()
+	queues := newMergeQueueTracker()
+	for _, event := range events {
+		if err := applySchedulerEvent(unitByID, attempts, lifecycles, leases, externalIntents, refreshes, approvals, queues, event); err != nil {
+			return SchedulerView{}, err
+		}
+	}
+	approvalSnapshots := approvals.Snapshots()
+	activeLeases, err := activeLeaseSnapshots(events, now)
+	if err != nil {
+		return SchedulerView{}, err
+	}
+	view.FrozenResources = externalIntents.Freezes(activeLeases)
+	freezesByResource := externalIntentFreezesByResource(view.FrozenResources)
+	for i := range view.MergeUnits {
+		unit := &view.MergeUnits[i]
+		frozenResources := freezesByResource[MergeUnitResource(unit.ID)]
+		if lease, ok := activeLeases[unit.ID]; ok {
+			unit.ActiveLease = &SchedulerLeaseView{
+				LeaseID:        lease.LeaseID,
+				AgentID:        lease.AgentID,
+				LeaseExpiresAt: lease.LeaseExpiresAt.UTC().Format(time.RFC3339Nano),
+			}
+			view.Leased = append(view.Leased, unit.ID)
+		}
+		if attempt := attempts.Current(unit.ID); attempt != nil {
+			unit.CurrentAttempt = &SchedulerAttemptView{
+				AttemptID:     attempt.AttemptID,
+				AttemptNumber: attempt.AttemptNumber,
+				AgentID:       attempt.AgentID,
+				LeaseID:       attempt.LeaseID,
+				Branch:        attempt.Branch,
+				Worktree:      attempt.Worktree,
+				BaseRef:       attempt.BaseRef,
+				BaseSHA:       attempt.BaseSHA,
+				Mode:          attempt.Mode,
+				Status:        attempt.Status,
+			}
+		}
+		attemptID := ""
+		if unit.CurrentAttempt != nil {
+			attemptID = unit.CurrentAttempt.AttemptID
+		}
+		unitApprovals := approvalViewsForStatus(approvalSnapshots, events, unit.ID, attemptID, now)
+		if len(unitApprovals) > 0 {
+			unit.Approvals = unitApprovals
+		}
+		bindings, err := contractBindingStatuses(lock, events, unit.ID, attemptID)
+		if err != nil {
+			return SchedulerView{}, err
+		}
+		if len(bindings) > 0 {
+			unit.ContractBindings = bindings
+		}
+		view.Counts[unit.Status]++
+		refreshConditions := refreshes.Conditions(unit.ID, attemptID)
+		if attemptID != "" {
+			if attempt := attempts.Current(unit.ID); attempt != nil {
+				condition, stale, err := currentRefreshHeadCondition(workspaceDir, events, *attempt)
+				if err != nil {
+					return SchedulerView{}, err
+				}
+				if stale {
+					refreshConditions = append(refreshConditions, condition)
+				}
+			}
+		}
+		if attemptID != "" && unit.ActiveLease != nil && len(frozenResources) == 0 {
+			if _, ok := latestRefresh(events, unit.ID, attemptID); !ok {
+				refreshConditions = appendMissingRefreshCondition(refreshConditions, unit.ID, attemptID)
+			}
+		}
+		if len(refreshConditions) > 0 {
+			unit.BlockingConditions = append(unit.BlockingConditions, refreshConditions...)
+		}
+		if unit.Status == MergeUnitPending {
+			unit.BlockedBy = incompleteDependencies(unit.Dependencies, unitByID)
+			unit.BlockingConditions = schedulerBlockingConditions(unit.BlockedBy, unit.ContractBindings, frozenResources, refreshConditions)
+		}
+	}
+	ensureLifecycleCounts(view.Counts)
+	if err := populateMergeQueue(workspaceDir, &view, lock, events, unitByID, attempts, approvalSnapshots, queues, now); err != nil {
+		return SchedulerView{}, err
+	}
+	for i := range view.MergeUnits {
+		unit := &view.MergeUnits[i]
+		if unit.Status != MergeUnitPending || unit.ActiveLease != nil || unit.MergeQueue != nil {
+			continue
+		}
+		if len(unit.BlockingConditions) == 0 {
+			view.Ready = append(view.Ready, unit.ID)
+		} else {
+			view.Blocked = append(view.Blocked, unit.ID)
+		}
+	}
+	sort.Strings(view.Ready)
+	sort.Strings(view.Blocked)
+	sort.Strings(view.Leased)
+	return view, nil
+}
+
+func applySchedulerEvent(unitByID map[string]*SchedulerMergeUnitView, attempts *attemptTracker, lifecycles *lifecycleTracker, leases *leaseTracker, externalIntents *externalIntentTracker, refreshes *refreshTracker, approvals *approvalReplayTracker, queues *mergeQueueTracker, event JournalEvent) error {
+	if err := approvals.Apply(event); err != nil {
+		return err
+	}
+	switch event.Type {
+	case EventWorkspaceCreated, EventWorkspaceValidated:
+		return nil
+	case EventLeaseGranted, EventLeaseHeartbeat, EventLeaseReleased, EventLeaseRecovered:
+		return leases.Apply(event)
+	case EventAttemptStarted:
+		return attempts.Apply(event)
+	case EventAttemptAbandoned:
+		return abandonSchedulerAttempt(unitByID, attempts, lifecycles, event)
+	case EventMergeUnitStarted:
+		return updateMergeUnitStatus(unitByID, attempts, lifecycles, leases, externalIntents, refreshes, approvals, queues, event, MergeUnitInProgress)
+	case EventMergeUnitCompleted:
+		return updateMergeUnitStatus(unitByID, attempts, lifecycles, leases, externalIntents, refreshes, approvals, queues, event, MergeUnitCompleted)
+	case EventMergeUnitFailed:
+		return updateMergeUnitStatus(unitByID, attempts, lifecycles, leases, externalIntents, refreshes, approvals, queues, event, MergeUnitFailed)
+	case EventContractPublished:
+		return nil
+	case EventContractBound:
+		return nil
+	case EventApprovalGranted, EventApprovalConsumed:
+		return nil
+	case EventExternalIntentReserved:
+		if err := externalIntents.Apply(event); err != nil {
+			return err
+		}
+		return queues.Apply(event)
+	case EventExternalIntentResultRecorded, EventExternalIntentReconciled:
+		return externalIntents.Apply(event)
+	case EventBranchRefreshRecorded:
+		return refreshes.Apply(event)
+	case EventGateEvaluationRecorded:
+		return nil
+	case EventGateEvidenceRecorded:
+		return validateGateEvidenceEvent(event)
+	case EventGateOverrideRecorded:
+		return validateGateOverrideEvent(event)
+	case EventMergeQueueEntered, EventMergeQueueStale:
+		return queues.Apply(event)
+	default:
+		return fmt.Errorf("unknown scheduler event type %q", event.Type)
+	}
+}
+
+func abandonSchedulerAttempt(unitByID map[string]*SchedulerMergeUnitView, attempts *attemptTracker, lifecycles *lifecycleTracker, event JournalEvent) error {
+	abandoned, err := eventAttemptAbandonedPayload(event)
+	if err != nil {
+		return err
+	}
+	if err := attempts.Apply(event); err != nil {
+		return err
+	}
+	unit := unitByID[abandoned.MergeUnitID]
+	if unit == nil {
+		return fmt.Errorf("scheduler event %s references unknown merge unit %s", event.ID, abandoned.MergeUnitID)
+	}
+	if lifecycles.ClearIfFromAttempt(abandoned.MergeUnitID, abandoned.AttemptID) {
+		unit.Status = MergeUnitPending
+	}
+	return nil
+}
+
+func updateMergeUnitStatus(unitByID map[string]*SchedulerMergeUnitView, attempts *attemptTracker, lifecycles *lifecycleTracker, leases *leaseTracker, externalIntents *externalIntentTracker, refreshes *refreshTracker, approvals *approvalReplayTracker, queues *mergeQueueTracker, event JournalEvent, status string) error {
+	unitID, err := eventStringPayload(event, eventPayloadMergeUnitIDKey)
+	if err != nil {
+		return err
+	}
+	unit := unitByID[unitID]
+	if unit == nil {
+		return fmt.Errorf("scheduler event %s references unknown merge unit %s", event.ID, unitID)
+	}
+	occurredAt, err := eventTimestamp(event)
+	if err != nil {
+		return err
+	}
+	attempt, err := validateCurrentAttemptForTransition(event, attempts, unitID, occurredAt)
+	if err != nil {
+		return err
+	}
+	if err := validateTransitionEventPayload(event, unit.Status, status, attempt, leases.ActiveAt(unitID, occurredAt), externalIntents, refreshes, approvals, queues); err != nil {
+		return err
+	}
+	unit.Status = status
+	lifecycles.RecordTransition(unitID, attempt.AttemptID)
+	return nil
+}
+
+func validateTransitionEventPayload(event JournalEvent, currentStatus string, targetStatus string, attempt *attemptSnapshot, activeLease *activeLeaseSnapshot, externalIntents *externalIntentTracker, refreshes *refreshTracker, approvals *approvalReplayTracker, queues *mergeQueueTracker) error {
+	from, to, evidence, ok, err := eventTransitionPayload(event)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("scheduler event %s missing transition payload", event.ID)
+	}
+	if from != currentStatus {
+		return fmt.Errorf("scheduler event %s transition from %s does not match current lifecycle %s", event.ID, from, currentStatus)
+	}
+	if to != targetStatus {
+		return fmt.Errorf("scheduler event %s transition to %s does not match event target %s", event.ID, to, targetStatus)
+	}
+	eventType, err := transitionEventType(from, to)
+	if err != nil {
+		return err
+	}
+	if eventType != event.Type {
+		return fmt.Errorf("scheduler event %s type %s does not match transition %s", event.ID, event.Type, eventType)
+	}
+	if attempt == nil {
+		return fmt.Errorf("scheduler event %s cannot advance lifecycle without an active attempt", event.ID)
+	}
+	agentID, err := eventStringPayload(event, eventPayloadAgentIDKey)
+	if err != nil {
+		return err
+	}
+	leaseID, err := eventStringPayload(event, eventPayloadLeaseIDKey)
+	if err != nil {
+		return err
+	}
+	if activeLease == nil || activeLease.LeaseID != leaseID || activeLease.AgentID != agentID {
+		return fmt.Errorf("scheduler event %s transition lease %s is not active for agent %s", event.ID, leaseID, agentID)
+	}
+	if err := validateAttemptLeaseOwner(attempt.AttemptID, attempt.AgentID, attempt.LeaseID, agentID, leaseID); err != nil {
+		return fmt.Errorf("scheduler event %s: %w", event.ID, err)
+	}
+	normalizedEvidence, err := normalizeTransitionEvidence(from, to, evidence, *attempt)
+	if err != nil {
+		return err
+	}
+	if err := validateRefreshConditionsClear(fmt.Sprintf("scheduler event %s", event.ID), attempt.MergeUnitID, attempt.AttemptID, refreshes); err != nil {
+		return err
+	}
+	activeLeases := map[string]activeLeaseSnapshot{}
+	if activeLease != nil {
+		activeLeases[activeLease.MergeUnitID] = *activeLease
+	}
+	if frozen := externalIntentFreezesByResource(externalIntents.Freezes(activeLeases))[MergeUnitResource(attempt.MergeUnitID)]; len(frozen) > 0 {
+		first := frozen[0]
+		return fmt.Errorf("scheduler event %s blocked by frozen resource %s from external intent %s (%s; requires %s)", event.ID, first.Resource, first.IntentID, first.Status, first.RequiredAction)
+	}
+	if targetStatus != MergeUnitCompleted {
+		return nil
+	}
+	requireMerge := queues != nil && queues.HasAttempt(attempt.MergeUnitID, attempt.AttemptID)
+	if !requireMerge && approvals != nil {
+		requireMerge = approvals.RequiresMergeEvidence(attempt.MergeUnitID, attempt.AttemptID)
+	}
+	return validateExternalIntentCompletionEvidence(event.ID, normalizedEvidence, attempt.MergeUnitID, attempt.AttemptID, externalIntents, requireMerge)
+}
+
+type approvalReplayTracker struct {
+	events    []JournalEvent
+	approvals map[string]approvalSnapshot
+}
+
+func newApprovalReplayTracker() *approvalReplayTracker {
+	return &approvalReplayTracker{approvals: map[string]approvalSnapshot{}}
+}
+
+func (t *approvalReplayTracker) Apply(event JournalEvent) error {
+	if t == nil {
+		return nil
+	}
+	priorEvents := t.events
+	switch event.Type {
+	case EventApprovalGranted:
+		approval, err := approvalGrantedFromEvent(event)
+		if err != nil {
+			return err
+		}
+		t.approvals[approval.ApprovalID] = approval
+	case EventApprovalConsumed:
+		approvalID, err := eventStringPayload(event, eventPayloadApprovalIDKey)
+		if err != nil {
+			return err
+		}
+		approval, ok := t.approvals[approvalID]
+		if !ok {
+			return fmt.Errorf("approval event %s references unknown approval %s", event.ID, approvalID)
+		}
+		if err := validateApprovalConsumedEvent(event, approval); err != nil {
+			return err
+		}
+		if err := validateApprovalEventNotStale(event, priorEvents, approval); err != nil {
+			return err
+		}
+		usedCount, err := eventIntPayload(event, eventPayloadUsedCountKey)
+		if err != nil {
+			return err
+		}
+		if usedCount != approval.UsedCount+1 {
+			return fmt.Errorf("approval event %s payload %s is %d, want %d", event.ID, eventPayloadUsedCountKey, usedCount, approval.UsedCount+1)
+		}
+		approval.UsedCount++
+		t.approvals[approvalID] = approval
+	case EventExternalIntentReserved:
+		approvalID, err := eventStringPayload(event, eventPayloadApprovalIDRefKey)
+		if err != nil {
+			return err
+		}
+		approvalResource := ApprovalResource(approvalID)
+		if !containsString(event.WriteSet, approvalResource) {
+			break
+		}
+		approval, ok := t.approvals[approvalID]
+		if !ok {
+			return fmt.Errorf("approval event %s references unknown approval %s", event.ID, approvalID)
+		}
+		if err := validateExternalIntentApprovalConsumptionEvent(event, approval); err != nil {
+			return err
+		}
+		if err := validateApprovalEventNotStale(event, priorEvents, approval); err != nil {
+			return err
+		}
+		usedCount, err := eventIntPayload(event, eventPayloadUsedCountKey)
+		if err != nil {
+			return err
+		}
+		if usedCount != approval.UsedCount+1 {
+			return fmt.Errorf("approval event %s payload %s is %d, want %d", event.ID, eventPayloadUsedCountKey, usedCount, approval.UsedCount+1)
+		}
+		approval.UsedCount++
+		t.approvals[approvalID] = approval
+	}
+	t.events = append(t.events, event)
+	return nil
+}
+
+func (t *approvalReplayTracker) Snapshots() map[string]approvalSnapshot {
+	if t == nil {
+		return map[string]approvalSnapshot{}
+	}
+	snapshots := make(map[string]approvalSnapshot, len(t.approvals))
+	for id, approval := range t.approvals {
+		approval.Actions = append([]string(nil), approval.Actions...)
+		snapshots[id] = approval
+	}
+	return snapshots
+}
+
+func (t *approvalReplayTracker) RequiresMergeEvidence(mergeUnitID string, attemptID string) bool {
+	if t == nil {
+		return false
+	}
+	for _, approval := range t.approvals {
+		if approval.MergeUnitID == mergeUnitID &&
+			approval.AttemptID == attemptID &&
+			containsString(approval.Actions, ExternalActionMerge) {
+			return true
+		}
+	}
+	return false
+}
+
+type leaseTracker struct {
+	leases map[string]activeLeaseSnapshot
+}
+
+func newLeaseTracker() *leaseTracker {
+	return &leaseTracker{leases: map[string]activeLeaseSnapshot{}}
+}
+
+func (t *leaseTracker) Apply(event JournalEvent) error {
+	switch event.Type {
+	case EventLeaseGranted, EventLeaseHeartbeat:
+		lease, err := eventLeasePayload(event)
+		if err != nil {
+			return err
+		}
+		t.leases[lease.MergeUnitID] = lease
+	case EventLeaseReleased, EventLeaseRecovered:
+		lease, err := eventReleasedLeasePayload(event)
+		if err != nil {
+			return err
+		}
+		current := t.leases[lease.MergeUnitID]
+		if current.LeaseID == lease.LeaseID {
+			delete(t.leases, lease.MergeUnitID)
+		}
+	}
+	return nil
+}
+
+func (t *leaseTracker) ActiveAt(mergeUnitID string, occurredAt time.Time) *activeLeaseSnapshot {
+	lease, ok := t.leases[mergeUnitID]
+	if !ok {
+		return nil
+	}
+	if occurredAt.Before(lease.LeaseStartedAt) || !occurredAt.Before(lease.LeaseExpiresAt) {
+		return nil
+	}
+	return &lease
+}
+
+type lifecycleTracker struct {
+	attemptByMergeUnit map[string]string
+}
+
+func newLifecycleTracker() *lifecycleTracker {
+	return &lifecycleTracker{attemptByMergeUnit: map[string]string{}}
+}
+
+func (t *lifecycleTracker) RecordTransition(mergeUnitID string, attemptID string) {
+	if attemptID == "" {
+		delete(t.attemptByMergeUnit, mergeUnitID)
+		return
+	}
+	t.attemptByMergeUnit[mergeUnitID] = attemptID
+}
+
+func (t *lifecycleTracker) ClearIfFromAttempt(mergeUnitID string, attemptID string) bool {
+	if t.attemptByMergeUnit[mergeUnitID] != attemptID {
+		return false
+	}
+	delete(t.attemptByMergeUnit, mergeUnitID)
+	return true
+}
+
+func validateCurrentAttemptForTransition(event JournalEvent, attempts *attemptTracker, mergeUnitID string, occurredAt time.Time) (*attemptSnapshot, error) {
+	attemptID, err := eventStringPayload(event, eventPayloadAttemptIDKey)
+	if err != nil {
+		return nil, err
+	}
+	if !attempts.HasAny(mergeUnitID) {
+		return nil, fmt.Errorf("scheduler event %s references unknown attempt %s", event.ID, attemptID)
+	}
+	current := attempts.Current(mergeUnitID)
+	if current == nil {
+		return nil, fmt.Errorf("scheduler event %s cannot advance merge unit %s without an active attempt", event.ID, mergeUnitID)
+	}
+	if occurredAt.Before(current.StartedAt) {
+		return nil, fmt.Errorf("scheduler event %s attempt %s has not started yet", event.ID, current.AttemptID)
+	}
+	if attemptID != current.AttemptID {
+		return nil, fmt.Errorf("scheduler event %s attempt %s is not current active attempt %s", event.ID, attemptID, current.AttemptID)
+	}
+	return current, nil
+}
+
+func eventStringPayload(event JournalEvent, key string) (string, error) {
+	value, ok := event.Payload[key]
+	if !ok {
+		return "", fmt.Errorf("scheduler event %s missing payload %s", event.ID, key)
+	}
+	text, ok := value.(string)
+	if !ok || text == "" {
+		return "", fmt.Errorf("scheduler event %s payload %s must be a string", event.ID, key)
+	}
+	return text, nil
+}
+
+func incompleteDependencies(dependencies []string, unitByID map[string]*SchedulerMergeUnitView) []string {
+	blockedBy := []string{}
+	for _, dependency := range dependencies {
+		unit := unitByID[dependency]
+		if unit == nil || unit.Status != MergeUnitCompleted {
+			blockedBy = append(blockedBy, dependency)
+		}
+	}
+	sort.Strings(blockedBy)
+	return blockedBy
+}
+
+func schedulerBlockingConditions(dependencies []string, bindings []ContractBindingStatus, freezes []ExternalIntentFreezeView, refreshes []SchedulerBlockingCondition) []SchedulerBlockingCondition {
+	conditions := make([]SchedulerBlockingCondition, 0, len(dependencies)+len(bindings)+len(freezes)+len(refreshes))
+	for _, dependency := range dependencies {
+		conditions = append(conditions, SchedulerBlockingCondition{
+			Type:     "dependency",
+			Resource: dependency,
+		})
+	}
+	for _, binding := range bindings {
+		if binding.Status != contractBindingStatusStale {
+			continue
+		}
+		conditions = append(conditions, SchedulerBlockingCondition{
+			Type:       "stale_contract",
+			Resource:   binding.ContractID + ":" + binding.ArtifactID,
+			ContractID: binding.ContractID,
+			ArtifactID: binding.ArtifactID,
+		})
+	}
+	for _, freeze := range freezes {
+		conditions = append(conditions, SchedulerBlockingCondition{
+			Type:           "frozen_resource",
+			Resource:       freeze.Resource,
+			IntentID:       freeze.IntentID,
+			Action:         freeze.Action,
+			Target:         freeze.Target,
+			Status:         freeze.Status,
+			RequiredAction: freeze.RequiredAction,
+		})
+	}
+	conditions = append(conditions, refreshes...)
+	sort.Slice(conditions, func(i, j int) bool {
+		if conditions[i].Type != conditions[j].Type {
+			return conditions[i].Type < conditions[j].Type
+		}
+		if conditions[i].Resource != conditions[j].Resource {
+			return conditions[i].Resource < conditions[j].Resource
+		}
+		if conditions[i].AttemptID != conditions[j].AttemptID {
+			return conditions[i].AttemptID < conditions[j].AttemptID
+		}
+		return conditions[i].ContractID < conditions[j].ContractID
+	})
+	return conditions
+}
+
+func approvalViewsForStatus(approvals map[string]approvalSnapshot, events []JournalEvent, mergeUnitID string, attemptID string, now time.Time) []ApprovalView {
+	if attemptID == "" {
+		return nil
+	}
+	views := []ApprovalView{}
+	for _, approval := range approvals {
+		if approval.MergeUnitID != mergeUnitID || approval.AttemptID != attemptID {
+			continue
+		}
+		staleInputs := approvalStaleInputsFromEvents(events, approval)
+		views = append(views, approval.ViewWithStaleInputs(now, staleInputs))
+	}
+	sort.Slice(views, func(i, j int) bool { return views[i].ApprovalID < views[j].ApprovalID })
+	return views
+}
+
+func ensureLifecycleCounts(counts map[string]int) {
+	for _, status := range []string{MergeUnitPending, MergeUnitInProgress, MergeUnitCompleted, MergeUnitFailed} {
+		if _, ok := counts[status]; !ok {
+			counts[status] = 0
+		}
+	}
+}
+
+func readWorkspaceLock(path string) (WorkspaceLock, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return WorkspaceLock{}, err
+	}
+	var lock WorkspaceLock
+	if err := json.Unmarshal(b, &lock); err != nil {
+		return WorkspaceLock{}, fmt.Errorf("parse %s: %w", filepath.Base(path), err)
+	}
+	if lock.GatePolicy.ID == "" || lock.GatePolicy.Version == "" || len(lock.GatePolicy.RetentionRules) == 0 {
+		return WorkspaceLock{}, fmt.Errorf("workspace lock missing gate_policy; run feature workspace validate <workspace-dir> --write-lock")
+	}
+	return lock, nil
+}

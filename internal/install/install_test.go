@@ -111,25 +111,89 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 		}
 		content := string(b)
 		for _, want := range []string{
-			"<plan-dir>/worktrees/<merge-unit-id>",
-			"open a PR with a clear title and description",
-			"review the opened PR",
+			"single-plan feature workspace",
+			"feature validate <plan-dir> --write-lock --json",
+			"feature.workspace.yaml",
+			"base_ref: <base_ref from feature.plan.lock.json>",
+			"remote: <remote from feature.plan.lock.json>",
+			"feature workspace init --manifest <workspace-dir>/feature.workspace.yaml --write-lock --json",
+			"feature workspace status <workspace-dir> --json",
+			"feature workspace recover <workspace-dir> --json",
+			"feature workspace next <workspace-dir> --agent <id> --claim --json",
+			"feature workspace attempt start <workspace-dir>",
+			"worker packet",
+			"`workspace_id`, `repo`, `base_ref`",
+			"`plan_id`, `plan_merge_unit_id`, `story_ids`",
+			"`attempt_id`, `lease_id`, `branch`, `worktree`, `base_sha`, and `commands`",
+			"`commands[]` worktree command",
+			"feature workspace transition ... --from pending --to in_progress --evidence worktree=<worktree> --json",
+			"feature workspace heartbeat <workspace-dir> --agent <id> --lease <id> --json",
+			"feature workspace refresh-branch --local",
+			"feature workspace refresh-branch <workspace-dir> --local",
+			"feature workspace evaluate-gates <workspace-dir>",
+			"feature workspace gate record <workspace-dir>",
+			"feature workspace queue enter <workspace-dir>",
+			"feature workspace approve grant",
+			"feature workspace approve grant <workspace-dir>",
+			"--action merge",
+			"--approval <merge-approval-id>",
+			"feature workspace external plan <workspace-dir>",
+			"approval capability",
+			"`approval_command`, `intent_command`, `provider_command`, then `result_command`",
+			"`push`, `open-pr`, `merge`, and `remote-delete`",
+			"accepted merge external intent evidence",
+			"merge-intent-id",
+			"--from in_progress --to completed",
+			"external_intent_ids",
+			"--from in_progress --to failed",
+			"`feature.plan.lock.json` as read-only input",
+			"direct plan lifecycle write-state commands",
+			"workspace state commands",
 			"branch-diff review only when PR creation is not approved",
 			"maximum of 10 fresh-review iterations",
-			"subagent to review the updated PR",
-			"stop and report the remaining findings instead of merging",
-			"only after the final reviewed branch has been pushed",
-			"feature implement cleanup",
-			"immutable and ordered",
-			"--write-state",
+			"External writes remain explicitly approval-gated",
 		} {
 			if !strings.Contains(content, want) {
 				t.Fatalf("staged implement skill %s missing %q", path, want)
 			}
 		}
-		if strings.Contains(content, "feature implement push <plan-dir> --merge-unit <id> --allow-push --json") {
-			t.Fatalf("staged implement skill %s includes a non-state-recording push write step", path)
+		for _, forbidden := range []string{
+			"feature implement next",
+			"feature implement start",
+			"feature implement commit",
+			"feature implement push",
+			"feature implement open-pr",
+			"feature implement review",
+			"feature implement merge",
+			"feature implement cleanup",
+			"feature status <plan-dir>",
+			"<plan-dir>/worktrees/<merge-unit-id>",
+			"always record lifecycle changes through `feature implement",
+		} {
+			if strings.Contains(content, forbidden) {
+				t.Fatalf("staged implement skill %s still contains stale serial workflow text %q", path, forbidden)
+			}
 		}
+		assertInOrder(t, path, content, []string{
+			"feature validate <plan-dir> --write-lock --json",
+			"feature workspace init --manifest <workspace-dir>/feature.workspace.yaml --write-lock --json",
+			"feature workspace status <workspace-dir> --json",
+			"feature workspace recover <workspace-dir> --json",
+			"feature workspace next <workspace-dir> --agent <id> --claim --json",
+			"feature workspace attempt start <workspace-dir>",
+			"feature workspace transition <workspace-dir>",
+			"feature workspace heartbeat <workspace-dir>",
+			"feature workspace refresh-branch <workspace-dir> --local",
+			"feature workspace evaluate-gates <workspace-dir>",
+			"feature workspace gate record <workspace-dir>",
+			"feature workspace evaluate-gates <workspace-dir>",
+			"feature workspace approve grant <workspace-dir>",
+			"feature workspace evaluate-gates <workspace-dir>",
+			"feature workspace queue enter <workspace-dir>",
+			"feature workspace external plan <workspace-dir>",
+			"feature workspace external intent result <workspace-dir>",
+			"feature workspace transition <workspace-dir>",
+		})
 	}
 	codexImplementSkill := filepath.Join(stage, ".codex", "skills", "feature:implement", "SKILL.md")
 	b, err = os.ReadFile(codexImplementSkill)
@@ -139,16 +203,9 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 	codexImplementContent := string(b)
 	for _, want := range []string{
 		"active Codex Skills list includes `pr:review:no-file`",
-		"`story_progress_label`",
-		"(Story 4/16)",
-		"clear title and description that includes the active `story_progress_label`",
 		"implementation worktree/repository path",
 		"`$pr:review:no-file <pr-number>`",
 		"generic Codex PR-review subagent",
-		"close that reviewer subagent",
-		"Do not send addressed findings back to the previous reviewer",
-		"fresh review of the pushed branch is the confirmation mechanism",
-		"same skill-selection rule",
 	} {
 		if !strings.Contains(codexImplementContent, want) {
 			t.Fatalf("staged codex implement skill missing %q", want)
@@ -162,6 +219,18 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 		if strings.Contains(codexImplementContent, forbidden) {
 			t.Fatalf("staged codex implement skill still contains removed reviewer-confirmation wording %q", forbidden)
 		}
+	}
+}
+
+func assertInOrder(t *testing.T, path string, content string, wants []string) {
+	t.Helper()
+	offset := 0
+	for _, want := range wants {
+		index := strings.Index(content[offset:], want)
+		if index < 0 {
+			t.Fatalf("staged skill %s missing %q after byte offset %d", path, want, offset)
+		}
+		offset += index + len(want)
 	}
 }
 

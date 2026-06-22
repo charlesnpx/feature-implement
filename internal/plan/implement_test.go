@@ -207,6 +207,43 @@ func TestImplementPlansConcretePushCommand(t *testing.T) {
 	}
 }
 
+func TestImplementUsesWorkspaceBaseRefWithoutFixtureRewrite(t *testing.T) {
+	planDir := materializeExamplePlan(t)
+	lock := readTestLock(t, planDir)
+	lock.BaseRef = "workspace-orchestration"
+	if err := writeLock(planDir, lock); err != nil {
+		t.Fatal(err)
+	}
+
+	start, err := Implement(ImplementOptions{PlanDir: planDir, Action: "start", MergeUnit: "story-current-state"})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	worktree := filepath.Join(planDir, "worktrees", "story-current-state")
+	wantStart := "git worktree add -b feature/sample-migration-plan/story-current-state " + worktree + " workspace-orchestration"
+	if len(start.Commands) != 1 || start.Commands[0] != wantStart {
+		t.Fatalf("start commands = %#v", start.Commands)
+	}
+	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "start", MergeUnit: "story-current-state", WriteState: true, BaseSHA: "base-sha"}); err != nil {
+		t.Fatalf("record start: %v", err)
+	}
+	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "commit", MergeUnit: "story-current-state", WriteState: true, CommitSHA: "commit-sha"}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if _, err := Implement(ImplementOptions{PlanDir: planDir, Action: "push", MergeUnit: "story-current-state", WriteState: true, AllowPush: true}); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+
+	openPR, err := Implement(ImplementOptions{PlanDir: planDir, Action: "open-pr", MergeUnit: "story-current-state", AllowOpenPR: true})
+	if err != nil {
+		t.Fatalf("open-pr: %v", err)
+	}
+	wantOpenPR := "cd " + worktree + " && gh pr create --base workspace-orchestration --head feature/sample-migration-plan/story-current-state"
+	if len(openPR.Commands) != 1 || openPR.Commands[0] != wantOpenPR {
+		t.Fatalf("open-pr commands = %#v", openPR.Commands)
+	}
+}
+
 func TestImplementQuotesWorktreeCommandsWithSpaces(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "plans with spaces")
 	if err := os.MkdirAll(root, 0o755); err != nil {

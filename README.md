@@ -39,11 +39,43 @@ feature implement cleanup <plan-dir> --merge-unit <id> --write-state --json
 `feature validate` writes `feature.plan.lock.json`; implementation commands consume that validated snapshot rather than live-edited Markdown.
 Lifecycle write steps use immutable lock transitions: each `--write-state` command reads the current lock, returns a new ordered merge-unit state snapshot, and writes that snapshot back to `feature.plan.lock.json`. Existing v1 lock files with map-shaped state are migrated on the next state write.
 
-`feature:implement` creates one temporary worktree for the active merge unit under `<plan-dir>/worktrees/<merge-unit-id>`. After the PR is merged and local `main` is updated, remove that worktree and record `feature implement cleanup ... --write-state`. Remote branch deletion is separate and still requires both merge policy allowance and explicit approval.
+`feature:implement` creates one temporary worktree for the active merge unit under `<plan-dir>/worktrees/<merge-unit-id>`. After the PR is merged and the local checkout of the plan `base_ref` is updated, remove that worktree and record `feature implement cleanup ... --write-state`. Remote branch deletion is separate and still requires both merge policy allowance and explicit approval.
 
 `feature implement ... --json` results for a selected merge unit include `story_progress_label`, such as `(Story 4/16)` or `(Stories 4-5/16)`, derived from the ordered stories in `feature.plan.lock.json`.
 
 When `$feature` or `/feature` needs to draft the temporary `feature.plan.yaml`, it should stage that scratch manifest under the user-provided output folder, `~/tmp` when it exists, or the system temp directory. It should not write scratch manifests into the current repository root unless that repo root was explicitly supplied as the output folder.
+
+## Direct Implement Versus Workspace Attempts
+
+Use `feature implement` directly for the normal single-plan flow. It owns the active merge-unit lifecycle in `feature.plan.lock.json`, creates one temporary worktree for that merge unit, opens a PR against the plan `base_ref`, and records commit, PR, review, merge, and cleanup metadata in the plan lock.
+
+Use `feature workspace` when several validated plans need to run on a shared long-running integration branch. A workspace has its own `feature.workspace.yaml`, `feature.workspace.lock.json`, scheduler view, and event journal. Workspace claims, leases, attempts, worktree commands, and lifecycle transitions are recorded in workspace state, not in the referenced plans' `feature.plan.lock.json` files.
+
+Workspace-managed workers should claim a merge unit with `feature workspace next --claim`, start an attempt with `feature workspace attempt start`, execute the returned worktree command, and record local lifecycle movement with `feature workspace transition`. After the final implementation commit or review-fix commit, refresh the branch, evaluate gates with the refreshed base/head evidence to get the input hash, record tool-proven review, security, or test evidence with `feature workspace gate record`, rerun `feature workspace evaluate-gates` so the recorded output hash includes that evidence, and queue using the same base/head SHAs. Any commit made after refresh stales that evidence and requires another refresh before gate evaluation, approval matching, or queue entry; missing or stale refresh evidence blocks queue entry with `required_action: refresh_branch`. The attempt-start JSON is the worker packet: it includes `workspace_id`, `repo`, `base_ref`, global `merge_unit_id`, `plan_id`, `plan_merge_unit_id`, `story_ids`, `dependencies`, `attempt_id`, `lease_id`, `branch`, `worktree`, `base_sha`, and `commands`. External writes such as push, PR creation, review, merge, and cleanup still belong to the guarded implementation workflow and should target the workspace integration branch.
+
+Agents refreshing workspace branches should follow the [agent rebase hygiene guide](docs/agent-rebase-hygiene.md). It defines local unpublished refresh rules, published branch force-with-lease boundaries, backup and verification evidence, and the distinction from the separate `rebase-up` workflow.
+
+### Workspace Recovery Reports
+
+Use `feature workspace status --json` to inspect scheduler state before taking recovery action. The JSON includes `blockers`, grouped by blocker `type` and `required_action`, plus `external_intents` so operators can distinguish tool-proven provider results from operator reconciliation.
+
+Use `feature workspace recover --json` after a long-running or interrupted campaign. The command records `actions` for recovered expired leases and returns `remaining_blockers` for work that still needs operator or agent action.
+
+Common recovery flows:
+
+- `dependency` / `complete_dependencies`: finish or fail the producer merge unit before claiming the consumer.
+- `stale_contract` / `bind_contract`: re-run contract validation for the consumer and bind the latest contract publication.
+- `stale_approval` / `grant_merge_approval`: refresh the branch or approval inputs and issue a new merge approval.
+- `frozen_resource` / `record_result`: record the external intent result while the owning lease is still active.
+- `frozen_resource` / `operator_reconcile`: after the lease is gone or the provider result is ambiguous, reconcile only when an operator has verified the external state.
+
+External intent report `result_source` values are intentionally distinct:
+
+- `tool`: the provider command completed with a tool-proven successful result.
+- `operator`: an operator reconciled the intent after an ambiguous or unresolved external write.
+- `policy`: policy accepted a non-success provider result.
+- `provider`: the provider recorded a non-success result that policy did not accept.
+- `unresolved`: no result has been recorded yet.
 
 ## Manifest Contract
 
@@ -166,4 +198,46 @@ go test ./...
 stage="$(mktemp -d)"
 ./install-skill.sh --install --target all --json --install-root "$stage"
 "$stage/.local/bin/feature" version
+```
+
+Optional local git smoke, which creates `.git` metadata only inside temp test directories:
+
+```sh
+FEATURE_WORKSPACE_LOCAL_GIT_SMOKE=1 go test ./internal/workspace -run TestLocalGitAttemptWorktreeSmoke -count=1
+```
+
+Workspace parallel e2e smoke, which uses only local temp git fixtures and does not perform GitHub writes:
+
+```sh
+go test ./internal/workspace -run TestWorkspaceParallelEndToEndSmoke -count=1
+```
+
+### Local Experimental Validation
+
+To test an unmerged branch under an experimental CLI name, rebuild the binary locally:
+
+```sh
+go build -o "$HOME/tmp/feature-implement-exp" ./cmd/feature
+"$HOME/tmp/feature-implement-exp" version
+```
+
+Stage the current branch's skills into a temp root before touching global skill folders:
+
+```sh
+stage="$(mktemp -d)"
+./install-skill.sh --install --target codex --json --install-root "$stage"
+```
+
+Only after hidden-folder write approval, install the binary on PATH, install the staged Codex skills under experimental names, and rewrite the command examples to call `feature-implement-exp`:
+
+```sh
+mkdir -p "$HOME/.local/bin"
+cp "$HOME/tmp/feature-implement-exp" "$HOME/.local/bin/feature-implement-exp"
+mkdir -p "$HOME/.codex/skills/feature-exp" "$HOME/.codex/skills/feature-exp:implement"
+cp -R "$stage/.codex/skills/feature/." "$HOME/.codex/skills/feature-exp/"
+cp -R "$stage/.codex/skills/feature:implement/." "$HOME/.codex/skills/feature-exp:implement/"
+perl -0pi -e 's/^name:\s*"?feature"?\s*$/name: "feature-exp"/m; s/\$feature(?!-exp)/\$feature-exp/g; s/`feature /`feature-implement-exp /g; s/^feature /feature-implement-exp /mg' "$HOME/.codex/skills/feature-exp/SKILL.md"
+perl -0pi -e 's/^name:\s*"?feature:implement"?\s*$/name: "feature-exp:implement"/m; s/\$feature(?!-exp)/\$feature-exp/g; s/`feature /`feature-implement-exp /g; s/^feature /feature-implement-exp /mg' "$HOME/.codex/skills/feature-exp:implement/SKILL.md"
+perl -0pi -e 's/^display_name: Feature$/display_name: Feature Exp/m; s/Use feature /Use feature-exp /g' "$HOME/.codex/skills/feature-exp/agents/openai.yaml"
+perl -0pi -e 's/Feature Implement/Feature Implement Exp/g; s/feature:implement/feature-exp:implement/g' "$HOME/.codex/skills/feature-exp:implement/agents/openai.yaml"
 ```
