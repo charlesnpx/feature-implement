@@ -11,8 +11,8 @@ Implement one merge unit at a time with the existing `feature implement` lifecyc
 
 1. Require an unambiguous `<plan-dir>`, read its materialized epic, feature, and current-story files, and require `feature.plan.lock.json`. Create it with `feature validate <plan-dir> --write-lock --json` only when it is missing.
 2. Use `feature status <plan-dir> --json` and `feature implement next <plan-dir> --json` to select the merge unit. Include the returned `story_progress_label` in progress updates and PR text.
-3. Run and verify each Git or GitHub operation first. Use `feature implement ... --write-state` only to record verified results: create the worktree, implement the assigned stories, run relevant checks, and make the commit before recording their state.
-4. Before every external write, obtain explicit approval for that action. Push the branch and verify its remote SHA before recording `push`; create the PR and capture its number and URL before recording `open-pr`. Use a local branch-diff review only when PR creation is not approved.
+3. Obtain hidden-path approval before creating or removing a worktree when the environment requires it. Run and verify each Git or GitHub operation first. Use `feature implement ... --write-state` only to record verified results: create the worktree, implement the assigned stories, run relevant checks, and make the commit before recording their state.
+4. Before every external write, obtain explicit approval for that action. Push the branch and verify its remote SHA before recording `push`; create the PR with a clear title and body containing `story_progress_label`, then capture its number and URL before recording `open-pr`. Use a local branch-diff review only when PR creation is not approved.
 5. Ask a fresh Claude subagent to review the current PR.
 6. Apply only evidence-backed Critical or High findings. Critical/High means normal-flow failure, data loss, approval bypass, unintended external writes, or direct CLI incompatibility. Do not elevate speculative edge cases.
 7. For each accepted Critical/High finding, run checks, make an additive commit, push it, and ask a fresh reviewer to inspect the updated PR. Repeat until a fresh review has no Critical or High findings; use no fixed iteration cap.
@@ -28,7 +28,7 @@ git -C <worktree> commit
 feature implement commit <plan-dir> --merge-unit <id> --commit-sha <sha> --write-state --json
 git -C <worktree> push -u <remote> HEAD:<branch>
 feature implement push <plan-dir> --merge-unit <id> --allow-push --write-state --json
-cd <worktree> && gh pr create --base <base-ref> --head <branch>
+cd <worktree> && gh pr create --base <base-ref> --head <branch> --title "<clear title>" --body "<story_progress_label>: <summary>"
 feature implement open-pr <plan-dir> --merge-unit <id> --allow-open-pr --pr <number> --pr-url <url> --write-state --json
 feature implement review <plan-dir> --merge-unit <id> --review-status passed|changes-applied --write-state --json
 gh pr merge <pr-number-or-url> --merge

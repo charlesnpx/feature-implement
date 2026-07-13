@@ -109,7 +109,9 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"feature implement next <plan-dir> --json",
 			"`story_progress_label`",
 			"Before every external write, obtain explicit approval",
+			"Obtain hidden-path approval before creating or removing a worktree",
 			"Run and verify each Git or GitHub operation first",
+			"body containing `story_progress_label`",
 			"only to record verified results",
 			"Critical/High means normal-flow failure, data loss, approval bypass, unintended external writes, or direct CLI incompatibility",
 			"fresh reviewer to inspect the updated PR",
@@ -124,6 +126,7 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"feature implement merge <plan-dir>",
 			"feature implement cleanup <plan-dir>",
 			"git -C <worktree> push -u <remote> HEAD:<branch>",
+			"gh pr create --base <base-ref> --head <branch> --title \"<clear title>\" --body \"<story_progress_label>: <summary>\"",
 			"gh pr merge <pr-number-or-url> --merge",
 			"--write-state",
 		})
