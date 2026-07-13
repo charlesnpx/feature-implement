@@ -58,110 +58,133 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			}
 		}
 	}
-	for _, path := range []string{
+	planningSkills := []string{
 		filepath.Join(stage, ".codex", "skills", "feature", "SKILL.md"),
 		filepath.Join(stage, ".claude", "skills", "feature", "SKILL.md"),
-	} {
-		b, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read staged skill %s: %v", path, err)
-		}
-		content := string(b)
-		for _, want := range []string{
-			"## Manifest Contract",
+	}
+	for _, path := range planningSkills {
+		content := readInstalledSkill(t, path)
+		assertContainsAll(t, path, content, []string{
+			"~/tmp/feature-plans/<plan-id>/",
+			"Quote every YAML string scalar",
+			"Leave integers and booleans typed",
+			"summary: \"Inventory: document systems, owners, dependencies, and risks.\"",
 			"schema_version: 1",
+			"number: 1",
+			"require_passing_checks: true",
+			"Critical/High means normal-flow failure, data loss, approval bypass, unintended external writes, or direct CLI incompatibility",
+			"Do not turn speculative edge cases into blockers",
+			"no fixed iteration cap",
+			"Medium or Low findings from that final review once",
+			"feature validate <plan-dir> --write-lock --json",
 			"feature plan example",
 			"feature plan schema --json",
-			"For migration or phased-planning prompts",
-			"Every story must be implementation-ready",
-			"`testing`: explicit test criteria",
-			"Testing Criteria",
-			"Never write the draft manifest in the current repo root",
-			"~/tmp",
-			"system temp directory",
-		} {
-			if !strings.Contains(content, want) {
-				t.Fatalf("staged skill %s missing %q", path, want)
-			}
-		}
+		})
+		assertNotContainsAny(t, path, content, []string{
+			"maximum of 10",
+			"feature workspace",
+			"execution_config",
+			"audit chain",
+			"fsync",
+		})
+		assertInOrder(t, path, content, []string{
+			"fresh reviewer",
+			"Apply only evidence-backed Critical or High findings",
+			"After each accepted Critical/High finding",
+			"no Critical or High findings",
+			"Medium or Low findings from that final review once",
+			"--write-lock",
+		})
 	}
-	codexFeatureSkill := filepath.Join(stage, ".codex", "skills", "feature", "SKILL.md")
-	b, err := os.ReadFile(codexFeatureSkill)
-	if err != nil {
-		t.Fatalf("read staged codex feature skill %s: %v", codexFeatureSkill, err)
-	}
-	codexFeatureContent := string(b)
-	for _, want := range []string{
-		"Do not use `pr:review:local:no-file`",
-		"maximum of 10 fresh-review iterations",
-		"re-run `feature plan materialize`",
-		"Stop only when a fresh reviewer returns no findings worth addressing",
-	} {
-		if !strings.Contains(codexFeatureContent, want) {
-			t.Fatalf("staged codex feature skill missing %q", want)
-		}
-	}
-	for _, path := range []string{
+
+	implementSkills := []string{
 		filepath.Join(stage, ".codex", "skills", "feature:implement", "SKILL.md"),
 		filepath.Join(stage, ".claude", "skills", "feature:implement", "SKILL.md"),
-	} {
-		b, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read staged implement skill %s: %v", path, err)
-		}
-		content := string(b)
-		for _, want := range []string{
-			"<plan-dir>/worktrees/<merge-unit-id>",
-			"open a PR with a clear title and description",
-			"review the opened PR",
-			"branch-diff review only when PR creation is not approved",
-			"maximum of 10 fresh-review iterations",
-			"subagent to review the updated PR",
-			"stop and report the remaining findings instead of merging",
-			"only after the final reviewed branch has been pushed",
-			"feature implement cleanup",
-			"immutable and ordered",
+	}
+	for _, path := range implementSkills {
+		content := readInstalledSkill(t, path)
+		assertContainsAll(t, path, content, []string{
+			"existing `feature implement` lifecycle",
+			"feature status <plan-dir> --json",
+			"feature implement next <plan-dir> --json",
+			"`story_progress_label`",
+			"Before every external write, obtain explicit approval",
+			"Critical/High means normal-flow failure, data loss, approval bypass, unintended external writes, or direct CLI incompatibility",
+			"fresh reviewer to inspect the updated PR",
+			"no fixed iteration cap",
+			"Medium or Low findings from that final review once",
+			"review-status passed",
+			"review-status changes-applied",
+			"feature implement start <plan-dir>",
+			"feature implement push <plan-dir>",
+			"feature implement open-pr <plan-dir>",
+			"feature implement review <plan-dir>",
+			"feature implement merge <plan-dir>",
+			"feature implement cleanup <plan-dir>",
 			"--write-state",
-		} {
-			if !strings.Contains(content, want) {
-				t.Fatalf("staged implement skill %s missing %q", path, want)
-			}
-		}
-		if strings.Contains(content, "feature implement push <plan-dir> --merge-unit <id> --allow-push --json") {
-			t.Fatalf("staged implement skill %s includes a non-state-recording push write step", path)
-		}
+		})
+		assertNotContainsAny(t, path, content, []string{
+			"maximum of 10",
+			"feature workspace",
+			"feature.workspace.yaml",
+			"execution_config",
+			"audit chain",
+			"filesystem transaction",
+		})
+		assertInOrder(t, path, content, []string{
+			"Ask a fresh",
+			"Critical or High findings",
+			"fresh reviewer to inspect the updated PR",
+			"no Critical or High findings",
+			"Medium or Low findings from that final review once",
+			"review-status passed",
+		})
 	}
+
 	codexImplementSkill := filepath.Join(stage, ".codex", "skills", "feature:implement", "SKILL.md")
-	b, err = os.ReadFile(codexImplementSkill)
-	if err != nil {
-		t.Fatalf("read staged codex implement skill %s: %v", codexImplementSkill, err)
-	}
-	codexImplementContent := string(b)
-	for _, want := range []string{
-		"active Codex Skills list includes `pr:review:no-file`",
-		"`story_progress_label`",
-		"(Story 4/16)",
-		"clear title and description that includes the active `story_progress_label`",
-		"implementation worktree/repository path",
+	codexImplementContent := readInstalledSkill(t, codexImplementSkill)
+	assertContainsAll(t, codexImplementSkill, codexImplementContent, []string{
 		"`$pr:review:no-file <pr-number>`",
-		"generic Codex PR-review subagent",
-		"close that reviewer subagent",
-		"Do not send addressed findings back to the previous reviewer",
-		"fresh review of the pushed branch is the confirmation mechanism",
-		"same skill-selection rule",
-	} {
-		if !strings.Contains(codexImplementContent, want) {
-			t.Fatalf("staged codex implement skill missing %q", want)
+		"generic PR-review subagent",
+	})
+}
+
+func readInstalledSkill(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read staged skill %s: %v", path, err)
+	}
+	return string(b)
+}
+
+func assertContainsAll(t *testing.T, path string, content string, wants []string) {
+	t.Helper()
+	for _, want := range wants {
+		if !strings.Contains(content, want) {
+			t.Fatalf("staged skill %s missing %q", path, want)
 		}
 	}
-	for _, forbidden := range []string{
-		"keep that reviewer agent alive",
-		"changed file list, and relevant local diff",
-		"ask whether the patch resolves its specific concerns",
-	} {
-		if strings.Contains(codexImplementContent, forbidden) {
-			t.Fatalf("staged codex implement skill still contains removed reviewer-confirmation wording %q", forbidden)
+}
+
+func assertNotContainsAny(t *testing.T, path string, content string, forbidden []string) {
+	t.Helper()
+	for _, value := range forbidden {
+		if strings.Contains(content, value) {
+			t.Fatalf("staged skill %s contains removed text %q", path, value)
 		}
+	}
+}
+
+func assertInOrder(t *testing.T, path string, content string, wants []string) {
+	t.Helper()
+	offset := 0
+	for _, want := range wants {
+		index := strings.Index(content[offset:], want)
+		if index < 0 {
+			t.Fatalf("staged skill %s missing %q after byte offset %d", path, want, offset)
+		}
+		offset += index + len(want)
 	}
 }
 

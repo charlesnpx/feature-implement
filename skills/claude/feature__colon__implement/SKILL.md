@@ -1,37 +1,25 @@
 ---
 name: "feature:implement"
-description: Implement a validated feature plan created by /feature, processing epics, features, stories, and merge units through guarded branch, PR, review, merge, and resume steps. Use when the user invokes /feature:implement or asks to implement a feature plan folder.
-argument-hint: "[plan-dir]"
+description: Implement a validated feature plan with the existing guarded serial branch, PR, review, merge, and cleanup commands. Use when the user invokes /feature:implement or asks to implement a feature plan folder.
 ---
 
 # Feature Implementation
 
-Implement a validated feature plan.
+Implement one merge unit at a time with the existing `feature implement` lifecycle.
 
-Preconditions:
+## Workflow
 
-- Use the obvious current plan folder only when conversation context identifies exactly one. Otherwise require the plan path.
-- Read `feature.plan.lock.json`; if missing, run `feature validate <plan-dir> --write-lock --json`.
-- External writes such as push, PR creation, merge, and branch deletion require explicit user approval.
-- Local git worktrees create git metadata under hidden paths. Get hidden-file approval before creating worktrees when the environment requires it.
+1. Require an unambiguous `<plan-dir>`, read its materialized epic, feature, and current-story files, and require `feature.plan.lock.json`. Create it with `feature validate <plan-dir> --write-lock --json` only when it is missing.
+2. Use `feature status <plan-dir> --json` and `feature implement next <plan-dir> --json` to select the merge unit. Include the returned `story_progress_label` in progress updates and PR text.
+3. Start one temporary worktree, implement the assigned stories, run relevant checks, commit, and record each lifecycle step through `feature implement ... --write-state`.
+4. Before every external write, obtain explicit approval for that action. Push the branch, open a PR, and record its number and URL. Use a local branch-diff review only when PR creation is not approved.
+5. Ask a fresh Claude subagent to review the current PR.
+6. Apply only evidence-backed Critical or High findings. Critical/High means normal-flow failure, data loss, approval bypass, unintended external writes, or direct CLI incompatibility. Do not elevate speculative edge cases.
+7. For each accepted Critical/High finding, run checks, make an additive commit, push it, and ask a fresh reviewer to inspect the updated PR. Repeat until a fresh review has no Critical or High findings; use no fixed iteration cap.
+8. Apply worthwhile Medium or Low findings from that final review once, run checks, commit, and push. Record `review-status passed` when no findings were applied, or `review-status changes-applied` when the final Medium/Low fixes were committed.
+9. When checks and policy allow it, merge the PR with explicit approval, record the merge commit, update local `main`, remove the worktree, and record cleanup. Delete the remote branch only when the plan permits it and the user approved deletion.
 
-Workflow:
-
-1. Read each epic file, then each feature file, then each story file in the current merge unit.
-2. Use `feature status <plan-dir> --json` and `feature implement next <plan-dir> --json` to identify the next merge unit.
-3. Create one temporary isolated worktree for the active merge unit at `<plan-dir>/worktrees/<merge-unit-id>`, then record `feature implement start ... --write-state`.
-4. Implement the story or merge unit, run repo checks, commit locally, then record `feature implement commit ... --commit-sha <sha> --write-state`.
-5. Push the implementation branch, open a PR with a clear title and description, then record PR number/URL with `feature implement open-pr ... --write-state`.
-6. Spawn a Claude subagent to review the opened PR. Use branch-diff review only when PR creation is not approved.
-7. Run a PR review loop with a maximum of 10 fresh-review iterations. For each review with worthwhile findings, keep that reviewer agent alive, apply the selected fixes locally, run checks, and do not commit yet.
-8. Send the same reviewer the addressed findings, changed file list, and relevant local diff; ask whether the patch resolves their specific concerns. Iterate locally until the reviewer confirms, or until you deliberately reject the concern with a concrete reason.
-9. Commit and push the confirmed fixes, then spawn a fresh subagent to review the updated PR. Stop only when a fresh reviewer returns no findings worth addressing. If iteration 10 still has worthwhile findings, stop and report the remaining findings instead of merging.
-10. Record review state with `feature implement review ... --review-status passed|changes-applied --write-state` only after the final reviewed branch has been pushed.
-11. Merge only when checks and policy allow it. Record merge state with `feature implement merge ... --merge-commit <sha> --write-state`.
-12. Update local main, remove the temporary worktree, then record `feature implement cleanup ... --write-state`. Delete the remote branch only when the plan permits it and the user explicitly approved it.
-13. Confirm `feature implement next <plan-dir> --json` advances before continuing to the next merge unit.
-
-Use guarded CLI forms for write steps:
+Stop for operator direction if plan or PR state is ambiguous. Do not invent state transitions or a separate recovery protocol.
 
 ```sh
 feature implement start <plan-dir> --merge-unit <id> --branch <branch> --worktree <plan-dir>/worktrees/<id> --base-sha <sha> --write-state --json
@@ -43,4 +31,4 @@ feature implement merge <plan-dir> --merge-unit <id> --allow-merge --merge-commi
 feature implement cleanup <plan-dir> --merge-unit <id> --write-state --json
 ```
 
-The lock state is immutable and ordered. Do not edit `feature.plan.lock.json` by hand; always record lifecycle changes through `feature implement ... --write-state`.
+Do not edit `feature.plan.lock.json` by hand.
