@@ -109,6 +109,8 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"feature implement next <plan-dir> --json",
 			"`story_progress_label`",
 			"Before every external write, obtain explicit approval",
+			"Run and verify each Git or GitHub operation first",
+			"only to record verified results",
 			"Critical/High means normal-flow failure, data loss, approval bypass, unintended external writes, or direct CLI incompatibility",
 			"fresh reviewer to inspect the updated PR",
 			"no fixed iteration cap",
@@ -121,6 +123,8 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"feature implement review <plan-dir>",
 			"feature implement merge <plan-dir>",
 			"feature implement cleanup <plan-dir>",
+			"git -C <worktree> push -u <remote> HEAD:<branch>",
+			"gh pr merge <pr-number-or-url> --merge",
 			"--write-state",
 		})
 		assertNotContainsAny(t, path, content, []string{
@@ -132,6 +136,7 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"filesystem transaction",
 		})
 		assertInOrder(t, path, content, []string{
+			"Run and verify each Git or GitHub operation first",
 			"Ask a fresh",
 			"Critical or High findings",
 			"fresh reviewer to inspect the updated PR",
