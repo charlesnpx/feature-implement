@@ -48,6 +48,18 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			t.Fatalf("expected installed file %s: %v", path, err)
 		}
 	}
+	codexFeatureMetadata := readInstalledSkill(t, filepath.Join(stage, ".codex", "skills", "feature", "agents", "openai.yaml"))
+	assertContainsAll(t, "codex feature metadata", codexFeatureMetadata, []string{
+		`default_prompt: "Use $feature`,
+		"policy:",
+		"allow_implicit_invocation: false",
+	})
+	codexImplementMetadata := readInstalledSkill(t, filepath.Join(stage, ".codex", "skills", "feature:implement", "agents", "openai.yaml"))
+	assertContainsAll(t, "codex implement metadata", codexImplementMetadata, []string{
+		`default_prompt: "Use $feature:implement`,
+		"policy:",
+		"allow_implicit_invocation: false",
+	})
 	for target, files := range result.Targets {
 		if len(files.Files) == 0 {
 			t.Fatalf("target %s has no files", target)
@@ -65,6 +77,8 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 	for _, path := range planningSkills {
 		content := readInstalledSkill(t, path)
 		assertContainsAll(t, path, content, []string{
+			"Invocation Guard",
+			"explicitly",
 			"~/tmp/feature-plans/<plan-id>/",
 			"Quote every YAML string scalar",
 			"Leave integers and booleans typed",
@@ -86,8 +100,10 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"execution_config",
 			"audit chain",
 			"fsync",
+			"or asks",
 		})
 		assertInOrder(t, path, content, []string{
+			"Invocation Guard",
 			"fresh reviewer",
 			"Apply only evidence-backed Critical or High findings",
 			"After each accepted Critical/High finding",
@@ -104,6 +120,8 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 	for _, path := range implementSkills {
 		content := readInstalledSkill(t, path)
 		assertContainsAll(t, path, content, []string{
+			"Invocation Guard",
+			"explicitly",
 			"existing `feature implement` lifecycle",
 			"feature status <plan-dir> --json",
 			"feature implement next <plan-dir> --json",
@@ -137,8 +155,10 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"execution_config",
 			"audit chain",
 			"filesystem transaction",
+			"or asks",
 		})
 		assertInOrder(t, path, content, []string{
+			"Invocation Guard",
 			"Run and verify each Git or GitHub operation first",
 			"Ask a fresh",
 			"Critical or High findings",

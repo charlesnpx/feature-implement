@@ -1,9 +1,13 @@
 ---
 name: "feature:implement"
-description: Implement a validated feature plan with the existing guarded serial branch, PR, review, merge, and cleanup commands. Use when the user invokes /feature:implement or asks to implement a feature plan folder.
+description: Explicit /feature:implement invocation only. Implement a validated feature plan with the existing guarded serial branch, PR, review, merge, and cleanup commands only when the user's current request contains a literal /feature:implement invocation.
 ---
 
 # Feature Implementation
+
+## Invocation Guard
+
+Proceed only when the user's current request contains a literal `/feature:implement` invocation. If this skill was selected for any other implementation request, stop and ask the user to invoke `/feature:implement` explicitly.
 
 Implement one merge unit at a time with the existing `feature implement` lifecycle.
 

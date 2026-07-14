@@ -1,3 +1,7 @@
-display_name: Feature
-short_description: Create validated epic, feature, story, and merge-unit plans for implementation.
-default_prompt: Use feature to break implementation scope into epics, features, stories, and merge units, materialize the plan folder, review it, and validate the resulting plan lock.
+interface:
+  display_name: "Feature"
+  short_description: "Create validated feature plans"
+  default_prompt: "Use $feature to break implementation scope into epics, features, stories, and merge units, then validate the plan."
+
+policy:
+  allow_implicit_invocation: false

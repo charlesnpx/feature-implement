@@ -1,9 +1,13 @@
 ---
 name: feature
-description: Create a concise, implementation-ready feature plan with epics, features, stories, and merge units. Use when the user invokes $feature or asks for a feature implementation plan.
+description: Explicit $feature invocation only. Create a concise, implementation-ready feature plan with epics, features, stories, and merge units only when the user's current request contains a literal $feature invocation.
 ---
 
 # Feature Planning
+
+## Invocation Guard
+
+Proceed only when the user's current request contains a literal `$feature` invocation. If this skill was selected for any other planning request, stop and ask the user to invoke `$feature` explicitly.
 
 Create a plan the existing `feature` CLI can materialize and validate.
 
