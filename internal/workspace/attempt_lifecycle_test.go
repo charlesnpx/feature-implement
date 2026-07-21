@@ -749,6 +749,26 @@ func TestLocalAttemptInspectionRejectsHiddenIndexFlags(t *testing.T) {
 	}
 }
 
+func TestLocalAttemptInspectionRejectsRawModeDrift(t *testing.T) {
+	repository, _, _ := newProtocolRepository(t)
+	worktree := filepath.Join(t.TempDir(), "attempt")
+	branch := "attempt-raw-mode"
+	runGitSetup(t, repository, "worktree", "add", "-b", branch, worktree, "HEAD")
+	runGitSetup(t, repository, "config", "core.fileMode", "false")
+	tracked := filepath.Join(worktree, "src", "protocol.go")
+	if err := os.Chmod(tracked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if ordinary := runGitSetup(t, worktree, "status", "--porcelain=v1", "-z"); len(ordinary) != 0 {
+		t.Fatalf("core.fileMode=false did not hide attempt mode drift: %q", ordinary)
+	}
+	if _, err := workspace.DefaultLocalAttemptGitAdapter().InspectAttemptWorktree(
+		context.Background(), repository, branch, worktree,
+	); err == nil || !strings.Contains(err.Error(), "executable mode differs") {
+		t.Fatalf("attempt raw-mode inspection error = %v", err)
+	}
+}
+
 func TestCompleteGoalBoundaryRecoversIdempotentlyThroughHandoffAndRejectsStaleHead(t *testing.T) {
 	harness := newAttemptHarness(t, "unit-two")
 	attempt := harness.reserve(t, "2026-07-21T12:01:00Z")

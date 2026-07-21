@@ -342,8 +342,19 @@ func (adapter LocalAttemptGitAdapter) InspectAttemptWorktree(
 		}
 		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree status: %w", err)
 	}
+	clean := len(statusOutput) == 0
+	if clean {
+		commitAdapter := LocalCommitGitAdapter{git: adapter}
+		tree, err := commitAdapter.resolveObject(ctx, worktree, algorithm, objectHex(head)+"^{tree}")
+		if err != nil {
+			return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree tree: %w", err)
+		}
+		if err := commitAdapter.verifyRawTreeMaterialization(ctx, worktree, tree); err != nil {
+			return AttemptGitInspection{}, fmt.Errorf("inspect attempt raw worktree: %w", err)
+		}
+	}
 	return NewAttemptGitInspection(
-		branchExists, branchHead, true, true, worktreeBranch, head, len(statusOutput) == 0,
+		branchExists, branchHead, true, true, worktreeBranch, head, clean,
 	)
 }
 
@@ -745,10 +756,7 @@ func (adapter LocalAttemptGitAdapter) run(
 	if !filepath.IsAbs(repositoryRoot) {
 		return nil, -1, fmt.Errorf("Git repository root must be absolute")
 	}
-	argv := append(
-		[]string{"--no-replace-objects", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-C", repositoryRoot},
-		arguments...,
-	)
+	argv := trustedGitArguments(repositoryRoot, arguments...)
 	command := exec.CommandContext(ctx, adapter.executable, argv...)
 	command.Env = mergeProcessEnvironment(os.Environ(), adapter.environment)
 	var stdout, stderr boundedProcessBuffer
@@ -806,6 +814,7 @@ func mergeProcessEnvironment(base []string, additions []EnvironmentVariable) []s
 	}
 	values["GIT_NO_REPLACE_OBJECTS"] = "1"
 	values["GIT_GRAFT_FILE"] = os.DevNull
+	values["GIT_OPTIONAL_LOCKS"] = "0"
 	names := make([]string, 0, len(values))
 	for name := range values {
 		names = append(names, name)
@@ -819,14 +828,28 @@ func mergeProcessEnvironment(base []string, additions []EnvironmentVariable) []s
 }
 
 func unsafeAttemptGitEnvironment(name string) bool {
+	if name == "GIT_CONFIG" || strings.HasPrefix(name, "GIT_CONFIG_") {
+		return true
+	}
 	switch name {
 	case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
 		"GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-		"GIT_NO_REPLACE_OBJECTS", "GIT_GRAFT_FILE":
+		"GIT_NO_REPLACE_OBJECTS", "GIT_GRAFT_FILE", "GIT_OPTIONAL_LOCKS":
 		return true
 	default:
 		return false
 	}
+}
+
+func trustedGitArguments(repositoryRoot string, arguments ...string) []string {
+	prefix := []string{
+		"--no-replace-objects",
+		"-c", "core.hooksPath=" + os.DevNull,
+		"-c", "core.fsmonitor=false",
+		"-c", "core.untrackedCache=false",
+		"-C", repositoryRoot,
+	}
+	return append(prefix, arguments...)
 }
 
 func digestAttemptGitInspection(inspection AttemptGitInspection) (Digest, error) {

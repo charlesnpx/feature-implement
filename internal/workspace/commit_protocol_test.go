@@ -318,6 +318,14 @@ func TestGoTestParserRejectsPartialMultiPackageStreams(t *testing.T) {
 				`{"Action":"start","Package":"example/a"}`,
 			},
 		},
+		{
+			name:     "named failure contradicted by package pass",
+			exitCode: 1,
+			lines: []string{
+				`{"Action":"fail","Package":"example/a","Test":"TestExpected"}`,
+				`{"Action":"pass","Package":"example/a"}`,
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

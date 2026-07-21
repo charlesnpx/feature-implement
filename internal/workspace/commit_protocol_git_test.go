@@ -2,10 +2,12 @@ package workspace_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charlesnpx/feature-implement/internal/workspace"
 )
@@ -416,6 +418,156 @@ func TestLocalCommitAdapterDoesNotTrustFsmonitorOrIgnoredInputs(t *testing.T) {
 			t.Fatalf("ignored-input clean-worktree error = %v", err)
 		}
 	})
+}
+
+func TestLocalCommitAdapterVerifiesRawBytesTypesAndModes(t *testing.T) {
+	t.Run("clean filter", func(t *testing.T) {
+		repository, branch, _ := newProtocolRepository(t)
+		if err := os.WriteFile(
+			filepath.Join(repository, ".gitattributes"), []byte("src/protocol.go filter=constant\n"), 0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+		runGitSetup(t, repository, "config", "filter.constant.clean", "sed 's/.*/package protocol/'")
+		runGitSetup(t, repository, "config", "filter.constant.required", "true")
+		runGitSetup(t, repository, "add", ".gitattributes", "src/protocol.go")
+		runGitSetup(t, repository, "commit", "-m", "Configure clean filter")
+		head := parseGitHead(t, repository)
+		if err := os.WriteFile(
+			filepath.Join(repository, "src", "protocol.go"),
+			[]byte("malicious content\n"), 0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+		runGitSetup(t, repository, "add", "src/protocol.go")
+		if ordinary := runGitSetup(t, repository, "status", "--porcelain=v2", "-z", "--untracked-files=all"); len(ordinary) != 0 {
+			t.Fatalf("clean filter did not hide raw bytes from ordinary Git: %q", ordinary)
+		}
+		if err := workspace.DefaultLocalCommitGitAdapter().VerifyCleanWorktree(
+			context.Background(), repository, branch, head,
+		); err == nil || !strings.Contains(err.Error(), "bytes differ from tree") {
+			t.Fatalf("clean-filter raw verification error = %v", err)
+		}
+	})
+
+	t.Run("file mode", func(t *testing.T) {
+		repository, branch, head := newProtocolRepository(t)
+		tracked := filepath.Join(repository, "src", "protocol.go")
+		runGitSetup(t, repository, "config", "core.fileMode", "false")
+		if err := os.Chmod(tracked, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if ordinary := runGitSetup(t, repository, "status", "--porcelain=v2", "-z"); len(ordinary) != 0 {
+			t.Fatalf("core.fileMode=false did not hide mode change: %q", ordinary)
+		}
+		if err := workspace.DefaultLocalCommitGitAdapter().VerifyCleanWorktree(
+			context.Background(), repository, branch, head,
+		); err == nil || !strings.Contains(err.Error(), "executable mode differs") {
+			t.Fatalf("raw file-mode verification error = %v", err)
+		}
+	})
+
+	t.Run("stat cache", func(t *testing.T) {
+		repository, branch, head := newProtocolRepository(t)
+		tracked := filepath.Join(repository, "src", "protocol.go")
+		before, err := os.Stat(tracked)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runGitSetup(t, repository, "config", "core.trustctime", "false")
+		runGitSetup(t, repository, "config", "core.checkStat", "minimal")
+		oldTime := time.Now().Add(-10 * time.Second).Truncate(time.Second)
+		if err := os.Chtimes(tracked, oldTime, oldTime); err != nil {
+			t.Fatal(err)
+		}
+		runGitSetup(t, repository, "update-index", "--really-refresh")
+		before, err = os.Stat(tracked)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(tracked, []byte("package protocom\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(tracked, before.ModTime(), before.ModTime()); err != nil {
+			t.Fatal(err)
+		}
+		if ordinary := runGitSetup(t, repository, "status", "--porcelain=v2", "-z"); len(ordinary) != 0 {
+			t.Fatalf("stat-cache configuration did not hide same-size change: %q", ordinary)
+		}
+		if err := workspace.DefaultLocalCommitGitAdapter().VerifyCleanWorktree(
+			context.Background(), repository, branch, head,
+		); err == nil || !strings.Contains(err.Error(), "bytes differ from tree") {
+			t.Fatalf("stat-cache raw verification error = %v", err)
+		}
+	})
+
+	t.Run("symlink type", func(t *testing.T) {
+		repository, branch, _ := newProtocolRepository(t)
+		link := filepath.Join(repository, "src", "protocol.go")
+		if err := os.Remove(link); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repository, "src", "target.go"), []byte("package protocol\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("target.go", link); err != nil {
+			t.Fatal(err)
+		}
+		runGitSetup(t, repository, "add", "-A")
+		runGitSetup(t, repository, "commit", "-m", "Track protocol symlink")
+		head := parseGitHead(t, repository)
+		runGitSetup(t, repository, "config", "core.symlinks", "false")
+		if err := os.Remove(link); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(link, []byte("target.go"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if ordinary := runGitSetup(t, repository, "status", "--porcelain=v2", "-z"); len(ordinary) != 0 {
+			t.Fatalf("core.symlinks=false did not hide type change: %q", ordinary)
+		}
+		if err := workspace.DefaultLocalCommitGitAdapter().VerifyCleanWorktree(
+			context.Background(), repository, branch, head,
+		); err == nil || !strings.Contains(err.Error(), "not a symbolic link") {
+			t.Fatalf("raw symlink verification error = %v", err)
+		}
+	})
+}
+
+func TestLocalCommitAdapterDisablesReferenceTransactionHooks(t *testing.T) {
+	repository, branch, base := stagedProtocolRepository(t)
+	gitDir := strings.TrimSpace(string(runGitSetup(t, repository, "rev-parse", "--absolute-git-dir")))
+	hook := filepath.Join(gitDir, "hooks", "reference-transaction")
+	sentinel := filepath.Join(gitDir, "hook-ran")
+	hookScript := "#!/bin/sh\n: > '" + strings.ReplaceAll(sentinel, "'", "'\"'\"'") + "'\n"
+	if err := os.WriteFile(hook, []byte(hookScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGitSetup(t, repository, "update-ref", "refs/probe/hook", rawGitObject(base))
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("reference-transaction hook did not run during control update: %v", err)
+	}
+	if err := os.Remove(sentinel); err != nil {
+		t.Fatal(err)
+	}
+	runGitSetup(t, repository, "update-ref", "-d", "refs/probe/hook")
+	if err := os.Remove(sentinel); err != nil {
+		t.Fatal(err)
+	}
+
+	state := oneStepProtocolState(t, base, workspace.CheckExpectationPass, nil)
+	runner := &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())}
+	shell, err := workspace.NewCommitProtocolShell(workspace.DefaultLocalCommitGitAdapter(), runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err = shell.ExecuteNextCommitStep(context.Background(), state, branch, repository, "")
+	if err != nil || state.Phase() != workspace.CommitProtocolComplete {
+		t.Fatalf("configured commit with disabled hooks state=%#v err=%v", state, err)
+	}
+	if _, err := os.Stat(sentinel); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("privileged commit executed reference-transaction hook: %v", err)
+	}
 }
 
 func TestCommitShellRejectsDirtyStateWeakIsolationAndWrongFailure(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -253,7 +254,16 @@ func (adapter LocalCommitGitAdapter) inspectStagedOnce(
 	if err != nil {
 		return StagedCommitInspection{}, err
 	}
-	return NewStagedCommitInspection(head, tree, diff, unstaged, untracked, conflicted)
+	inspection, err := NewStagedCommitInspection(head, tree, diff, unstaged, untracked, conflicted)
+	if err != nil {
+		return StagedCommitInspection{}, err
+	}
+	if inspection.Eligible() {
+		if err := adapter.verifyRawTreeMaterialization(ctx, worktree, tree); err != nil {
+			return StagedCommitInspection{}, fmt.Errorf("verify staged raw worktree: %w", err)
+		}
+	}
+	return inspection, nil
 }
 
 func (adapter LocalCommitGitAdapter) CreateConfiguredCommit(
@@ -467,6 +477,9 @@ func (adapter LocalCommitGitAdapter) VerifyCleanWorktree(
 	if indexTree != commitTree {
 		return fmt.Errorf("worktree index tree does not match committed tree")
 	}
+	if err := adapter.verifyRawTreeMaterialization(ctx, worktree, commitTree); err != nil {
+		return fmt.Errorf("verify committed raw worktree: %w", err)
+	}
 	return nil
 }
 
@@ -511,6 +524,384 @@ func rejectIndexTagRecords(output []byte, forbidden func(byte) bool, message str
 		}
 	}
 	return nil
+}
+
+const (
+	maxGitAdministrativeFileBytes = 64 * 1024
+	maxRawSubmoduleDepth          = 16
+)
+
+type trustedWorktreeBinding struct {
+	root      string
+	gitDir    string
+	commonDir string
+	admin     Digest
+	config    Digest
+}
+
+type rawGitTreeEntry struct {
+	path   string
+	mode   GitFileMode
+	kind   string
+	object GitObjectID
+}
+
+func (adapter LocalCommitGitAdapter) verifyRawTreeMaterialization(
+	ctx context.Context,
+	worktree string,
+	tree GitObjectID,
+) error {
+	return adapter.verifyRawTreeMaterializationAtDepth(ctx, worktree, tree, 0, make(map[string]struct{}))
+}
+
+func (adapter LocalCommitGitAdapter) verifyRawTreeMaterializationAtDepth(
+	ctx context.Context,
+	worktree string,
+	tree GitObjectID,
+	depth int,
+	visited map[string]struct{},
+) error {
+	if depth > maxRawSubmoduleDepth {
+		return fmt.Errorf("raw worktree exceeds %d nested submodules", maxRawSubmoduleDepth)
+	}
+	binding, err := adapter.captureTrustedWorktreeBinding(ctx, worktree)
+	if err != nil {
+		return err
+	}
+	algorithm, err := adapter.git.objectFormat(ctx, binding.root)
+	if err != nil {
+		return err
+	}
+	if tree.IsZero() || tree.Algorithm() != algorithm {
+		return fmt.Errorf("raw worktree tree does not match repository object format")
+	}
+	visitKey := binding.root + "\x00" + tree.String()
+	if _, exists := visited[visitKey]; exists {
+		return fmt.Errorf("raw worktree contains a recursive submodule materialization")
+	}
+	visited[visitKey] = struct{}{}
+	defer delete(visited, visitKey)
+
+	entries, err := adapter.inspectRawTreeEntries(ctx, binding.root, tree)
+	if err != nil {
+		return err
+	}
+	expected := make(map[string]rawGitTreeEntry, len(entries))
+	expectedDirectories := map[string]struct{}{"": {}}
+	for _, entry := range entries {
+		if _, duplicate := expected[entry.path]; duplicate {
+			return fmt.Errorf("raw Git tree repeats path %q", entry.path)
+		}
+		expected[entry.path] = entry
+		for directory := pathpkg.Dir(entry.path); directory != "."; directory = pathpkg.Dir(directory) {
+			expectedDirectories[directory] = struct{}{}
+		}
+	}
+
+	for _, entry := range entries {
+		absolute := filepath.Join(binding.root, filepath.FromSlash(entry.path))
+		info, err := os.Lstat(absolute)
+		if err != nil {
+			return fmt.Errorf("raw worktree path %s: %w", entry.path, err)
+		}
+		switch entry.mode {
+		case GitModeRegular, GitModeExecutable:
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("raw worktree path %s is not a regular file", entry.path)
+			}
+			executable := info.Mode().Perm()&0o111 != 0
+			if executable != (entry.mode == GitModeExecutable) {
+				return fmt.Errorf("raw worktree path %s executable mode differs from tree", entry.path)
+			}
+			object, err := adapter.hashRawWorktreeFile(ctx, binding.root, entry.path, algorithm, info)
+			if err != nil {
+				return err
+			}
+			if object != entry.object {
+				return fmt.Errorf("raw worktree path %s bytes differ from tree", entry.path)
+			}
+		case GitModeSymlink:
+			if info.Mode()&os.ModeSymlink == 0 {
+				return fmt.Errorf("raw worktree path %s is not a symbolic link", entry.path)
+			}
+			target, err := os.Readlink(absolute)
+			if err != nil {
+				return fmt.Errorf("read raw worktree symlink %s: %w", entry.path, err)
+			}
+			object, err := gitBlobObjectID(algorithm, []byte(target))
+			if err != nil {
+				return err
+			}
+			confirmedTarget, err := os.Readlink(absolute)
+			if err != nil || confirmedTarget != target {
+				return fmt.Errorf("raw worktree symlink %s changed during verification", entry.path)
+			}
+			if object != entry.object {
+				return fmt.Errorf("raw worktree symlink %s target differs from tree", entry.path)
+			}
+		case GitModeSubmodule:
+			if !info.IsDir() {
+				return fmt.Errorf("raw worktree submodule %s is not a directory", entry.path)
+			}
+			submoduleRoot := absolute
+			submoduleAlgorithm, err := adapter.git.objectFormat(ctx, submoduleRoot)
+			if err != nil {
+				return fmt.Errorf("inspect raw submodule %s object format: %w", entry.path, err)
+			}
+			if submoduleAlgorithm != entry.object.Algorithm() {
+				return fmt.Errorf("raw worktree submodule %s object format differs from gitlink", entry.path)
+			}
+			head, err := adapter.resolveObject(ctx, submoduleRoot, submoduleAlgorithm, "HEAD")
+			if err != nil {
+				return fmt.Errorf("inspect raw submodule %s head: %w", entry.path, err)
+			}
+			if head != entry.object {
+				return fmt.Errorf("raw worktree submodule %s head differs from gitlink", entry.path)
+			}
+			submoduleTree, err := adapter.resolveObject(
+				ctx, submoduleRoot, submoduleAlgorithm, objectHex(head)+"^{tree}",
+			)
+			if err != nil {
+				return fmt.Errorf("inspect raw submodule %s tree: %w", entry.path, err)
+			}
+			if err := adapter.verifyRawTreeMaterializationAtDepth(
+				ctx, submoduleRoot, submoduleTree, depth+1, visited,
+			); err != nil {
+				return fmt.Errorf("verify raw submodule %s: %w", entry.path, err)
+			}
+		default:
+			return fmt.Errorf("raw worktree path %s has unsupported mode %s", entry.path, entry.mode)
+		}
+	}
+
+	err = filepath.WalkDir(binding.root, func(absolute string, item os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if absolute == binding.root {
+			return nil
+		}
+		relative, err := filepath.Rel(binding.root, absolute)
+		if err != nil {
+			return err
+		}
+		relative = filepath.ToSlash(relative)
+		if relative == ".git" {
+			if item.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		entry, tracked := expected[relative]
+		if item.IsDir() {
+			if tracked && entry.mode == GitModeSubmodule {
+				return filepath.SkipDir
+			}
+			if _, expectedDirectory := expectedDirectories[relative]; expectedDirectory {
+				return nil
+			}
+			return fmt.Errorf("raw worktree contains untracked directory %s", relative)
+		}
+		if !tracked || entry.mode == GitModeSubmodule {
+			return fmt.Errorf("raw worktree contains untracked path %s", relative)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	confirmed, err := adapter.captureTrustedWorktreeBinding(ctx, binding.root)
+	if err != nil {
+		return err
+	}
+	if confirmed != binding {
+		return fmt.Errorf("Git worktree administration changed during raw verification")
+	}
+	return nil
+}
+
+func (adapter LocalCommitGitAdapter) inspectRawTreeEntries(
+	ctx context.Context,
+	repositoryRoot string,
+	tree GitObjectID,
+) ([]rawGitTreeEntry, error) {
+	output, exitCode, err := adapter.git.run(
+		ctx, repositoryRoot, "ls-tree", "-r", "-z", "--full-tree", objectHex(tree),
+	)
+	if err != nil || exitCode != 0 {
+		return nil, gitExitError("inspect raw Git tree", exitCode, err)
+	}
+	if len(output) == 0 {
+		return nil, nil
+	}
+	tokens := bytes.Split(output, []byte{0})
+	if len(tokens[len(tokens)-1]) != 0 {
+		return nil, fmt.Errorf("raw Git tree is not NUL terminated")
+	}
+	entries := make([]rawGitTreeEntry, 0, len(tokens)-1)
+	for _, token := range tokens[:len(tokens)-1] {
+		metadata, rawPath, found := bytes.Cut(token, []byte{'\t'})
+		fields := strings.Fields(string(metadata))
+		if !found || len(fields) != 3 {
+			return nil, fmt.Errorf("raw Git tree entry is malformed")
+		}
+		normalized, err := normalizeCommitPath(string(rawPath))
+		if err != nil {
+			return nil, err
+		}
+		mode := GitFileMode(fields[0])
+		if !mode.valid() || mode == GitModeAbsent {
+			return nil, fmt.Errorf("raw Git tree path %s has unsupported mode %s", normalized, mode)
+		}
+		if (mode == GitModeSubmodule) != (fields[1] == "commit") ||
+			(mode != GitModeSubmodule && fields[1] != "blob") {
+			return nil, fmt.Errorf("raw Git tree path %s has inconsistent type %s", normalized, fields[1])
+		}
+		object, err := qualifyGitObjectID(tree.Algorithm(), fields[2])
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, rawGitTreeEntry{
+			path: normalized, mode: mode, kind: fields[1], object: object,
+		})
+	}
+	return entries, nil
+}
+
+func (adapter LocalCommitGitAdapter) hashRawWorktreeFile(
+	ctx context.Context,
+	repositoryRoot, relative string,
+	algorithm GitHashAlgorithm,
+	before os.FileInfo,
+) (GitObjectID, error) {
+	output, exitCode, err := adapter.git.run(
+		ctx, repositoryRoot, "hash-object", "--no-filters", "--", relative,
+	)
+	if err != nil || exitCode != 0 {
+		return GitObjectID{}, gitExitError("hash raw worktree file "+relative, exitCode, err)
+	}
+	after, err := os.Lstat(filepath.Join(repositoryRoot, filepath.FromSlash(relative)))
+	if err != nil {
+		return GitObjectID{}, fmt.Errorf("reinspect raw worktree file %s: %w", relative, err)
+	}
+	if !os.SameFile(before, after) || before.Mode() != after.Mode() || before.Size() != after.Size() ||
+		!before.ModTime().Equal(after.ModTime()) {
+		return GitObjectID{}, fmt.Errorf("raw worktree file %s changed during verification", relative)
+	}
+	return qualifyGitObjectID(algorithm, strings.TrimSpace(string(output)))
+}
+
+func (adapter LocalCommitGitAdapter) captureTrustedWorktreeBinding(
+	ctx context.Context,
+	worktree string,
+) (trustedWorktreeBinding, error) {
+	root, err := canonicalExistingDirectory(worktree)
+	if err != nil {
+		return trustedWorktreeBinding{}, err
+	}
+	resolvedRoot, err := adapter.readGitPath(ctx, root, "--show-toplevel")
+	if err != nil {
+		return trustedWorktreeBinding{}, err
+	}
+	resolvedRoot, err = canonicalExistingDirectory(resolvedRoot)
+	if err != nil {
+		return trustedWorktreeBinding{}, err
+	}
+	if resolvedRoot != root {
+		return trustedWorktreeBinding{}, fmt.Errorf("Git top-level %s does not match worktree %s", resolvedRoot, root)
+	}
+	gitDir, err := adapter.readGitPath(ctx, root, "--absolute-git-dir")
+	if err != nil {
+		return trustedWorktreeBinding{}, err
+	}
+	gitDir, err = canonicalExistingDirectory(gitDir)
+	if err != nil {
+		return trustedWorktreeBinding{}, err
+	}
+	commonDir, err := adapter.readGitPath(ctx, root, "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return trustedWorktreeBinding{}, err
+	}
+	commonDir, err = canonicalExistingDirectory(commonDir)
+	if err != nil {
+		return trustedWorktreeBinding{}, err
+	}
+	adminPath := filepath.Join(root, ".git")
+	adminInfo, err := os.Lstat(adminPath)
+	if err != nil {
+		return trustedWorktreeBinding{}, fmt.Errorf("inspect Git worktree administration: %w", err)
+	}
+	adminBytes := []byte(adminInfo.Mode().String() + "\n")
+	switch {
+	case adminInfo.IsDir():
+		canonicalAdmin, err := canonicalExistingDirectory(adminPath)
+		if err != nil {
+			return trustedWorktreeBinding{}, err
+		}
+		if canonicalAdmin != gitDir {
+			return trustedWorktreeBinding{}, fmt.Errorf("Git directory does not match worktree administration")
+		}
+	case adminInfo.Mode().IsRegular():
+		if adminInfo.Size() > maxGitAdministrativeFileBytes {
+			return trustedWorktreeBinding{}, fmt.Errorf("Git worktree administration file exceeds its bound")
+		}
+		content, err := os.ReadFile(adminPath)
+		if err != nil {
+			return trustedWorktreeBinding{}, fmt.Errorf("read Git worktree administration: %w", err)
+		}
+		adminBytes = append(adminBytes, content...)
+	default:
+		return trustedWorktreeBinding{}, fmt.Errorf("Git worktree administration has an unsupported file type")
+	}
+	config, exitCode, err := adapter.git.run(
+		ctx, root, "config", "--null", "--list", "--show-origin", "--show-scope",
+	)
+	if err != nil || exitCode != 0 {
+		return trustedWorktreeBinding{}, gitExitError("inspect trusted Git configuration", exitCode, err)
+	}
+	return trustedWorktreeBinding{
+		root: root, gitDir: gitDir, commonDir: commonDir,
+		admin: DigestBytes(adminBytes), config: DigestBytes(config),
+	}, nil
+}
+
+func (adapter LocalCommitGitAdapter) readGitPath(
+	ctx context.Context,
+	repositoryRoot string,
+	arguments ...string,
+) (string, error) {
+	output, exitCode, err := adapter.git.run(ctx, repositoryRoot, append([]string{"rev-parse"}, arguments...)...)
+	if err != nil || exitCode != 0 {
+		return "", gitExitError("resolve trusted Git path", exitCode, err)
+	}
+	value := strings.TrimSpace(string(output))
+	if value == "" || strings.ContainsAny(value, "\x00\r\n") {
+		return "", fmt.Errorf("trusted Git path is malformed")
+	}
+	return value, nil
+}
+
+func canonicalExistingDirectory(value string) (string, error) {
+	value = filepath.Clean(strings.TrimSpace(value))
+	if !filepath.IsAbs(value) {
+		return "", fmt.Errorf("Git worktree binding requires absolute paths")
+	}
+	canonical, err := filepath.EvalSymlinks(value)
+	if err != nil {
+		return "", fmt.Errorf("resolve Git worktree binding path: %w", err)
+	}
+	canonical, err = filepath.Abs(canonical)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(canonical)
+	if err != nil || !info.IsDir() {
+		if err == nil {
+			err = fmt.Errorf("path is not a directory")
+		}
+		return "", fmt.Errorf("inspect Git worktree binding path: %w", err)
+	}
+	return filepath.Clean(canonical), nil
 }
 
 func existingMatchesCreateRequest(existing GitCommitInspection, request CreateGitCommitRequest) error {
@@ -574,10 +965,7 @@ func (adapter LocalCommitGitAdapter) runWithInput(
 	if !filepath.IsAbs(repositoryRoot) {
 		return nil, -1, fmt.Errorf("Git repository root must be absolute")
 	}
-	argv := append(
-		[]string{"--no-replace-objects", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-C", repositoryRoot},
-		arguments...,
-	)
+	argv := trustedGitArguments(repositoryRoot, arguments...)
 	command := exec.CommandContext(ctx, adapter.git.executable, argv...)
 	command.Env = mergeProcessEnvironment(os.Environ(), adapter.git.environment)
 	command.Stdin = bytes.NewReader(input)

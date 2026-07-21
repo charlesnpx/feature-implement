@@ -69,7 +69,8 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 		Time        string  `json:"Time"`
 	}
 	type goTestPackageState struct {
-		terminal bool
+		terminalAction string
+		namedFailure   bool
 	}
 	scanner := bufio.NewScanner(bytes.NewReader(result.stdout))
 	scanner.Buffer(make([]byte, 64*1024), maxAttemptGitOutputBytes)
@@ -93,7 +94,7 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 		}
 		packageState := packages[event.Package]
-		if packageState.terminal {
+		if packageState.terminalAction != "" {
 			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 		}
 		terminal := false
@@ -114,10 +115,13 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 			}
 		case "build-fail":
 			buildFailure = true
-			terminal = true
+			terminal, packageState.terminalAction = true, event.Action
 		case "pass", "skip":
 			if event.Test == "" {
-				terminal = true
+				if packageState.namedFailure {
+					return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+				}
+				terminal, packageState.terminalAction = true, event.Action
 			}
 		case "fail":
 			if event.Test != "" {
@@ -127,9 +131,10 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 				}
 				failures[identity] = struct{}{}
 				namedFailurePackages[event.Package] = struct{}{}
+				packageState.namedFailure = true
 			} else {
 				packageFailures[event.Package] = struct{}{}
-				terminal = true
+				terminal, packageState.terminalAction = true, event.Action
 				if event.FailedBuild != "" {
 					buildFailure = true
 				}
@@ -137,14 +142,21 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 		default:
 			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 		}
-		packageState.terminal = terminal
+		if !terminal {
+			packageState.terminalAction = ""
+		}
 		packages[event.Package] = packageState
 	}
 	if err := scanner.Err(); err != nil || structured == 0 || len(packages) == 0 {
 		return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 	}
 	for _, packageState := range packages {
-		if !packageState.terminal {
+		if packageState.terminalAction == "" {
+			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+		}
+	}
+	for packageName := range namedFailurePackages {
+		if _, failed := packageFailures[packageName]; !failed || packages[packageName].terminalAction != "fail" {
 			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 		}
 	}
