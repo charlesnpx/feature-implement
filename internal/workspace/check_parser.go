@@ -73,7 +73,9 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 	failures := make(map[string]struct{})
 	namedFailurePackages := make(map[string]struct{})
 	packageFailures := make(map[string]struct{})
-	structured, terminal, buildFailure := 0, false, false
+	observedPackages := make(map[string]struct{})
+	terminalPackages := make(map[string]struct{})
+	structured, buildFailure := 0, false
 	crashed, timedOut := false, false
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
@@ -85,6 +87,9 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 		}
 		structured++
+		if event.Package != "" {
+			observedPackages[event.Package] = struct{}{}
+		}
 		switch event.Action {
 		case "start", "run", "pause", "cont", "bench":
 		case "output", "build-output":
@@ -101,10 +106,11 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 				buildFailure = true
 			}
 		case "build-fail":
-			buildFailure, terminal = true, true
+			buildFailure = true
+			terminalPackages[event.Package] = struct{}{}
 		case "pass", "skip":
 			if event.Test == "" {
-				terminal = true
+				terminalPackages[event.Package] = struct{}{}
 			}
 		case "fail":
 			if event.Test != "" {
@@ -115,7 +121,8 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 				failures[identity] = struct{}{}
 				namedFailurePackages[event.Package] = struct{}{}
 			} else {
-				packageFailures[event.Package], terminal = struct{}{}, true
+				packageFailures[event.Package] = struct{}{}
+				terminalPackages[event.Package] = struct{}{}
 				if event.FailedBuild != "" {
 					buildFailure = true
 				}
@@ -124,8 +131,13 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 		}
 	}
-	if err := scanner.Err(); err != nil || structured == 0 || !terminal {
+	if err := scanner.Err(); err != nil || structured == 0 || len(observedPackages) == 0 {
 		return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+	}
+	for packageName := range observedPackages {
+		if _, terminal := terminalPackages[packageName]; !terminal {
+			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+		}
 	}
 	if timedOut {
 		return NewParsedCheckOutcome(CheckOutcomeTimedOut, nil)

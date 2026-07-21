@@ -279,6 +279,9 @@ func ReduceCommitProtocol(current CommitProtocolState, event CommitProtocolEvent
 		if err != nil {
 			return CommitProtocolReduction{}, fmt.Errorf("commit step %s body: %w", step.id, err)
 		}
+		if err := validateProspectiveCommitJournalFootprint(current, step, ordinal, value.inspection, body); err != nil {
+			return CommitProtocolReduction{}, err
+		}
 		next.phase = CommitProtocolAwaitingCommit
 		next.pending = pendingCommitStep{inspection: cloneStagedCommitInspection(value.inspection), body: body}
 		effect, err := createCommitEffect(next, step, ordinal, parent)
@@ -371,6 +374,41 @@ func ReduceCommitProtocol(current CommitProtocolState, event CommitProtocolEvent
 		return CommitProtocolReduction{}, fmt.Errorf("invalid commit protocol transition: %w", err)
 	}
 	return CommitProtocolReduction{state: cloneCommitProtocolState(next), effects: effects}, nil
+}
+
+func validateProspectiveCommitJournalFootprint(
+	state CommitProtocolState,
+	step CommitStep,
+	ordinal uint16,
+	inspection StagedCommitInspection,
+	body string,
+) error {
+	candidate, err := NewCommitObjectEvidence(
+		state.generation, step.id, ordinal,
+		inspection.indexTree, state.Head(), inspection.indexTree,
+		step.message.subject, body, inspection.diff, step.paths.digest,
+	)
+	if err != nil {
+		return err
+	}
+	identifier := maxCommitJournalIdentifier()
+	if _, err := NewCommitStepRecordedJournalEvent(
+		identifier, state.generation, identifier, state.protocol.digest,
+		DigestBytes([]byte("prospective-commit-intent")), candidate,
+	); err != nil {
+		return fmt.Errorf("commit step exceeds its durable record footprint: %w", err)
+	}
+	commits := make([]CommitObjectEvidence, 0, len(state.steps)+1)
+	for _, completed := range state.steps {
+		commits = append(commits, cloneCommitObjectEvidence(completed.commit))
+	}
+	commits = append(commits, candidate)
+	if _, err := NewCommitProtocolRebasedJournalEvent(
+		identifier, state.generation, identifier, state.protocol.digest, state.base, commits,
+	); err != nil {
+		return fmt.Errorf("commit sequence exceeds its durable rebase footprint: %w", err)
+	}
+	return nil
 }
 
 func PendingCommitProtocolEffects(state CommitProtocolState) ([]CommitProtocolEffect, error) {

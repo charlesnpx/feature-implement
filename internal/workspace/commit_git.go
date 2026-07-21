@@ -224,12 +224,16 @@ func (adapter LocalCommitGitAdapter) inspectStagedOnce(
 	if err != nil {
 		return StagedCommitInspection{}, err
 	}
+	if err := adapter.rejectHiddenIndexEntries(ctx, worktree); err != nil {
+		return StagedCommitInspection{}, err
+	}
 	tree, err := adapter.writeTree(ctx, worktree, algorithm)
 	if err != nil {
 		return StagedCommitInspection{}, err
 	}
 	raw, exitCode, err := adapter.git.run(
-		ctx, worktree, "diff", "--cached", "--raw", "-z", "--no-abbrev", "--find-renames=50%", "HEAD", "--",
+		ctx, worktree, "diff", "--cached", "--raw", "-z", "--no-abbrev", "--find-renames=50%",
+		"--ignore-submodules=none", "HEAD", "--",
 	)
 	if err != nil || exitCode != 0 {
 		return StagedCommitInspection{}, gitExitError("inspect staged diff", exitCode, err)
@@ -238,7 +242,9 @@ func (adapter LocalCommitGitAdapter) inspectStagedOnce(
 	if err != nil {
 		return StagedCommitInspection{}, err
 	}
-	status, exitCode, err := adapter.git.run(ctx, worktree, "status", "--porcelain=v2", "-z", "--untracked-files=all")
+	status, exitCode, err := adapter.git.run(
+		ctx, worktree, "status", "--porcelain=v2", "-z", "--untracked-files=all", "--ignore-submodules=none",
+	)
 	if err != nil || exitCode != 0 {
 		return StagedCommitInspection{}, gitExitError("inspect commit worktree status", exitCode, err)
 	}
@@ -357,7 +363,7 @@ func (adapter LocalCommitGitAdapter) InspectCommit(
 	}
 	diffRaw, exitCode, err := adapter.git.run(
 		ctx, repositoryRoot, "diff-tree", "--raw", "-z", "--no-commit-id", "--no-abbrev", "-r",
-		"--find-renames=50%", objectHex(parents[0]), objectHex(commit), "--",
+		"--find-renames=50%", "--ignore-submodules=none", objectHex(parents[0]), objectHex(commit), "--",
 	)
 	if err != nil || exitCode != 0 {
 		return GitCommitInspection{}, gitExitError("inspect configured commit diff", exitCode, err)
@@ -436,7 +442,12 @@ func (adapter LocalCommitGitAdapter) VerifyCleanWorktree(
 	if head != expectedHead {
 		return fmt.Errorf("worktree head %s does not match %s", head, expectedHead)
 	}
-	status, exitCode, err := adapter.git.run(ctx, worktree, "status", "--porcelain=v2", "-z", "--untracked-files=all")
+	if err := adapter.rejectHiddenIndexEntries(ctx, worktree); err != nil {
+		return err
+	}
+	status, exitCode, err := adapter.git.run(
+		ctx, worktree, "status", "--porcelain=v2", "-z", "--untracked-files=all", "--ignore-submodules=none",
+	)
 	if err != nil || exitCode != 0 {
 		return gitExitError("verify clean worktree", exitCode, err)
 	}
@@ -453,6 +464,26 @@ func (adapter LocalCommitGitAdapter) VerifyCleanWorktree(
 	}
 	if indexTree != commitTree {
 		return fmt.Errorf("worktree index tree does not match committed tree")
+	}
+	return nil
+}
+
+func (adapter LocalCommitGitAdapter) rejectHiddenIndexEntries(ctx context.Context, worktree string) error {
+	output, exitCode, err := adapter.git.run(ctx, worktree, "ls-files", "-v", "-z", "--")
+	if err != nil || exitCode != 0 {
+		return gitExitError("inspect commit index flags", exitCode, err)
+	}
+	for _, record := range bytes.Split(output, []byte{0}) {
+		if len(record) == 0 {
+			continue
+		}
+		if len(record) < 3 || record[1] != ' ' {
+			return fmt.Errorf("Git index flag record is malformed")
+		}
+		tag := record[0]
+		if tag == 'S' || (tag >= 'a' && tag <= 'z') {
+			return fmt.Errorf("configured commit forbids assume-unchanged and skip-worktree index entries")
+		}
 	}
 	return nil
 }

@@ -190,6 +190,9 @@ func NewCommitDiff(changes []CommitPathChange) (CommitDiff, error) {
 	if err != nil {
 		return CommitDiff{}, err
 	}
+	if len(content) > MaxJournalRecordBytes/2 {
+		return CommitDiff{}, fmt.Errorf("commit diff exceeds its durable journal footprint")
+	}
 	return CommitDiff{changes: copyChanges, digest: DigestBytes(content)}, nil
 }
 

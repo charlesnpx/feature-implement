@@ -312,7 +312,9 @@ func (adapter LocalAttemptGitAdapter) InspectAttemptWorktree(
 		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree branch: %w", err)
 	}
 	worktreeBranch := strings.TrimSpace(string(branchOutput))
-	statusOutput, statusExit, err := adapter.run(ctx, worktree, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	statusOutput, statusExit, err := adapter.run(
+		ctx, worktree, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none",
+	)
 	if err != nil || statusExit != 0 {
 		if err == nil {
 			err = fmt.Errorf("Git exited with status %d", statusExit)

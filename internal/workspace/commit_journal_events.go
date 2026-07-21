@@ -2,7 +2,10 @@ package workspace
 
 import (
 	"fmt"
+	"time"
 )
+
+const commitJournalRecordSafetyBytes = 16 * 1024
 
 type CommitProtocolStartedJournalEvent struct {
 	workspaceID ID
@@ -24,6 +27,9 @@ func NewCommitProtocolStartedJournalEvent(
 		base: base, protocol: *cloneCommitProtocol(&protocol),
 	}
 	if err := event.validate(); err != nil {
+		return CommitProtocolStartedJournalEvent{}, err
+	}
+	if err := validateCommitJournalRecordFootprint(event); err != nil {
 		return CommitProtocolStartedJournalEvent{}, err
 	}
 	return event, nil
@@ -92,6 +98,9 @@ func NewCommitStepIntendedJournalEvent(
 	if err := event.validate(); err != nil {
 		return CommitStepIntendedJournalEvent{}, err
 	}
+	if err := validateCommitJournalRecordFootprint(event); err != nil {
+		return CommitStepIntendedJournalEvent{}, err
+	}
 	return event, nil
 }
 
@@ -156,6 +165,9 @@ func NewCommitStepRecordedJournalEvent(
 	if err := event.validate(); err != nil {
 		return CommitStepRecordedJournalEvent{}, err
 	}
+	if err := validateCommitJournalRecordFootprint(event); err != nil {
+		return CommitStepRecordedJournalEvent{}, err
+	}
 	return event, nil
 }
 
@@ -211,6 +223,9 @@ func NewCommitCheckRecordedJournalEvent(
 		idempotencyKey: idempotencyKey, evidence: cloneOneCommitCheckEvidence(evidence),
 	}
 	if err := event.validate(); err != nil {
+		return CommitCheckRecordedJournalEvent{}, err
+	}
+	if err := validateCommitJournalRecordFootprint(event); err != nil {
 		return CommitCheckRecordedJournalEvent{}, err
 	}
 	return event, nil
@@ -275,7 +290,57 @@ func NewCommitProtocolRebasedJournalEvent(
 	if err := event.validate(); err != nil {
 		return CommitProtocolRebasedJournalEvent{}, err
 	}
+	if err := validateCommitJournalRecordFootprint(event); err != nil {
+		return CommitProtocolRebasedJournalEvent{}, err
+	}
 	return event, nil
+}
+
+func maxCommitJournalIdentifier() ID {
+	value := "a"
+	for len(value) < maxIdentifierBytes {
+		value += "1"
+	}
+	identifier, _ := NewID(value)
+	return identifier
+}
+
+func validateCommitJournalRecordFootprint(event WorkspaceJournalEvent) error {
+	reads, writes, ok := commitJournalEventResources(event)
+	if !ok {
+		return fmt.Errorf("unsupported commit journal footprint event %T", event)
+	}
+	reads, _ = normalizeJournalWriteSet(reads)
+	writes, _ = normalizeJournalWriteSet(writes)
+	readSet := make([]JournalResourceRevision, 0, len(reads))
+	for _, resource := range reads {
+		revision, _ := NewJournalResourceRevision(resource, ^uint64(0))
+		readSet = append(readSet, revision)
+	}
+	request, err := newPrivilegedJournalAppend(
+		event,
+		time.Date(9999, time.December, 31, 23, 59, 59, 999999999, time.UTC),
+		readSet,
+		writes,
+	)
+	if err != nil {
+		return err
+	}
+	record, err := buildJournalRecord(JournalSnapshot{}, request)
+	if err != nil {
+		return err
+	}
+	encoded, err := marshalJournalRecord(record)
+	if err != nil {
+		return err
+	}
+	if len(encoded) > MaxJournalRecordBytes-commitJournalRecordSafetyBytes {
+		return fmt.Errorf(
+			"commit journal record footprint %d exceeds its safe %d-byte bound",
+			len(encoded), MaxJournalRecordBytes-commitJournalRecordSafetyBytes,
+		)
+	}
+	return nil
 }
 
 func (CommitProtocolRebasedJournalEvent) isWorkspaceJournalEvent() {}

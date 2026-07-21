@@ -280,6 +280,44 @@ func TestGoTestParserDoesNotHideSetupFailureBehindExpectedTestFailure(t *testing
 	}
 }
 
+func TestGoTestParserRejectsPartialMultiPackageStreams(t *testing.T) {
+	tests := []struct {
+		name     string
+		exitCode int
+		lines    []string
+	}{
+		{
+			name: "pass",
+			lines: []string{
+				`{"Action":"pass","Package":"example/a"}`,
+				`{"Action":"start","Package":"example/b"}`,
+			},
+		},
+		{
+			name:     "expected failure",
+			exitCode: 1,
+			lines: []string{
+				`{"Action":"fail","Package":"example/a","Test":"TestExpected"}`,
+				`{"Action":"fail","Package":"example/a"}`,
+				`{"Action":"run","Package":"example/b","Test":"TestIncomplete"}`,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			lines := append(append([]string{}, test.lines...), "")
+			output := []byte(strings.Join(lines, "\n"))
+			result := mustCheckResult(
+				t, workspace.CheckExited, test.exitCode, "", output, nil, workspace.StrictCheckIsolationProof(),
+			)
+			outcome, err := workspace.ParseCheckOutcome(workspace.CheckParserGoTestJSON, result)
+			if err != nil || outcome.Kind() != workspace.CheckOutcomeMalformedOutput {
+				t.Fatalf("partial outcome = %#v err=%v", outcome, err)
+			}
+		})
+	}
+}
+
 func TestAssertionAndDiagnosticParsersRequireExactStructuredIdentities(t *testing.T) {
 	for _, test := range []struct {
 		name       string

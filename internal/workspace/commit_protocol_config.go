@@ -492,7 +492,22 @@ func NewCommitProtocol(steps []CommitStep) (CommitProtocol, error) {
 	content, _ := json.Marshal(struct {
 		Steps []string `json:"steps"`
 	}{Steps: digests})
-	return CommitProtocol{steps: copySteps, digest: DigestBytes(content)}, nil
+	protocol := CommitProtocol{steps: copySteps, digest: DigestBytes(content)}
+	if err := validateCommitProtocolJournalFootprint(protocol); err != nil {
+		return CommitProtocol{}, err
+	}
+	return protocol, nil
+}
+
+func validateCommitProtocolJournalFootprint(protocol CommitProtocol) error {
+	identifier := maxCommitJournalIdentifier()
+	base, _ := ParseGitObjectID("sha256:" + strings.Repeat("f", 64))
+	if _, err := NewCommitProtocolStartedJournalEvent(
+		identifier, DigestBytes([]byte("commit-protocol-footprint")), identifier, base, protocol,
+	); err != nil {
+		return fmt.Errorf("commit protocol journal footprint: %w", err)
+	}
+	return nil
 }
 
 func (protocol CommitProtocol) Steps() []CommitStep { return cloneCommitSteps(protocol.steps) }

@@ -195,6 +195,8 @@ func TestLocalCommitAdapterRejectsDirtySubmoduleBeforeCommit(t *testing.T) {
 
 	repository, branch, _ := newProtocolRepository(t)
 	runGitSetup(t, repository, "-c", "protocol.file.allow=always", "submodule", "add", submodule, "modules/tool")
+	runGitSetup(t, repository, "config", "diff.ignoreSubmodules", "all")
+	runGitSetup(t, repository, "config", "submodule.modules/tool.ignore", "all")
 	if err := os.WriteFile(filepath.Join(repository, "modules", "tool", "module.txt"), []byte("dirty\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -205,6 +207,86 @@ func TestLocalCommitAdapterRejectsDirtySubmoduleBeforeCommit(t *testing.T) {
 	}
 	if inspection.Eligible() || len(inspection.Unstaged()) != 1 || inspection.Unstaged()[0] != "modules/tool" {
 		t.Fatalf("dirty submodule inspection = %#v, unstaged=%v", inspection, inspection.Unstaged())
+	}
+}
+
+func TestLocalCommitAdapterDoesNotHideStagedGitlinkFromPathPolicy(t *testing.T) {
+	submodule := t.TempDir()
+	runGitSetup(t, "", "init", "-b", "main", submodule)
+	runGitSetup(t, submodule, "config", "user.name", "Protocol Test")
+	runGitSetup(t, submodule, "config", "user.email", "protocol@example.test")
+	moduleFile := filepath.Join(submodule, "module.txt")
+	if err := os.WriteFile(moduleFile, []byte("first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitSetup(t, submodule, "add", "module.txt")
+	runGitSetup(t, submodule, "commit", "-m", "Initial module")
+
+	repository, branch, _ := newProtocolRepository(t)
+	runGitSetup(t, repository, "-c", "protocol.file.allow=always", "submodule", "add", submodule, "modules/tool")
+	runGitSetup(t, repository, "commit", "-m", "Add module")
+	base := parseGitHead(t, repository)
+	moduleWorktree := filepath.Join(repository, "modules", "tool")
+	runGitSetup(t, moduleWorktree, "config", "user.name", "Protocol Test")
+	runGitSetup(t, moduleWorktree, "config", "user.email", "protocol@example.test")
+	if err := os.WriteFile(filepath.Join(moduleWorktree, "module.txt"), []byte("second\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitSetup(t, moduleWorktree, "add", "module.txt")
+	runGitSetup(t, moduleWorktree, "commit", "-m", "Update module")
+	runGitSetup(t, repository, "add", "modules/tool")
+	if err := os.WriteFile(
+		filepath.Join(repository, "src", "protocol.go"),
+		[]byte("package protocol\n\nconst Allowed = true\n"), 0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	runGitSetup(t, repository, "add", "src/protocol.go")
+	runGitSetup(t, repository, "config", "diff.ignoreSubmodules", "all")
+	runGitSetup(t, repository, "config", "submodule.modules/tool.ignore", "all")
+
+	state := oneStepProtocolState(t, base, workspace.CheckExpectationPass, nil)
+	runner := &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())}
+	shell, err := workspace.NewCommitProtocolShell(workspace.DefaultLocalCommitGitAdapter(), runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := shell.ExecuteNextCommitStep(context.Background(), state, branch, repository, ""); err == nil ||
+		!strings.Contains(err.Error(), "outside configured allowed_paths") {
+		t.Fatalf("hidden gitlink path-policy error = %v", err)
+	}
+	if head := parseGitHead(t, repository); head != base {
+		t.Fatalf("path-policy rejection advanced head from %s to %s", base, head)
+	}
+}
+
+func TestLocalCommitAdapterRejectsHiddenIndexFlags(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		flag string
+	}{
+		{"assume unchanged", "--assume-unchanged"},
+		{"skip worktree", "--skip-worktree"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository, branch, head := newProtocolRepository(t)
+			runGitSetup(t, repository, "update-index", test.flag, "src/protocol.go")
+			if err := os.WriteFile(
+				filepath.Join(repository, "src", "protocol.go"),
+				[]byte("package protocol\n\nconst Hidden = true\n"), 0o644,
+			); err != nil {
+				t.Fatal(err)
+			}
+			adapter := workspace.DefaultLocalCommitGitAdapter()
+			if _, err := adapter.InspectStaged(context.Background(), repository, branch); err == nil ||
+				!strings.Contains(err.Error(), "assume-unchanged and skip-worktree") {
+				t.Fatalf("InspectStaged hidden-index error = %v", err)
+			}
+			if err := adapter.VerifyCleanWorktree(context.Background(), repository, branch, head); err == nil ||
+				!strings.Contains(err.Error(), "assume-unchanged and skip-worktree") {
+				t.Fatalf("VerifyCleanWorktree hidden-index error = %v", err)
+			}
+		})
 	}
 }
 
