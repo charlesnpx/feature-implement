@@ -94,6 +94,37 @@ func TestCommitProtocolValidationEnforcesJournalRecordBoundary(t *testing.T) {
 	}
 }
 
+func TestReviewFixProtocolValidationEnforcesJournalRecordBoundary(t *testing.T) {
+	paths, err := NewCommitPathPolicy([]string{"src/**"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectation, err := NewCheckExpectation(CheckExpectationPass, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := func(argumentBytes int) error {
+		command, err := NewArgv("review-check", strings.Repeat("x", argumentBytes))
+		if err != nil {
+			return err
+		}
+		check, err := NewCommitCheck(
+			MustID("review-check"), MustID("runner"), CheckParserGoTestJSON, command, expectation,
+		)
+		if err != nil {
+			return err
+		}
+		_, err = NewReviewFixProtocol("Review fix", CommitBodyRequired, paths, []CommitCheck{check})
+		return err
+	}
+	if err := build(MaxJournalRecordBytes / 2); err != nil {
+		t.Fatalf("review-fix protocol below record boundary: %v", err)
+	}
+	if err := build(MaxJournalRecordBytes); err == nil || !strings.Contains(err.Error(), "journal footprint") {
+		t.Fatalf("review-fix protocol above record boundary error = %v", err)
+	}
+}
+
 func TestCommitDiffValidationEnforcesJournalRecordBoundary(t *testing.T) {
 	build := func(changeCount int) error {
 		object, err := ParseGitObjectID("sha1:1111111111111111111111111111111111111111")
@@ -205,6 +236,137 @@ func TestCommitReducerReservesFutureRebaseJournalFootprint(t *testing.T) {
 			t.Fatal(err)
 		}
 		state = reduction.State()
+	}
+}
+
+func TestReviewFixReducerReservesCombinedRebaseJournalFootprint(t *testing.T) {
+	paths, err := NewCommitPathPolicy([]string{"src/**"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := DigestBytes([]byte("generation"))
+	body := strings.Repeat("b", maxCommitBodyBytes)
+	steps := make([]CommitStep, 0, 3)
+	for index := 0; index < 3; index++ {
+		message, err := NewCommitMessagePolicy(
+			fmt.Sprintf("Implement protocol part %d", index+1), CommitBodyOptional, nil,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		step, err := NewCommitStep(MustID(fmt.Sprintf("step-%d", index+1)), message, paths, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		steps = append(steps, step)
+	}
+	protocol, err := NewCommitProtocol(steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	implementation, err := NewCommitProtocolState(generation, journalBoundObject(t, 1), protocol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, step := range steps {
+		parent := implementation.Head()
+		tree := journalBoundObject(t, 10+index*3)
+		commit := journalBoundObject(t, 11+index*3)
+		change, err := NewCommitPathChange(
+			CommitChangeAdded, "", fmt.Sprintf("src/part-%d.go", index+1),
+			GitModeAbsent, GitModeRegular, GitObjectID{}, journalBoundObject(t, 12+index*3),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		diff, err := NewCommitDiff([]CommitPathChange{change})
+		if err != nil {
+			t.Fatal(err)
+		}
+		inspection, err := NewStagedCommitInspection(parent, tree, diff, nil, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stage, err := NewStageCommitStep(inspection, body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reduction, err := ReduceCommitProtocol(implementation, stage)
+		if err != nil {
+			t.Fatalf("stage implementation %d: %v", index+1, err)
+		}
+		evidence, err := NewCommitObjectEvidence(
+			generation, step.id, uint16(index+1), commit, parent, tree,
+			step.message.subject, body, diff, step.paths.digest,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record, err := NewRecordCommitStep(evidence)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reduction, err = ReduceCommitProtocol(reduction.State(), record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		implementation = reduction.State()
+	}
+	if implementation.Phase() != CommitProtocolComplete {
+		t.Fatalf("implementation state = %#v", implementation)
+	}
+
+	reviewProtocol, err := NewReviewFixProtocol("Review fix", CommitBodyRequired, paths, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := NewReviewFixState(generation, implementation.Head(), reviewProtocol, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserve, err := NewReserveReviewFix(1, implementation.Head())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reduction, err := ReduceReviewFix(review, reserve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review = reduction.State()
+	change, err := NewCommitPathChange(
+		CommitChangeAdded, "", "src/review.go", GitModeAbsent, GitModeRegular,
+		GitObjectID{}, journalBoundObject(t, 31),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	diff, err := NewCommitDiff([]CommitPathChange{change})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := NewStagedCommitInspection(
+		implementation.Head(), journalBoundObject(t, 32), diff, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewOnly, err := NewStageReviewFix(1, inspection, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReduceReviewFix(review, reviewOnly); err != nil {
+		t.Fatalf("review-only footprint should fit: %v", err)
+	}
+	combined, err := newStageReviewFix(1, inspection, body, &implementation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReduceReviewFix(review, combined); err == nil ||
+		!strings.Contains(err.Error(), "combined commit sequence exceeds its durable rebase footprint") {
+		t.Fatalf("combined review-fix footprint error = %v", err)
+	}
+	if review.Phase() != ReviewFixReserved || review.Used() != 1 {
+		t.Fatalf("rejected review-fix footprint mutated state: %#v", review)
 	}
 }
 

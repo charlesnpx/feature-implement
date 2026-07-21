@@ -473,6 +473,31 @@ func TestGoTestParserRejectsPartialMultiPackageStreams(t *testing.T) {
 			},
 		},
 		{
+			name:     "package failure while a named test remains active",
+			exitCode: 1,
+			lines: []string{
+				`{"Action":"fail","Package":"example/a","Test":"TestExpected"}`,
+				`{"Action":"run","Package":"example/a","Test":"TestNeverTerminates"}`,
+				`{"Action":"fail","Package":"example/a"}`,
+			},
+		},
+		{
+			name: "package pass while a named test remains active",
+			lines: []string{
+				`{"Action":"run","Package":"example/a","Test":"TestNeverTerminates"}`,
+				`{"Action":"pass","Package":"example/a"}`,
+			},
+		},
+		{
+			name: "repeated run before a named test terminates",
+			lines: []string{
+				`{"Action":"run","Package":"example/a","Test":"TestRepeated"}`,
+				`{"Action":"run","Package":"example/a","Test":"TestRepeated"}`,
+				`{"Action":"pass","Package":"example/a","Test":"TestRepeated"}`,
+				`{"Action":"pass","Package":"example/a"}`,
+			},
+		},
+		{
 			name:     "late event after terminal failure",
 			exitCode: 1,
 			lines: []string{

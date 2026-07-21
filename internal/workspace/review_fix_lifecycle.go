@@ -71,6 +71,12 @@ func ExecuteAttemptReviewFix(
 			return result, fmt.Errorf("first review-fix ordinal must be 1")
 		}
 	} else if request.Ordinal <= result.state.Used() {
+		if result.state.checkingFix >= 0 && request.Ordinal != uint16(result.state.checkingFix+1) {
+			return result, fmt.Errorf(
+				"review-fix ordinal %d does not match pending revalidation ordinal %d",
+				request.Ordinal, result.state.checkingFix+1,
+			)
+		}
 		fix := result.state.fixes[request.Ordinal-1]
 		if fix.phase == ReviewFixReserved && request.Ordinal != result.state.Used() {
 			return result, fmt.Errorf("review-fix %d is not complete", request.Ordinal)
@@ -85,7 +91,8 @@ func ExecuteAttemptReviewFix(
 				return result, fmt.Errorf("review-fix %d retry body differs from durable intent", request.Ordinal)
 			}
 		}
-		if request.Ordinal < result.state.Used() || fix.phase == ReviewFixComplete && result.state.Quiescent() {
+		if result.state.checkingFix < 0 &&
+			(request.Ordinal < result.state.Used() || fix.phase == ReviewFixComplete && result.state.Quiescent()) {
 			if err := shell.git.VerifyCleanWorktree(
 				ctx, result.attempt.worktree, result.attempt.branch, result.state.Head(),
 			); err != nil {
@@ -141,7 +148,7 @@ func ExecuteAttemptReviewFix(
 		if err != nil {
 			return result, err
 		}
-		transition, err := NewStageReviewFix(request.Ordinal, inspection, body)
+		transition, err := newStageReviewFix(request.Ordinal, inspection, body, result.attempt.commitProtocol)
 		if err != nil {
 			return result, err
 		}

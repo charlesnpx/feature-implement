@@ -554,10 +554,27 @@ func NewReviewFixProtocol(subjectPrefix string, body CommitBodyPolicy, paths Com
 		PathPolicy    string           `json:"path_policy"`
 		Checks        []string         `json:"checks"`
 	}{subjectPrefix, body, paths.digest.String(), digests})
-	return ReviewFixProtocol{
+	protocol := ReviewFixProtocol{
 		subjectPrefix: subjectPrefix, body: body, paths: paths,
 		checks: copyChecks, digest: DigestBytes(content),
-	}, nil
+	}
+	if err := validateReviewFixProtocolJournalFootprint(protocol); err != nil {
+		return ReviewFixProtocol{}, err
+	}
+	return protocol, nil
+}
+
+func validateReviewFixProtocolJournalFootprint(protocol ReviewFixProtocol) error {
+	identifier := maxCommitJournalIdentifier()
+	base, _ := ParseGitObjectID("sha256:" + strings.Repeat("f", 64))
+	maximum := ^uint16(0)
+	if _, err := NewReviewFixReservedJournalEvent(
+		identifier, DigestBytes([]byte("review-fix-protocol-footprint")), identifier,
+		protocol, maximum, maximum, base,
+	); err != nil {
+		return fmt.Errorf("review-fix protocol journal footprint: %w", err)
+	}
+	return nil
 }
 
 func (protocol ReviewFixProtocol) SubjectPrefix() string        { return protocol.subjectPrefix }

@@ -759,6 +759,36 @@ func TestJournaledRebaseAtomicallyRemapsImplementationAndReviewFixChecks(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	reviewProtocol := configuredReviewFixProtocol(t, scenario.harness.definition)
+	secondStep, err := reviewProtocol.Step(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondTree, secondCommit, secondChanged := mustGitObject(t, '7'), mustGitObject(t, '8'), mustGitObject(t, '9')
+	secondDiff := addedDiff(t, "src/review-two.go", secondChanged)
+	scenario.git.staged, err = workspace.NewStagedCommitInspection(
+		scenario.commit, secondTree, secondDiff, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenario.git.commit, err = workspace.NewGitCommitInspection(
+		secondCommit, []workspace.GitObjectID{scenario.commit}, secondTree,
+		secondStep.Message().Subject(), "second accepted fix", secondDiff,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewResult, err = workspace.ExecuteAttemptReviewFix(
+		context.Background(), scenario.harness.journal, scenario.harness.definition,
+		scenario.shell, workspace.ExecuteAttemptReviewFixRequest{
+			AttemptID: scenario.attempt.AttemptID(), Ordinal: 2, Body: "second accepted fix",
+			OccurredAt: mustTime(t, "2026-07-21T12:13:30Z"),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	implementationState, ok := reviewResult.Attempt().CommitProtocol()
 	if !ok {
 		t.Fatal("completed attempt has no implementation protocol")
@@ -768,9 +798,14 @@ func TestJournaledRebaseAtomicallyRemapsImplementationAndReviewFixChecks(t *test
 		t.Fatal("completed attempt has no review-fix state")
 	}
 	implementationEvidence := implementationState.CompletedSteps()[0].Commit()
-	reviewEvidence, ok := reviewState.Fixes()[0].Commit()
-	if !ok {
-		t.Fatal("completed review fix has no commit evidence")
+	reviewFixes := reviewState.Fixes()
+	if len(reviewFixes) != 2 {
+		t.Fatalf("completed review-fix count = %d", len(reviewFixes))
+	}
+	firstReviewEvidence, firstOK := reviewFixes[0].Commit()
+	secondReviewEvidence, secondOK := reviewFixes[1].Commit()
+	if !firstOK || !secondOK {
+		t.Fatal("completed review fixes have missing commit evidence")
 	}
 
 	newBase := mustGitObject(t, '2')
@@ -785,18 +820,26 @@ func TestJournaledRebaseAtomicallyRemapsImplementationAndReviewFixChecks(t *test
 	newReviewTree, newReviewCommit := mustGitObject(t, '5'), mustGitObject(t, '6')
 	newReview, err := workspace.NewGitCommitInspection(
 		newReviewCommit, []workspace.GitObjectID{newImplementationCommit}, newReviewTree,
-		reviewEvidence.Subject(), reviewEvidence.Body(), reviewEvidence.Diff(),
+		firstReviewEvidence.Subject(), firstReviewEvidence.Body(), firstReviewEvidence.Diff(),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	scenario.git.head = newReviewCommit
-	scenario.git.commit = newReview
-	scenario.git.rangeCommits = []workspace.GitCommitInspection{newImplementation, newReview}
+	newSecondReviewTree, newSecondReviewCommit := mustGitObject(t, 'a'), mustGitObject(t, 'b')
+	newSecondReview, err := workspace.NewGitCommitInspection(
+		newSecondReviewCommit, []workspace.GitObjectID{newReviewCommit}, newSecondReviewTree,
+		secondReviewEvidence.Subject(), secondReviewEvidence.Body(), secondReviewEvidence.Diff(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenario.git.head = newSecondReviewCommit
+	scenario.git.commit = newSecondReview
+	scenario.git.rangeCommits = []workspace.GitCommitInspection{newImplementation, newReview, newSecondReview}
 
 	rebased, err := workspace.RecordAttemptCommitRebase(
 		context.Background(), scenario.harness.journal, scenario.harness.definition, scenario.shell,
-		scenario.attempt.AttemptID(), newBase, newReviewCommit, mustTime(t, "2026-07-21T12:14:00Z"),
+		scenario.attempt.AttemptID(), newBase, newSecondReviewCommit, mustTime(t, "2026-07-21T12:14:00Z"),
 		commitFailOnce(workspace.CommitFaultAfterRebaseRecord),
 	)
 	if err == nil || !strings.Contains(err.Error(), string(workspace.CommitFaultAfterRebaseRecord)) {
@@ -806,15 +849,15 @@ func TestJournaledRebaseAtomicallyRemapsImplementationAndReviewFixChecks(t *test
 	reviewState, ok = rebased.Attempt().ReviewFixes()
 	if !ok || implementationState.Phase() != workspace.CommitProtocolAwaitingChecks ||
 		implementationState.Head() != newImplementationCommit || implementationState.RebaseEpoch() != 1 ||
-		reviewState.Phase() != workspace.ReviewFixAwaitingChecks || reviewState.Head() != newReviewCommit ||
+		reviewState.Phase() != workspace.ReviewFixAwaitingChecks || reviewState.Head() != newSecondReviewCommit ||
 		reviewState.Base() != newImplementationCommit || reviewState.RebaseEpoch() != 1 ||
-		rebased.Attempt().VerifiedHead() != newReviewCommit {
+		rebased.Attempt().VerifiedHead() != newSecondReviewCommit {
 		t.Fatalf("durable chain rebase implementation=%#v review=%#v attempt=%#v", implementationState, reviewState, rebased.Attempt())
 	}
 
 	if _, err := workspace.RecordAttemptCommitRebase(
 		context.Background(), scenario.harness.journal, scenario.harness.definition, scenario.shell,
-		scenario.attempt.AttemptID(), newBase, newReviewCommit, mustTime(t, "2026-07-21T12:14:10Z"), nil,
+		scenario.attempt.AttemptID(), newBase, newSecondReviewCommit, mustTime(t, "2026-07-21T12:14:10Z"), nil,
 	); err != nil {
 		t.Fatalf("retry recorded chain rebase: %v", err)
 	}
@@ -832,6 +875,19 @@ func TestJournaledRebaseAtomicallyRemapsImplementationAndReviewFixChecks(t *test
 	if implementationState.Phase() != workspace.CommitProtocolComplete {
 		t.Fatalf("implementation revalidation state = %#v", implementationState)
 	}
+	wrongReviewOrdinal := workspace.ExecuteAttemptReviewFixRequest{
+		AttemptID: scenario.attempt.AttemptID(), Ordinal: 2, Body: "second accepted fix",
+		OccurredAt: mustTime(t, "2026-07-21T12:14:25Z"),
+	}
+	if _, err := workspace.ExecuteAttemptReviewFix(
+		context.Background(), scenario.harness.journal, scenario.harness.definition,
+		scenario.shell, wrongReviewOrdinal,
+	); err == nil || !strings.Contains(err.Error(), "pending revalidation ordinal 1") {
+		t.Fatalf("wrong review-fix revalidation ordinal error = %v", err)
+	}
+	if runnerCallCount(scenario.runner) != 3 {
+		t.Fatalf("wrong review-fix ordinal ran checks: %d", runnerCallCount(scenario.runner))
+	}
 	scenario.request.OccurredAt = mustTime(t, "2026-07-21T12:14:30Z")
 	reviewResult, err = workspace.ExecuteAttemptReviewFix(
 		context.Background(), scenario.harness.journal, scenario.harness.definition,
@@ -842,10 +898,11 @@ func TestJournaledRebaseAtomicallyRemapsImplementationAndReviewFixChecks(t *test
 	}
 	reviewState, _ = reviewResult.State()
 	fixes := reviewState.Fixes()
-	if reviewState.Phase() != workspace.ReviewFixComplete || reviewState.Head() != newReviewCommit ||
-		len(fixes) != 1 || len(fixes[0].Checks()) != 1 ||
+	if reviewState.Phase() != workspace.ReviewFixComplete || reviewState.Head() != newSecondReviewCommit ||
+		len(fixes) != 2 || len(fixes[0].Checks()) != 1 || len(fixes[1].Checks()) != 1 ||
 		fixes[0].Checks()[0].Commit() != newReviewCommit ||
-		reviewResult.Attempt().VerifiedHead() != newReviewCommit || runnerCallCount(scenario.runner) != 3 {
+		fixes[1].Checks()[0].Commit() != newSecondReviewCommit ||
+		reviewResult.Attempt().VerifiedHead() != newSecondReviewCommit || runnerCallCount(scenario.runner) != 5 {
 		t.Fatalf("revalidated review state=%#v attempt=%#v checks=%d", reviewState, reviewResult.Attempt(), runnerCallCount(scenario.runner))
 	}
 
@@ -859,8 +916,8 @@ func TestJournaledRebaseAtomicallyRemapsImplementationAndReviewFixChecks(t *test
 	}
 	replayedAttempt, exists := replayed.Attempt(scenario.attempt.AttemptID())
 	replayedReview, hasReview := replayedAttempt.ReviewFixes()
-	if !exists || !hasReview || replayedAttempt.VerifiedHead() != newReviewCommit ||
-		replayedReview.Phase() != workspace.ReviewFixComplete || replayedReview.Head() != newReviewCommit {
+	if !exists || !hasReview || replayedAttempt.VerifiedHead() != newSecondReviewCommit ||
+		replayedReview.Phase() != workspace.ReviewFixComplete || replayedReview.Head() != newSecondReviewCommit {
 		t.Fatalf("replayed chain attempt=%#v exists=%v review=%#v configured=%v", replayedAttempt, exists, replayedReview, hasReview)
 	}
 }

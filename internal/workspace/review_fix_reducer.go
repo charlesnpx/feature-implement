@@ -139,19 +139,34 @@ func (event ReserveReviewFix) Ordinal() uint16     { return event.ordinal }
 func (event ReserveReviewFix) Parent() GitObjectID { return event.parent }
 
 type StageReviewFix struct {
-	ordinal    uint16
-	inspection StagedCommitInspection
-	body       string
+	ordinal        uint16
+	inspection     StagedCommitInspection
+	body           string
+	implementation *CommitProtocolState
 }
 
 func NewStageReviewFix(ordinal uint16, inspection StagedCommitInspection, body string) (StageReviewFix, error) {
+	return newStageReviewFix(ordinal, inspection, body, nil)
+}
+
+func newStageReviewFix(
+	ordinal uint16,
+	inspection StagedCommitInspection,
+	body string,
+	implementation *CommitProtocolState,
+) (StageReviewFix, error) {
 	if ordinal == 0 || inspection.stateDigest.IsZero() {
 		return StageReviewFix{}, fmt.Errorf("review-fix intent requires ordinal and staged inspection")
 	}
 	if err := validateCommitBody(body); err != nil {
 		return StageReviewFix{}, err
 	}
-	return StageReviewFix{ordinal: ordinal, inspection: cloneStagedCommitInspection(inspection), body: body}, nil
+	event := StageReviewFix{ordinal: ordinal, inspection: cloneStagedCommitInspection(inspection), body: body}
+	if implementation != nil {
+		state := cloneCommitProtocolState(*implementation)
+		event.implementation = &state
+	}
+	return event, nil
 }
 
 func (StageReviewFix) isReviewFixEvent()     {}
@@ -303,6 +318,11 @@ func ReduceReviewFix(current ReviewFixState, event ReviewFixEvent) (ReviewFixRed
 		}
 		body, err := step.message.ResolveBody(value.body)
 		if err != nil {
+			return ReviewFixReduction{}, err
+		}
+		if err := validateProspectiveReviewFixJournalFootprint(
+			current, step, value.ordinal, value.inspection, body, value.implementation,
+		); err != nil {
 			return ReviewFixReduction{}, err
 		}
 		key, err := commitEffectIdempotencyKey(
@@ -476,6 +496,66 @@ func ReduceReviewFix(current ReviewFixState, event ReviewFixEvent) (ReviewFixRed
 		return ReviewFixReduction{}, fmt.Errorf("invalid review-fix transition: %w", err)
 	}
 	return ReviewFixReduction{state: cloneReviewFixState(next), effects: effects}, nil
+}
+
+func validateProspectiveReviewFixJournalFootprint(
+	state ReviewFixState,
+	step CommitStep,
+	ordinal uint16,
+	inspection StagedCommitInspection,
+	body string,
+	implementation *CommitProtocolState,
+) error {
+	candidate, err := NewCommitObjectEvidence(
+		state.generation, step.id, ordinal,
+		inspection.indexTree, state.Head(), inspection.indexTree,
+		step.message.subject, body, inspection.diff, step.paths.digest,
+	)
+	if err != nil {
+		return err
+	}
+	identifier := maxCommitJournalIdentifier()
+	if _, err := NewReviewFixCommitRecordedJournalEvent(
+		identifier, state.generation, identifier, state.protocol.digest, ordinal,
+		DigestBytes([]byte("prospective-review-fix-intent")), candidate,
+	); err != nil {
+		return fmt.Errorf("review fix exceeds its durable record footprint: %w", err)
+	}
+
+	reviewCommits := make([]CommitObjectEvidence, 0, len(state.fixes))
+	for index := 0; index < int(ordinal)-1; index++ {
+		if index >= len(state.fixes) || state.fixes[index].commit.evidence.IsZero() {
+			return fmt.Errorf("review fix durable footprint requires all earlier commit evidence")
+		}
+		reviewCommits = append(reviewCommits, cloneCommitObjectEvidence(state.fixes[index].commit))
+	}
+	reviewCommits = append(reviewCommits, candidate)
+
+	base := state.base
+	var implementationProtocol Digest
+	var implementationCommits []CommitObjectEvidence
+	if implementation != nil {
+		if err := validateCommitProtocolState(*implementation); err != nil {
+			return fmt.Errorf("review fix implementation footprint: %w", err)
+		}
+		if implementation.generation != state.generation || implementation.phase != CommitProtocolComplete ||
+			implementation.Head() != state.base {
+			return fmt.Errorf("review fix implementation footprint does not match the completed attempt chain")
+		}
+		base = implementation.base
+		implementationProtocol = implementation.protocol.digest
+		implementationCommits = make([]CommitObjectEvidence, len(implementation.steps))
+		for index, completed := range implementation.steps {
+			implementationCommits[index] = cloneCommitObjectEvidence(completed.commit)
+		}
+	}
+	if _, err := NewCommitProtocolChainRebasedJournalEvent(
+		identifier, state.generation, identifier, implementationProtocol, base,
+		implementationCommits, state.protocol.digest, reviewCommits,
+	); err != nil {
+		return fmt.Errorf("combined commit sequence exceeds its durable rebase footprint: %w", err)
+	}
+	return nil
 }
 
 func PendingReviewFixEffects(state ReviewFixState) ([]CommitProtocolEffect, error) {

@@ -91,7 +91,7 @@ func reduceReviewFixRuntime(
 		if event.stepID != step.id || event.parent != fix.parent || event.reservationKey != fix.reservationKey {
 			return fmt.Errorf("review-fix intent does not match its reservation")
 		}
-		transition, err := NewStageReviewFix(event.ordinal, event.inspection, event.body)
+		transition, err := newStageReviewFix(event.ordinal, event.inspection, event.body, attempt.commitProtocol)
 		if err != nil {
 			return err
 		}
