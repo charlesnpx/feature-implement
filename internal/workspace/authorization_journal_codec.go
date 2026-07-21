@@ -407,9 +407,12 @@ func authorizationCapabilityFromWire(wire authorizationCapabilityWire) (Authoriz
 	if err != nil {
 		return AuthorizationCapability{}, err
 	}
-	priorDigest, err := ParseDigest(wire.PriorDigest)
-	if err != nil {
-		return AuthorizationCapability{}, err
+	var priorDigest Digest
+	if wire.PriorDigest != "" {
+		priorDigest, err = ParseDigest(wire.PriorDigest)
+		if err != nil {
+			return AuthorizationCapability{}, err
+		}
 	}
 	digest, err := ParseDigest(wire.Digest)
 	if err != nil {

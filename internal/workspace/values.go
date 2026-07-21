@@ -231,6 +231,9 @@ func NewCommand(argv Argv, directory string, environment []EnvironmentVariable, 
 		if variable.name == "" {
 			return Command{}, fmt.Errorf("command contains an invalid environment variable")
 		}
+		if providerCredentialEnvironment(variable.name) {
+			return Command{}, fmt.Errorf("non-provider command environment cannot carry credential variable %s", variable.name)
+		}
 		if _, exists := seen[variable.name]; exists {
 			return Command{}, fmt.Errorf("duplicate environment variable %s", variable.name)
 		}

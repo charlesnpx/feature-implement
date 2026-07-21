@@ -800,6 +800,33 @@ func NewAuthorizationEffectDispatched(
 }
 func (AuthorizationEffectDispatched) isAuthorizationEvent() {}
 
+// AuthorizationEffectResolved removes exactly one durable dispatch
+// obligation after provider evidence proves either a successful effect, a
+// failure before any effect, or a definitive reconciliation. It deliberately
+// uses the obligation's epoch rather than the current epoch so a revocation
+// cannot make post-dispatch reconciliation impossible.
+type AuthorizationEffectResolved struct {
+	effectID      ID
+	requestDigest Digest
+	resultDigest  Digest
+	epoch         uint64
+}
+
+func NewAuthorizationEffectResolved(
+	effectID ID,
+	requestDigest, resultDigest Digest,
+	epoch uint64,
+) (AuthorizationEffectResolved, error) {
+	if effectID.IsZero() || requestDigest.IsZero() || resultDigest.IsZero() || epoch == 0 {
+		return AuthorizationEffectResolved{}, fmt.Errorf("resolved authorization effect requires effect, request, result, and dispatch epoch")
+	}
+	return AuthorizationEffectResolved{
+		effectID: effectID, requestDigest: requestDigest, resultDigest: resultDigest, epoch: epoch,
+	}, nil
+}
+
+func (AuthorizationEffectResolved) isAuthorizationEvent() {}
+
 func ReduceAuthorization(current AuthorizationState, event AuthorizationEvent) (AuthorizationState, error) {
 	if current.workspaceID.IsZero() || current.repository.String() == "" || current.generation.IsZero() || current.epoch == 0 {
 		return AuthorizationState{}, fmt.Errorf("authorization reducer requires initialized state")
@@ -913,6 +940,21 @@ func ReduceAuthorization(current AuthorizationState, event AuthorizationEvent) (
 			grantID: value.capability.grantID, epoch: value.capability.epoch,
 			dispatchedAt: value.dispatchedAt,
 		})
+	case AuthorizationEffectResolved:
+		index := -1
+		for candidate, obligation := range current.obligations {
+			if obligation.effectID == value.effectID {
+				index = candidate
+				if obligation.requestDigest != value.requestDigest || obligation.epoch != value.epoch {
+					return AuthorizationState{}, fmt.Errorf("resolved authorization effect does not match its dispatch obligation")
+				}
+				break
+			}
+		}
+		if index < 0 {
+			return AuthorizationState{}, fmt.Errorf("authorization effect %s has no dispatch obligation", value.effectID)
+		}
+		next.obligations = append(next.obligations[:index], next.obligations[index+1:]...)
 	default:
 		return AuthorizationState{}, fmt.Errorf("unsupported authorization event %T", event)
 	}

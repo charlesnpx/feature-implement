@@ -98,6 +98,9 @@ func (result ProcessResult) ExitCode() int        { return result.exitCode }
 func (result ProcessResult) StdoutDigest() Digest { return result.stdoutDigest }
 func (result ProcessResult) StderrDigest() Digest { return result.stderrDigest }
 
+// ProcessPort is a non-provider execution boundary. Implementations must use
+// BuildNonProviderProcessEnvironment, deny write-capable network and provider
+// broker access, and may not reinterpret Command as provider authority.
 type ProcessPort interface {
 	Run(context.Context, Command) (ProcessResult, error)
 }
