@@ -6,11 +6,12 @@ import (
 )
 
 type RuntimeOrchestrationAcknowledgement struct {
-	record                uint64
-	kind                  OrchestrationAcknowledgementKind
-	goal                  GoalBinding
-	idempotencyKey        Digest
-	acknowledgementDigest Digest
+	record         uint64
+	kind           OrchestrationAcknowledgementKind
+	goal           GoalBinding
+	idempotencyKey Digest
+	requestDigest  Digest
+	receiptDigest  Digest
 }
 
 func (acknowledgement RuntimeOrchestrationAcknowledgement) Record() uint64 {
@@ -25,8 +26,11 @@ func (acknowledgement RuntimeOrchestrationAcknowledgement) Goal() GoalBinding {
 func (acknowledgement RuntimeOrchestrationAcknowledgement) IdempotencyKey() Digest {
 	return acknowledgement.idempotencyKey
 }
-func (acknowledgement RuntimeOrchestrationAcknowledgement) AcknowledgementDigest() Digest {
-	return acknowledgement.acknowledgementDigest
+func (acknowledgement RuntimeOrchestrationAcknowledgement) RequestDigest() Digest {
+	return acknowledgement.requestDigest
+}
+func (acknowledgement RuntimeOrchestrationAcknowledgement) ReceiptDigest() Digest {
+	return acknowledgement.receiptDigest
 }
 
 type RuntimeOwnerBoundaryResponse struct {
@@ -332,9 +336,16 @@ func reduceAttemptRuntime(
 		if boundary.mode != AttemptBoundaryCompleteGoalAndWait {
 			return fmt.Errorf("pause-only boundary %s cannot acknowledge goal completion or creation", boundary.boundaryID)
 		}
+		expectedRequest, err := deriveOrchestrationAcknowledgementRequestDigest(
+			event.workspaceID, event.generation, event.attemptID, boundary,
+			event.kind, event.goal, event.idempotencyKey,
+		)
+		if err != nil || expectedRequest != event.requestDigest {
+			return fmt.Errorf("orchestration acknowledgement has an invalid request digest")
+		}
 		acknowledgement := RuntimeOrchestrationAcknowledgement{
 			record: record.sequence, kind: event.kind, goal: event.goal,
-			idempotencyKey: event.idempotencyKey, acknowledgementDigest: event.acknowledgementDigest,
+			idempotencyKey: event.idempotencyKey, requestDigest: event.requestDigest, receiptDigest: event.receiptDigest,
 		}
 		updated := &next.attempts[index].boundaries[boundaryIndex]
 		switch event.kind {
@@ -514,12 +525,13 @@ func cloneRuntimeBoundary(value RuntimeBoundaryProjection) RuntimeBoundaryProjec
 
 func canonicalAttemptRuntime(attempt RuntimeAttemptProjection) (json.RawMessage, error) {
 	type acknowledgementJSON struct {
-		Record                uint64                           `json:"record"`
-		Kind                  OrchestrationAcknowledgementKind `json:"kind"`
-		GoalID                string                           `json:"goal_id"`
-		GoalScope             GoalScope                        `json:"goal_scope"`
-		IdempotencyKey        string                           `json:"idempotency_key"`
-		AcknowledgementDigest string                           `json:"acknowledgement_digest"`
+		Record         uint64                           `json:"record"`
+		Kind           OrchestrationAcknowledgementKind `json:"kind"`
+		GoalID         string                           `json:"goal_id"`
+		GoalScope      GoalScope                        `json:"goal_scope"`
+		IdempotencyKey string                           `json:"idempotency_key"`
+		RequestDigest  string                           `json:"request_digest"`
+		ReceiptDigest  string                           `json:"receipt_digest"`
 	}
 	type ownerJSON struct {
 		Record        uint64                `json:"record"`
@@ -583,7 +595,8 @@ func canonicalAttemptRuntime(attempt RuntimeAttemptProjection) (json.RawMessage,
 	ackJSON := func(value RuntimeOrchestrationAcknowledgement) *acknowledgementJSON {
 		return &acknowledgementJSON{
 			Record: value.record, Kind: value.kind, GoalID: value.goal.id.String(), GoalScope: value.goal.scope,
-			IdempotencyKey: value.idempotencyKey.String(), AcknowledgementDigest: value.acknowledgementDigest.String(),
+			IdempotencyKey: value.idempotencyKey.String(), RequestDigest: value.requestDigest.String(),
+			ReceiptDigest: value.receiptDigest.String(),
 		}
 	}
 	value := attemptJSON{

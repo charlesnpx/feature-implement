@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"time"
 	"unicode/utf8"
 )
 
@@ -317,37 +316,6 @@ func cloneEvidence(values []Evidence) []Evidence {
 	}
 	return result
 }
-
-// Receipt is immutable signed evidence. Signature bytes are always copied.
-type Receipt struct {
-	keyID         ID
-	payloadDigest Digest
-	nonce         string
-	expiresAt     time.Time
-	signature     []byte
-}
-
-func NewReceipt(keyID ID, payloadDigest Digest, nonce string, expiresAt time.Time, signature []byte) (Receipt, error) {
-	if keyID.IsZero() || payloadDigest.IsZero() {
-		return Receipt{}, fmt.Errorf("receipt key and payload digest are required")
-	}
-	if err := validateBoundedText("receipt nonce", nonce, 512); err != nil {
-		return Receipt{}, err
-	}
-	if expiresAt.IsZero() || len(signature) == 0 || len(signature) > 16*1024 {
-		return Receipt{}, fmt.Errorf("receipt expiry and bounded signature are required")
-	}
-	return Receipt{
-		keyID: keyID, payloadDigest: payloadDigest, nonce: nonce,
-		expiresAt: expiresAt.UTC(), signature: append([]byte(nil), signature...),
-	}, nil
-}
-
-func (receipt Receipt) KeyID() ID             { return receipt.keyID }
-func (receipt Receipt) PayloadDigest() Digest { return receipt.payloadDigest }
-func (receipt Receipt) Nonce() string         { return receipt.nonce }
-func (receipt Receipt) ExpiresAt() time.Time  { return receipt.expiresAt }
-func (receipt Receipt) Signature() []byte     { return append([]byte(nil), receipt.signature...) }
 
 func validateBoundedText(name, value string, maxBytes int) error {
 	if strings.TrimSpace(value) == "" {

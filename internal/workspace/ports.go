@@ -154,24 +154,3 @@ type ProviderPort interface {
 type ClockPort interface {
 	Now() time.Time
 }
-
-type ReceiptVerification struct {
-	workspaceID ID
-	generation  Digest
-	request     Digest
-}
-
-func NewReceiptVerification(workspaceID ID, generation, request Digest) (ReceiptVerification, error) {
-	if workspaceID.IsZero() || generation.IsZero() || request.IsZero() {
-		return ReceiptVerification{}, fmt.Errorf("receipt verification bindings are required")
-	}
-	return ReceiptVerification{workspaceID: workspaceID, generation: generation, request: request}, nil
-}
-
-func (verification ReceiptVerification) WorkspaceID() ID       { return verification.workspaceID }
-func (verification ReceiptVerification) Generation() Digest    { return verification.generation }
-func (verification ReceiptVerification) RequestDigest() Digest { return verification.request }
-
-type ControlPlaneVerifierPort interface {
-	Verify(context.Context, ReceiptVerification, Receipt) error
-}

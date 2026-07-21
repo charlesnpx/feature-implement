@@ -19,12 +19,47 @@ type activationVerifier struct {
 	calls       int
 }
 
-func (verifier *activationVerifier) Verify(_ context.Context, verification workspace.ReceiptVerification, _ workspace.Receipt) error {
+func (verifier *activationVerifier) Verify(
+	_ context.Context,
+	verification workspace.ControlPlaneVerification,
+	receipt workspace.ControlPlaneReceiptV2,
+) error {
 	verifier.calls++
 	if verification.WorkspaceID() != verifier.workspaceID || verification.Generation() != verifier.generation || verification.RequestDigest() != verifier.request {
 		return errors.New("unexpected activation verification binding")
 	}
+	if verification.Binding() != receipt.Binding() {
+		return errors.New("activation receipt binding mismatch")
+	}
 	return nil
+}
+
+func activationReceipt(
+	t *testing.T,
+	active workspace.EffectiveWorkspaceDefinition,
+	candidate workspace.EffectiveWorkspaceDefinition,
+	plan workspace.ReconciliationPlan,
+	nonce string,
+	expiresAt string,
+) workspace.ControlPlaneReceiptV2 {
+	t.Helper()
+	binding, err := workspace.ReconciliationControlPlaneBinding(active, candidate, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := workspace.NewControlPlaneEnvelopeV2(
+		binding, workspace.MustID("owner-key"), nonce, mustTime(t, expiresAt), workspace.MustID("test-coordinator"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := make([]byte, 64)
+	signature[0] = 1
+	receipt, err := workspace.NewControlPlaneReceiptV2(envelope, signature)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return receipt
 }
 
 func TestProspectiveReconciliationActivatesCandidateWithOwnerCAS(t *testing.T) {
@@ -124,13 +159,7 @@ func TestProspectiveReconciliationActivatesCandidateWithOwnerCAS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := workspace.NewReceipt(
-		workspace.MustID("owner-key"), workspace.DigestBytes([]byte("signed-owner-payload")),
-		"activation-nonce", mustTime(t, "2026-07-21T03:00:00Z"), []byte("signature"),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	receipt := activationReceipt(t, active, candidate, plan, "activation-nonce", "2026-07-21T03:00:00Z")
 	verifier := &activationVerifier{
 		workspaceID: active.Workspace().ID(), generation: candidate.Generation(), request: plan.ComparisonDigest(),
 	}
@@ -156,7 +185,7 @@ func TestProspectiveReconciliationActivatesCandidateWithOwnerCAS(t *testing.T) {
 	}
 	activation, ok := record.Event().(workspace.GenerationActivatedJournalEvent)
 	if !ok || activation.PriorGeneration() != active.Generation() || activation.ActiveGeneration() != candidate.Generation() ||
-		activation.ComparisonDigest() != plan.ComparisonDigest() || activation.OwnerReceiptDigest() != receipt.PayloadDigest() ||
+		activation.ComparisonDigest() != plan.ComparisonDigest() || activation.OwnerReceiptDigest() != receipt.ReceiptDigest() ||
 		activation.History() != history {
 		t.Fatalf("activation event = %#v", record.Event())
 	}
@@ -191,6 +220,96 @@ func TestProspectiveReconciliationActivatesCandidateWithOwnerCAS(t *testing.T) {
 	unchanged, err := workspace.ReadWorkspaceJournalSnapshot(workspaceDir)
 	if err != nil || unchanged.Head() != beforeReinitialize {
 		t.Fatalf("reinitialization overwrote activated state: %v %#v", err, unchanged)
+	}
+}
+
+func TestGenerationActivationRejectsOutstandingAuthorizationObligationsBeforeAppend(t *testing.T) {
+	fixture := newDefinitionFixture(t)
+	active := mustDefinition(t, fixture.sources)
+	candidate := mustProspectiveCandidate(t, fixture)
+	workspaceDir := t.TempDir()
+	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, active, mustTime(t, "2026-07-21T02:00:00Z")); err != nil {
+		t.Fatal(err)
+	}
+	store, err := workspace.OpenGenerationStore(workspaceDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+
+	frontier, _ := workspace.NewAuthorizationFrontier(mustGitObject(t, 'a'), mustGitObject(t, 'b'))
+	segment := workspace.MustID("serial-activation-obligation")
+	scope, err := workspace.NewStandingGrantScope(workspace.StandingGrantScopeOptions{
+		WorkspaceID: active.Workspace().ID(), Repository: active.Workspace().Repository(),
+		Remote: active.Workspace().Remote(), Generation: active.Generation(), SerialSegment: segment,
+		Frontier: frontier, Actions: []workspace.StandingAuthorizationAction{workspace.StandingAuthorizationPush},
+		ExpiresAt: mustTime(t, "2026-07-21T05:00:00Z"), Epoch: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, _ := workspace.StandingGrantControlPlaneBinding(scope)
+	if _, _, err := workspace.RecordStandingGrant(
+		context.Background(), journal, active, &boundaryVerifier{expectedRequest: scope.Digest()},
+		scope, controlPlaneReceipt(t, binding, "activation-obligation-grant"),
+		mustTime(t, "2026-07-21T02:01:00Z"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	evaluator, _ := workspace.NewAuthorizationEvaluator(
+		&authorizationTestClock{now: mustTime(t, "2026-07-21T02:02:00Z")},
+	)
+	request := authorizationJournalRequest(t, active, segment, frontier, 1)
+	queued := authorizationJournalQueue(t, journal, active, evaluator, request)
+	if _, _, err := workspace.RecordAuthorizationEffectDispatched(
+		journal, active, evaluator, request, queued, workspace.MustID("activation-blocking-effect"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.StageCandidate(journal, candidate, mustTime(t, "2026-07-21T02:03:00Z")); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := workspace.NewReconciliationState(
+		snapshot, nil, nil, nil, nil, workspace.EmptyRuntimeHistoryBinding(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := workspace.DryRunReconciliation(active, candidate, snapshot, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := activationReceipt(t, active, candidate, plan, "activation-with-obligation", "2026-07-21T04:00:00Z")
+	verifier := &activationVerifier{
+		workspaceID: active.Workspace().ID(), generation: candidate.Generation(), request: plan.ComparisonDigest(),
+	}
+	if _, err := workspace.ActivateCandidateGeneration(
+		context.Background(), journal, store, active, candidate, plan, state, receipt, verifier,
+		mustTime(t, "2026-07-21T02:04:00Z"),
+	); err == nil || !strings.Contains(err.Error(), "dispatched effects awaiting reconciliation") {
+		t.Fatalf("activation with authorization obligation error = %v", err)
+	}
+	if verifier.calls != 0 {
+		t.Fatal("blocked activation reached owner verifier")
+	}
+	after, err := journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Head() != snapshot.Head() {
+		t.Fatal("blocked activation was durably appended")
+	}
+	authorization, err := workspace.RebuildAuthorizationRuntime(after, active)
+	if err != nil || len(authorization.State().OutstandingReconciliationObligations()) != 1 {
+		t.Fatalf("authorization after blocked activation = %#v, %v", authorization, err)
 	}
 }
 
@@ -239,13 +358,7 @@ func TestActivatedCandidateCannotBeReactivated(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		receipt, err := workspace.NewReceipt(
-			workspace.MustID("owner-key"), workspace.DigestBytes([]byte("activate-"+nonce)), nonce,
-			mustTime(t, activatedAt), []byte("signature-"+nonce),
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
+		receipt := activationReceipt(t, active, candidate, plan, nonce, activatedAt)
 		verifier := &activationVerifier{
 			workspaceID: active.Workspace().ID(), generation: candidate.Generation(), request: plan.ComparisonDigest(),
 		}
@@ -437,10 +550,7 @@ func TestReconciliationSafetyMatrixRejectsUnsafeRuntimeAndRetrospectiveChanges(t
 	forgedPlan := mustForgeReconciliationPlan(
 		t, structuralSnapshot, active, structural, safePlan.StateDigest(), safePlan.StructuralDigest(),
 	)
-	receipt, _ := workspace.NewReceipt(
-		workspace.MustID("owner-key"), workspace.DigestBytes([]byte("forged-payload")), "forged-nonce",
-		mustTime(t, "2026-07-21T03:00:00Z"), []byte("signature"),
-	)
+	receipt := activationReceipt(t, active, structural, forgedPlan, "forged-nonce", "2026-07-21T03:00:00Z")
 	verifier := &activationVerifier{
 		workspaceID: active.Workspace().ID(), generation: structural.Generation(), request: forgedPlan.ComparisonDigest(),
 	}
@@ -503,10 +613,7 @@ func TestCandidateOrphanRecoveryAndStaleComparisonToken(t *testing.T) {
 	if _, err := store.StageCandidate(journal, secondCandidate, mustTime(t, "2026-07-21T02:02:00Z")); err != nil {
 		t.Fatal(err)
 	}
-	receipt, _ := workspace.NewReceipt(
-		workspace.MustID("owner-key"), workspace.DigestBytes([]byte("payload")), "nonce",
-		mustTime(t, "2026-07-21T03:00:00Z"), []byte("signature"),
-	)
+	receipt := activationReceipt(t, active, candidate, plan, "nonce", "2026-07-21T03:00:00Z")
 	verifier := &activationVerifier{workspaceID: active.Workspace().ID(), generation: candidate.Generation(), request: plan.ComparisonDigest()}
 	if _, err := workspace.ActivateCandidateGeneration(
 		context.Background(), journal, store, active, candidate, plan, state, receipt, verifier, mustTime(t, "2026-07-21T02:03:00Z"),
