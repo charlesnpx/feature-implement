@@ -336,6 +336,7 @@ func reviewFixJournalEventResources(event WorkspaceJournalEvent) ([]JournalResou
 		reads = []JournalResource{
 			AttemptJournalResource(attemptID), ReviewFixJournalResource(attemptID),
 			ReviewFixBudgetJournalResource(attemptID), ReviewFixStepJournalResource(attemptID, stepID, ordinal),
+			ReviewJournalResource(attemptID), ReviewFixReservationJournalResource(attemptID, ordinal),
 		}
 	case ReviewFixIntendedJournalEvent:
 		workspaceID, generation, attemptID, ordinal, stepID =
@@ -343,6 +344,7 @@ func reviewFixJournalEventResources(event WorkspaceJournalEvent) ([]JournalResou
 		reads = []JournalResource{
 			AttemptJournalResource(attemptID), ReviewFixJournalResource(attemptID),
 			ReviewFixStepJournalResource(attemptID, stepID, ordinal),
+			ReviewJournalResource(attemptID), ReviewFixReservationJournalResource(attemptID, ordinal),
 		}
 	case ReviewFixCommitRecordedJournalEvent:
 		workspaceID, generation, attemptID, ordinal, stepID =
@@ -351,6 +353,7 @@ func reviewFixJournalEventResources(event WorkspaceJournalEvent) ([]JournalResou
 			AttemptJournalResource(attemptID), ReviewFixJournalResource(attemptID),
 			ReviewFixStepJournalResource(attemptID, stepID, ordinal),
 			EvidenceJournalResource(event.evidence.evidence),
+			ReviewJournalResource(attemptID), ReviewFixReservationJournalResource(attemptID, ordinal),
 		}
 	case ReviewFixCheckRecordedJournalEvent:
 		workspaceID, generation, attemptID, ordinal, stepID =
@@ -361,6 +364,7 @@ func reviewFixJournalEventResources(event WorkspaceJournalEvent) ([]JournalResou
 				attemptID, stepID, event.evidence.checkID, ordinal, event.checkOrdinal,
 			),
 			EvidenceJournalResource(event.evidence.evidence),
+			ReviewJournalResource(attemptID), ReviewFixReservationJournalResource(attemptID, ordinal),
 		}
 	default:
 		return nil, nil, false

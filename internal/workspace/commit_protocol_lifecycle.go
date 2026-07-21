@@ -294,6 +294,9 @@ func recordAttemptProtocolChainRebase(
 			return attempt, fmt.Errorf("attempt review-fix protocol does not match the active generation")
 		}
 	}
+	if err := validateAttemptReviewRebase(journal, definition, unit, attempt, newHead); err != nil {
+		return attempt, err
+	}
 	if attempt.commitProtocol == nil && attempt.reviewFixes == nil {
 		return attempt, fmt.Errorf("attempt %s has no recorded commit chain", attemptID)
 	}

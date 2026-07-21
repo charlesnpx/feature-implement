@@ -270,7 +270,11 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 			discardDigest: event.discardDigest, resultingHead: event.resultingHead,
 		})
 	default:
-		if isAttemptJournalEvent(record.event) {
+		if event, ok := record.event.(ReviewHeadAdoptedJournalEvent); ok {
+			if err := reduceReviewHeadAdoption(current, &next, record, event); err != nil {
+				return WorkspaceRuntimeProjection{}, err
+			}
+		} else if isAttemptJournalEvent(record.event) {
 			if err := reduceAttemptRuntime(current, &next, record); err != nil {
 				return WorkspaceRuntimeProjection{}, err
 			}
@@ -289,6 +293,37 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 		}
 	}
 	return next, nil
+}
+
+func reduceReviewHeadAdoption(
+	current WorkspaceRuntimeProjection,
+	next *WorkspaceRuntimeProjection,
+	record JournalRecord,
+	event ReviewHeadAdoptedJournalEvent,
+) error {
+	if next == nil || current.workspaceID.IsZero() || current.activeGeneration.IsZero() {
+		return fmt.Errorf("review head adoption requires an initialized workspace runtime")
+	}
+	if record.generation != current.activeGeneration {
+		return fmt.Errorf("review head adoption generation is not active")
+	}
+	index, attempt, err := requireRuntimeAttempt(
+		current, event.attemptID, event.workspaceID, event.generation,
+	)
+	if err != nil {
+		return err
+	}
+	if attempt.phase != AttemptActive || attempt.mergeUnit != event.mergeUnit ||
+		attempt.verifiedHead != event.priorHead {
+		return fmt.Errorf("review head adoption does not match the active attempt and prior head")
+	}
+	if attempt.commitProtocol != nil || attempt.reviewFixes != nil {
+		return fmt.Errorf("review head adoption is only allowed without durable commit protocols")
+	}
+	updated := &next.attempts[index]
+	updated.verifiedHead = event.head
+	updated.inspectionDigest = event.snapshotDigest
+	return nil
 }
 
 func cloneWorkspaceRuntime(source WorkspaceRuntimeProjection) WorkspaceRuntimeProjection {

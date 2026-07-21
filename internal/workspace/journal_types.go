@@ -138,7 +138,11 @@ const (
 	JournalEventAuthorizationSafetyChanged     JournalEventType = "authorization.safety_changed.v2"
 	JournalEventAuthorizationEffectDispatched  JournalEventType = "authorization.effect_dispatched.v2"
 	JournalEventReviewRoundStarted             JournalEventType = "review.round_started.v2"
+	JournalEventReviewHeadAdopted              JournalEventType = "review.head_adopted.v2"
+	JournalEventReviewInvocationReserved       JournalEventType = "review.invocation_reserved.v2"
+	JournalEventReviewInvocationFailed         JournalEventType = "review.invocation_failed.v2"
 	JournalEventReviewResultRecorded           JournalEventType = "review.result_recorded.v2"
+	JournalEventReviewFindingFixReserved       JournalEventType = "review.finding_fix_reserved.v2"
 	JournalEventReviewFixApplied               JournalEventType = "review.fix_applied.v2"
 )
 
@@ -399,7 +403,9 @@ func newJournalAppend(
 			AuthorizationSegmentCompletedJournalEvent, AuthorizationSafetyChangedJournalEvent,
 			AuthorizationEffectDispatchedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("authorization events must use the protected control-plane workflow")
-		case ReviewRoundStartedJournalEvent, ReviewResultRecordedJournalEvent, ReviewFixAppliedJournalEvent:
+		case ReviewHeadAdoptedJournalEvent, ReviewRoundStartedJournalEvent, ReviewInvocationReservedJournalEvent,
+			ReviewInvocationFailedJournalEvent, ReviewResultRecordedJournalEvent,
+			ReviewFindingFixReservedJournalEvent, ReviewFixAppliedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("review events must use the exact-head verifier-backed review workflow")
 		}
 	}

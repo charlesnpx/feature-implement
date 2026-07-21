@@ -402,28 +402,38 @@ func canonicalReviewRequest(request ReviewRequest) ([]byte, error) {
 }
 
 type VerifiedReviewResult struct {
-	request       ReviewRequest
-	submission    ReviewResultSubmission
-	receiptDigest Digest
+	request           ReviewRequest
+	submission        ReviewResultSubmission
+	reservationDigest Digest
+	receiptDigest     Digest
 }
 
 func (result VerifiedReviewResult) Request() ReviewRequest { return result.request }
 func (result VerifiedReviewResult) Submission() ReviewResultSubmission {
 	return cloneReviewResult(result.submission)
 }
-func (result VerifiedReviewResult) ReceiptDigest() Digest { return result.receiptDigest }
+func (result VerifiedReviewResult) ReservationDigest() Digest { return result.reservationDigest }
+func (result VerifiedReviewResult) ReceiptDigest() Digest     { return result.receiptDigest }
 
 type ReviewRoundState struct {
-	ordinal  uint16
-	head     GitObjectID
-	tree     GitObjectID
-	attempts []VerifiedReviewResult
-	results  []VerifiedReviewResult
+	ordinal      uint16
+	head         GitObjectID
+	tree         GitObjectID
+	reservations []ReviewInvocationReservation
+	failures     []ReviewInvocationFailure
+	attempts     []VerifiedReviewResult
+	results      []VerifiedReviewResult
 }
 
 func (round ReviewRoundState) Ordinal() uint16   { return round.ordinal }
 func (round ReviewRoundState) Head() GitObjectID { return round.head }
 func (round ReviewRoundState) Tree() GitObjectID { return round.tree }
+func (round ReviewRoundState) Reservations() []ReviewInvocationReservation {
+	return cloneReviewInvocationReservations(round.reservations)
+}
+func (round ReviewRoundState) Failures() []ReviewInvocationFailure {
+	return cloneReviewInvocationFailures(round.failures)
+}
 func (round ReviewRoundState) Attempts() []VerifiedReviewResult {
 	return cloneVerifiedReviewResults(round.attempts)
 }
@@ -448,22 +458,26 @@ func (round ReviewRoundState) HasBlockingFindings() bool {
 }
 
 type ReviewFixApplication struct {
-	ordinal   uint16
-	priorHead GitObjectID
-	priorTree GitObjectID
-	head      GitObjectID
-	tree      GitObjectID
-	evidence  Digest
-	findings  []Digest
+	ordinal           uint16
+	round             uint16
+	reservationDigest Digest
+	priorHead         GitObjectID
+	priorTree         GitObjectID
+	head              GitObjectID
+	tree              GitObjectID
+	evidence          Digest
+	findings          []Digest
 }
 
-func (fix ReviewFixApplication) Ordinal() uint16        { return fix.ordinal }
-func (fix ReviewFixApplication) PriorHead() GitObjectID { return fix.priorHead }
-func (fix ReviewFixApplication) PriorTree() GitObjectID { return fix.priorTree }
-func (fix ReviewFixApplication) Head() GitObjectID      { return fix.head }
-func (fix ReviewFixApplication) Tree() GitObjectID      { return fix.tree }
-func (fix ReviewFixApplication) EvidenceDigest() Digest { return fix.evidence }
-func (fix ReviewFixApplication) FindingIDs() []Digest   { return append([]Digest(nil), fix.findings...) }
+func (fix ReviewFixApplication) Ordinal() uint16           { return fix.ordinal }
+func (fix ReviewFixApplication) Round() uint16             { return fix.round }
+func (fix ReviewFixApplication) ReservationDigest() Digest { return fix.reservationDigest }
+func (fix ReviewFixApplication) PriorHead() GitObjectID    { return fix.priorHead }
+func (fix ReviewFixApplication) PriorTree() GitObjectID    { return fix.priorTree }
+func (fix ReviewFixApplication) Head() GitObjectID         { return fix.head }
+func (fix ReviewFixApplication) Tree() GitObjectID         { return fix.tree }
+func (fix ReviewFixApplication) EvidenceDigest() Digest    { return fix.evidence }
+func (fix ReviewFixApplication) FindingIDs() []Digest      { return append([]Digest(nil), fix.findings...) }
 
 type ReviewExhaustionReason string
 
@@ -520,6 +534,7 @@ type ReviewState struct {
 	tree        GitObjectID
 	rounds      []ReviewRoundState
 	fixes       []ReviewFixApplication
+	pendingFix  *ReviewFixReservation
 	exhaustion  *ReviewExhaustionDirective
 }
 
@@ -532,16 +547,22 @@ func (state ReviewState) Head() GitObjectID             { return state.head }
 func (state ReviewState) Tree() GitObjectID             { return state.tree }
 func (state ReviewState) Rounds() []ReviewRoundState    { return cloneReviewRounds(state.rounds) }
 func (state ReviewState) Fixes() []ReviewFixApplication { return cloneReviewFixes(state.fixes) }
-func (state ReviewState) RoundsUsed() uint16            { return uint16(len(state.rounds)) }
-func (state ReviewState) FixesUsed() uint16             { return uint16(len(state.fixes)) }
+func (state ReviewState) PendingFix() (ReviewFixReservation, bool) {
+	if state.pendingFix == nil {
+		return ReviewFixReservation{}, false
+	}
+	return *cloneReviewFixReservation(state.pendingFix), true
+}
+func (state ReviewState) RoundsUsed() uint16 { return uint16(len(state.rounds)) }
+func (state ReviewState) FixesUsed() uint16  { return uint16(len(state.fixes)) }
 func (state ReviewState) InfrastructureRetriesUsed() uint16 {
 	var used uint16
 	for _, round := range state.rounds {
-		for _, result := range round.attempts {
+		for _, reservation := range round.reservations {
 			// Invocation one is the substantive profile attempt. Every later
-			// invocation is a retry, regardless of whether that retry eventually
-			// succeeds or reports another infrastructure failure.
-			if result.request.invocation > 1 {
+			// reserved invocation is a retry, regardless of whether it eventually
+			// succeeds, reports a typed failure, or crashes in the runner.
+			if reservation.request.invocation > 1 {
 				used++
 			}
 		}
@@ -555,7 +576,7 @@ func (state ReviewState) Exhaustion() (ReviewExhaustionDirective, bool) {
 	return *state.exhaustion, true
 }
 func (state ReviewState) MergeReady() bool {
-	if state.exhaustion != nil || len(state.rounds) == 0 {
+	if state.exhaustion != nil || state.pendingFix != nil || len(state.rounds) == 0 {
 		return false
 	}
 	round := state.rounds[len(state.rounds)-1]
@@ -568,14 +589,17 @@ func (state ReviewState) NextRequest() (ReviewRequest, bool, error) {
 		return ReviewRequest{}, false, nil
 	}
 	round := state.rounds[len(state.rounds)-1]
+	if pending, ok := pendingReviewInvocation(round); ok {
+		return pending.request, true, nil
+	}
 	if round.Complete(len(state.loop.profiles)) {
 		return ReviewRequest{}, false, nil
 	}
 	profileIndex := len(round.results)
 	profile := state.loop.profiles[profileIndex]
 	invocation := uint16(1)
-	for _, result := range round.attempts {
-		if result.request.profileOrdinal == uint16(profileIndex+1) {
+	for _, reservation := range round.reservations {
+		if reservation.request.profileOrdinal == uint16(profileIndex+1) {
 			invocation++
 		}
 	}
@@ -615,59 +639,108 @@ func NewStartReviewRound(
 }
 func (StartReviewRound) isReviewEvent() {}
 
+type ReserveReviewInvocation struct {
+	reservation ReviewInvocationReservation
+}
+
+func NewReserveReviewInvocation(
+	request ReviewRequest,
+	reviewerInstance ID,
+	idempotencyKey Digest,
+) (ReserveReviewInvocation, error) {
+	reservation, err := NewReviewInvocationReservation(request, reviewerInstance, idempotencyKey)
+	if err != nil {
+		return ReserveReviewInvocation{}, err
+	}
+	return ReserveReviewInvocation{reservation: reservation}, nil
+}
+func (ReserveReviewInvocation) isReviewEvent() {}
+
+type RecordReviewInvocationFailure struct {
+	reservationDigest Digest
+	failureDigest     Digest
+}
+
+func NewRecordReviewInvocationFailure(
+	reservationDigest, failureDigest Digest,
+) (RecordReviewInvocationFailure, error) {
+	failure, err := NewReviewInvocationFailure(reservationDigest, failureDigest)
+	if err != nil {
+		return RecordReviewInvocationFailure{}, err
+	}
+	return RecordReviewInvocationFailure{
+		reservationDigest: failure.reservationDigest, failureDigest: failure.failureDigest,
+	}, nil
+}
+func (RecordReviewInvocationFailure) isReviewEvent() {}
+
 type RecordReviewResult struct {
-	round          uint16
-	profileOrdinal uint16
-	invocation     uint16
-	result         ReviewResultSubmission
-	receiptDigest  Digest
+	round             uint16
+	profileOrdinal    uint16
+	invocation        uint16
+	reservationDigest Digest
+	result            ReviewResultSubmission
+	receiptDigest     Digest
 }
 
 func NewRecordReviewResult(
 	round, profileOrdinal, invocation uint16,
+	reservationDigest Digest,
 	result ReviewResultSubmission,
 	receiptDigest Digest,
 ) (RecordReviewResult, error) {
 	canonical, err := canonicalReviewResult(result)
 	if round == 0 || profileOrdinal == 0 || invocation == 0 || err != nil ||
-		result.digest != DigestBytes(canonical) || receiptDigest.IsZero() {
+		reservationDigest.IsZero() || result.digest != DigestBytes(canonical) || receiptDigest.IsZero() {
 		return RecordReviewResult{}, fmt.Errorf("review result record requires canonical signed result bindings")
 	}
 	return RecordReviewResult{
-		round: round, profileOrdinal: profileOrdinal, invocation: invocation,
+		round: round, profileOrdinal: profileOrdinal, invocation: invocation, reservationDigest: reservationDigest,
 		result: cloneReviewResult(result), receiptDigest: receiptDigest,
 	}, nil
 }
 func (RecordReviewResult) isReviewEvent() {}
 
+type ReserveReviewFindingFix struct {
+	reservation ReviewFixReservation
+}
+
+func NewReserveReviewFindingFix(reservation ReviewFixReservation) (ReserveReviewFindingFix, error) {
+	canonical, err := canonicalReviewFixReservation(reservation)
+	if err != nil || reservation.digest != DigestBytes(canonical) {
+		return ReserveReviewFindingFix{}, fmt.Errorf("review fix reservation requires canonical bindings")
+	}
+	return ReserveReviewFindingFix{reservation: *cloneReviewFixReservation(&reservation)}, nil
+}
+func (ReserveReviewFindingFix) isReviewEvent() {}
+
 type ApplyReviewFix struct {
-	ordinal   uint16
-	priorHead GitObjectID
-	priorTree GitObjectID
-	head      GitObjectID
-	tree      GitObjectID
-	evidence  Digest
-	findings  []Digest
+	ordinal           uint16
+	reservationDigest Digest
+	priorHead         GitObjectID
+	priorTree         GitObjectID
+	head              GitObjectID
+	tree              GitObjectID
+	evidence          Digest
+	findings          []Digest
 }
 
 func NewApplyReviewFix(
-	ordinal uint16, priorHead, priorTree, head, tree GitObjectID,
+	ordinal uint16, reservationDigest Digest, priorHead, priorTree, head, tree GitObjectID,
 	evidence Digest, findings []Digest,
 ) (ApplyReviewFix, error) {
 	if ordinal == 0 || priorHead.IsZero() || priorTree.IsZero() || head.IsZero() || tree.IsZero() ||
 		priorHead.Algorithm() != priorTree.Algorithm() || head.Algorithm() != tree.Algorithm() ||
-		priorHead.Algorithm() != head.Algorithm() || head == priorHead || evidence.IsZero() || len(findings) == 0 {
+		priorHead.Algorithm() != head.Algorithm() || head == priorHead || reservationDigest.IsZero() ||
+		evidence.IsZero() || len(findings) == 0 {
 		return ApplyReviewFix{}, fmt.Errorf("review fix requires ordinal, exact prior/new Git identities, evidence, and findings")
 	}
-	normalized := append([]Digest(nil), findings...)
-	sort.Slice(normalized, func(i, j int) bool { return normalized[i].String() < normalized[j].String() })
-	for index, finding := range normalized {
-		if finding.IsZero() || index > 0 && finding == normalized[index-1] {
-			return ApplyReviewFix{}, fmt.Errorf("review fix finding identities must be nonzero and unique")
-		}
+	normalized, err := normalizeReviewFindingIDs(findings)
+	if err != nil {
+		return ApplyReviewFix{}, err
 	}
 	return ApplyReviewFix{
-		ordinal: ordinal, priorHead: priorHead, priorTree: priorTree,
+		ordinal: ordinal, reservationDigest: reservationDigest, priorHead: priorHead, priorTree: priorTree,
 		head: head, tree: tree, evidence: evidence, findings: normalized,
 	}, nil
 }
@@ -697,6 +770,9 @@ func ReduceReview(current ReviewState, event ReviewEvent) (ReviewState, error) {
 				value.loop.digest != current.loop.digest {
 				return ReviewState{}, fmt.Errorf("review round cannot reset durable configuration or identity")
 			}
+			if current.pendingFix != nil {
+				return ReviewState{}, fmt.Errorf("review round cannot start while a review fix is reserved")
+			}
 			if len(current.rounds) == 0 || !current.rounds[len(current.rounds)-1].Complete(len(current.loop.profiles)) {
 				return ReviewState{}, fmt.Errorf("review round cannot start while the prior round is incomplete")
 			}
@@ -710,36 +786,119 @@ func ReduceReview(current ReviewState, event ReviewEvent) (ReviewState, error) {
 			return ReviewState{}, fmt.Errorf("review round budget is exhausted")
 		}
 		next.rounds = append(next.rounds, ReviewRoundState{ordinal: value.ordinal, head: value.head, tree: value.tree})
+	case ReserveReviewInvocation:
+		if current.workspaceID.IsZero() || current.exhaustion != nil || current.pendingFix != nil || len(current.rounds) == 0 {
+			return ReviewState{}, fmt.Errorf("review invocation requires an active non-exhausted round without a pending fix")
+		}
+		round := &next.rounds[len(next.rounds)-1]
+		if pending, exists := pendingReviewInvocation(*round); exists {
+			if pending.digest == value.reservation.digest {
+				return next, nil
+			}
+			return ReviewState{}, fmt.Errorf("review request is already reserved by a different invocation")
+		}
+		request, ok, err := current.NextRequest()
+		if err != nil || !ok || request.digest != value.reservation.request.digest {
+			return ReviewState{}, fmt.Errorf("review invocation reservation does not match the ordered exact-head request")
+		}
+		canonical, err := canonicalReviewInvocationReservation(value.reservation)
+		if err != nil || value.reservation.digest != DigestBytes(canonical) {
+			return ReviewState{}, fmt.Errorf("review invocation reservation is not canonical")
+		}
+		for _, priorRound := range current.rounds {
+			for _, prior := range priorRound.reservations {
+				if prior.idempotencyKey == value.reservation.idempotencyKey {
+					return ReviewState{}, fmt.Errorf("review invocation idempotency key is already bound")
+				}
+			}
+		}
+		if err := validateReviewInstancePolicy(current, request.profile, value.reservation.reviewerInstance); err != nil {
+			return ReviewState{}, err
+		}
+		round.reservations = append(round.reservations, value.reservation)
+	case RecordReviewInvocationFailure:
+		if current.workspaceID.IsZero() || current.exhaustion != nil || len(current.rounds) == 0 {
+			return ReviewState{}, fmt.Errorf("review invocation failure requires an active non-exhausted round")
+		}
+		round := &next.rounds[len(next.rounds)-1]
+		pending, exists := pendingReviewInvocation(*round)
+		if !exists || pending.digest != value.reservationDigest || value.failureDigest.IsZero() {
+			return ReviewState{}, fmt.Errorf("review invocation failure does not match the pending reservation")
+		}
+		round.failures = append(round.failures, ReviewInvocationFailure{
+			reservationDigest: value.reservationDigest, failureDigest: value.failureDigest,
+		})
 	case RecordReviewResult:
 		if current.workspaceID.IsZero() || current.exhaustion != nil || len(current.rounds) == 0 {
 			return ReviewState{}, fmt.Errorf("review result requires an active non-exhausted round")
 		}
 		round := &next.rounds[len(next.rounds)-1]
-		request, ok, err := current.NextRequest()
-		if err != nil || !ok {
-			return ReviewState{}, fmt.Errorf("review round has no pending profile")
+		reservation, reserved := pendingReviewInvocation(*round)
+		if !reserved || reservation.digest != value.reservationDigest {
+			return ReviewState{}, fmt.Errorf("review result has no matching durable invocation reservation")
 		}
+		request := reservation.request
 		if value.round != request.round || value.profileOrdinal != request.profileOrdinal ||
 			value.invocation != request.invocation || value.result.requestDigest != request.digest ||
-			!value.result.isolation.Strict() {
+			value.result.reviewerInstance != reservation.reviewerInstance || !value.result.isolation.Strict() {
 			return ReviewState{}, fmt.Errorf("review result does not match the ordered exact-head request and strict sandbox")
 		}
-		if err := validateReviewInstancePolicy(current, request.profile, value.result.reviewerInstance); err != nil {
-			return ReviewState{}, err
+		verified := VerifiedReviewResult{
+			request: request, submission: cloneReviewResult(value.result),
+			reservationDigest: value.reservationDigest, receiptDigest: value.receiptDigest,
 		}
-		verified := VerifiedReviewResult{request: request, submission: cloneReviewResult(value.result), receiptDigest: value.receiptDigest}
 		round.attempts = append(round.attempts, verified)
 		if value.result.status == ReviewResultCompleted {
 			round.results = append(round.results, verified)
 		}
+	case ReserveReviewFindingFix:
+		if current.workspaceID.IsZero() || current.exhaustion != nil || len(current.rounds) == 0 {
+			return ReviewState{}, fmt.Errorf("review fix reservation requires a completed non-exhausted review round")
+		}
+		if current.pendingFix != nil {
+			if current.pendingFix.digest == value.reservation.digest {
+				return next, nil
+			}
+			return ReviewState{}, fmt.Errorf("a different review fix is already reserved")
+		}
+		round := current.rounds[len(current.rounds)-1]
+		if _, pending := pendingReviewInvocation(round); pending || !round.Complete(len(current.loop.profiles)) {
+			return ReviewState{}, fmt.Errorf("review fix reservation requires a fully completed review round")
+		}
+		reservation := value.reservation
+		if reservation.workspaceID != current.workspaceID || reservation.generation != current.generation ||
+			reservation.attemptID != current.attemptID || reservation.loopDigest != current.loop.digest ||
+			reservation.ordinal != uint16(len(current.fixes)+1) || reservation.ordinal > current.loop.maxFixes ||
+			reservation.round != round.ordinal || reservation.head != current.head || reservation.tree != current.tree {
+			return ReviewState{}, fmt.Errorf("review fix reservation does not match durable review identity, budgets, and Git state")
+		}
+		if current.RoundsUsed() >= current.loop.maxRounds {
+			return ReviewState{}, fmt.Errorf("review fix requires remaining round budget for exact-head reconfirmation")
+		}
+		available := make(map[Digest]struct{})
+		for _, finding := range round.Findings() {
+			available[finding.id] = struct{}{}
+		}
+		for _, finding := range reservation.findings {
+			if _, exists := available[finding]; !exists {
+				return ReviewState{}, fmt.Errorf("review fix reservation references finding %s outside the current round", finding)
+			}
+		}
+		next.pendingFix = cloneReviewFixReservation(&reservation)
 	case ApplyReviewFix:
 		if current.workspaceID.IsZero() || current.exhaustion != nil || len(current.rounds) == 0 {
 			return ReviewState{}, fmt.Errorf("review fix requires a completed non-exhausted review round")
 		}
 		round := current.rounds[len(current.rounds)-1]
-		if !round.Complete(len(current.loop.profiles)) || value.ordinal != uint16(len(current.fixes)+1) ||
-			value.ordinal > current.loop.maxFixes || value.priorHead != current.head || value.priorTree != current.tree {
-			return ReviewState{}, fmt.Errorf("review fix does not match durable round, budget, and current Git state")
+		reservation := current.pendingFix
+		if reservation == nil || reservation.digest != value.reservationDigest ||
+			!round.Complete(len(current.loop.profiles)) || value.ordinal != uint16(len(current.fixes)+1) ||
+			value.ordinal > current.loop.maxFixes || current.RoundsUsed() >= current.loop.maxRounds ||
+			value.priorHead != current.head || value.priorTree != current.tree ||
+			reservation.ordinal != value.ordinal || reservation.round != round.ordinal ||
+			reservation.head != value.priorHead || reservation.tree != value.priorTree ||
+			!equalDigestSlices(reservation.findings, value.findings) {
+			return ReviewState{}, fmt.Errorf("review fix does not match durable round, budget, reservation, and current Git state")
 		}
 		available := make(map[Digest]struct{})
 		for _, finding := range round.Findings() {
@@ -751,11 +910,13 @@ func ReduceReview(current ReviewState, event ReviewEvent) (ReviewState, error) {
 			}
 		}
 		next.fixes = append(next.fixes, ReviewFixApplication{
-			ordinal: value.ordinal, priorHead: value.priorHead, priorTree: value.priorTree,
+			ordinal: value.ordinal, round: reservation.round, reservationDigest: value.reservationDigest,
+			priorHead: value.priorHead, priorTree: value.priorTree,
 			head: value.head, tree: value.tree, evidence: value.evidence,
 			findings: append([]Digest(nil), value.findings...),
 		})
 		next.head, next.tree = value.head, value.tree
+		next.pendingFix = nil
 	default:
 		return ReviewState{}, fmt.Errorf("unsupported review event %T", event)
 	}
@@ -765,12 +926,60 @@ func ReduceReview(current ReviewState, event ReviewEvent) (ReviewState, error) {
 	return next, nil
 }
 
+func pendingReviewInvocation(round ReviewRoundState) (ReviewInvocationReservation, bool) {
+	if len(round.reservations) == 0 {
+		return ReviewInvocationReservation{}, false
+	}
+	latest := round.reservations[len(round.reservations)-1]
+	for _, result := range round.attempts {
+		if result.reservationDigest == latest.digest {
+			return ReviewInvocationReservation{}, false
+		}
+	}
+	for _, failure := range round.failures {
+		if failure.reservationDigest == latest.digest {
+			return ReviewInvocationReservation{}, false
+		}
+	}
+	return latest, true
+}
+
+func latestReviewInvocationFailed(round ReviewRoundState) bool {
+	if len(round.reservations) == 0 {
+		return false
+	}
+	latest := round.reservations[len(round.reservations)-1]
+	for _, failure := range round.failures {
+		if failure.reservationDigest == latest.digest {
+			return true
+		}
+	}
+	for _, result := range round.attempts {
+		if result.reservationDigest == latest.digest {
+			return result.submission.status == ReviewResultInfrastructureFailure
+		}
+	}
+	return false
+}
+
+func equalDigestSlices(left, right []Digest) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
 func validateReviewInstancePolicy(state ReviewState, profile ReviewProfile, instance ID) error {
 	var prior []ID
 	for _, round := range state.rounds {
-		for _, result := range round.attempts {
-			if result.request.profile.id == profile.id {
-				prior = append(prior, result.submission.reviewerInstance)
+		for _, reservation := range round.reservations {
+			if reservation.request.profile.id == profile.id {
+				prior = append(prior, reservation.reviewerInstance)
 			}
 		}
 	}
@@ -795,9 +1004,7 @@ func deriveReviewExhaustion(state ReviewState) *ReviewExhaustionDirective {
 	reason := ReviewExhaustionReason("")
 	latestInfrastructureFailure := false
 	if len(state.rounds) != 0 {
-		attempts := state.rounds[len(state.rounds)-1].attempts
-		latestInfrastructureFailure = len(attempts) != 0 &&
-			attempts[len(attempts)-1].submission.status == ReviewResultInfrastructureFailure
+		latestInfrastructureFailure = latestReviewInvocationFailed(state.rounds[len(state.rounds)-1])
 	}
 	if latestInfrastructureFailure && state.InfrastructureRetriesUsed() >= state.loop.maxInfrastructureRetries {
 		reason = ReviewExhaustedInfrastructure
@@ -858,6 +1065,8 @@ func cloneVerifiedReviewResults(values []VerifiedReviewResult) []VerifiedReviewR
 func cloneReviewRounds(values []ReviewRoundState) []ReviewRoundState {
 	result := append([]ReviewRoundState(nil), values...)
 	for index := range result {
+		result[index].reservations = cloneReviewInvocationReservations(result[index].reservations)
+		result[index].failures = cloneReviewInvocationFailures(result[index].failures)
 		result[index].attempts = cloneVerifiedReviewResults(result[index].attempts)
 		result[index].results = cloneVerifiedReviewResults(result[index].results)
 	}
@@ -876,6 +1085,7 @@ func cloneReviewState(state ReviewState) ReviewState {
 	state.loop = cloneReviewLoop(state.loop)
 	state.rounds = cloneReviewRounds(state.rounds)
 	state.fixes = cloneReviewFixes(state.fixes)
+	state.pendingFix = cloneReviewFixReservation(state.pendingFix)
 	if state.exhaustion != nil {
 		directive := *state.exhaustion
 		state.exhaustion = &directive
