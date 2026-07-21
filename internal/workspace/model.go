@@ -41,8 +41,21 @@ type MergeUnitReference struct {
 	mergeUnitID ID
 }
 
+func NewMergeUnitReference(planID, mergeUnitID ID) (MergeUnitReference, error) {
+	if planID.IsZero() || mergeUnitID.IsZero() {
+		return MergeUnitReference{}, fmt.Errorf("merge unit reference requires plan and merge unit identifiers")
+	}
+	return MergeUnitReference{planID: planID, mergeUnitID: mergeUnitID}, nil
+}
+
 func (reference MergeUnitReference) PlanID() ID      { return reference.planID }
 func (reference MergeUnitReference) MergeUnitID() ID { return reference.mergeUnitID }
+func (reference MergeUnitReference) String() string {
+	if reference.planID.IsZero() || reference.mergeUnitID.IsZero() {
+		return ""
+	}
+	return reference.planID.String() + "/" + reference.mergeUnitID.String()
+}
 
 func (reference MergeUnitReference) key() string {
 	return reference.planID.String() + "\x00" + reference.mergeUnitID.String()
