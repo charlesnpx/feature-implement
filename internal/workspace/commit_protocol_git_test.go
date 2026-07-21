@@ -111,6 +111,62 @@ func TestLocalCommitShellCreatesExactCommitAndRevalidatesAfterRebase(t *testing.
 	}
 }
 
+func TestLocalCommitShellRerunsEachRebasedStepCheckFromFinalHead(t *testing.T) {
+	repository, branch, base := newProtocolRepository(t)
+	firstStep, _ := protocolTestStep(t, "first", "Implement first step")
+	secondStep, _ := protocolTestStep(t, "second", "Implement second step")
+	protocol, err := workspace.NewCommitProtocol([]workspace.CommitStep{firstStep, secondStep})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := workspace.NewCommitProtocolState(workspace.DigestBytes([]byte("generation")), base, protocol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())}
+	shell, _ := workspace.NewCommitProtocolShell(workspace.DefaultLocalCommitGitAdapter(), runner)
+
+	for index, name := range []string{"first.go", "second.go"} {
+		if err := os.WriteFile(
+			filepath.Join(repository, "src", name),
+			[]byte("package protocol\n"), 0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+		runGitSetup(t, repository, "add", filepath.Join("src", name))
+		state, err = shell.ExecuteNextCommitStep(context.Background(), state, branch, repository, "")
+		if err != nil {
+			t.Fatalf("execute step %d: %v", index+1, err)
+		}
+	}
+	if state.Phase() != workspace.CommitProtocolComplete || len(runner.invocations) != 2 {
+		t.Fatalf("initial state=%#v runner calls=%d", state, len(runner.invocations))
+	}
+
+	runGitSetup(t, repository, "switch", "-c", "upstream", rawGitObject(base))
+	if err := os.WriteFile(filepath.Join(repository, "README.md"), []byte("upstream\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitSetup(t, repository, "add", "README.md")
+	runGitSetup(t, repository, "commit", "-m", "Upstream change")
+	newBase := parseGitHead(t, repository)
+	runGitSetup(t, repository, "switch", branch)
+	runGitSetup(t, repository, "rebase", "--onto", rawGitObject(newBase), rawGitObject(base), branch)
+	newHead := parseGitHead(t, repository)
+
+	state, err = shell.RemapAfterRebase(context.Background(), state, branch, repository, newBase, newHead)
+	if err != nil {
+		t.Fatalf("remap two-step rebase: %v", err)
+	}
+	completed := state.CompletedSteps()
+	if state.Phase() != workspace.CommitProtocolComplete || state.Head() != newHead ||
+		len(completed) != 2 || len(runner.invocations) != 4 ||
+		runner.invocations[2].Commit() != completed[0].Commit().Commit() ||
+		runner.invocations[3].Commit() != completed[1].Commit().Commit() {
+		t.Fatalf("rebased state=%#v completed=%#v invocations=%#v", state, completed, runner.invocations)
+	}
+}
+
 func TestLocalCommitShellSupportsSHA256Repositories(t *testing.T) {
 	repository := t.TempDir()
 	branch := "protocol"

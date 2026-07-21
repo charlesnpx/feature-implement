@@ -61,9 +61,13 @@ func (invocation CommitCheckInvocation) Worktree() string       { return invocat
 func (invocation CommitCheckInvocation) IdempotencyKey() Digest { return invocation.idempotencyKey }
 
 // CommitCheckRunnerPort is a capability boundary, not a generic process port.
-// An implementation must deny credentials, repository hooks, write-capable
-// network access, and provider-broker access, then return a proof describing
-// the actual isolation used. The shell rejects any weaker proof.
+// An implementation must materialize the invocation's exact commit and tree
+// in its isolated execution root rather than execute against the ambient
+// worktree head. It must also deny credentials, repository hooks,
+// write-capable network access, and provider-broker access, then return a
+// proof describing the actual isolation used. The shell rejects any weaker
+// proof. Worktree is repository input for that materialization, not authority
+// to substitute its current checkout for the invocation bindings.
 type CommitCheckRunnerPort interface {
 	RunConfiguredCheck(context.Context, CommitCheckInvocation) (CheckProcessResult, error)
 }
@@ -316,7 +320,7 @@ func (shell CommitProtocolShell) drive(
 			if shell.checks == nil {
 				return fail(fmt.Errorf("configured commit check %s requires an isolated runner", effect.check.id))
 			}
-			if err := shell.git.VerifyCleanWorktree(ctx, worktree, branch, effect.commit.commit); err != nil {
+			if err := shell.git.VerifyCleanWorktree(ctx, worktree, branch, state.Head()); err != nil {
 				return fail(fmt.Errorf("verify worktree before check %s: %w", effect.check.id, err))
 			}
 			invocation, err := NewCommitCheckInvocation(effect, worktree)
@@ -341,7 +345,7 @@ func (shell CommitProtocolShell) drive(
 					effect.check.expectation.kind, effect.check.expectation.failureIDs,
 				))
 			}
-			if err := shell.git.VerifyCleanWorktree(ctx, worktree, branch, effect.commit.commit); err != nil {
+			if err := shell.git.VerifyCleanWorktree(ctx, worktree, branch, state.Head()); err != nil {
 				return fail(fmt.Errorf("configured check %s changed Git state: %w", effect.check.id, err))
 			}
 			evidence, err := NewCommitCheckEvidence(

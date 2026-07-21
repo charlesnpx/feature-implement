@@ -84,6 +84,7 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(result.stdout))
 	scanner.Buffer(make([]byte, 64*1024), maxAttemptGitOutputBytes)
 	failures := make(map[string]struct{})
+	testTerminalActions := make(map[string]string)
 	namedFailurePackages := make(map[string]struct{})
 	packageFailures := make(map[string]struct{})
 	packages := make(map[string]goTestPackageState)
@@ -125,6 +126,17 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 		if packageState.terminalAction != "" {
 			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 		}
+		testIdentity := ""
+		if event.Test != "" {
+			var err error
+			testIdentity, err = GoTestFailureIdentity(event.Package, event.Test)
+			if err != nil {
+				return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+			}
+			if event.Action == "run" {
+				delete(testTerminalActions, testIdentity)
+			}
+		}
 		terminal := false
 		switch event.Action {
 		case "start", "run", "pause", "cont", "bench":
@@ -143,7 +155,12 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 				crashed = crashed || outputCrashed
 			}
 		case "pass", "skip":
-			if event.Test == "" {
+			if event.Test != "" {
+				if testTerminalActions[testIdentity] != "" {
+					return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+				}
+				testTerminalActions[testIdentity] = event.Action
+			} else {
 				if packageState.namedFailure {
 					return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 				}
@@ -151,11 +168,11 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 			}
 		case "fail":
 			if event.Test != "" {
-				identity, err := GoTestFailureIdentity(event.Package, event.Test)
-				if err != nil {
+				if testTerminalActions[testIdentity] != "" {
 					return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 				}
-				failures[identity] = struct{}{}
+				testTerminalActions[testIdentity] = event.Action
+				failures[testIdentity] = struct{}{}
 				namedFailurePackages[event.Package] = struct{}{}
 				packageState.namedFailure = true
 			} else {

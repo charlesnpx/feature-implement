@@ -143,7 +143,11 @@ func reduceReviewFixRuntime(
 		if err != nil {
 			return err
 		}
-		if state.Phase() != ReviewFixAwaitingChecks || event.ordinal != state.Used() {
+		expectedOrdinal := state.Used()
+		if state.checkingFix >= 0 {
+			expectedOrdinal = uint16(state.checkingFix + 1)
+		}
+		if state.Phase() != ReviewFixAwaitingChecks || event.ordinal != expectedOrdinal {
 			return fmt.Errorf("review-fix check record has no pending check")
 		}
 		effects, err := PendingReviewFixEffects(state)
@@ -211,19 +215,24 @@ func canonicalReviewFixRuntime(state ReviewFixState) (json.RawMessage, error) {
 		Checks         []checkJSON    `json:"checks"`
 	}
 	type runtimeJSON struct {
-		Generation string         `json:"generation"`
-		Base       string         `json:"base"`
-		Protocol   string         `json:"protocol"`
-		Maximum    uint16         `json:"maximum"`
-		Used       uint16         `json:"used"`
-		Remaining  uint16         `json:"remaining"`
-		Phase      ReviewFixPhase `json:"phase"`
-		Fixes      []fixJSON      `json:"fixes"`
+		Generation  string         `json:"generation"`
+		Base        string         `json:"base"`
+		Protocol    string         `json:"protocol"`
+		Maximum     uint16         `json:"maximum"`
+		Used        uint16         `json:"used"`
+		Remaining   uint16         `json:"remaining"`
+		Phase       ReviewFixPhase `json:"phase"`
+		RebaseEpoch uint64         `json:"rebase_epoch"`
+		CheckingFix uint16         `json:"checking_fix"`
+		Fixes       []fixJSON      `json:"fixes"`
 	}
 	value := runtimeJSON{
 		Generation: state.generation.String(), Base: state.base.String(), Protocol: state.protocol.digest.String(),
 		Maximum: state.maximum, Used: state.Used(), Remaining: state.Remaining(), Phase: state.Phase(),
-		Fixes: make([]fixJSON, 0, len(state.fixes)),
+		RebaseEpoch: state.rebaseEpoch, Fixes: make([]fixJSON, 0, len(state.fixes)),
+	}
+	if state.checkingFix >= 0 {
+		value.CheckingFix = uint16(state.checkingFix + 1)
 	}
 	for _, fix := range state.fixes {
 		item := fixJSON{

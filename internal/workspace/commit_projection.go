@@ -143,21 +143,48 @@ func reduceCommitRuntime(
 		updated.commitProtocol = &state
 		return nil
 	case CommitProtocolRebasedJournalEvent:
-		state, err := requireAttemptCommitProtocol(attempt, event.protocolDigest)
-		if err != nil {
-			return err
+		if (attempt.commitProtocol != nil) != (len(event.commits) != 0) {
+			return fmt.Errorf("commit rebase mapping does not match the attempt implementation protocol")
 		}
-		transition, err := NewRemapRebasedCommits(event.base, event.commits)
-		if err != nil {
-			return err
+		if (attempt.reviewFixes != nil) != (len(event.reviewCommits) != 0) {
+			return fmt.Errorf("commit rebase mapping does not match the attempt review-fix chain")
 		}
-		reduction, err := ReduceCommitProtocol(state, transition)
-		if err != nil {
-			return err
+		chainHead := event.base
+		if len(event.commits) != 0 {
+			state, err := requireAttemptCommitProtocol(attempt, event.protocolDigest)
+			if err != nil {
+				return err
+			}
+			transition, err := NewRemapRebasedCommits(event.base, event.commits)
+			if err != nil {
+				return err
+			}
+			reduction, err := ReduceCommitProtocol(state, transition)
+			if err != nil {
+				return err
+			}
+			state = reduction.State()
+			updated.commitProtocol = &state
+			chainHead = state.Head()
 		}
-		state = reduction.State()
-		updated.commitProtocol = &state
-		updated.verifiedHead = event.commits[len(event.commits)-1].commit
+		if len(event.reviewCommits) != 0 {
+			state, err := requireAttemptReviewFix(attempt, event.reviewProtocolDigest)
+			if err != nil {
+				return err
+			}
+			transition, err := NewRemapRebasedReviewFixes(chainHead, event.reviewCommits)
+			if err != nil {
+				return err
+			}
+			reduction, err := ReduceReviewFix(state, transition)
+			if err != nil {
+				return err
+			}
+			state = reduction.State()
+			updated.reviewFixes = &state
+			chainHead = state.Head()
+		}
+		updated.verifiedHead = chainHead
 		return nil
 	default:
 		return fmt.Errorf("unsupported commit runtime event %T", record.event)

@@ -101,13 +101,15 @@ type commitCheckRecordedPayloadWire struct {
 }
 
 type commitProtocolRebasedPayloadWire struct {
-	WorkspaceID    string                            `json:"workspace_id"`
-	Generation     string                            `json:"generation"`
-	AttemptID      string                            `json:"attempt_id"`
-	ProtocolDigest string                            `json:"protocol_digest"`
-	Base           string                            `json:"base"`
-	Commits        []commitObjectEvidencePayloadWire `json:"commits"`
-	MappingDigest  string                            `json:"mapping_digest"`
+	WorkspaceID          string                            `json:"workspace_id"`
+	Generation           string                            `json:"generation"`
+	AttemptID            string                            `json:"attempt_id"`
+	ProtocolDigest       string                            `json:"protocol_digest,omitempty"`
+	Base                 string                            `json:"base"`
+	Commits              []commitObjectEvidencePayloadWire `json:"commits,omitempty"`
+	ReviewProtocolDigest string                            `json:"review_protocol_digest,omitempty"`
+	ReviewCommits        []commitObjectEvidencePayloadWire `json:"review_commits,omitempty"`
+	MappingDigest        string                            `json:"mapping_digest"`
 }
 
 func marshalCommitJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, bool, error) {
@@ -143,9 +145,14 @@ func marshalCommitJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, bo
 		for _, commit := range event.commits {
 			commits = append(commits, commitObjectEvidenceToPayload(commit))
 		}
+		reviewCommits := make([]commitObjectEvidencePayloadWire, 0, len(event.reviewCommits))
+		for _, commit := range event.reviewCommits {
+			reviewCommits = append(reviewCommits, commitObjectEvidenceToPayload(commit))
+		}
 		value = commitProtocolRebasedPayloadWire{
 			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(), AttemptID: event.attemptID.String(),
 			ProtocolDigest: event.protocolDigest.String(), Base: event.base.String(), Commits: commits,
+			ReviewProtocolDigest: event.reviewProtocolDigest.String(), ReviewCommits: reviewCommits,
 			MappingDigest: event.mappingDigest.String(),
 		}
 	default:
@@ -275,9 +282,12 @@ func decodeCommitJournalEvent(
 		if err != nil {
 			return nil, true, err
 		}
-		protocol, err := ParseDigest(wire.ProtocolDigest)
-		if err != nil {
-			return nil, true, err
+		var protocol Digest
+		if wire.ProtocolDigest != "" {
+			protocol, err = ParseDigest(wire.ProtocolDigest)
+			if err != nil {
+				return nil, true, err
+			}
 		}
 		base, err := ParseGitObjectID(wire.Base)
 		if err != nil {
@@ -291,7 +301,24 @@ func decodeCommitJournalEvent(
 			}
 			commits = append(commits, evidence)
 		}
-		event, err := NewCommitProtocolRebasedJournalEvent(workspaceID, generation, attemptID, protocol, base, commits)
+		var reviewProtocol Digest
+		if wire.ReviewProtocolDigest != "" {
+			reviewProtocol, err = ParseDigest(wire.ReviewProtocolDigest)
+			if err != nil {
+				return nil, true, err
+			}
+		}
+		reviewCommits := make([]CommitObjectEvidence, 0, len(wire.ReviewCommits))
+		for _, item := range wire.ReviewCommits {
+			evidence, err := commitObjectEvidenceFromPayload(item)
+			if err != nil {
+				return nil, true, err
+			}
+			reviewCommits = append(reviewCommits, evidence)
+		}
+		event, err := NewCommitProtocolChainRebasedJournalEvent(
+			workspaceID, generation, attemptID, protocol, base, commits, reviewProtocol, reviewCommits,
+		)
 		if err != nil {
 			return nil, true, err
 		}

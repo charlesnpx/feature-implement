@@ -53,11 +53,13 @@ func (state ReviewFixStepState) Checks() []CommitCheckEvidence {
 }
 
 type ReviewFixState struct {
-	generation Digest
-	base       GitObjectID
-	protocol   ReviewFixProtocol
-	maximum    uint16
-	fixes      []ReviewFixStepState
+	generation  Digest
+	base        GitObjectID
+	protocol    ReviewFixProtocol
+	maximum     uint16
+	fixes       []ReviewFixStepState
+	checkingFix int
+	rebaseEpoch uint64
 }
 
 func NewReviewFixState(
@@ -67,10 +69,11 @@ func NewReviewFixState(
 	maximum uint16,
 ) (ReviewFixState, error) {
 	state := ReviewFixState{
-		generation: generation,
-		base:       base,
-		protocol:   *cloneReviewFixProtocol(&protocol),
-		maximum:    maximum,
+		generation:  generation,
+		base:        base,
+		protocol:    *cloneReviewFixProtocol(&protocol),
+		maximum:     maximum,
+		checkingFix: -1,
 	}
 	if err := validateReviewFixState(state); err != nil {
 		return ReviewFixState{}, err
@@ -85,12 +88,16 @@ func (state ReviewFixState) Protocol() ReviewFixProtocol {
 }
 func (state ReviewFixState) ProtocolDigest() Digest { return state.protocol.digest }
 func (state ReviewFixState) Maximum() uint16        { return state.maximum }
+func (state ReviewFixState) RebaseEpoch() uint64    { return state.rebaseEpoch }
 func (state ReviewFixState) Used() uint16           { return uint16(len(state.fixes)) }
 func (state ReviewFixState) Remaining() uint16      { return state.maximum - state.Used() }
 func (state ReviewFixState) Fixes() []ReviewFixStepState {
 	return cloneReviewFixStepStates(state.fixes)
 }
 func (state ReviewFixState) Phase() ReviewFixPhase {
+	if state.checkingFix >= 0 {
+		return ReviewFixAwaitingChecks
+	}
 	if len(state.fixes) == 0 {
 		return ReviewFixReady
 	}
@@ -191,6 +198,37 @@ func (RecordReviewFixCheck) isReviewFixEvent()     {}
 func (event RecordReviewFixCheck) Ordinal() uint16 { return event.ordinal }
 func (event RecordReviewFixCheck) Evidence() CommitCheckEvidence {
 	return cloneOneCommitCheckEvidence(event.evidence)
+}
+
+type RemapRebasedReviewFixes struct {
+	base    GitObjectID
+	commits []CommitObjectEvidence
+}
+
+func NewRemapRebasedReviewFixes(
+	base GitObjectID,
+	commits []CommitObjectEvidence,
+) (RemapRebasedReviewFixes, error) {
+	if base.IsZero() || len(commits) == 0 {
+		return RemapRebasedReviewFixes{}, fmt.Errorf("review-fix rebase remapping requires a new base and commits")
+	}
+	copyCommits := make([]CommitObjectEvidence, len(commits))
+	for index, commit := range commits {
+		if err := commit.validate(); err != nil || commit.evidence.IsZero() {
+			if err == nil {
+				err = fmt.Errorf("commit evidence digest is required")
+			}
+			return RemapRebasedReviewFixes{}, fmt.Errorf("rebased review fix %d: %w", index+1, err)
+		}
+		copyCommits[index] = cloneCommitObjectEvidence(commit)
+	}
+	return RemapRebasedReviewFixes{base: base, commits: copyCommits}, nil
+}
+
+func (RemapRebasedReviewFixes) isReviewFixEvent()       {}
+func (event RemapRebasedReviewFixes) Base() GitObjectID { return event.base }
+func (event RemapRebasedReviewFixes) Commits() []CommitObjectEvidence {
+	return cloneCommitObjects(event.commits)
 }
 
 type ReviewFixCompletedEffect struct {
@@ -317,10 +355,16 @@ func ReduceReviewFix(current ReviewFixState, event ReviewFixEvent) (ReviewFixRed
 			effects = []CommitProtocolEffect{effect}
 		}
 	case RecordReviewFixCheck:
-		if current.Phase() != ReviewFixAwaitingChecks || value.ordinal != current.Used() {
+		if current.Phase() != ReviewFixAwaitingChecks {
 			return ReviewFixReduction{}, fmt.Errorf("review-fix check evidence requires a pending check")
 		}
 		index := len(current.fixes) - 1
+		if current.checkingFix >= 0 {
+			index = current.checkingFix
+		}
+		if value.ordinal != uint16(index+1) {
+			return ReviewFixReduction{}, fmt.Errorf("review-fix check evidence does not match the pending fix")
+		}
 		step, err := current.protocol.Step(value.ordinal)
 		if err != nil {
 			return ReviewFixReduction{}, err
@@ -333,7 +377,18 @@ func ReduceReviewFix(current ReviewFixState, event ReviewFixEvent) (ReviewFixRed
 			return ReviewFixReduction{}, err
 		}
 		next.fixes[index].checks = append(next.fixes[index].checks, cloneOneCommitCheckEvidence(value.evidence))
-		if len(next.fixes[index].checks) == len(step.checks) {
+		if current.checkingFix >= 0 {
+			if len(next.fixes[index].checks) == len(step.checks) {
+				next.fixes[index].phase = ReviewFixComplete
+				effects = scheduleNextRebasedReviewFixCheck(&next, index+1)
+			} else {
+				effect, err := createReviewFixCheckEffect(next, index, checkIndex+1)
+				if err != nil {
+					return ReviewFixReduction{}, err
+				}
+				effects = []CommitProtocolEffect{effect}
+			}
+		} else if len(next.fixes[index].checks) == len(step.checks) {
 			next.fixes[index].phase = ReviewFixComplete
 			effect, err := completedReviewFixEffect(next, index)
 			if err != nil {
@@ -347,6 +402,73 @@ func ReduceReviewFix(current ReviewFixState, event ReviewFixEvent) (ReviewFixRed
 			}
 			effects = []CommitProtocolEffect{effect}
 		}
+	case RemapRebasedReviewFixes:
+		if !current.Quiescent() || len(current.fixes) == 0 {
+			return ReviewFixReduction{}, fmt.Errorf("review-fix rebase remapping requires a completed, quiescent chain")
+		}
+		if len(value.commits) != len(current.fixes) {
+			return ReviewFixReduction{}, fmt.Errorf(
+				"review-fix rebase remapping requires exactly %d commits", len(current.fixes),
+			)
+		}
+		if value.base.Algorithm() != current.base.Algorithm() {
+			return ReviewFixReduction{}, fmt.Errorf("review-fix rebase changes the repository object format")
+		}
+		parent := value.base
+		seen := make(map[string]struct{}, len(value.commits))
+		changed := value.base != current.base
+		for index, evidence := range value.commits {
+			ordinal := uint16(index + 1)
+			step, err := current.protocol.Step(ordinal)
+			if err != nil {
+				return ReviewFixReduction{}, err
+			}
+			if err := evidence.ValidateStep(step, current.generation, ordinal, parent); err != nil {
+				return ReviewFixReduction{}, fmt.Errorf("rebased review fix %d: %w", ordinal, err)
+			}
+			previous := current.fixes[index]
+			if evidence.diff.digest != previous.commit.diff.digest {
+				return ReviewFixReduction{}, fmt.Errorf("rebased review fix %d changed its canonical diff", ordinal)
+			}
+			if evidence.subject != previous.commit.subject || evidence.body != previous.commit.body {
+				return ReviewFixReduction{}, fmt.Errorf("rebased review fix %d changed its commit message", ordinal)
+			}
+			if _, exists := seen[evidence.commit.String()]; exists {
+				return ReviewFixReduction{}, fmt.Errorf("rebased review-fix chain repeats commit %s", evidence.commit)
+			}
+			seen[evidence.commit.String()] = struct{}{}
+			inspection, err := NewStagedCommitInspection(parent, evidence.tree, evidence.diff, nil, nil, nil)
+			if err != nil {
+				return ReviewFixReduction{}, fmt.Errorf("rebuild rebased review-fix intent %d: %w", ordinal, err)
+			}
+			reservation, err := reviewFixReservationKey(
+				current.generation, current.protocol.digest, current.maximum, ordinal, parent,
+			)
+			if err != nil {
+				return ReviewFixReduction{}, err
+			}
+			intent, err := commitEffectIdempotencyKey(
+				current.generation, current.protocol.digest, step.id, ordinal, parent,
+				inspection.stateDigest, previous.body, 0,
+			)
+			if err != nil {
+				return ReviewFixReduction{}, err
+			}
+			next.fixes[index] = ReviewFixStepState{
+				ordinal: ordinal, parent: parent, phase: ReviewFixComplete,
+				reservationKey: reservation, inspection: inspection, body: previous.body,
+				intentKey: intent, commit: cloneCommitObjectEvidence(evidence),
+			}
+			changed = changed || evidence.commit != previous.commit.commit || evidence.tree != previous.commit.tree
+			parent = evidence.commit
+		}
+		if !changed {
+			return ReviewFixReduction{}, fmt.Errorf("review-fix rebase remapping did not change the base, commit, or tree sequence")
+		}
+		next.base = value.base
+		next.rebaseEpoch++
+		next.checkingFix = -1
+		effects = scheduleNextRebasedReviewFixCheck(&next, 0)
 	default:
 		return ReviewFixReduction{}, fmt.Errorf("unsupported review-fix event %T", event)
 	}
@@ -362,6 +484,15 @@ func PendingReviewFixEffects(state ReviewFixState) ([]CommitProtocolEffect, erro
 	}
 	if len(state.fixes) == 0 {
 		return nil, nil
+	}
+	if state.checkingFix >= 0 {
+		effect, err := createReviewFixCheckEffect(
+			state, state.checkingFix, len(state.fixes[state.checkingFix].checks),
+		)
+		if err != nil {
+			return nil, err
+		}
+		return []CommitProtocolEffect{effect}, nil
 	}
 	index := len(state.fixes) - 1
 	switch state.fixes[index].phase {
@@ -386,6 +517,21 @@ func PendingReviewFixEffects(state ReviewFixState) ([]CommitProtocolEffect, erro
 	default:
 		return nil, nil
 	}
+}
+
+func scheduleNextRebasedReviewFixCheck(state *ReviewFixState, start int) []CommitProtocolEffect {
+	for index := start; index < len(state.fixes); index++ {
+		step, err := state.protocol.Step(uint16(index + 1))
+		if err == nil && len(step.checks) != 0 {
+			state.checkingFix = index
+			state.fixes[index].phase = ReviewFixAwaitingChecks
+			effect, _ := createReviewFixCheckEffect(*state, index, 0)
+			return []CommitProtocolEffect{effect}
+		}
+	}
+	state.checkingFix = -1
+	effect, _ := completedReviewFixEffect(*state, len(state.fixes)-1)
+	return []CommitProtocolEffect{effect}
 }
 
 func createReviewFixCommitEffect(state ReviewFixState, index int) (CreateConfiguredCommitEffect, error) {
@@ -433,9 +579,9 @@ func reviewFixCheckIdempotencyKey(
 	checkOrdinal uint16,
 ) Digest {
 	return DigestBytes([]byte(fmt.Sprintf(
-		"review_fix_check_effect_v2\ngeneration=%s\nprotocol=%s\nordinal=%d\ncheck=%s\ncheck_ordinal=%d\ncommit=%s\ntree=%s\ndiff=%s\nrunner=%s\nparser=%s\n",
+		"review_fix_check_effect_v2\ngeneration=%s\nprotocol=%s\nordinal=%d\ncheck=%s\ncheck_ordinal=%d\ncommit=%s\ntree=%s\ndiff=%s\nrunner=%s\nparser=%s\nrebase_epoch=%d\n",
 		state.generation, state.protocol.digest, fix.ordinal, check.id, checkOrdinal,
-		fix.commit.commit, fix.commit.tree, fix.commit.diff.digest, check.runner, check.parser,
+		fix.commit.commit, fix.commit.tree, fix.commit.diff.digest, check.runner, check.parser, state.rebaseEpoch,
 	)))
 }
 
@@ -445,8 +591,9 @@ func completedReviewFixEffect(state ReviewFixState, index int) (ReviewFixComplet
 	}
 	fix := state.fixes[index]
 	bindings := []byte(fmt.Sprintf(
-		"review_fix_complete_v2\ngeneration=%s\nprotocol=%s\nordinal=%d\nreservation=%s\nintent=%s\ncommit=%s\n",
+		"review_fix_complete_v2\ngeneration=%s\nprotocol=%s\nordinal=%d\nreservation=%s\nintent=%s\ncommit=%s\nrebase_epoch=%d\n",
 		state.generation, state.protocol.digest, fix.ordinal, fix.reservationKey, fix.intentKey, fix.commit.evidence,
+		state.rebaseEpoch,
 	))
 	for checkIndex, check := range fix.checks {
 		bindings = append(bindings, []byte(fmt.Sprintf("check_%d=%s\n", checkIndex+1, check.evidence))...)
@@ -473,8 +620,12 @@ func reviewFixReservationKey(
 
 func validateReviewFixState(state ReviewFixState) error {
 	if state.generation.IsZero() || state.base.IsZero() || state.protocol.digest.IsZero() ||
-		state.maximum == 0 || len(state.fixes) > int(state.maximum) {
+		state.maximum == 0 || len(state.fixes) > int(state.maximum) || state.checkingFix < -1 ||
+		state.checkingFix >= len(state.fixes) {
 		return fmt.Errorf("review-fix state requires generation, base, protocol, and positive budget")
+	}
+	if state.checkingFix >= 0 && state.rebaseEpoch == 0 {
+		return fmt.Errorf("review-fix check revalidation requires a rebase epoch")
 	}
 	parent := state.base
 	for index, fix := range state.fixes {
@@ -492,7 +643,7 @@ func validateReviewFixState(state ReviewFixState) error {
 		if err != nil {
 			return err
 		}
-		if index < len(state.fixes)-1 && fix.phase != ReviewFixComplete {
+		if index < len(state.fixes)-1 && fix.phase != ReviewFixComplete && state.checkingFix != index {
 			return fmt.Errorf("review-fix %d is incomplete before a later reservation", ordinal)
 		}
 		switch fix.phase {
@@ -502,6 +653,15 @@ func validateReviewFixState(state ReviewFixState) error {
 				return fmt.Errorf("reserved review-fix %d carries premature intent or evidence", ordinal)
 			}
 		case ReviewFixAwaitingCommit, ReviewFixAwaitingChecks, ReviewFixComplete:
+			if state.checkingFix >= 0 {
+				expectedPhase := ReviewFixComplete
+				if index == state.checkingFix {
+					expectedPhase = ReviewFixAwaitingChecks
+				}
+				if fix.phase != expectedPhase {
+					return fmt.Errorf("review-fix %d has an invalid phase during rebase check revalidation", ordinal)
+				}
+			}
 			if fix.inspection.stateDigest.IsZero() || fix.intentKey.IsZero() {
 				return fmt.Errorf("review-fix %d is missing its durable intent", ordinal)
 			}
@@ -544,7 +704,11 @@ func validateReviewFixState(state ReviewFixState) error {
 				return fmt.Errorf("review-fix %d awaiting-checks phase has no pending check", ordinal)
 			}
 			if fix.phase == ReviewFixComplete && len(fix.checks) != len(step.checks) {
-				return fmt.Errorf("completed review-fix %d has incomplete checks", ordinal)
+				if state.checkingFix < 0 || index < state.checkingFix ||
+					(index == state.checkingFix && len(fix.checks) >= len(step.checks)) ||
+					(index > state.checkingFix && len(fix.checks) != 0) {
+					return fmt.Errorf("completed review-fix %d has incomplete checks", ordinal)
+				}
 			}
 		}
 		if !fix.commit.commit.IsZero() {

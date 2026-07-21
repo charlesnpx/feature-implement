@@ -2,6 +2,7 @@ package workspace_test
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -338,6 +339,26 @@ func TestGoTestParserRejectsUncorrelatedBuildsAndAbnormalTermination(t *testing.
 			},
 			want: workspace.CheckOutcomeMalformedOutput,
 		},
+		{
+			name:     "failed test later passes",
+			exitCode: 1,
+			lines: []string{
+				`{"Action":"fail","Package":"example/pkg","Test":"TestExpected"}`,
+				`{"Action":"pass","Package":"example/pkg","Test":"TestExpected"}`,
+				`{"Action":"fail","Package":"example/pkg"}`,
+			},
+			want: workspace.CheckOutcomeMalformedOutput,
+		},
+		{
+			name:     "failed test later skips",
+			exitCode: 1,
+			lines: []string{
+				`{"Action":"fail","Package":"example/pkg","Test":"TestExpected"}`,
+				`{"Action":"skip","Package":"example/pkg","Test":"TestExpected"}`,
+				`{"Action":"fail","Package":"example/pkg"}`,
+			},
+			want: workspace.CheckOutcomeMalformedOutput,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -383,6 +404,24 @@ func TestGoTestParserRecognizesRealGo126CompilationFailure(t *testing.T) {
 	outcome, err := workspace.ParseCheckOutcome(workspace.CheckParserGoTestJSON, result)
 	if err != nil || outcome.Kind() != workspace.CheckOutcomeCompilationFailed {
 		t.Fatalf("real compilation outcome = %#v err=%v stdout=%s stderr=%s", outcome, err, stdout.String(), stderr.String())
+	}
+}
+
+func TestGoTestParserAllowsRepeatedTestRunsWithDistinctTerminals(t *testing.T) {
+	output := []byte(strings.Join([]string{
+		`{"Action":"run","Package":"example/pkg","Test":"TestRepeated"}`,
+		`{"Action":"pass","Package":"example/pkg","Test":"TestRepeated"}`,
+		`{"Action":"run","Package":"example/pkg","Test":"TestRepeated"}`,
+		`{"Action":"pass","Package":"example/pkg","Test":"TestRepeated"}`,
+		`{"Action":"pass","Package":"example/pkg"}`,
+		"",
+	}, "\n"))
+	result := mustCheckResult(
+		t, workspace.CheckExited, 0, "", output, nil, workspace.StrictCheckIsolationProof(),
+	)
+	outcome, err := workspace.ParseCheckOutcome(workspace.CheckParserGoTestJSON, result)
+	if err != nil || outcome.Kind() != workspace.CheckOutcomePassed {
+		t.Fatalf("repeated test-run outcome = %#v err=%v", outcome, err)
 	}
 }
 
@@ -754,6 +793,115 @@ func TestCommitEvidenceRejectsMergeCommitsAndReviewFixBudgetIsDurableState(t *te
 	reduction, err = workspace.ReduceReviewFix(reduction.State(), record)
 	if err != nil || reduction.State().Phase() != workspace.ReviewFixComplete || reduction.State().Head() != mustGitObject(t, '3') {
 		t.Fatalf("completed review fix = %#v err=%v", reduction.State(), err)
+	}
+}
+
+func TestReviewFixRebaseRerunsChecksForEveryRewrittenFix(t *testing.T) {
+	generation := workspace.DigestBytes([]byte("generation"))
+	_, check := protocolTestStep(t, "unused", "Unused")
+	paths, _ := workspace.NewCommitPathPolicy([]string{"src/**"}, nil)
+	protocol, err := workspace.NewReviewFixProtocol(
+		"Review fix", workspace.CommitBodyRequired, paths, []workspace.CommitCheck{check},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := workspace.NewReviewFixState(generation, mustGitObject(t, '1'), protocol, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	process := mustCheckResult(
+		t, workspace.CheckExited, 0, "", []byte("{\"Action\":\"pass\",\"Package\":\"example/pkg\"}\n"), nil,
+		workspace.StrictCheckIsolationProof(),
+	)
+	outcome, err := workspace.ParseCheckOutcome(workspace.CheckParserGoTestJSON, process)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var original []workspace.CommitObjectEvidence
+	for index := 0; index < 2; index++ {
+		ordinal := uint16(index + 1)
+		step, _ := protocol.Step(ordinal)
+		parent := state.Head()
+		diff := addedDiff(t, fmt.Sprintf("src/review-%d.go", ordinal), mustGitObject(t, byte('2'+index*3)))
+		tree := mustGitObject(t, byte('3'+index*3))
+		commit := mustGitObject(t, byte('4'+index*3))
+		reserve, _ := workspace.NewReserveReviewFix(ordinal, parent)
+		reduction, err := workspace.ReduceReviewFix(state, reserve)
+		if err != nil {
+			t.Fatal(err)
+		}
+		staged, _ := workspace.NewStagedCommitInspection(parent, tree, diff, nil, nil, nil)
+		stage, _ := workspace.NewStageReviewFix(ordinal, staged, fmt.Sprintf("accepted feedback %d", ordinal))
+		reduction, err = workspace.ReduceReviewFix(reduction.State(), stage)
+		if err != nil {
+			t.Fatal(err)
+		}
+		evidence, _ := workspace.NewCommitObjectEvidence(
+			generation, step.ID(), ordinal, commit, parent, tree, step.Message().Subject(),
+			fmt.Sprintf("accepted feedback %d", ordinal), diff, step.Paths().Digest(),
+		)
+		recordCommit, _ := workspace.NewRecordReviewFixCommit(ordinal, evidence)
+		reduction, err = workspace.ReduceReviewFix(reduction.State(), recordCommit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkEvidence, _ := workspace.NewCommitCheckEvidence(generation, step, check, evidence, process, outcome)
+		recordCheck, _ := workspace.NewRecordReviewFixCheck(ordinal, checkEvidence)
+		reduction, err = workspace.ReduceReviewFix(reduction.State(), recordCheck)
+		if err != nil {
+			t.Fatal(err)
+		}
+		state = reduction.State()
+		original = append(original, evidence)
+	}
+
+	newBase := mustGitObject(t, '8')
+	firstStep, _ := protocol.Step(1)
+	secondStep, _ := protocol.Step(2)
+	first := original[0]
+	second := original[1]
+	firstRebased, _ := workspace.NewCommitObjectEvidence(
+		generation, firstStep.ID(), 1, mustGitObject(t, '9'), newBase, mustGitObject(t, 'a'),
+		first.Subject(), first.Body(), first.Diff(), first.PathPolicyDigest(),
+	)
+	secondRebased, _ := workspace.NewCommitObjectEvidence(
+		generation, secondStep.ID(), 2, mustGitObject(t, 'b'), firstRebased.Commit(), mustGitObject(t, 'c'),
+		second.Subject(), second.Body(), second.Diff(), second.PathPolicyDigest(),
+	)
+	remap, _ := workspace.NewRemapRebasedReviewFixes(
+		newBase, []workspace.CommitObjectEvidence{firstRebased, secondRebased},
+	)
+	reduction, err := workspace.ReduceReviewFix(state, remap)
+	if err != nil || reduction.State().Phase() != workspace.ReviewFixAwaitingChecks ||
+		reduction.State().RebaseEpoch() != 1 {
+		t.Fatalf("remapped review fixes state=%#v err=%v", reduction.State(), err)
+	}
+	state = reduction.State()
+	for index, commit := range []workspace.CommitObjectEvidence{firstRebased, secondRebased} {
+		effects, err := workspace.PendingReviewFixEffects(state)
+		if err != nil || len(effects) != 1 {
+			t.Fatalf("pending rebased check %d effects=%#v err=%v", index+1, effects, err)
+		}
+		effect, ok := effects[0].(workspace.RunConfiguredCheckEffect)
+		if !ok || effect.StepOrdinal() != uint16(index+1) || effect.Commit().Commit() != commit.Commit() {
+			t.Fatalf("pending rebased check %d = %#v", index+1, effects[0])
+		}
+		step, _ := protocol.Step(uint16(index + 1))
+		evidence, _ := workspace.NewCommitCheckEvidence(generation, step, check, commit, process, outcome)
+		record, _ := workspace.NewRecordReviewFixCheck(uint16(index+1), evidence)
+		reduction, err = workspace.ReduceReviewFix(state, record)
+		if err != nil {
+			t.Fatalf("record rebased check %d: %v", index+1, err)
+		}
+		state = reduction.State()
+	}
+	fixes := state.Fixes()
+	if state.Phase() != workspace.ReviewFixComplete || state.Head() != secondRebased.Commit() ||
+		len(fixes) != 2 || fixes[0].Checks()[0].Commit() != firstRebased.Commit() ||
+		fixes[1].Checks()[0].Commit() != secondRebased.Commit() {
+		t.Fatalf("revalidated review-fix chain = %#v", state)
 	}
 }
 

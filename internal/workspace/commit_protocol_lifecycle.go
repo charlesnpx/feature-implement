@@ -155,7 +155,7 @@ func ExecuteAttemptCommitStep(
 				return result, fmt.Errorf("configured check %s requires an isolated runner", effect.check.id)
 			}
 			if err := shell.git.VerifyCleanWorktree(
-				ctx, result.attempt.worktree, result.attempt.branch, effect.commit.commit,
+				ctx, result.attempt.worktree, result.attempt.branch, result.attempt.verifiedHead,
 			); err != nil {
 				return result, err
 			}
@@ -182,7 +182,7 @@ func ExecuteAttemptCommitStep(
 				)
 			}
 			if err := shell.git.VerifyCleanWorktree(
-				ctx, result.attempt.worktree, result.attempt.branch, effect.commit.commit,
+				ctx, result.attempt.worktree, result.attempt.branch, result.attempt.verifiedHead,
 			); err != nil {
 				return result, fmt.Errorf("configured check %s changed Git state: %w", effect.check.id, err)
 			}
@@ -234,114 +234,258 @@ func RecordAttemptCommitRebase(
 	if journal == nil || shell.git == nil || attemptID.IsZero() || newBase.IsZero() || newHead.IsZero() || occurredAt.IsZero() {
 		return AttemptCommitProtocolResult{}, fmt.Errorf("commit rebase requires journal, Git shell, attempt, objects, and occurrence time")
 	}
-	result, err := loadAttemptCommitProtocolResult(journal, attemptID, true, nil)
-	if err != nil {
-		return result, err
-	}
-	alreadyRecorded := result.protocol.base == newBase && result.protocol.Head() == newHead
-	if result.protocol.phase == CommitProtocolAwaitingChecks && alreadyRecorded && result.protocol.rebaseEpoch > 0 {
-		// A crash can occur after the rebase event is durable but before the
-		// caller observes success. The remapped checks are intentionally still
-		// pending. Re-prove the recorded Git mapping before treating the retry
-		// as a successful no-op so branch, worktree, or history drift cannot be
-		// hidden by journal idempotency.
-		if err := verifyRecordedAttemptCommitRebase(ctx, shell, result, newBase, newHead); err != nil {
-			return result, err
-		}
-		return result, nil
-	}
-	if result.protocol.phase != CommitProtocolReady && result.protocol.phase != CommitProtocolComplete {
-		return result, fmt.Errorf("commit rebase is blocked by an in-flight commit or check")
-	}
-	if alreadyRecorded {
-		if result.protocol.rebaseEpoch > 0 {
-			if err := verifyRecordedAttemptCommitRebase(ctx, shell, result, newBase, newHead); err != nil {
-				return result, err
-			}
-		}
-		return result, nil
-	}
-	if err := shell.git.VerifyCleanWorktree(ctx, result.attempt.worktree, result.attempt.branch, newHead); err != nil {
-		return result, err
-	}
-	inspections, err := shell.git.InspectFirstParentRange(ctx, result.attempt.worktree, newBase, newHead)
-	if err != nil {
-		return result, err
-	}
-	if len(inspections) != len(result.protocol.steps) {
-		return result, fmt.Errorf("rebased commit count %d does not match recorded count %d", len(inspections), len(result.protocol.steps))
-	}
-	commits := make([]CommitObjectEvidence, 0, len(inspections))
-	for index, inspection := range inspections {
-		evidence, err := inspection.Evidence(
-			definition.generation, result.protocol.protocol.steps[index], uint16(index+1),
-		)
-		if err != nil {
-			return result, err
-		}
-		commits = append(commits, evidence)
-	}
-	transition, err := NewRemapRebasedCommits(newBase, commits)
-	if err != nil {
-		return result, err
-	}
-	if _, err := ReduceCommitProtocol(result.protocol, transition); err != nil {
-		return result, err
-	}
-	event, err := NewCommitProtocolRebasedJournalEvent(
-		definition.workspace.id, definition.generation, attemptID,
-		result.protocol.protocol.digest, newBase, commits,
+	attempt, err := recordAttemptProtocolChainRebase(
+		ctx, journal, definition, shell, attemptID, newBase, newHead, occurredAt,
+		true, false,
+		func() error { return injectCommitProtocolFault(fault, CommitFaultAfterRebaseRecord) },
 	)
+	result := commitProtocolResultFromAttempt(attempt)
 	if err != nil {
 		return result, err
 	}
-	if _, err := appendCommitProtocolEvent(journal, event, occurredAt); err != nil {
-		return result, err
+	if !result.configured {
+		return result, fmt.Errorf("attempt %s has no commit protocol", attemptID)
 	}
-	if err := injectCommitProtocolFault(fault, CommitFaultAfterRebaseRecord); err != nil {
-		return loadAttemptCommitProtocolResult(journal, attemptID, true, err)
-	}
-	return loadAttemptCommitProtocolResult(journal, attemptID, true, nil)
+	return result, nil
 }
 
-func verifyRecordedAttemptCommitRebase(
+func recordAttemptProtocolChainRebase(
+	ctx context.Context,
+	journal *WorkspaceJournal,
+	definition EffectiveWorkspaceDefinition,
+	shell CommitProtocolShell,
+	attemptID ID,
+	newBase, newHead GitObjectID,
+	occurredAt time.Time,
+	requireImplementation, requireReviewFixes bool,
+	afterRecord func() error,
+) (RuntimeAttemptProjection, error) {
+	_, runtime, err := readAttemptRuntime(journal, definition)
+	if err != nil {
+		return RuntimeAttemptProjection{}, err
+	}
+	attempt, exists := runtime.Attempt(attemptID)
+	if !exists {
+		return RuntimeAttemptProjection{}, fmt.Errorf("attempt %s is not reserved", attemptID)
+	}
+	if attempt.phase != AttemptActive {
+		return attempt, fmt.Errorf("attempt %s must be active for commit rebase", attemptID)
+	}
+	if requireImplementation && attempt.commitProtocol == nil {
+		return attempt, fmt.Errorf("attempt %s has no commit protocol", attemptID)
+	}
+	if requireReviewFixes && attempt.reviewFixes == nil {
+		return attempt, fmt.Errorf("attempt %s has no review-fix chain", attemptID)
+	}
+	unit, err := executionForMergeUnit(definition.execution, attempt.mergeUnit)
+	if err != nil {
+		return attempt, err
+	}
+	if attempt.commitProtocol != nil {
+		protocol, configured := unit.CommitProtocol()
+		if !configured || protocol.digest != attempt.commitProtocol.protocol.digest {
+			return attempt, fmt.Errorf("attempt commit protocol does not match the active generation")
+		}
+	}
+	if attempt.reviewFixes != nil {
+		protocol, configured := unit.ReviewFixProtocol()
+		if !configured || protocol.digest != attempt.reviewFixes.protocol.digest ||
+			unit.policy.maxReviewFixes != attempt.reviewFixes.maximum {
+			return attempt, fmt.Errorf("attempt review-fix protocol does not match the active generation")
+		}
+	}
+	if attempt.commitProtocol == nil && attempt.reviewFixes == nil {
+		return attempt, fmt.Errorf("attempt %s has no recorded commit chain", attemptID)
+	}
+	recordedBase := GitObjectID{}
+	if attempt.commitProtocol != nil {
+		recordedBase = attempt.commitProtocol.base
+	} else {
+		recordedBase = attempt.reviewFixes.base
+	}
+	alreadyRecorded := recordedBase == newBase && attempt.verifiedHead == newHead
+	implementationRevalidation := attempt.commitProtocol != nil && alreadyRecorded &&
+		attempt.commitProtocol.phase == CommitProtocolAwaitingChecks && attempt.commitProtocol.rebaseEpoch > 0
+	if attempt.commitProtocol != nil && attempt.commitProtocol.phase != CommitProtocolReady &&
+		attempt.commitProtocol.phase != CommitProtocolComplete && !implementationRevalidation {
+		return attempt, fmt.Errorf("commit rebase is blocked by an in-flight commit or check")
+	}
+	reviewRevalidation := attempt.reviewFixes != nil && alreadyRecorded &&
+		attempt.reviewFixes.checkingFix >= 0 && attempt.reviewFixes.rebaseEpoch > 0
+	if attempt.reviewFixes != nil && !attempt.reviewFixes.Quiescent() && !reviewRevalidation {
+		return attempt, fmt.Errorf("commit rebase is blocked by an in-flight review fix or check")
+	}
+	if alreadyRecorded {
+		if err := verifyRecordedAttemptProtocolRebase(ctx, shell, attempt, newBase, newHead); err != nil {
+			return attempt, err
+		}
+		return attempt, nil
+	}
+	if err := shell.git.VerifyCleanWorktree(ctx, attempt.worktree, attempt.branch, newHead); err != nil {
+		return attempt, err
+	}
+	inspections, err := shell.git.InspectFirstParentRange(ctx, attempt.worktree, newBase, newHead)
+	if err != nil {
+		return attempt, err
+	}
+	implementationCount, reviewCount := 0, 0
+	if attempt.commitProtocol != nil {
+		implementationCount = len(attempt.commitProtocol.steps)
+	}
+	if attempt.reviewFixes != nil {
+		reviewCount = len(attempt.reviewFixes.fixes)
+	}
+	if implementationCount+reviewCount == 0 || len(inspections) != implementationCount+reviewCount {
+		return attempt, fmt.Errorf(
+			"rebased commit count %d does not match recorded count %d",
+			len(inspections), implementationCount+reviewCount,
+		)
+	}
+	implementationCommits := make([]CommitObjectEvidence, 0, implementationCount)
+	for index := 0; index < implementationCount; index++ {
+		evidence, err := inspections[index].Evidence(
+			definition.generation, attempt.commitProtocol.protocol.steps[index], uint16(index+1),
+		)
+		if err != nil {
+			return attempt, err
+		}
+		implementationCommits = append(implementationCommits, evidence)
+	}
+	reviewCommits := make([]CommitObjectEvidence, 0, reviewCount)
+	for index := 0; index < reviewCount; index++ {
+		step, err := attempt.reviewFixes.protocol.Step(uint16(index + 1))
+		if err != nil {
+			return attempt, err
+		}
+		evidence, err := inspections[implementationCount+index].Evidence(
+			definition.generation, step, uint16(index+1),
+		)
+		if err != nil {
+			return attempt, err
+		}
+		reviewCommits = append(reviewCommits, evidence)
+	}
+	implementationProtocol := Digest{}
+	chainHead := newBase
+	if attempt.commitProtocol != nil {
+		transition, err := NewRemapRebasedCommits(newBase, implementationCommits)
+		if err != nil {
+			return attempt, err
+		}
+		reduction, err := ReduceCommitProtocol(*attempt.commitProtocol, transition)
+		if err != nil {
+			return attempt, err
+		}
+		implementationProtocol = attempt.commitProtocol.protocol.digest
+		chainHead = reduction.State().Head()
+	}
+	reviewProtocol := Digest{}
+	if attempt.reviewFixes != nil {
+		transition, err := NewRemapRebasedReviewFixes(chainHead, reviewCommits)
+		if err != nil {
+			return attempt, err
+		}
+		if _, err := ReduceReviewFix(*attempt.reviewFixes, transition); err != nil {
+			return attempt, err
+		}
+		reviewProtocol = attempt.reviewFixes.protocol.digest
+	}
+	event, err := NewCommitProtocolChainRebasedJournalEvent(
+		definition.workspace.id, definition.generation, attemptID,
+		implementationProtocol, newBase, implementationCommits, reviewProtocol, reviewCommits,
+	)
+	if err != nil {
+		return attempt, err
+	}
+	if _, err := appendCommitProtocolEvent(journal, event, occurredAt); err != nil {
+		return attempt, err
+	}
+	_, runtime, loadErr := readAttemptRuntime(journal, definition)
+	if loadErr != nil {
+		return RuntimeAttemptProjection{}, loadErr
+	}
+	recorded, exists := runtime.Attempt(attemptID)
+	if !exists {
+		return RuntimeAttemptProjection{}, fmt.Errorf("attempt %s is missing after commit rebase", attemptID)
+	}
+	if afterRecord != nil {
+		if err := afterRecord(); err != nil {
+			return recorded, err
+		}
+	}
+	return recorded, nil
+}
+
+func verifyRecordedAttemptProtocolRebase(
 	ctx context.Context,
 	shell CommitProtocolShell,
-	result AttemptCommitProtocolResult,
+	attempt RuntimeAttemptProjection,
 	newBase, newHead GitObjectID,
 ) error {
 	if err := shell.git.VerifyCleanWorktree(
-		ctx, result.attempt.worktree, result.attempt.branch, newHead,
+		ctx, attempt.worktree, attempt.branch, newHead,
 	); err != nil {
 		return fmt.Errorf("verify recorded commit rebase worktree: %w", err)
 	}
 	inspections, err := shell.git.InspectFirstParentRange(
-		ctx, result.attempt.worktree, newBase, newHead,
+		ctx, attempt.worktree, newBase, newHead,
 	)
 	if err != nil {
 		return fmt.Errorf("verify recorded commit rebase range: %w", err)
 	}
-	if len(inspections) != len(result.protocol.steps) {
+	implementationCount, reviewCount := 0, 0
+	if attempt.commitProtocol != nil {
+		implementationCount = len(attempt.commitProtocol.steps)
+	}
+	if attempt.reviewFixes != nil {
+		reviewCount = len(attempt.reviewFixes.fixes)
+	}
+	if len(inspections) != implementationCount+reviewCount {
 		return fmt.Errorf(
 			"recorded rebased commit count %d no longer matches %d",
-			len(inspections), len(result.protocol.steps),
+			len(inspections), implementationCount+reviewCount,
 		)
 	}
-	for index, inspection := range inspections {
+	for index := 0; index < implementationCount; index++ {
+		inspection := inspections[index]
 		evidence, err := inspection.Evidence(
-			result.protocol.generation, result.protocol.protocol.steps[index], uint16(index+1),
+			attempt.commitProtocol.generation, attempt.commitProtocol.protocol.steps[index], uint16(index+1),
 		)
 		if err != nil {
 			return fmt.Errorf("re-prove recorded rebased commit %d: %w", index+1, err)
 		}
-		if evidence.evidence != result.protocol.steps[index].commit.evidence {
+		if evidence.evidence != attempt.commitProtocol.steps[index].commit.evidence {
 			return fmt.Errorf(
 				"recorded rebased commit step %s no longer matches Git evidence",
-				result.protocol.protocol.steps[index].id,
+				attempt.commitProtocol.protocol.steps[index].id,
 			)
 		}
 	}
+	for index := 0; index < reviewCount; index++ {
+		step, err := attempt.reviewFixes.protocol.Step(uint16(index + 1))
+		if err != nil {
+			return err
+		}
+		evidence, err := inspections[implementationCount+index].Evidence(
+			attempt.reviewFixes.generation, step, uint16(index+1),
+		)
+		if err != nil {
+			return fmt.Errorf("re-prove recorded rebased review fix %d: %w", index+1, err)
+		}
+		if evidence.evidence != attempt.reviewFixes.fixes[index].commit.evidence {
+			return fmt.Errorf("recorded rebased review fix %d no longer matches Git evidence", index+1)
+		}
+	}
 	return nil
+}
+
+func commitProtocolResultFromAttempt(attempt RuntimeAttemptProjection) AttemptCommitProtocolResult {
+	result := AttemptCommitProtocolResult{attempt: cloneRuntimeAttempt(attempt)}
+	if attempt.commitProtocol != nil {
+		result.configured = true
+		result.protocol = cloneCommitProtocolState(*attempt.commitProtocol)
+	}
+	return result
 }
 
 func ensureAttemptCommitProtocolStarted(

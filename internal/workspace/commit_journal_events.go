@@ -260,13 +260,15 @@ func (event CommitCheckRecordedJournalEvent) Evidence() CommitCheckEvidence {
 }
 
 type CommitProtocolRebasedJournalEvent struct {
-	workspaceID    ID
-	generation     Digest
-	attemptID      ID
-	protocolDigest Digest
-	base           GitObjectID
-	commits        []CommitObjectEvidence
-	mappingDigest  Digest
+	workspaceID          ID
+	generation           Digest
+	attemptID            ID
+	protocolDigest       Digest
+	base                 GitObjectID
+	commits              []CommitObjectEvidence
+	reviewProtocolDigest Digest
+	reviewCommits        []CommitObjectEvidence
+	mappingDigest        Digest
 }
 
 func NewCommitProtocolRebasedJournalEvent(
@@ -277,10 +279,26 @@ func NewCommitProtocolRebasedJournalEvent(
 	base GitObjectID,
 	commits []CommitObjectEvidence,
 ) (CommitProtocolRebasedJournalEvent, error) {
+	return NewCommitProtocolChainRebasedJournalEvent(
+		workspaceID, generation, attemptID, protocolDigest, base, commits, Digest{}, nil,
+	)
+}
+
+func NewCommitProtocolChainRebasedJournalEvent(
+	workspaceID ID,
+	generation Digest,
+	attemptID ID,
+	protocolDigest Digest,
+	base GitObjectID,
+	commits []CommitObjectEvidence,
+	reviewProtocolDigest Digest,
+	reviewCommits []CommitObjectEvidence,
+) (CommitProtocolRebasedJournalEvent, error) {
 	event := CommitProtocolRebasedJournalEvent{
 		workspaceID: workspaceID, generation: generation, attemptID: attemptID,
 		protocolDigest: protocolDigest, base: base,
-		commits: cloneCommitObjects(commits),
+		commits: cloneCommitObjects(commits), reviewProtocolDigest: reviewProtocolDigest,
+		reviewCommits: cloneCommitObjects(reviewCommits),
 	}
 	digest, err := digestCommitRebaseMapping(event)
 	if err != nil {
@@ -350,12 +368,24 @@ func (CommitProtocolRebasedJournalEvent) eventType() JournalEventType {
 func (event CommitProtocolRebasedJournalEvent) boundGeneration() Digest { return event.generation }
 func (event CommitProtocolRebasedJournalEvent) validate() error {
 	if event.workspaceID.IsZero() || event.generation.IsZero() || event.attemptID.IsZero() ||
-		event.protocolDigest.IsZero() || event.base.IsZero() || len(event.commits) == 0 || event.mappingDigest.IsZero() {
+		event.base.IsZero() || event.mappingDigest.IsZero() {
 		return fmt.Errorf("commit protocol rebase requires complete mapping bindings")
+	}
+	hasImplementation := !event.protocolDigest.IsZero() || len(event.commits) != 0
+	hasReviewFixes := !event.reviewProtocolDigest.IsZero() || len(event.reviewCommits) != 0
+	if !hasImplementation && !hasReviewFixes ||
+		hasImplementation && (event.protocolDigest.IsZero() || len(event.commits) == 0) ||
+		hasReviewFixes && (event.reviewProtocolDigest.IsZero() || len(event.reviewCommits) == 0) {
+		return fmt.Errorf("commit protocol rebase requires complete implementation or review-fix mappings")
 	}
 	for _, commit := range event.commits {
 		if commit.generation != event.generation || commit.evidence.IsZero() {
 			return fmt.Errorf("rebased commit evidence does not match generation")
+		}
+	}
+	for _, commit := range event.reviewCommits {
+		if commit.generation != event.generation || commit.evidence.IsZero() {
+			return fmt.Errorf("rebased review-fix evidence does not match generation")
 		}
 	}
 	digest, err := digestCommitRebaseMapping(event)
@@ -372,21 +402,46 @@ func (event CommitProtocolRebasedJournalEvent) Base() GitObjectID      { return 
 func (event CommitProtocolRebasedJournalEvent) Commits() []CommitObjectEvidence {
 	return cloneCommitObjects(event.commits)
 }
+func (event CommitProtocolRebasedJournalEvent) ReviewProtocolDigest() Digest {
+	return event.reviewProtocolDigest
+}
+func (event CommitProtocolRebasedJournalEvent) ReviewCommits() []CommitObjectEvidence {
+	return cloneCommitObjects(event.reviewCommits)
+}
 func (event CommitProtocolRebasedJournalEvent) MappingDigest() Digest { return event.mappingDigest }
 
 func digestCommitRebaseMapping(event CommitProtocolRebasedJournalEvent) (Digest, error) {
-	if event.generation.IsZero() || event.protocolDigest.IsZero() || event.base.IsZero() || len(event.commits) == 0 {
+	if event.generation.IsZero() || event.base.IsZero() ||
+		(event.protocolDigest.IsZero() || len(event.commits) == 0) &&
+			(event.reviewProtocolDigest.IsZero() || len(event.reviewCommits) == 0) {
 		return Digest{}, fmt.Errorf("commit rebase mapping is incomplete")
 	}
-	bindings := []byte(fmt.Sprintf(
-		"commit_rebase_mapping_v2\ngeneration=%s\nprotocol=%s\nbase=%s\n",
-		event.generation, event.protocolDigest, event.base,
-	))
+	var bindings []byte
+	if len(event.commits) != 0 {
+		bindings = []byte(fmt.Sprintf(
+			"commit_rebase_mapping_v2\ngeneration=%s\nprotocol=%s\nbase=%s\n",
+			event.generation, event.protocolDigest, event.base,
+		))
+	} else {
+		bindings = []byte(fmt.Sprintf(
+			"protocol_chain_rebase_mapping_v2\ngeneration=%s\nbase=%s\n",
+			event.generation, event.base,
+		))
+	}
 	for index, commit := range event.commits {
 		if commit.evidence.IsZero() {
 			return Digest{}, fmt.Errorf("rebased commit %d lacks evidence digest", index+1)
 		}
 		bindings = append(bindings, []byte(fmt.Sprintf("commit_%d=%s\n", index+1, commit.evidence))...)
+	}
+	if len(event.reviewCommits) != 0 {
+		bindings = append(bindings, []byte(fmt.Sprintf("review_protocol=%s\n", event.reviewProtocolDigest))...)
+		for index, commit := range event.reviewCommits {
+			if commit.evidence.IsZero() {
+				return Digest{}, fmt.Errorf("rebased review fix %d lacks evidence digest", index+1)
+			}
+			bindings = append(bindings, []byte(fmt.Sprintf("review_commit_%d=%s\n", index+1, commit.evidence))...)
+		}
 	}
 	return DigestBytes(bindings), nil
 }
@@ -450,8 +505,10 @@ func commitJournalEventResources(event WorkspaceJournalEvent) ([]JournalResource
 		writes = append([]JournalResource(nil), reads...)
 	case CommitProtocolRebasedJournalEvent:
 		workspaceID, generation, attemptID = event.workspaceID, event.generation, event.attemptID
-		protocol := CommitProtocolJournalResource(attemptID)
-		reads = []JournalResource{AttemptJournalResource(attemptID), protocol}
+		reads = []JournalResource{AttemptJournalResource(attemptID)}
+		if len(event.commits) != 0 {
+			reads = append(reads, CommitProtocolJournalResource(attemptID))
+		}
 		for _, commit := range event.commits {
 			reads = append(
 				reads,
@@ -459,7 +516,20 @@ func commitJournalEventResources(event WorkspaceJournalEvent) ([]JournalResource
 				EvidenceJournalResource(commit.evidence),
 			)
 		}
+		if len(event.reviewCommits) != 0 {
+			reads = append(reads, ReviewFixJournalResource(attemptID))
+		}
+		for _, commit := range event.reviewCommits {
+			reads = append(
+				reads,
+				ReviewFixStepJournalResource(attemptID, commit.stepID, commit.ordinal),
+				EvidenceJournalResource(commit.evidence),
+			)
+		}
 		writes = append([]JournalResource(nil), reads...)
+		if len(event.reviewCommits) != 0 {
+			reads = append(reads, ReviewFixBudgetJournalResource(attemptID))
+		}
 	default:
 		return reviewFixJournalEventResources(event)
 	}
@@ -483,6 +553,7 @@ func cloneCommitJournalEvent(event WorkspaceJournalEvent) WorkspaceJournalEvent 
 		return value
 	case CommitProtocolRebasedJournalEvent:
 		value.commits = cloneCommitObjects(value.commits)
+		value.reviewCommits = cloneCommitObjects(value.reviewCommits)
 		return value
 	default:
 		return cloneReviewFixJournalEvent(event)

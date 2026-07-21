@@ -15,6 +15,7 @@ const (
 	ReviewFixFaultAfterCommitRecord ReviewFixFaultPoint = "after_commit_record"
 	ReviewFixFaultAfterCheckRun     ReviewFixFaultPoint = "after_check_run"
 	ReviewFixFaultAfterCheckRecord  ReviewFixFaultPoint = "after_check_record"
+	ReviewFixFaultAfterRebaseRecord ReviewFixFaultPoint = "after_rebase_record"
 )
 
 type ReviewFixFaultInjector func(ReviewFixFaultPoint) error
@@ -84,7 +85,7 @@ func ExecuteAttemptReviewFix(
 				return result, fmt.Errorf("review-fix %d retry body differs from durable intent", request.Ordinal)
 			}
 		}
-		if request.Ordinal < result.state.Used() || fix.phase == ReviewFixComplete {
+		if request.Ordinal < result.state.Used() || fix.phase == ReviewFixComplete && result.state.Quiescent() {
 			if err := shell.git.VerifyCleanWorktree(
 				ctx, result.attempt.worktree, result.attempt.branch, result.state.Head(),
 			); err != nil {
@@ -220,7 +221,7 @@ func ExecuteAttemptReviewFix(
 				return result, fmt.Errorf("review-fix check %s requires an isolated runner", effect.check.id)
 			}
 			if err := shell.git.VerifyCleanWorktree(
-				ctx, result.attempt.worktree, result.attempt.branch, effect.commit.commit,
+				ctx, result.attempt.worktree, result.attempt.branch, result.attempt.verifiedHead,
 			); err != nil {
 				return result, err
 			}
@@ -247,7 +248,7 @@ func ExecuteAttemptReviewFix(
 				)
 			}
 			if err := shell.git.VerifyCleanWorktree(
-				ctx, result.attempt.worktree, result.attempt.branch, effect.commit.commit,
+				ctx, result.attempt.worktree, result.attempt.branch, result.attempt.verifiedHead,
 			); err != nil {
 				return result, fmt.Errorf("review-fix check %s changed Git state: %w", effect.check.id, err)
 			}
@@ -262,7 +263,7 @@ func ExecuteAttemptReviewFix(
 			}
 			event, err := NewReviewFixCheckRecordedJournalEvent(
 				definition.workspace.id, definition.generation, request.AttemptID,
-				state.protocol.digest, request.Ordinal, effect.checkOrdinal,
+				state.protocol.digest, effect.stepOrdinal, effect.checkOrdinal,
 				effect.idempotencyKey, evidence,
 			)
 			if err != nil {
@@ -290,6 +291,38 @@ func ExecuteAttemptReviewFix(
 		ctx, result.attempt.worktree, result.attempt.branch, state.Head(),
 	); err != nil {
 		return result, fmt.Errorf("verify completed review-fix head: %w", err)
+	}
+	return result, nil
+}
+
+func RecordAttemptReviewFixRebase(
+	ctx context.Context,
+	journal *WorkspaceJournal,
+	definition EffectiveWorkspaceDefinition,
+	shell CommitProtocolShell,
+	attemptID ID,
+	newBase, newHead GitObjectID,
+	occurredAt time.Time,
+	fault ReviewFixFaultInjector,
+) (AttemptReviewFixResult, error) {
+	if journal == nil || shell.git == nil || attemptID.IsZero() || newBase.IsZero() || newHead.IsZero() || occurredAt.IsZero() {
+		return AttemptReviewFixResult{}, fmt.Errorf("review-fix rebase requires journal, Git shell, attempt, objects, and occurrence time")
+	}
+	attempt, err := recordAttemptProtocolChainRebase(
+		ctx, journal, definition, shell, attemptID, newBase, newHead, occurredAt,
+		false, true,
+		func() error { return injectReviewFixFault(fault, ReviewFixFaultAfterRebaseRecord) },
+	)
+	result := AttemptReviewFixResult{attempt: cloneRuntimeAttempt(attempt)}
+	if attempt.reviewFixes != nil {
+		result.configured = true
+		result.state = cloneReviewFixState(*attempt.reviewFixes)
+	}
+	if err != nil {
+		return result, err
+	}
+	if !result.configured {
+		return result, fmt.Errorf("attempt %s has no review-fix chain", attemptID)
 	}
 	return result, nil
 }
