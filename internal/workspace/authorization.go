@@ -39,32 +39,36 @@ func (frontier AuthorizationFrontier) Base() GitObjectID { return frontier.base 
 func (frontier AuthorizationFrontier) Head() GitObjectID { return frontier.head }
 
 type StandingGrantScopeOptions struct {
-	WorkspaceID   ID
-	Repository    RepositoryIdentity
-	Remote        string
-	Generation    Digest
-	SerialSegment ID
-	Frontier      AuthorizationFrontier
-	Actions       []StandingAuthorizationAction
-	ExpiresAt     time.Time
-	Epoch         uint64
-	PullRequest   PullRequestIdentity
+	WorkspaceID                 ID
+	Repository                  RepositoryIdentity
+	Remote                      string
+	Generation                  Digest
+	SerialSegment               ID
+	Frontier                    AuthorizationFrontier
+	Actions                     []StandingAuthorizationAction
+	ExpiresAt                   time.Time
+	Epoch                       uint64
+	PullRequest                 PullRequestIdentity
+	RequiresProviderPullRequest bool
 }
 
 // StandingGrantScope is exact and immutable. A pre-PR scope has no pull
 // request identity; only a provider-derived result can create the derived
-// post-PR grant used for review-fix pushes and merge.
+// post-PR grant used for review-fix pushes and merge. A scope marked as
+// requiring that identity is an inert derivation seed until verification
+// produces the PR-bound child.
 type StandingGrantScope struct {
-	workspaceID   ID
-	repository    RepositoryIdentity
-	remote        string
-	generation    Digest
-	serialSegment ID
-	frontier      AuthorizationFrontier
-	actions       []StandingAuthorizationAction
-	expiresAt     time.Time
-	epoch         uint64
-	pullRequest   PullRequestIdentity
+	workspaceID                 ID
+	repository                  RepositoryIdentity
+	remote                      string
+	generation                  Digest
+	serialSegment               ID
+	frontier                    AuthorizationFrontier
+	actions                     []StandingAuthorizationAction
+	expiresAt                   time.Time
+	epoch                       uint64
+	pullRequest                 PullRequestIdentity
+	requiresProviderPullRequest bool
 }
 
 func NewStandingGrantScope(options StandingGrantScopeOptions) (StandingGrantScope, error) {
@@ -103,6 +107,7 @@ func NewStandingGrantScope(options StandingGrantScopeOptions) (StandingGrantScop
 		generation: options.Generation, serialSegment: options.SerialSegment,
 		frontier: options.Frontier, actions: actions, expiresAt: options.ExpiresAt.UTC(),
 		epoch: options.Epoch, pullRequest: options.PullRequest,
+		requiresProviderPullRequest: options.RequiresProviderPullRequest,
 	}, nil
 }
 
@@ -119,6 +124,9 @@ func (scope StandingGrantScope) Actions() []StandingAuthorizationAction {
 }
 func (scope StandingGrantScope) PullRequest() (PullRequestIdentity, bool) {
 	return scope.pullRequest, !scope.pullRequest.IsZero()
+}
+func (scope StandingGrantScope) RequiresProviderPullRequest() bool {
+	return scope.requiresProviderPullRequest
 }
 func (scope StandingGrantScope) Allows(action StandingAuthorizationAction) bool {
 	for _, candidate := range scope.actions {
@@ -256,6 +264,7 @@ func deriveStandingGrantPullRequestFrontierAdvance(
 		newScope.workspaceID != priorScope.workspaceID || newScope.repository != priorScope.repository ||
 		newScope.remote != priorScope.remote || newScope.generation != priorScope.generation ||
 		newScope.serialSegment != priorScope.serialSegment || newScope.epoch != priorScope.epoch ||
+		!newScope.requiresProviderPullRequest ||
 		!newScope.Allows(StandingAuthorizationPush) || newScope.Allows(StandingAuthorizationOpenPullRequest) {
 		return StandingGrant{}, fmt.Errorf("pull-request frontier advance does not bind the durable identity and exact old/new heads")
 	}
@@ -1019,6 +1028,10 @@ func (evaluator *AuthorizationEvaluator) evaluate(
 	}
 	matches := make([]StandingGrant, 0, 1)
 	for _, grant := range state.grants {
+		if standingGrantIsSuperseded(state.grants, grant.grantID) ||
+			standingGrantIsUnboundAfterPullRequest(state.grants, grant) {
+			continue
+		}
 		if standingGrantMatchesRequest(grant, request, now.UTC()) {
 			matches = append(matches, grant)
 		}
@@ -1048,6 +1061,43 @@ func (evaluator *AuthorizationEvaluator) evaluate(
 		return AuthorizationCapability{}, fmt.Errorf("authorization capability cannot be canonically bound")
 	}
 	return capability, nil
+}
+
+// standingGrantIsUnboundAfterPullRequest prevents a later generic signed push
+// grant from reopening a zero-identity path after this exact serial segment has
+// established provider-derived PR identity. Review-fix dispatch must use the
+// PR-bound frontier successor even if an unmarked seed was also recorded.
+func standingGrantIsUnboundAfterPullRequest(grants []StandingGrant, grant StandingGrant) bool {
+	if !grant.scope.pullRequest.IsZero() {
+		return false
+	}
+	for _, candidate := range grants {
+		if candidate.scope.pullRequest.IsZero() {
+			continue
+		}
+		if candidate.scope.workspaceID == grant.scope.workspaceID &&
+			candidate.scope.repository == grant.scope.repository &&
+			candidate.scope.remote == grant.scope.remote &&
+			candidate.scope.generation == grant.scope.generation &&
+			candidate.scope.serialSegment == grant.scope.serialSegment &&
+			candidate.scope.epoch == grant.scope.epoch {
+			return true
+		}
+	}
+	return false
+}
+
+// standingGrantIsSuperseded keeps the signed and provider-derived evidence in
+// the durable projection while making lineage transitions one-way for future
+// dispatch. A provider-derived child shadows its signed seed, and a frontier
+// successor shadows the exact prior PR-bound grant.
+func standingGrantIsSuperseded(grants []StandingGrant, grantID Digest) bool {
+	for _, candidate := range grants {
+		if candidate.parentGrantID == grantID || candidate.priorDerivedGrantID == grantID {
+			return true
+		}
+	}
+	return false
 }
 
 func capabilityDigest(capability AuthorizationCapability) Digest {
@@ -1093,6 +1143,9 @@ func standingGrantMatchesRequest(grant StandingGrant, request AuthorizationReque
 		return false
 	}
 	if scope.pullRequest.IsZero() {
+		if scope.requiresProviderPullRequest {
+			return false
+		}
 		return request.pullRequest.IsZero() && request.action != StandingAuthorizationMerge
 	}
 	if request.pullRequest != scope.pullRequest {
@@ -1108,18 +1161,19 @@ func canonicalStandingGrantScope(scope StandingGrantScope) ([]byte, error) {
 		return nil, fmt.Errorf("standing grant scope is incomplete")
 	}
 	type scopeJSON struct {
-		SchemaVersion int                           `json:"schema_version"`
-		WorkspaceID   string                        `json:"workspace_id"`
-		Repository    string                        `json:"repository"`
-		Remote        string                        `json:"remote"`
-		Generation    string                        `json:"generation"`
-		SerialSegment string                        `json:"serial_segment"`
-		Base          string                        `json:"base"`
-		Head          string                        `json:"head"`
-		Actions       []StandingAuthorizationAction `json:"actions"`
-		ExpiresAt     string                        `json:"expires_at"`
-		Epoch         uint64                        `json:"epoch"`
-		PullRequest   *controlPlanePullRequestWire  `json:"pull_request,omitempty"`
+		SchemaVersion               int                           `json:"schema_version"`
+		WorkspaceID                 string                        `json:"workspace_id"`
+		Repository                  string                        `json:"repository"`
+		Remote                      string                        `json:"remote"`
+		Generation                  string                        `json:"generation"`
+		SerialSegment               string                        `json:"serial_segment"`
+		Base                        string                        `json:"base"`
+		Head                        string                        `json:"head"`
+		Actions                     []StandingAuthorizationAction `json:"actions"`
+		ExpiresAt                   string                        `json:"expires_at"`
+		Epoch                       uint64                        `json:"epoch"`
+		PullRequest                 *controlPlanePullRequestWire  `json:"pull_request,omitempty"`
+		RequiresProviderPullRequest bool                          `json:"requires_provider_pull_request,omitempty"`
 	}
 	wire := scopeJSON{
 		SchemaVersion: 2, WorkspaceID: scope.workspaceID.String(), Repository: scope.repository.String(),
@@ -1127,6 +1181,7 @@ func canonicalStandingGrantScope(scope StandingGrantScope) ([]byte, error) {
 		Base: scope.frontier.base.String(), Head: scope.frontier.head.String(),
 		Actions:   append([]StandingAuthorizationAction(nil), scope.actions...),
 		ExpiresAt: scope.expiresAt.UTC().Format(time.RFC3339Nano), Epoch: scope.epoch,
+		RequiresProviderPullRequest: scope.requiresProviderPullRequest,
 	}
 	if !scope.pullRequest.IsZero() {
 		wire.PullRequest = &controlPlanePullRequestWire{

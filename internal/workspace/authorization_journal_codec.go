@@ -7,17 +7,18 @@ import (
 )
 
 type standingGrantScopeWire struct {
-	WorkspaceID   string                        `json:"workspace_id"`
-	Repository    string                        `json:"repository"`
-	Remote        string                        `json:"remote"`
-	Generation    string                        `json:"generation"`
-	SerialSegment string                        `json:"serial_segment"`
-	Base          string                        `json:"base"`
-	Head          string                        `json:"head"`
-	Actions       []StandingAuthorizationAction `json:"actions"`
-	ExpiresAt     string                        `json:"expires_at"`
-	Epoch         uint64                        `json:"epoch"`
-	PullRequest   *controlPlanePullRequestWire  `json:"pull_request,omitempty"`
+	WorkspaceID                 string                        `json:"workspace_id"`
+	Repository                  string                        `json:"repository"`
+	Remote                      string                        `json:"remote"`
+	Generation                  string                        `json:"generation"`
+	SerialSegment               string                        `json:"serial_segment"`
+	Base                        string                        `json:"base"`
+	Head                        string                        `json:"head"`
+	Actions                     []StandingAuthorizationAction `json:"actions"`
+	ExpiresAt                   string                        `json:"expires_at"`
+	Epoch                       uint64                        `json:"epoch"`
+	PullRequest                 *controlPlanePullRequestWire  `json:"pull_request,omitempty"`
+	RequiresProviderPullRequest bool                          `json:"requires_provider_pull_request,omitempty"`
 }
 
 type authorizationGrantPayloadWire struct {
@@ -318,6 +319,7 @@ func standingGrantScopeToWire(scope StandingGrantScope) standingGrantScopeWire {
 		Base: scope.frontier.base.String(), Head: scope.frontier.head.String(),
 		Actions:   append([]StandingAuthorizationAction(nil), scope.actions...),
 		ExpiresAt: scope.expiresAt.UTC().Format(time.RFC3339Nano), Epoch: scope.epoch,
+		RequiresProviderPullRequest: scope.requiresProviderPullRequest,
 	}
 	if !scope.pullRequest.IsZero() {
 		wire.PullRequest = &controlPlanePullRequestWire{
@@ -376,6 +378,7 @@ func standingGrantScopeFromWire(wire standingGrantScopeWire) (StandingGrantScope
 		WorkspaceID: workspaceID, Repository: repository, Remote: wire.Remote, Generation: generation,
 		SerialSegment: segment, Frontier: frontier, Actions: wire.Actions,
 		ExpiresAt: expiresAt, Epoch: wire.Epoch, PullRequest: pullRequest,
+		RequiresProviderPullRequest: wire.RequiresProviderPullRequest,
 	})
 }
 

@@ -687,6 +687,27 @@ func TestPullRequestStandingGrantFrontierAdvanceAuthorizesExactReviewFixPush(t *
 
 	fixHead := mustGitObject(t, 'c')
 	fixFrontier, _ := workspace.NewAuthorizationFrontier(initialFrontier.Head(), fixHead)
+	unflaggedFixScope, err := workspace.NewStandingGrantScope(workspace.StandingGrantScopeOptions{
+		WorkspaceID: definition.Workspace().ID(), Repository: definition.Workspace().Repository(),
+		Remote: definition.Workspace().Remote(), Generation: definition.Generation(),
+		SerialSegment: segment, Frontier: fixFrontier,
+		Actions: []workspace.StandingAuthorizationAction{
+			workspace.StandingAuthorizationPush, workspace.StandingAuthorizationMerge,
+		},
+		ExpiresAt: mustTime(t, "2026-07-21T19:59:00Z"), Epoch: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unflaggedBinding, _ := workspace.StandingGrantControlPlaneBinding(unflaggedFixScope)
+	unflaggedParent, _, err := workspace.RecordStandingGrant(
+		context.Background(), journal, definition, &boundaryVerifier{expectedRequest: unflaggedFixScope.Digest()},
+		unflaggedFixScope, controlPlaneReceipt(t, unflaggedBinding, "unflagged-review-fix-regrant"),
+		mustTime(t, "2026-07-21T16:02:30Z"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	fixScope, err := workspace.NewStandingGrantScope(workspace.StandingGrantScopeOptions{
 		WorkspaceID: definition.Workspace().ID(), Repository: definition.Workspace().Repository(),
 		Remote: definition.Workspace().Remote(), Generation: definition.Generation(),
@@ -695,9 +716,13 @@ func TestPullRequestStandingGrantFrontierAdvanceAuthorizesExactReviewFixPush(t *
 			workspace.StandingAuthorizationPush, workspace.StandingAuthorizationMerge,
 		},
 		ExpiresAt: mustTime(t, "2026-07-21T20:00:00Z"), Epoch: 1,
+		RequiresProviderPullRequest: true,
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if fixScope.Digest() == unflaggedFixScope.Digest() {
+		t.Fatal("provider-identity requirement is not bound into the signed grant scope")
 	}
 	fixBinding, _ := workspace.StandingGrantControlPlaneBinding(fixScope)
 	fixParent, _, err := workspace.RecordStandingGrant(
@@ -708,11 +733,54 @@ func TestPullRequestStandingGrantFrontierAdvanceAuthorizesExactReviewFixPush(t *
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !fixParent.Scope().RequiresProviderPullRequest() {
+		t.Fatal("review-fix derivation seed lost its provider-identity requirement")
+	}
+	evaluator, _ := workspace.NewAuthorizationEvaluator(
+		&authorizationTestClock{now: mustTime(t, "2026-07-21T18:00:00Z")},
+	)
+	unboundFixRequest, err := workspace.NewAuthorizationRequest(workspace.AuthorizationRequestOptions{
+		WorkspaceID: definition.Workspace().ID(), Repository: definition.Workspace().Repository(),
+		Remote: definition.Workspace().Remote(), Generation: definition.Generation(),
+		SerialSegment: segment, Frontier: fixFrontier, Action: workspace.StandingAuthorizationPush,
+		Epoch: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedState, seedBinding, err := workspace.ReadAuthorizationEvaluationSnapshot(journal, definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := evaluator.PlanAuthorization(seedState, unboundFixRequest, seedBinding); err == nil ||
+		!strings.Contains(err.Error(), "no standing grant authorizes the exact request") {
+		t.Fatalf("unverified review-fix derivation seed authorization error = %v", err)
+	}
+	unboundInitialRequest, err := workspace.NewAuthorizationRequest(workspace.AuthorizationRequestOptions{
+		WorkspaceID: definition.Workspace().ID(), Repository: definition.Workspace().Repository(),
+		Remote: definition.Workspace().Remote(), Generation: definition.Generation(),
+		SerialSegment: segment, Frontier: initialFrontier, Action: workspace.StandingAuthorizationPush,
+		Epoch: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := evaluator.PlanAuthorization(seedState, unboundInitialRequest, seedBinding); err == nil ||
+		!strings.Contains(err.Error(), "no standing grant authorizes the exact request") {
+		t.Fatalf("provider-derived parent remained dispatchable after PR identity binding: %v", err)
+	}
 	currentPR, _ := workspace.NewProviderPullRequestObservation(
 		workspace.MustID("github"), definition.Workspace().Repository(), 76, initialFrontier.Head(),
 		workspace.DigestBytes([]byte("provider-current-review-fix-pr")),
 	)
 	advanceVerifier := &providerPullRequestVerifier{expected: currentPR.Digest()}
+	if _, _, err := workspace.RecordPullRequestStandingGrantFrontierAdvance(
+		context.Background(), journal, definition, advanceVerifier,
+		unflaggedParent.GrantID(), initialDerived.GrantID(), currentPR,
+		mustTime(t, "2026-07-21T16:03:30Z"),
+	); err == nil || !strings.Contains(err.Error(), "does not bind the durable identity") || advanceVerifier.calls != 0 {
+		t.Fatalf("unmarked review-fix seed frontier advance error = %v, verifier calls = %d", err, advanceVerifier.calls)
+	}
 	advanced, record, err := workspace.RecordPullRequestStandingGrantFrontierAdvance(
 		context.Background(), journal, definition, advanceVerifier,
 		fixParent.GrantID(), initialDerived.GrantID(), currentPR,
@@ -725,9 +793,31 @@ func TestPullRequestStandingGrantFrontierAdvanceAuthorizesExactReviewFixPush(t *
 	observedHead, hasObservedHead := advanced.ProviderObservedHead()
 	verificationPrior, verificationHasPrior := advanceVerifier.last.PriorDerivedGrantID()
 	if !hasPrior || priorID != initialDerived.GrantID() || !hasObservedHead || observedHead != initialFrontier.Head() ||
+		!advanced.Scope().RequiresProviderPullRequest() ||
 		!verificationHasPrior || verificationPrior != initialDerived.GrantID() ||
 		advanceVerifier.last.ObservedHead() != initialFrontier.Head() || advanceVerifier.last.Frontier() != fixFrontier {
 		t.Fatalf("review-fix frontier bindings = grant %#v verification %#v", advanced, advanceVerifier.last)
+	}
+	shadowedState, shadowedBinding, err := workspace.ReadAuthorizationEvaluationSnapshot(journal, definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := evaluator.PlanAuthorization(shadowedState, unboundFixRequest, shadowedBinding); err == nil ||
+		!strings.Contains(err.Error(), "no standing grant authorizes the exact request") {
+		t.Fatalf("shadowed review-fix derivation seed authorization error = %v", err)
+	}
+	priorRequest, err := workspace.NewAuthorizationRequest(workspace.AuthorizationRequestOptions{
+		WorkspaceID: definition.Workspace().ID(), Repository: definition.Workspace().Repository(),
+		Remote: definition.Workspace().Remote(), Generation: definition.Generation(),
+		SerialSegment: segment, Frontier: initialFrontier, Action: workspace.StandingAuthorizationPush,
+		PullRequest: currentPR.PullRequest(), Epoch: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := evaluator.PlanAuthorization(shadowedState, priorRequest, shadowedBinding); err == nil ||
+		!strings.Contains(err.Error(), "no standing grant authorizes the exact request") {
+		t.Fatalf("superseded PR-bound predecessor authorization error = %v", err)
 	}
 
 	request, err := workspace.NewAuthorizationRequest(workspace.AuthorizationRequestOptions{
@@ -739,9 +829,6 @@ func TestPullRequestStandingGrantFrontierAdvanceAuthorizesExactReviewFixPush(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	evaluator, _ := workspace.NewAuthorizationEvaluator(
-		&authorizationTestClock{now: mustTime(t, "2026-07-21T18:00:00Z")},
-	)
 	queued := authorizationJournalQueue(t, journal, definition, evaluator, request)
 	state, binding, err := workspace.ReadAuthorizationEvaluationSnapshot(journal, definition)
 	if err != nil {
@@ -774,8 +861,17 @@ func TestPullRequestStandingGrantFrontierAdvanceAuthorizesExactReviewFixPush(t *
 		t.Fatal(err)
 	}
 	replayed, err := workspace.RebuildAuthorizationRuntime(snapshot, definition)
-	if err != nil || len(replayed.State().Grants()) != 4 {
+	if err != nil || len(replayed.State().Grants()) != 5 {
 		t.Fatalf("replayed review-fix frontier grants = %#v, %v", replayed, err)
+	}
+	replayedAdvanced := false
+	for _, grant := range replayed.State().Grants() {
+		if grant.GrantID() == advanced.GrantID() {
+			replayedAdvanced = grant.Scope().RequiresProviderPullRequest()
+		}
+	}
+	if !replayedAdvanced {
+		t.Fatal("replayed review-fix frontier successor lost its provider-identity requirement")
 	}
 }
 
