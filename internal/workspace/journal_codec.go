@@ -208,10 +208,14 @@ func marshalWorkspaceJournalEvent(event WorkspaceJournalEvent) (json.RawMessage,
 			return payload, err
 		}
 		payload, supported, err = marshalCommitJournalEvent(event)
-		if !supported {
-			return nil, fmt.Errorf("unsupported workspace journal event %T", event)
+		if supported {
+			return payload, err
 		}
-		return payload, err
+		payload, supported, err = marshalAuthorizationJournalEvent(event)
+		if supported {
+			return payload, err
+		}
+		return nil, fmt.Errorf("unsupported workspace journal event %T", event)
 	}
 	payload, err := json.Marshal(value)
 	return json.RawMessage(payload), err
@@ -441,10 +445,14 @@ func decodeWorkspaceJournalEvent(eventType JournalEventType, payload json.RawMes
 			return event, err
 		}
 		event, supported, err = decodeCommitJournalEvent(eventType, payload)
-		if !supported {
-			return nil, fmt.Errorf("unsupported journal event type %q", eventType)
+		if supported {
+			return event, err
 		}
-		return event, err
+		event, supported, err = decodeAuthorizationJournalEvent(eventType, payload)
+		if supported {
+			return event, err
+		}
+		return nil, fmt.Errorf("unsupported journal event type %q", eventType)
 	}
 }
 

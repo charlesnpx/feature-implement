@@ -516,6 +516,24 @@ func comparisonWireFromPlan(plan ReconciliationPlan) reconciliationComparisonWir
 	return value
 }
 
+func ReconciliationControlPlaneBinding(
+	active EffectiveWorkspaceDefinition,
+	candidate EffectiveWorkspaceDefinition,
+	plan ReconciliationPlan,
+) (ControlPlaneBinding, error) {
+	if active.workspace.id.IsZero() || candidate.workspace.id.IsZero() ||
+		active.workspace.id != candidate.workspace.id || active.workspace.id != plan.workspaceID ||
+		active.generation != plan.activeGeneration || candidate.generation != plan.candidateGeneration ||
+		active.workspace.repository != candidate.workspace.repository || active.workspace.remote != candidate.workspace.remote {
+		return ControlPlaneBinding{}, fmt.Errorf("reconciliation receipt definition does not match the dry-run plan")
+	}
+	return NewControlPlaneBinding(ControlPlaneBindingOptions{
+		Kind: ControlPlaneReceiptReconciliation, WorkspaceID: plan.workspaceID,
+		Generation: plan.candidateGeneration, RequestDigest: plan.comparisonDigest,
+		Repository: active.workspace.repository, Remote: active.workspace.remote,
+	})
+}
+
 func ActivateCandidateGeneration(
 	ctx context.Context,
 	journal *WorkspaceJournal,
@@ -524,7 +542,7 @@ func ActivateCandidateGeneration(
 	candidate EffectiveWorkspaceDefinition,
 	plan ReconciliationPlan,
 	state ReconciliationState,
-	receipt Receipt,
+	receipt ControlPlaneReceiptV2,
 	verifier ControlPlaneVerifierPort,
 	occurredAt time.Time,
 ) (JournalRecord, error) {
@@ -534,7 +552,7 @@ func ActivateCandidateGeneration(
 	if plan.workspaceID.IsZero() || plan.activeGeneration.IsZero() || plan.candidateGeneration.IsZero() || plan.comparisonDigest.IsZero() {
 		return JournalRecord{}, fmt.Errorf("candidate activation requires a complete dry-run plan")
 	}
-	if receipt.keyID.IsZero() || receipt.payloadDigest.IsZero() {
+	if receipt.ReceiptDigest().IsZero() {
 		return JournalRecord{}, fmt.Errorf("candidate activation requires an owner receipt")
 	}
 	snapshot, err := journal.ReadSnapshot()
@@ -579,7 +597,11 @@ func ActivateCandidateGeneration(
 	if storedCandidate.workspaceID != plan.workspaceID {
 		return JournalRecord{}, fmt.Errorf("candidate generation belongs to workspace %s", storedCandidate.workspaceID)
 	}
-	verification, err := NewReceiptVerification(plan.workspaceID, plan.candidateGeneration, plan.comparisonDigest)
+	binding, err := ReconciliationControlPlaneBinding(active, candidate, plan)
+	if err != nil {
+		return JournalRecord{}, err
+	}
+	verification, err := NewControlPlaneVerification(binding)
 	if err != nil {
 		return JournalRecord{}, err
 	}
@@ -588,7 +610,7 @@ func ActivateCandidateGeneration(
 	}
 	event, err := NewGenerationActivatedJournalEvent(
 		plan.workspaceID, plan.activeGeneration, plan.candidateGeneration,
-		plan.comparisonDigest, receipt.payloadDigest, state.history, plan.changedMergeUnits,
+		plan.comparisonDigest, receipt.ReceiptDigest(), state.history, plan.changedMergeUnits,
 	)
 	if err != nil {
 		return JournalRecord{}, err

@@ -74,15 +74,16 @@ type attemptBoundaryPayloadWire struct {
 }
 
 type attemptOrchestrationAckPayloadWire struct {
-	WorkspaceID           string                           `json:"workspace_id"`
-	Generation            string                           `json:"generation"`
-	AttemptID             string                           `json:"attempt_id"`
-	BoundaryID            string                           `json:"boundary_id"`
-	Kind                  OrchestrationAcknowledgementKind `json:"kind"`
-	GoalID                string                           `json:"goal_id"`
-	GoalScope             GoalScope                        `json:"goal_scope"`
-	IdempotencyKey        string                           `json:"idempotency_key"`
-	AcknowledgementDigest string                           `json:"acknowledgement_digest"`
+	WorkspaceID    string                           `json:"workspace_id"`
+	Generation     string                           `json:"generation"`
+	AttemptID      string                           `json:"attempt_id"`
+	BoundaryID     string                           `json:"boundary_id"`
+	Kind           OrchestrationAcknowledgementKind `json:"kind"`
+	GoalID         string                           `json:"goal_id"`
+	GoalScope      GoalScope                        `json:"goal_scope"`
+	IdempotencyKey string                           `json:"idempotency_key"`
+	RequestDigest  string                           `json:"request_digest"`
+	ReceiptDigest  string                           `json:"receipt_digest"`
 }
 
 type attemptNextGoalIntentPayloadWire struct {
@@ -165,7 +166,8 @@ func marshalAttemptJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, b
 			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(), AttemptID: event.attemptID.String(),
 			BoundaryID: event.boundaryID.String(), Kind: event.kind,
 			GoalID: event.goal.id.String(), GoalScope: event.goal.scope,
-			IdempotencyKey: event.idempotencyKey.String(), AcknowledgementDigest: event.acknowledgementDigest.String(),
+			IdempotencyKey: event.idempotencyKey.String(), RequestDigest: event.requestDigest.String(),
+			ReceiptDigest: event.receiptDigest.String(),
 		}
 	case AttemptOwnerResponseJournalEvent:
 		value = attemptOwnerResponsePayloadWire{
@@ -358,12 +360,16 @@ func decodeAttemptJournalEvent(
 		if err != nil {
 			return nil, true, err
 		}
-		acknowledgement, err := ParseDigest(wire.AcknowledgementDigest)
+		request, err := ParseDigest(wire.RequestDigest)
+		if err != nil {
+			return nil, true, err
+		}
+		receipt, err := ParseDigest(wire.ReceiptDigest)
 		if err != nil {
 			return nil, true, err
 		}
 		event, err := NewAttemptOrchestrationAcknowledgedJournalEvent(
-			workspaceID, attemptID, boundaryID, generation, wire.Kind, goal, key, acknowledgement,
+			workspaceID, attemptID, boundaryID, generation, wire.Kind, goal, key, request, receipt,
 		)
 		return event, true, err
 	case JournalEventOwnerResponse:

@@ -19,12 +19,47 @@ type activationVerifier struct {
 	calls       int
 }
 
-func (verifier *activationVerifier) Verify(_ context.Context, verification workspace.ReceiptVerification, _ workspace.Receipt) error {
+func (verifier *activationVerifier) Verify(
+	_ context.Context,
+	verification workspace.ControlPlaneVerification,
+	receipt workspace.ControlPlaneReceiptV2,
+) error {
 	verifier.calls++
 	if verification.WorkspaceID() != verifier.workspaceID || verification.Generation() != verifier.generation || verification.RequestDigest() != verifier.request {
 		return errors.New("unexpected activation verification binding")
 	}
+	if verification.Binding() != receipt.Binding() {
+		return errors.New("activation receipt binding mismatch")
+	}
 	return nil
+}
+
+func activationReceipt(
+	t *testing.T,
+	active workspace.EffectiveWorkspaceDefinition,
+	candidate workspace.EffectiveWorkspaceDefinition,
+	plan workspace.ReconciliationPlan,
+	nonce string,
+	expiresAt string,
+) workspace.ControlPlaneReceiptV2 {
+	t.Helper()
+	binding, err := workspace.ReconciliationControlPlaneBinding(active, candidate, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := workspace.NewControlPlaneEnvelopeV2(
+		binding, workspace.MustID("owner-key"), nonce, mustTime(t, expiresAt), workspace.MustID("test-coordinator"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := make([]byte, 64)
+	signature[0] = 1
+	receipt, err := workspace.NewControlPlaneReceiptV2(envelope, signature)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return receipt
 }
 
 func TestProspectiveReconciliationActivatesCandidateWithOwnerCAS(t *testing.T) {
@@ -124,13 +159,7 @@ func TestProspectiveReconciliationActivatesCandidateWithOwnerCAS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := workspace.NewReceipt(
-		workspace.MustID("owner-key"), workspace.DigestBytes([]byte("signed-owner-payload")),
-		"activation-nonce", mustTime(t, "2026-07-21T03:00:00Z"), []byte("signature"),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	receipt := activationReceipt(t, active, candidate, plan, "activation-nonce", "2026-07-21T03:00:00Z")
 	verifier := &activationVerifier{
 		workspaceID: active.Workspace().ID(), generation: candidate.Generation(), request: plan.ComparisonDigest(),
 	}
@@ -156,7 +185,7 @@ func TestProspectiveReconciliationActivatesCandidateWithOwnerCAS(t *testing.T) {
 	}
 	activation, ok := record.Event().(workspace.GenerationActivatedJournalEvent)
 	if !ok || activation.PriorGeneration() != active.Generation() || activation.ActiveGeneration() != candidate.Generation() ||
-		activation.ComparisonDigest() != plan.ComparisonDigest() || activation.OwnerReceiptDigest() != receipt.PayloadDigest() ||
+		activation.ComparisonDigest() != plan.ComparisonDigest() || activation.OwnerReceiptDigest() != receipt.ReceiptDigest() ||
 		activation.History() != history {
 		t.Fatalf("activation event = %#v", record.Event())
 	}
@@ -239,13 +268,7 @@ func TestActivatedCandidateCannotBeReactivated(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		receipt, err := workspace.NewReceipt(
-			workspace.MustID("owner-key"), workspace.DigestBytes([]byte("activate-"+nonce)), nonce,
-			mustTime(t, activatedAt), []byte("signature-"+nonce),
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
+		receipt := activationReceipt(t, active, candidate, plan, nonce, activatedAt)
 		verifier := &activationVerifier{
 			workspaceID: active.Workspace().ID(), generation: candidate.Generation(), request: plan.ComparisonDigest(),
 		}
@@ -437,10 +460,7 @@ func TestReconciliationSafetyMatrixRejectsUnsafeRuntimeAndRetrospectiveChanges(t
 	forgedPlan := mustForgeReconciliationPlan(
 		t, structuralSnapshot, active, structural, safePlan.StateDigest(), safePlan.StructuralDigest(),
 	)
-	receipt, _ := workspace.NewReceipt(
-		workspace.MustID("owner-key"), workspace.DigestBytes([]byte("forged-payload")), "forged-nonce",
-		mustTime(t, "2026-07-21T03:00:00Z"), []byte("signature"),
-	)
+	receipt := activationReceipt(t, active, structural, forgedPlan, "forged-nonce", "2026-07-21T03:00:00Z")
 	verifier := &activationVerifier{
 		workspaceID: active.Workspace().ID(), generation: structural.Generation(), request: forgedPlan.ComparisonDigest(),
 	}
@@ -503,10 +523,7 @@ func TestCandidateOrphanRecoveryAndStaleComparisonToken(t *testing.T) {
 	if _, err := store.StageCandidate(journal, secondCandidate, mustTime(t, "2026-07-21T02:02:00Z")); err != nil {
 		t.Fatal(err)
 	}
-	receipt, _ := workspace.NewReceipt(
-		workspace.MustID("owner-key"), workspace.DigestBytes([]byte("payload")), "nonce",
-		mustTime(t, "2026-07-21T03:00:00Z"), []byte("signature"),
-	)
+	receipt := activationReceipt(t, active, candidate, plan, "nonce", "2026-07-21T03:00:00Z")
 	verifier := &activationVerifier{workspaceID: active.Workspace().ID(), generation: candidate.Generation(), request: plan.ComparisonDigest()}
 	if _, err := workspace.ActivateCandidateGeneration(
 		context.Background(), journal, store, active, candidate, plan, state, receipt, verifier, mustTime(t, "2026-07-21T02:03:00Z"),

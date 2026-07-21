@@ -648,13 +648,18 @@ func TestPauseOnlyBoundaryAtomicallyPausesAndResumesSameGoal(t *testing.T) {
 	}
 	paused := result.Attempt()
 	if paused.Phase() != workspace.AttemptPaused || !paused.LeaseID().IsZero() || !paused.AuthorizationID().IsZero() ||
-		paused.SerialSegmentHeld() || len(result.Directives()) != 0 {
+		paused.SerialSegmentHeld() || len(result.Directives()) != 1 {
 		t.Fatalf("pause-only boundary did not atomically close and release: %#v", paused)
 	}
 	boundary := result.Boundary()
 	if boundary.LeaseID() != lease || boundary.AuthorizationID() != authorization || boundary.EvidenceDigest().IsZero() ||
 		boundary.Head() != unconstrainedHead || !boundary.AuthorizationClosed() || !boundary.LeaseFencedAndReleased() {
 		t.Fatalf("boundary did not checkpoint closed bindings: %#v", boundary)
+	}
+	ownerDirective, ok := result.Directives()[0].(workspace.OwnerGateDirective)
+	if !ok || ownerDirective.DirectiveDigest() != boundary.DirectiveDigest() ||
+		len(ownerDirective.Choices()) != 1 || ownerDirective.Choices()[0] != workspace.OwnerBoundaryContinue {
+		t.Fatalf("pause-only owner directive = %#v", result.Directives())
 	}
 	snapshot, err := harness.journal.ReadSnapshot()
 	if err != nil {
@@ -679,10 +684,10 @@ func TestPauseOnlyBoundaryAtomicallyPausesAndResumesSameGoal(t *testing.T) {
 		}
 	}
 	if _, err := workspace.RecordOrchestrationAcknowledgement(
-		harness.journal, harness.definition,
+		context.Background(), harness.journal, harness.definition, &boundaryVerifier{},
 		workspace.RecordOrchestrationAcknowledgementRequest{
 			AttemptID: attempt.AttemptID(), Kind: workspace.AcknowledgementGoalCompleted,
-			Goal: harness.goal, AcknowledgementDigest: workspace.DigestBytes([]byte("false-completion")),
+			Goal: harness.goal, Receipt: placeholderControlPlaneReceipt(t, workspace.DigestBytes([]byte("false-completion")), "false-completion"),
 			OccurredAt: mustTime(t, "2026-07-21T11:04:00Z"),
 		},
 	); err == nil || !strings.Contains(err.Error(), "pause-only") {
@@ -696,7 +701,13 @@ func TestPauseOnlyBoundaryAtomicallyPausesAndResumesSameGoal(t *testing.T) {
 		t.Fatal(err)
 	}
 	verifier := &boundaryVerifier{expectedRequest: requestDigest}
-	receipt := ownerReceipt(t, requestDigest, "pause-nonce")
+	binding, err := workspace.OwnerBoundaryResponseControlPlaneBinding(
+		harness.definition, projection, attempt.AttemptID(), workspace.OwnerBoundaryContinue,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := controlPlaneReceipt(t, binding, "pause-nonce")
 	if _, err := workspace.RecordOwnerBoundaryResponse(
 		context.Background(), harness.journal, harness.definition, verifier,
 		workspace.RecordOwnerBoundaryResponseRequest{
@@ -816,7 +827,7 @@ func TestCompleteGoalBoundaryRecoversIdempotentlyThroughHandoffAndRejectsStaleHe
 	}
 	prematureDigest := workspace.DigestBytes([]byte("premature-owner-request"))
 	verifier := &boundaryVerifier{expectedRequest: prematureDigest}
-	receipt := ownerReceipt(t, prematureDigest, "premature-complete-nonce")
+	receipt := placeholderControlPlaneReceipt(t, prematureDigest, "premature-complete-nonce")
 	if _, err := workspace.RecordOwnerBoundaryResponse(
 		context.Background(), harness.journal, harness.definition, verifier,
 		workspace.RecordOwnerBoundaryResponseRequest{
@@ -828,26 +839,38 @@ func TestCompleteGoalBoundaryRecoversIdempotentlyThroughHandoffAndRejectsStaleHe
 	}
 	nextGoal, _ := workspace.NewGoalBinding(workspace.MustID("review-goal"), workspace.GoalScopeMergeUnit)
 	if _, err := workspace.RecordOrchestrationAcknowledgement(
-		harness.journal, harness.definition,
+		context.Background(), harness.journal, harness.definition, &boundaryVerifier{},
 		workspace.RecordOrchestrationAcknowledgementRequest{
 			AttemptID: attempt.AttemptID(), Kind: workspace.AcknowledgementNextGoalCreated,
-			Goal: nextGoal, AcknowledgementDigest: workspace.DigestBytes([]byte("next-too-early")),
+			Goal: nextGoal, Receipt: placeholderControlPlaneReceipt(t, workspace.DigestBytes([]byte("next-too-early")), "next-too-early"),
 			OccurredAt: mustTime(t, "2026-07-21T12:07:00Z"),
 		},
 	); err == nil || !strings.Contains(err.Error(), "durable creation intent") {
 		t.Fatalf("next goal bypassed required ordering: %v", err)
 	}
+	goalBinding, err := workspace.OrchestrationAcknowledgementControlPlaneBinding(
+		harness.definition, mustRuntime(t, harness.journal), attempt.AttemptID(),
+		workspace.AcknowledgementGoalCompleted, harness.goal,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goalVerifier := &boundaryVerifier{expectedRequest: goalBinding.RequestDigest()}
 	goalAck := workspace.RecordOrchestrationAcknowledgementRequest{
 		AttemptID: attempt.AttemptID(), Kind: workspace.AcknowledgementGoalCompleted,
-		Goal: harness.goal, AcknowledgementDigest: workspace.DigestBytes([]byte("goal-completed")),
+		Goal: harness.goal, Receipt: controlPlaneReceipt(t, goalBinding, "goal-completed"),
 		OccurredAt: mustTime(t, "2026-07-21T12:08:00Z"),
 		Fault:      failAt(workspace.AttemptFaultAfterOrchestrationAck, crash),
 	}
-	if _, err := workspace.RecordOrchestrationAcknowledgement(harness.journal, harness.definition, goalAck); !errors.Is(err, crash) {
+	if _, err := workspace.RecordOrchestrationAcknowledgement(
+		context.Background(), harness.journal, harness.definition, goalVerifier, goalAck,
+	); !errors.Is(err, crash) {
 		t.Fatalf("goal ack crash = %v", err)
 	}
 	goalAck.Fault = nil
-	ack, err := workspace.RecordOrchestrationAcknowledgement(harness.journal, harness.definition, goalAck)
+	ack, err := workspace.RecordOrchestrationAcknowledgement(
+		context.Background(), harness.journal, harness.definition, goalVerifier, goalAck,
+	)
 	if err != nil || ack.IdempotencyKey() != directive.IdempotencyKey() {
 		t.Fatalf("goal ack retry = %#v, %v", ack, err)
 	}
@@ -859,7 +882,13 @@ func TestCompleteGoalBoundaryRecoversIdempotentlyThroughHandoffAndRejectsStaleHe
 		t.Fatal(err)
 	}
 	verifier = &boundaryVerifier{expectedRequest: requestDigest}
-	receipt = ownerReceipt(t, requestDigest, "complete-nonce")
+	binding, err := workspace.OwnerBoundaryResponseControlPlaneBinding(
+		harness.definition, projection, attempt.AttemptID(), workspace.OwnerBoundaryContinue,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt = controlPlaneReceipt(t, binding, "complete-nonce")
 	ownerRequest := workspace.RecordOwnerBoundaryResponseRequest{
 		AttemptID: attempt.AttemptID(), Response: workspace.OwnerBoundaryContinue,
 		Receipt: receipt, OccurredAt: mustTime(t, "2026-07-21T12:09:00Z"),
@@ -897,17 +926,29 @@ func TestCompleteGoalBoundaryRecoversIdempotentlyThroughHandoffAndRejectsStaleHe
 	if !ok || pendingIntent.NextGoal() != nextGoal || pendingIntent.IdempotencyKey() != intent.IdempotencyKey() {
 		t.Fatalf("pending next-goal intent was not stably re-emitted: %#v", pendingIntent)
 	}
+	nextBinding, err := workspace.OrchestrationAcknowledgementControlPlaneBinding(
+		harness.definition, mustRuntime(t, harness.journal), attempt.AttemptID(),
+		workspace.AcknowledgementNextGoalCreated, nextGoal,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextVerifier := &boundaryVerifier{expectedRequest: nextBinding.RequestDigest()}
 	nextAck := workspace.RecordOrchestrationAcknowledgementRequest{
 		AttemptID: attempt.AttemptID(), Kind: workspace.AcknowledgementNextGoalCreated,
-		Goal: nextGoal, AcknowledgementDigest: workspace.DigestBytes([]byte("next-goal-created")),
+		Goal: nextGoal, Receipt: controlPlaneReceipt(t, nextBinding, "next-goal-created"),
 		OccurredAt: mustTime(t, "2026-07-21T12:10:00Z"),
 		Fault:      failAt(workspace.AttemptFaultAfterOrchestrationAck, crash),
 	}
-	if _, err := workspace.RecordOrchestrationAcknowledgement(harness.journal, harness.definition, nextAck); !errors.Is(err, crash) {
+	if _, err := workspace.RecordOrchestrationAcknowledgement(
+		context.Background(), harness.journal, harness.definition, nextVerifier, nextAck,
+	); !errors.Is(err, crash) {
 		t.Fatalf("next-goal ack crash = %v", err)
 	}
 	nextAck.Fault = nil
-	if _, err := workspace.RecordOrchestrationAcknowledgement(harness.journal, harness.definition, nextAck); err != nil {
+	if _, err := workspace.RecordOrchestrationAcknowledgement(
+		context.Background(), harness.journal, harness.definition, nextVerifier, nextAck,
+	); err != nil {
 		t.Fatalf("next-goal ack retry: %v", err)
 	}
 	if _, ok := workspace.PendingNextGoalCreationIntent(mustRuntime(t, harness.journal), attempt.AttemptID()); ok {
@@ -1065,26 +1106,52 @@ type boundaryVerifier struct {
 
 func (verifier *boundaryVerifier) Verify(
 	_ context.Context,
-	verification workspace.ReceiptVerification,
-	_ workspace.Receipt,
+	verification workspace.ControlPlaneVerification,
+	receipt workspace.ControlPlaneReceiptV2,
 ) error {
 	verifier.calls++
-	if verification.RequestDigest() != verifier.expectedRequest {
+	if receipt.Binding() != verification.Binding() {
+		return fmt.Errorf("receipt binding does not match verification")
+	}
+	if !verifier.expectedRequest.IsZero() && verification.RequestDigest() != verifier.expectedRequest {
 		return fmt.Errorf("request = %s, expected %s", verification.RequestDigest(), verifier.expectedRequest)
 	}
 	return nil
 }
 
-func ownerReceipt(t *testing.T, request workspace.Digest, nonce string) workspace.Receipt {
+func controlPlaneReceipt(t *testing.T, binding workspace.ControlPlaneBinding, nonce string) workspace.ControlPlaneReceiptV2 {
 	t.Helper()
-	receipt, err := workspace.NewReceipt(
-		workspace.MustID("owner-key"), request, nonce,
-		mustTime(t, "2026-07-22T00:00:00Z"), []byte("verified-signature"),
+	envelope, err := workspace.NewControlPlaneEnvelopeV2(
+		binding, workspace.MustID("owner-key"), nonce,
+		mustTime(t, "2026-07-22T00:00:00Z"), workspace.MustID("test-coordinator"),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	signature := make([]byte, 64)
+	signature[0] = 1
+	receipt, err := workspace.NewControlPlaneReceiptV2(envelope, signature)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return receipt
+}
+
+func placeholderControlPlaneReceipt(t *testing.T, request workspace.Digest, nonce string) workspace.ControlPlaneReceiptV2 {
+	t.Helper()
+	repository, err := workspace.NewRepositoryIdentity("https://example.invalid/repository.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := workspace.NewControlPlaneBinding(workspace.ControlPlaneBindingOptions{
+		Kind: workspace.ControlPlaneReceiptReconciliation, WorkspaceID: workspace.MustID("placeholder-workspace"),
+		Generation: workspace.DigestBytes([]byte("placeholder-generation")), RequestDigest: request,
+		Repository: repository, Remote: "origin",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return controlPlaneReceipt(t, binding, nonce)
 }
 
 func boundaryEvidence(t *testing.T, label string) []workspace.Evidence {

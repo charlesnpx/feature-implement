@@ -392,14 +392,15 @@ func (event AttemptNextGoalIntendedJournalEvent) Goal() GoalBinding      { retur
 func (event AttemptNextGoalIntendedJournalEvent) IdempotencyKey() Digest { return event.idempotencyKey }
 
 type AttemptOrchestrationAcknowledgedJournalEvent struct {
-	workspaceID           ID
-	generation            Digest
-	attemptID             ID
-	boundaryID            ID
-	kind                  OrchestrationAcknowledgementKind
-	goal                  GoalBinding
-	idempotencyKey        Digest
-	acknowledgementDigest Digest
+	workspaceID    ID
+	generation     Digest
+	attemptID      ID
+	boundaryID     ID
+	kind           OrchestrationAcknowledgementKind
+	goal           GoalBinding
+	idempotencyKey Digest
+	requestDigest  Digest
+	receiptDigest  Digest
 }
 
 func NewAttemptOrchestrationAcknowledgedJournalEvent(
@@ -407,12 +408,12 @@ func NewAttemptOrchestrationAcknowledgedJournalEvent(
 	generation Digest,
 	kind OrchestrationAcknowledgementKind,
 	goal GoalBinding,
-	idempotencyKey, acknowledgementDigest Digest,
+	idempotencyKey, requestDigest, receiptDigest Digest,
 ) (AttemptOrchestrationAcknowledgedJournalEvent, error) {
 	event := AttemptOrchestrationAcknowledgedJournalEvent{
 		workspaceID: workspaceID, generation: generation, attemptID: attemptID,
 		boundaryID: boundaryID, kind: kind, goal: goal,
-		idempotencyKey: idempotencyKey, acknowledgementDigest: acknowledgementDigest,
+		idempotencyKey: idempotencyKey, requestDigest: requestDigest, receiptDigest: receiptDigest,
 	}
 	if err := event.validate(); err != nil {
 		return AttemptOrchestrationAcknowledgedJournalEvent{}, err
@@ -430,8 +431,8 @@ func (event AttemptOrchestrationAcknowledgedJournalEvent) boundGeneration() Dige
 func (event AttemptOrchestrationAcknowledgedJournalEvent) validate() error {
 	if event.workspaceID.IsZero() || event.generation.IsZero() || event.attemptID.IsZero() ||
 		event.boundaryID.IsZero() || !event.kind.valid() || event.goal.IsZero() ||
-		event.idempotencyKey.IsZero() || event.acknowledgementDigest.IsZero() {
-		return fmt.Errorf("orchestration acknowledgement requires boundary, kind, goal, idempotency, and evidence bindings")
+		event.idempotencyKey.IsZero() || event.requestDigest.IsZero() || event.receiptDigest.IsZero() {
+		return fmt.Errorf("orchestration acknowledgement requires boundary, kind, goal, idempotency, request, and receipt bindings")
 	}
 	return nil
 }
@@ -448,8 +449,11 @@ func (event AttemptOrchestrationAcknowledgedJournalEvent) Goal() GoalBinding { r
 func (event AttemptOrchestrationAcknowledgedJournalEvent) IdempotencyKey() Digest {
 	return event.idempotencyKey
 }
-func (event AttemptOrchestrationAcknowledgedJournalEvent) AcknowledgementDigest() Digest {
-	return event.acknowledgementDigest
+func (event AttemptOrchestrationAcknowledgedJournalEvent) RequestDigest() Digest {
+	return event.requestDigest
+}
+func (event AttemptOrchestrationAcknowledgedJournalEvent) ReceiptDigest() Digest {
+	return event.receiptDigest
 }
 
 type AttemptOwnerResponseJournalEvent struct {
@@ -782,9 +786,6 @@ func deriveBoundaryDirectiveBindings(
 		!mode.valid() || goal.IsZero() || head.IsZero() || evidenceDigest.IsZero() {
 		return Digest{}, Digest{}, fmt.Errorf("boundary directive requires immutable boundary bindings")
 	}
-	if mode == AttemptBoundaryPauseOnly {
-		return Digest{}, Digest{}, nil
-	}
 	type directiveJSON struct {
 		SchemaVersion int                 `json:"schema_version"`
 		Kind          AttemptBoundaryMode `json:"kind"`
@@ -806,6 +807,9 @@ func deriveBoundaryDirectiveBindings(
 		return Digest{}, Digest{}, err
 	}
 	directive := DigestBytes(content)
+	if mode == AttemptBoundaryPauseOnly {
+		return directive, Digest{}, nil
+	}
 	key := DigestBytes([]byte("complete_goal_and_wait_v2\n" + directive.String() + "\n"))
 	return directive, key, nil
 }
@@ -841,7 +845,7 @@ func deriveOwnerResponseRequestDigest(
 	}
 	if boundary.mode == AttemptBoundaryCompleteGoalAndWait && (!boundary.goalCompletedOK ||
 		boundary.goalCompleted.record == 0 || boundary.goalCompleted.idempotencyKey.IsZero() ||
-		boundary.goalCompleted.acknowledgementDigest.IsZero()) {
+		boundary.goalCompleted.receiptDigest.IsZero()) {
 		return Digest{}, fmt.Errorf("owner response request requires the durable goal-completion acknowledgement")
 	}
 	type requestJSON struct {
@@ -870,7 +874,46 @@ func deriveOwnerResponseRequestDigest(
 		Head: boundary.head.String(), Evidence: boundary.evidenceDigest.String(), Directive: boundary.directiveDigest.String(),
 		CompletionRecord: boundary.goalCompleted.record,
 		CompletionKey:    boundary.goalCompleted.idempotencyKey.String(),
-		CompletionAck:    boundary.goalCompleted.acknowledgementDigest.String(),
+		CompletionAck:    boundary.goalCompleted.receiptDigest.String(),
+	})
+	if err != nil {
+		return Digest{}, err
+	}
+	return DigestBytes(content), nil
+}
+
+func deriveOrchestrationAcknowledgementRequestDigest(
+	workspaceID ID,
+	generation Digest,
+	attemptID ID,
+	boundary RuntimeBoundaryProjection,
+	kind OrchestrationAcknowledgementKind,
+	goal GoalBinding,
+	idempotencyKey Digest,
+) (Digest, error) {
+	if workspaceID.IsZero() || generation.IsZero() || attemptID.IsZero() || boundary.boundaryID.IsZero() ||
+		!kind.valid() || goal.IsZero() || idempotencyKey.IsZero() || boundary.head.IsZero() ||
+		boundary.directiveDigest.IsZero() {
+		return Digest{}, fmt.Errorf("orchestration acknowledgement requires immutable directive bindings")
+	}
+	type requestJSON struct {
+		SchemaVersion  int                              `json:"schema_version"`
+		Kind           OrchestrationAcknowledgementKind `json:"kind"`
+		WorkspaceID    string                           `json:"workspace_id"`
+		Generation     string                           `json:"generation"`
+		AttemptID      string                           `json:"attempt_id"`
+		BoundaryID     string                           `json:"boundary_id"`
+		GoalID         string                           `json:"goal_id"`
+		GoalScope      GoalScope                        `json:"goal_scope"`
+		Head           string                           `json:"head"`
+		Directive      string                           `json:"directive_digest"`
+		IdempotencyKey string                           `json:"idempotency_key"`
+	}
+	content, err := json.Marshal(requestJSON{
+		SchemaVersion: JournalSchemaVersion, Kind: kind, WorkspaceID: workspaceID.String(),
+		Generation: generation.String(), AttemptID: attemptID.String(), BoundaryID: boundary.boundaryID.String(),
+		GoalID: goal.id.String(), GoalScope: goal.scope, Head: boundary.head.String(),
+		Directive: boundary.directiveDigest.String(), IdempotencyKey: idempotencyKey.String(),
 	})
 	if err != nil {
 		return Digest{}, err
