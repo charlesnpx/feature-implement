@@ -336,6 +336,13 @@ func reduceAttemptRuntime(
 		if boundary.mode != AttemptBoundaryCompleteGoalAndWait {
 			return fmt.Errorf("pause-only boundary %s cannot acknowledge goal completion or creation", boundary.boundaryID)
 		}
+		expectedRequest, err := deriveOrchestrationAcknowledgementRequestDigest(
+			event.workspaceID, event.generation, event.attemptID, boundary,
+			event.kind, event.goal, event.idempotencyKey,
+		)
+		if err != nil || expectedRequest != event.requestDigest {
+			return fmt.Errorf("orchestration acknowledgement has an invalid request digest")
+		}
 		acknowledgement := RuntimeOrchestrationAcknowledgement{
 			record: record.sequence, kind: event.kind, goal: event.goal,
 			idempotencyKey: event.idempotencyKey, requestDigest: event.requestDigest, receiptDigest: event.receiptDigest,

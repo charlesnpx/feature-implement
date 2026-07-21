@@ -40,7 +40,8 @@ func (event AuthorizationGrantRecordedJournalEvent) validate() error {
 		return fmt.Errorf("authorization grant event requires generation-bound grant evidence")
 	}
 	if event.grant.parentGrantID.IsZero() {
-		if !event.grant.providerObservationDigest.IsZero() ||
+		if !event.grant.priorDerivedGrantID.IsZero() ||
+			!event.grant.providerObservationDigest.IsZero() || !event.grant.providerObservedHead.IsZero() ||
 			!event.grant.scope.pullRequest.IsZero() ||
 			event.grant.scope.Digest() != event.grant.requestDigest ||
 			event.grant.grantID != event.grant.scope.Digest() {
@@ -49,10 +50,11 @@ func (event AuthorizationGrantRecordedJournalEvent) validate() error {
 		return nil
 	}
 	derivedID, err := derivedStandingGrantID(
-		event.grant.parentGrantID, event.grant.receiptDigest, event.grant.providerObservationDigest,
-		event.grant.scope.pullRequest, event.grant.scope.frontier.head,
+		event.grant.parentGrantID, event.grant.priorDerivedGrantID, event.grant.receiptDigest,
+		event.grant.providerObservationDigest, event.grant.scope.pullRequest, event.grant.providerObservedHead,
 	)
-	if err != nil || derivedID != event.grant.grantID || event.grant.scope.pullRequest.IsZero() {
+	if err != nil || derivedID != event.grant.grantID || event.grant.scope.pullRequest.IsZero() ||
+		event.grant.providerObservedHead.IsZero() {
 		return fmt.Errorf("authorization grant event has invalid provider-derived grant bindings")
 	}
 	return nil
@@ -306,6 +308,9 @@ func authorizationJournalEventResources(event WorkspaceJournalEvent) ([]JournalR
 				AuthorizationReceiptJournalResource(event.grant.receiptDigest),
 				AuthorizationProviderObservationJournalResource(event.grant.providerObservationDigest),
 			)
+			if !event.grant.priorDerivedGrantID.IsZero() {
+				reads = append(reads, AuthorizationGrantJournalResource(event.grant.priorDerivedGrantID))
+			}
 			writes = append(writes, AuthorizationProviderObservationJournalResource(event.grant.providerObservationDigest))
 		}
 		return reads, writes, true
@@ -472,7 +477,7 @@ func reduceAuthorizationRuntime(
 			event.generation != current.state.generation || event.epoch != current.state.epoch {
 			return AuthorizationRuntimeProjection{}, fmt.Errorf("authorization safety journal event has stale bindings")
 		}
-		expectedRequest, err := authorizationSafetyChangeRequestDigest(current.state, event.safety)
+		expectedRequest, err := authorizationSafetyChangeRequestDigest(current.state, current.pendingCandidates, event.safety)
 		if err != nil || expectedRequest != event.requestDigest {
 			return AuthorizationRuntimeProjection{}, fmt.Errorf("authorization safety journal event has invalid prior-state bindings")
 		}
@@ -627,7 +632,9 @@ func RecordDerivedStandingGrantPullRequest(
 	if parent.grantID.IsZero() {
 		return StandingGrant{}, JournalRecord{}, fmt.Errorf("provider-derived standing grant parent %s is not active", parentGrantID)
 	}
-	verification, err := newProviderPullRequestVerification(parent.scope, parentGrantID, observation)
+	verification, err := newProviderPullRequestVerification(
+		parent.scope, parentGrantID, Digest{}, parent.scope.frontier.head, observation,
+	)
 	if err != nil {
 		return StandingGrant{}, JournalRecord{}, err
 	}
@@ -637,6 +644,86 @@ func RecordDerivedStandingGrantPullRequest(
 	derived, err := deriveStandingGrantPullRequest(parent, observation)
 	if err != nil {
 		return StandingGrant{}, JournalRecord{}, err
+	}
+	domainEvent, err := NewAuthorizationGrantRecorded(derived)
+	if err != nil {
+		return StandingGrant{}, JournalRecord{}, err
+	}
+	if _, err := ReduceAuthorization(projection.state, domainEvent); err != nil {
+		return StandingGrant{}, JournalRecord{}, err
+	}
+	event, err := NewAuthorizationGrantRecordedJournalEvent(
+		definition.workspace.id, definition.generation, derived,
+	)
+	if err != nil {
+		return StandingGrant{}, JournalRecord{}, err
+	}
+	record, err := appendAuthorizationJournalEvent(journal, snapshot, event, occurredAt)
+	if err != nil {
+		return StandingGrant{}, JournalRecord{}, err
+	}
+	return derived, record, nil
+}
+
+// RecordPullRequestStandingGrantFrontierAdvance binds a newly signed exact
+// old/new frontier grant to an already durable provider-derived pull request.
+// It is the protected authorization path for review-fix pushes after the pull
+// request exists: the provider independently confirms the PR identity and old
+// remote head before the new exact head becomes dispatchable.
+func RecordPullRequestStandingGrantFrontierAdvance(
+	ctx context.Context,
+	journal *WorkspaceJournal,
+	definition EffectiveWorkspaceDefinition,
+	verifier ProviderPullRequestVerifierPort,
+	parentGrantID Digest,
+	priorDerivedGrantID Digest,
+	observation ProviderPullRequestObservation,
+	occurredAt time.Time,
+) (StandingGrant, JournalRecord, error) {
+	if journal == nil || verifier == nil || parentGrantID.IsZero() || priorDerivedGrantID.IsZero() ||
+		observation.digest.IsZero() || occurredAt.IsZero() {
+		return StandingGrant{}, JournalRecord{}, fmt.Errorf("record pull-request frontier advance requires journal, provider verifier, signed parent, predecessor, observation, and occurrence time")
+	}
+	snapshot, projection, err := readAuthorizationRuntime(journal, definition)
+	if err != nil {
+		return StandingGrant{}, JournalRecord{}, err
+	}
+	var parent, prior StandingGrant
+	for _, existing := range projection.state.grants {
+		if existing.parentGrantID == parentGrantID {
+			if existing.priorDerivedGrantID != priorDerivedGrantID ||
+				existing.providerObservationDigest != observation.digest ||
+				existing.providerObservedHead != observation.head ||
+				existing.scope.pullRequest != observation.identity {
+				return StandingGrant{}, JournalRecord{}, fmt.Errorf("standing grant %s already has a different provider-derived child", parentGrantID)
+			}
+			return cloneStandingGrant(existing), JournalRecord{}, nil
+		}
+		if existing.priorDerivedGrantID == priorDerivedGrantID {
+			return StandingGrant{}, JournalRecord{}, fmt.Errorf("pull-request grant %s already has a different frontier successor", priorDerivedGrantID)
+		}
+		if existing.grantID == parentGrantID {
+			parent = existing
+		}
+		if existing.grantID == priorDerivedGrantID {
+			prior = existing
+		}
+	}
+	if parent.grantID.IsZero() || prior.grantID.IsZero() {
+		return StandingGrant{}, JournalRecord{}, fmt.Errorf("pull-request frontier advance requires active signed parent %s and predecessor %s", parentGrantID, priorDerivedGrantID)
+	}
+	derived, err := deriveStandingGrantPullRequestFrontierAdvance(parent, prior, observation)
+	if err != nil {
+		return StandingGrant{}, JournalRecord{}, err
+	}
+	verification, err := newProviderPullRequestVerification(
+		parent.scope, parentGrantID, priorDerivedGrantID, prior.scope.frontier.head, observation,
+	)
+	if err != nil {
+		return StandingGrant{}, JournalRecord{}, err
+	}
+	if err := verifier.VerifyProviderPullRequest(ctx, verification, observation); err != nil {
+		return StandingGrant{}, JournalRecord{}, fmt.Errorf("verify provider pull request frontier: %w", err)
 	}
 	domainEvent, err := NewAuthorizationGrantRecorded(derived)
 	if err != nil {
@@ -774,7 +861,7 @@ func RecordAuthorizationSafetyChange(
 	if projection.state.safety == safety {
 		return JournalRecord{}, fmt.Errorf("authorization safety already matches target without this durable receipt")
 	}
-	binding, err := AuthorizationSafetyChangeControlPlaneBinding(projection.state, safety)
+	binding, err := AuthorizationSafetyChangeControlPlaneBinding(projection.state, projection.pendingCandidates, safety)
 	if err != nil {
 		return JournalRecord{}, err
 	}

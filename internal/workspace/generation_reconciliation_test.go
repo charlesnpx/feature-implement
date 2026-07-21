@@ -223,6 +223,96 @@ func TestProspectiveReconciliationActivatesCandidateWithOwnerCAS(t *testing.T) {
 	}
 }
 
+func TestGenerationActivationRejectsOutstandingAuthorizationObligationsBeforeAppend(t *testing.T) {
+	fixture := newDefinitionFixture(t)
+	active := mustDefinition(t, fixture.sources)
+	candidate := mustProspectiveCandidate(t, fixture)
+	workspaceDir := t.TempDir()
+	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, active, mustTime(t, "2026-07-21T02:00:00Z")); err != nil {
+		t.Fatal(err)
+	}
+	store, err := workspace.OpenGenerationStore(workspaceDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+
+	frontier, _ := workspace.NewAuthorizationFrontier(mustGitObject(t, 'a'), mustGitObject(t, 'b'))
+	segment := workspace.MustID("serial-activation-obligation")
+	scope, err := workspace.NewStandingGrantScope(workspace.StandingGrantScopeOptions{
+		WorkspaceID: active.Workspace().ID(), Repository: active.Workspace().Repository(),
+		Remote: active.Workspace().Remote(), Generation: active.Generation(), SerialSegment: segment,
+		Frontier: frontier, Actions: []workspace.StandingAuthorizationAction{workspace.StandingAuthorizationPush},
+		ExpiresAt: mustTime(t, "2026-07-21T05:00:00Z"), Epoch: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, _ := workspace.StandingGrantControlPlaneBinding(scope)
+	if _, _, err := workspace.RecordStandingGrant(
+		context.Background(), journal, active, &boundaryVerifier{expectedRequest: scope.Digest()},
+		scope, controlPlaneReceipt(t, binding, "activation-obligation-grant"),
+		mustTime(t, "2026-07-21T02:01:00Z"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	evaluator, _ := workspace.NewAuthorizationEvaluator(
+		&authorizationTestClock{now: mustTime(t, "2026-07-21T02:02:00Z")},
+	)
+	request := authorizationJournalRequest(t, active, segment, frontier, 1)
+	queued := authorizationJournalQueue(t, journal, active, evaluator, request)
+	if _, _, err := workspace.RecordAuthorizationEffectDispatched(
+		journal, active, evaluator, request, queued, workspace.MustID("activation-blocking-effect"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.StageCandidate(journal, candidate, mustTime(t, "2026-07-21T02:03:00Z")); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := workspace.NewReconciliationState(
+		snapshot, nil, nil, nil, nil, workspace.EmptyRuntimeHistoryBinding(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := workspace.DryRunReconciliation(active, candidate, snapshot, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := activationReceipt(t, active, candidate, plan, "activation-with-obligation", "2026-07-21T04:00:00Z")
+	verifier := &activationVerifier{
+		workspaceID: active.Workspace().ID(), generation: candidate.Generation(), request: plan.ComparisonDigest(),
+	}
+	if _, err := workspace.ActivateCandidateGeneration(
+		context.Background(), journal, store, active, candidate, plan, state, receipt, verifier,
+		mustTime(t, "2026-07-21T02:04:00Z"),
+	); err == nil || !strings.Contains(err.Error(), "dispatched effects awaiting reconciliation") {
+		t.Fatalf("activation with authorization obligation error = %v", err)
+	}
+	if verifier.calls != 0 {
+		t.Fatal("blocked activation reached owner verifier")
+	}
+	after, err := journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Head() != snapshot.Head() {
+		t.Fatal("blocked activation was durably appended")
+	}
+	authorization, err := workspace.RebuildAuthorizationRuntime(after, active)
+	if err != nil || len(authorization.State().OutstandingReconciliationObligations()) != 1 {
+		t.Fatalf("authorization after blocked activation = %#v, %v", authorization, err)
+	}
+}
+
 func TestActivatedCandidateCannotBeReactivated(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	first := mustDefinition(t, fixture.sources)

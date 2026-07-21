@@ -142,7 +142,9 @@ type StandingGrant struct {
 	requestDigest             Digest
 	receiptDigest             Digest
 	parentGrantID             Digest
+	priorDerivedGrantID       Digest
 	providerObservationDigest Digest
+	providerObservedHead      GitObjectID
 }
 
 func VerifyStandingGrant(
@@ -197,8 +199,14 @@ func (grant StandingGrant) ReceiptDigest() Digest     { return grant.receiptDige
 func (grant StandingGrant) ParentGrantID() (Digest, bool) {
 	return grant.parentGrantID, !grant.parentGrantID.IsZero()
 }
+func (grant StandingGrant) PriorDerivedGrantID() (Digest, bool) {
+	return grant.priorDerivedGrantID, !grant.priorDerivedGrantID.IsZero()
+}
 func (grant StandingGrant) ProviderObservationDigest() (Digest, bool) {
 	return grant.providerObservationDigest, !grant.providerObservationDigest.IsZero()
+}
+func (grant StandingGrant) ProviderObservedHead() (GitObjectID, bool) {
+	return grant.providerObservedHead, !grant.providerObservedHead.IsZero()
 }
 
 func deriveStandingGrantPullRequest(
@@ -215,7 +223,7 @@ func deriveStandingGrantPullRequest(
 	derivedScope := cloneStandingGrantScope(grant.scope)
 	derivedScope.pullRequest = identity
 	grantID, err := derivedStandingGrantID(
-		grant.grantID, grant.receiptDigest, observation.digest, identity, observation.head,
+		grant.grantID, Digest{}, grant.receiptDigest, observation.digest, identity, observation.head,
 	)
 	if err != nil {
 		return StandingGrant{}, err
@@ -223,12 +231,53 @@ func deriveStandingGrantPullRequest(
 	return StandingGrant{
 		scope: derivedScope, grantID: grantID, requestDigest: grant.requestDigest,
 		receiptDigest: grant.receiptDigest, parentGrantID: grant.grantID,
-		providerObservationDigest: observation.digest,
+		providerObservationDigest: observation.digest, providerObservedHead: observation.head,
+	}, nil
+}
+
+// deriveStandingGrantPullRequestFrontierAdvance binds a newly signed exact
+// frontier grant to an already durable pull-request identity. The provider
+// observation proves that the pull request still points at the old head, and
+// the new signed parent grant names that old head and the exact review-fix
+// head that may be pushed.
+func deriveStandingGrantPullRequestFrontierAdvance(
+	grant StandingGrant,
+	prior StandingGrant,
+	observation ProviderPullRequestObservation,
+) (StandingGrant, error) {
+	identity := observation.identity
+	priorScope := prior.scope
+	newScope := grant.scope
+	if grant.grantID.IsZero() || !grant.parentGrantID.IsZero() || !newScope.pullRequest.IsZero() ||
+		prior.grantID.IsZero() || prior.parentGrantID.IsZero() || priorScope.pullRequest.IsZero() ||
+		identity.IsZero() || observation.digest.IsZero() || identity != priorScope.pullRequest ||
+		identity.repository != newScope.repository || observation.head != priorScope.frontier.head ||
+		newScope.frontier.base != observation.head || newScope.frontier.head == observation.head ||
+		newScope.workspaceID != priorScope.workspaceID || newScope.repository != priorScope.repository ||
+		newScope.remote != priorScope.remote || newScope.generation != priorScope.generation ||
+		newScope.serialSegment != priorScope.serialSegment || newScope.epoch != priorScope.epoch ||
+		!newScope.Allows(StandingAuthorizationPush) || newScope.Allows(StandingAuthorizationOpenPullRequest) {
+		return StandingGrant{}, fmt.Errorf("pull-request frontier advance does not bind the durable identity and exact old/new heads")
+	}
+	derivedScope := cloneStandingGrantScope(newScope)
+	derivedScope.pullRequest = identity
+	grantID, err := derivedStandingGrantID(
+		grant.grantID, prior.grantID, grant.receiptDigest, observation.digest, identity, observation.head,
+	)
+	if err != nil {
+		return StandingGrant{}, err
+	}
+	return StandingGrant{
+		scope: derivedScope, grantID: grantID, requestDigest: grant.requestDigest,
+		receiptDigest: grant.receiptDigest, parentGrantID: grant.grantID,
+		priorDerivedGrantID: prior.grantID, providerObservationDigest: observation.digest,
+		providerObservedHead: observation.head,
 	}, nil
 }
 
 func derivedStandingGrantID(
 	parentGrantID Digest,
+	priorDerivedGrantID Digest,
 	receiptDigest Digest,
 	providerObservationDigest Digest,
 	identity PullRequestIdentity,
@@ -242,6 +291,7 @@ func derivedStandingGrantID(
 		SchemaVersion       int    `json:"schema_version"`
 		Kind                string `json:"kind"`
 		ParentGrant         string `json:"parent_grant"`
+		PriorDerivedGrant   string `json:"prior_derived_grant,omitempty"`
 		Receipt             string `json:"receipt"`
 		ProviderObservation string `json:"provider_observation"`
 		Provider            string `json:"provider"`
@@ -251,7 +301,8 @@ func derivedStandingGrantID(
 	}
 	canonical, err := json.Marshal(derivedJSON{
 		SchemaVersion: 2, Kind: "derived_pull_request", ParentGrant: parentGrantID.String(),
-		Receipt: receiptDigest.String(), ProviderObservation: providerObservationDigest.String(),
+		PriorDerivedGrant: priorDerivedGrantID.String(),
+		Receipt:           receiptDigest.String(), ProviderObservation: providerObservationDigest.String(),
 		Provider:   identity.provider.String(),
 		Repository: identity.repository.String(), Number: identity.number, Head: observedHead.String(),
 	})
@@ -408,26 +459,41 @@ func (state AuthorizationSafetyState) AmbiguousEffect() bool { return state.ambi
 
 func authorizationSafetyChangeRequestDigest(
 	state AuthorizationState,
+	pendingCandidates []Digest,
 	safety AuthorizationSafetyState,
 ) (Digest, error) {
 	priorStateDigest := authorizationStateDigest(state)
 	if priorStateDigest.IsZero() || state.epoch == 0 {
 		return Digest{}, fmt.Errorf("authorization safety change requires initialized prior state")
 	}
+	candidates := append([]Digest(nil), pendingCandidates...)
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].String() < candidates[j].String() })
+	pending := make([]string, 0, len(candidates))
+	for index, candidate := range candidates {
+		if candidate.IsZero() || index > 0 && candidate == candidates[index-1] {
+			return Digest{}, fmt.Errorf("authorization safety change requires unique pending candidate generations")
+		}
+		pending = append(pending, candidate.String())
+	}
+	if len(pending) != 0 && !safety.reconciliationPending {
+		return Digest{}, fmt.Errorf("authorization safety cannot clear reconciliation while candidate generations remain pending")
+	}
 	type safetyChangeJSON struct {
-		SchemaVersion         int    `json:"schema_version"`
-		Kind                  string `json:"kind"`
-		PriorStateDigest      string `json:"prior_authorization_state_digest"`
-		Epoch                 uint64 `json:"epoch"`
-		GatesBlocked          bool   `json:"gates_blocked"`
-		ReconciliationPending bool   `json:"reconciliation_pending"`
-		DriftDetected         bool   `json:"drift_detected"`
-		AmbiguousEffect       bool   `json:"ambiguous_effect"`
+		SchemaVersion               int      `json:"schema_version"`
+		Kind                        string   `json:"kind"`
+		PriorStateDigest            string   `json:"prior_authorization_state_digest"`
+		Epoch                       uint64   `json:"epoch"`
+		PendingCandidateGenerations []string `json:"pending_candidate_generations"`
+		GatesBlocked                bool     `json:"gates_blocked"`
+		ReconciliationPending       bool     `json:"reconciliation_pending"`
+		DriftDetected               bool     `json:"drift_detected"`
+		AmbiguousEffect             bool     `json:"ambiguous_effect"`
 	}
 	canonical, err := json.Marshal(safetyChangeJSON{
 		SchemaVersion: JournalSchemaVersion, Kind: "authorization_safety_change",
 		PriorStateDigest: priorStateDigest.String(), Epoch: state.epoch,
-		GatesBlocked: safety.gatesBlocked, ReconciliationPending: safety.reconciliationPending,
+		PendingCandidateGenerations: pending,
+		GatesBlocked:                safety.gatesBlocked, ReconciliationPending: safety.reconciliationPending,
 		DriftDetected: safety.driftDetected, AmbiguousEffect: safety.ambiguousEffect,
 	})
 	if err != nil {
@@ -441,9 +507,10 @@ func authorizationSafetyChangeRequestDigest(
 // prevents a receipt from being reused after any authorization state change.
 func AuthorizationSafetyChangeControlPlaneBinding(
 	state AuthorizationState,
+	pendingCandidates []Digest,
 	safety AuthorizationSafetyState,
 ) (ControlPlaneBinding, error) {
-	requestDigest, err := authorizationSafetyChangeRequestDigest(state, safety)
+	requestDigest, err := authorizationSafetyChangeRequestDigest(state, pendingCandidates, safety)
 	if err != nil {
 		return ControlPlaneBinding{}, err
 	}
@@ -745,26 +812,43 @@ func ReduceAuthorization(current AuthorizationState, event AuthorizationEvent) (
 			}
 		}
 		if !value.grant.parentGrantID.IsZero() {
-			var parent StandingGrant
+			var parent, prior StandingGrant
 			for _, grant := range current.grants {
 				if grant.parentGrantID == value.grant.parentGrantID {
 					return AuthorizationState{}, fmt.Errorf("standing grant %s already has a provider-derived child", value.grant.parentGrantID)
 				}
+				if !value.grant.priorDerivedGrantID.IsZero() && grant.priorDerivedGrantID == value.grant.priorDerivedGrantID {
+					return AuthorizationState{}, fmt.Errorf("pull-request grant %s already has a frontier successor", value.grant.priorDerivedGrantID)
+				}
 				if grant.grantID == value.grant.parentGrantID {
 					parent = grant
+				}
+				if !value.grant.priorDerivedGrantID.IsZero() && grant.grantID == value.grant.priorDerivedGrantID {
+					prior = grant
 				}
 			}
 			if parent.grantID.IsZero() {
 				return AuthorizationState{}, fmt.Errorf("derived standing grant has no durable parent %s", value.grant.parentGrantID)
 			}
 			observation := ProviderPullRequestObservation{
-				identity: scope.pullRequest, head: scope.frontier.head,
+				identity: scope.pullRequest, head: value.grant.providerObservedHead,
 				digest: value.grant.providerObservationDigest,
 			}
-			derived, err := deriveStandingGrantPullRequest(parent, observation)
+			var derived StandingGrant
+			var err error
+			if value.grant.priorDerivedGrantID.IsZero() {
+				derived, err = deriveStandingGrantPullRequest(parent, observation)
+			} else {
+				if prior.grantID.IsZero() {
+					return AuthorizationState{}, fmt.Errorf("pull-request frontier advance has no durable predecessor %s", value.grant.priorDerivedGrantID)
+				}
+				derived, err = deriveStandingGrantPullRequestFrontierAdvance(parent, prior, observation)
+			}
 			if err != nil || derived.grantID != value.grant.grantID ||
 				derived.requestDigest != value.grant.requestDigest || derived.receiptDigest != value.grant.receiptDigest ||
+				derived.priorDerivedGrantID != value.grant.priorDerivedGrantID ||
 				derived.providerObservationDigest != value.grant.providerObservationDigest ||
+				derived.providerObservedHead != value.grant.providerObservedHead ||
 				derived.scope.Digest() != value.grant.scope.Digest() {
 				return AuthorizationState{}, fmt.Errorf("derived standing grant does not match its durable parent")
 			}
@@ -1075,7 +1159,9 @@ func authorizationStateDigest(state AuthorizationState) Digest {
 		RequestDigest             string `json:"request_digest"`
 		ReceiptDigest             string `json:"receipt_digest"`
 		ParentGrantID             string `json:"parent_grant_id,omitempty"`
+		PriorDerivedGrantID       string `json:"prior_derived_grant_id,omitempty"`
 		ProviderObservationDigest string `json:"provider_observation_digest,omitempty"`
+		ProviderObservedHead      string `json:"provider_observed_head,omitempty"`
 	}
 	type obligationJSON struct {
 		EffectID      string `json:"effect_id"`
@@ -1113,7 +1199,9 @@ func authorizationStateDigest(state AuthorizationState) Digest {
 		wire.Grants = append(wire.Grants, grantJSON{
 			GrantID: grant.grantID.String(), RequestDigest: grant.requestDigest.String(),
 			ReceiptDigest: grant.receiptDigest.String(), ParentGrantID: grant.parentGrantID.String(),
+			PriorDerivedGrantID:       grant.priorDerivedGrantID.String(),
 			ProviderObservationDigest: grant.providerObservationDigest.String(),
+			ProviderObservedHead:      grant.providerObservedHead.String(),
 		})
 	}
 	for _, grantID := range state.revokedGrantIDs {

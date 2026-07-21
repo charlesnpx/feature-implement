@@ -129,33 +129,38 @@ func (observation ProviderPullRequestObservation) PullRequest() PullRequestIdent
 // ProviderPullRequestVerification is the exact provider boundary expected by
 // a pre-PR standing grant. It contains no executable command or credential.
 type ProviderPullRequestVerification struct {
-	workspaceID   ID
-	generation    Digest
-	repository    RepositoryIdentity
-	remote        string
-	serialSegment ID
-	frontier      AuthorizationFrontier
-	parentGrantID Digest
-	observation   Digest
+	workspaceID         ID
+	generation          Digest
+	repository          RepositoryIdentity
+	remote              string
+	serialSegment       ID
+	frontier            AuthorizationFrontier
+	parentGrantID       Digest
+	priorDerivedGrantID Digest
+	observedHead        GitObjectID
+	observation         Digest
 }
 
 func newProviderPullRequestVerification(
 	scope StandingGrantScope,
 	parentGrantID Digest,
+	priorDerivedGrantID Digest,
+	expectedObservedHead GitObjectID,
 	observation ProviderPullRequestObservation,
 ) (ProviderPullRequestVerification, error) {
 	if scope.workspaceID.IsZero() || scope.generation.IsZero() || scope.repository.String() == "" ||
 		scope.serialSegment.IsZero() || scope.frontier.base.IsZero() || scope.frontier.head.IsZero() ||
-		parentGrantID.IsZero() || observation.digest.IsZero() {
+		parentGrantID.IsZero() || expectedObservedHead.IsZero() || observation.digest.IsZero() {
 		return ProviderPullRequestVerification{}, fmt.Errorf("provider pull request verification requires exact grant and observation bindings")
 	}
-	if observation.identity.repository != scope.repository || observation.head != scope.frontier.head {
+	if observation.identity.repository != scope.repository || observation.head != expectedObservedHead {
 		return ProviderPullRequestVerification{}, fmt.Errorf("provider pull request observation does not match the granted repository and frontier")
 	}
 	return ProviderPullRequestVerification{
 		workspaceID: scope.workspaceID, generation: scope.generation, repository: scope.repository,
 		remote: scope.remote, serialSegment: scope.serialSegment, frontier: scope.frontier,
-		parentGrantID: parentGrantID, observation: observation.digest,
+		parentGrantID: parentGrantID, priorDerivedGrantID: priorDerivedGrantID,
+		observedHead: expectedObservedHead, observation: observation.digest,
 	}, nil
 }
 
@@ -175,6 +180,12 @@ func (verification ProviderPullRequestVerification) Frontier() AuthorizationFron
 }
 func (verification ProviderPullRequestVerification) ParentGrantID() Digest {
 	return verification.parentGrantID
+}
+func (verification ProviderPullRequestVerification) PriorDerivedGrantID() (Digest, bool) {
+	return verification.priorDerivedGrantID, !verification.priorDerivedGrantID.IsZero()
+}
+func (verification ProviderPullRequestVerification) ObservedHead() GitObjectID {
+	return verification.observedHead
 }
 func (verification ProviderPullRequestVerification) ObservationDigest() Digest {
 	return verification.observation

@@ -576,6 +576,13 @@ func ActivateCandidateGeneration(
 	if runtime.workspaceID != plan.workspaceID || runtime.activeGeneration != plan.activeGeneration || !runtime.HasActivatableCandidate(plan.candidateGeneration) {
 		return JournalRecord{}, fmt.Errorf("stale reconciliation token: generation state changed")
 	}
+	authorization, err := RebuildAuthorizationRuntime(snapshot, active)
+	if err != nil {
+		return JournalRecord{}, fmt.Errorf("rebuild authorization before generation activation: %w", err)
+	}
+	if len(authorization.state.obligations) != 0 {
+		return JournalRecord{}, fmt.Errorf("generation activation is blocked by dispatched effects awaiting reconciliation")
+	}
 	recomputed, err := DryRunReconciliation(active, candidate, snapshot, state)
 	if err != nil {
 		return JournalRecord{}, fmt.Errorf("revalidate reconciliation plan: %w", err)

@@ -26,7 +26,9 @@ type authorizationGrantPayloadWire struct {
 	Scope                     standingGrantScopeWire `json:"scope"`
 	GrantID                   string                 `json:"grant_id"`
 	ParentGrantID             string                 `json:"parent_grant_id,omitempty"`
+	PriorDerivedGrantID       string                 `json:"prior_derived_grant_id,omitempty"`
 	ProviderObservationDigest string                 `json:"provider_observation_digest,omitempty"`
+	ProviderObservedHead      string                 `json:"provider_observed_head,omitempty"`
 	RequestDigest             string                 `json:"request_digest"`
 	ReceiptDigest             string                 `json:"receipt_digest"`
 }
@@ -92,7 +94,9 @@ func marshalAuthorizationJournalEvent(event WorkspaceJournalEvent) (json.RawMess
 			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
 			Scope: standingGrantScopeToWire(event.grant.scope), GrantID: event.grant.grantID.String(),
 			ParentGrantID:             event.grant.parentGrantID.String(),
+			PriorDerivedGrantID:       event.grant.priorDerivedGrantID.String(),
 			ProviderObservationDigest: event.grant.providerObservationDigest.String(),
+			ProviderObservedHead:      event.grant.providerObservedHead.String(),
 			RequestDigest:             event.grant.requestDigest.String(), ReceiptDigest: event.grant.receiptDigest.String(),
 		}
 	case AuthorizationRevokedJournalEvent:
@@ -164,6 +168,20 @@ func decodeAuthorizationJournalEvent(
 				return nil, true, err
 			}
 		}
+		var priorDerivedGrantID Digest
+		if wire.PriorDerivedGrantID != "" {
+			priorDerivedGrantID, err = ParseDigest(wire.PriorDerivedGrantID)
+			if err != nil {
+				return nil, true, err
+			}
+		}
+		var providerObservedHead GitObjectID
+		if wire.ProviderObservedHead != "" {
+			providerObservedHead, err = ParseGitObjectID(wire.ProviderObservedHead)
+			if err != nil {
+				return nil, true, err
+			}
+		}
 		requestDigest, err := ParseDigest(wire.RequestDigest)
 		if err != nil {
 			return nil, true, err
@@ -174,8 +192,9 @@ func decodeAuthorizationJournalEvent(
 		}
 		grant := StandingGrant{
 			scope: scope, grantID: grantID, parentGrantID: parentGrantID,
-			providerObservationDigest: providerObservationDigest,
-			requestDigest:             requestDigest, receiptDigest: receiptDigest,
+			priorDerivedGrantID: priorDerivedGrantID, providerObservationDigest: providerObservationDigest,
+			providerObservedHead: providerObservedHead,
+			requestDigest:        requestDigest, receiptDigest: receiptDigest,
 		}
 		event, err := NewAuthorizationGrantRecordedJournalEvent(workspaceID, generation, grant)
 		return event, true, err
