@@ -439,10 +439,16 @@ func DryRunReconciliation(
 		}
 		unitStates[unit.reference.key()] = unit
 	}
-	attemptedUnits := make(map[string]AttemptGenerationBinding, len(state.attempts))
+	attemptedUnits := make(map[string]AttemptGenerationBinding, len(state.attempts)+len(runtime.attempts))
 	for _, attempt := range state.attempts {
 		if _, exists := activeUnits[attempt.mergeUnit.key()]; !exists {
 			return ReconciliationPlan{}, fmt.Errorf("attempt %s references unknown merge unit %s", attempt.attemptID, attempt.mergeUnit)
+		}
+		attemptedUnits[attempt.mergeUnit.key()] = attempt
+	}
+	for _, attempt := range runtime.AttemptGenerationBindings() {
+		if _, exists := activeUnits[attempt.mergeUnit.key()]; !exists {
+			return ReconciliationPlan{}, fmt.Errorf("journal attempt %s references unknown merge unit %s", attempt.attemptID, attempt.mergeUnit)
 		}
 		attemptedUnits[attempt.mergeUnit.key()] = attempt
 	}
@@ -673,6 +679,14 @@ func validateReconciliationSafety(state ReconciliationState, runtime WorkspaceRu
 			return fmt.Errorf("reconciliation is blocked by nonterminal attempt %s in state %s", attempt.attemptID, attempt.phase)
 		}
 	}
+	for _, attempt := range runtime.AttemptGenerationBindings() {
+		if !containsDigest(knownGenerations, attempt.generation) {
+			return fmt.Errorf("journal attempt %s is bound to unknown generation %s", attempt.attemptID, attempt.generation)
+		}
+		if attempt.phase.nonterminal() {
+			return fmt.Errorf("reconciliation is blocked by journal-projected nonterminal attempt %s in state %s", attempt.attemptID, attempt.phase)
+		}
+	}
 	for _, intent := range state.intents {
 		if !containsDigest(knownGenerations, intent.generation) {
 			return fmt.Errorf("provider intent %s is bound to unknown generation %s", intent.intentID, intent.generation)
@@ -881,7 +895,8 @@ func definitionUnitFingerprints(definition EffectiveWorkspaceDefinition) (map[st
 				Profile: canonicalProfile{ID: profile.id.String(), Runner: profile.runner.String(), Policy: canonicalizePolicy(profile.policy)},
 				Execution: canonicalUnitExecution{
 					PlanID: plan.id.String(), MergeUnitID: unit.id.String(), Profile: execution.profileID.String(),
-					Policy: canonicalizePolicy(execution.policy),
+					Policy: canonicalizePolicy(execution.policy), BoundaryMode: execution.boundary.mode,
+					SerialSegment: execution.boundary.serialSegment.String(),
 				},
 				Authorities: append([]json.RawMessage(nil), authorities...),
 			}

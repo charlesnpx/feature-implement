@@ -125,6 +125,7 @@ type WorkspaceRuntimeProjection struct {
 	candidates        []RuntimeCandidateProjection
 	activations       []RuntimeActivationProjection
 	recoveries        []RuntimeRecoveryProjection
+	attempts          []RuntimeAttemptProjection
 }
 
 func (projection WorkspaceRuntimeProjection) WorkspaceID() ID { return projection.workspaceID }
@@ -185,7 +186,7 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 	switch event := record.event.(type) {
 	case WorkspaceInitializedJournalEvent:
 		if !current.activeGeneration.IsZero() || len(current.generationHistory) != 0 ||
-			len(current.candidates) != 0 || len(current.activations) != 0 {
+			len(current.candidates) != 0 || len(current.activations) != 0 || len(current.attempts) != 0 {
 			return WorkspaceRuntimeProjection{}, fmt.Errorf("workspace initialization must be the first and only initialization event")
 		}
 		if current.workspaceID.IsZero() {
@@ -229,6 +230,11 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 		if candidateIndex < 0 {
 			return WorkspaceRuntimeProjection{}, fmt.Errorf("generation activation references an unstaged candidate")
 		}
+		for _, attempt := range current.attempts {
+			if attempt.phase.nonterminal() {
+				return WorkspaceRuntimeProjection{}, fmt.Errorf("generation activation is blocked by nonterminal attempt %s", attempt.attemptID)
+			}
+		}
 		next.candidates[candidateIndex].activated = true
 		next.activeGeneration = event.activeGeneration
 		next.generationHistory = append(next.generationHistory, event.activeGeneration)
@@ -264,7 +270,12 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 			discardDigest: event.discardDigest, resultingHead: event.resultingHead,
 		})
 	default:
-		return WorkspaceRuntimeProjection{}, fmt.Errorf("unsupported runtime event %T", record.event)
+		if !isAttemptJournalEvent(record.event) {
+			return WorkspaceRuntimeProjection{}, fmt.Errorf("unsupported runtime event %T", record.event)
+		}
+		if err := reduceAttemptRuntime(current, &next, record); err != nil {
+			return WorkspaceRuntimeProjection{}, err
+		}
 	}
 	return next, nil
 }
@@ -278,6 +289,7 @@ func cloneWorkspaceRuntime(source WorkspaceRuntimeProjection) WorkspaceRuntimePr
 		result.activations[index].changedMergeUnits = append([]MergeUnitReference(nil), source.activations[index].changedMergeUnits...)
 	}
 	result.recoveries = append([]RuntimeRecoveryProjection(nil), source.recoveries...)
+	result.attempts = cloneRuntimeAttempts(source.attempts)
 	return result
 }
 
@@ -308,13 +320,14 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 		ResultingHead string `json:"resulting_head"`
 	}
 	type runtimeJSON struct {
-		SchemaVersion     int              `json:"schema_version"`
-		WorkspaceID       string           `json:"workspace_id"`
-		ActiveGeneration  string           `json:"active_generation"`
-		GenerationHistory []string         `json:"generation_history"`
-		Candidates        []candidateJSON  `json:"candidates"`
-		Activations       []activationJSON `json:"activations"`
-		Recoveries        []recoveryJSON   `json:"recoveries"`
+		SchemaVersion     int               `json:"schema_version"`
+		WorkspaceID       string            `json:"workspace_id"`
+		ActiveGeneration  string            `json:"active_generation"`
+		GenerationHistory []string          `json:"generation_history"`
+		Candidates        []candidateJSON   `json:"candidates"`
+		Activations       []activationJSON  `json:"activations"`
+		Recoveries        []recoveryJSON    `json:"recoveries"`
+		Attempts          []json.RawMessage `json:"attempts"`
 	}
 	value := runtimeJSON{
 		SchemaVersion: JournalSchemaVersion, WorkspaceID: projection.workspaceID.String(),
@@ -323,6 +336,7 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 		Candidates:        make([]candidateJSON, 0, len(projection.candidates)),
 		Activations:       make([]activationJSON, 0, len(projection.activations)),
 		Recoveries:        make([]recoveryJSON, 0, len(projection.recoveries)),
+		Attempts:          make([]json.RawMessage, 0, len(projection.attempts)),
 	}
 	for _, generation := range projection.generationHistory {
 		value.GenerationHistory = append(value.GenerationHistory, generation.String())
@@ -351,6 +365,13 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 			DiscardOffset: recovery.discardOffset, DiscardSize: recovery.discardSize,
 			DiscardDigest: recovery.discardDigest.String(), ResultingHead: recovery.resultingHead.String(),
 		})
+	}
+	for _, attempt := range projection.attempts {
+		canonical, err := canonicalAttemptRuntime(attempt)
+		if err != nil {
+			return nil, err
+		}
+		value.Attempts = append(value.Attempts, canonical)
 	}
 	return json.Marshal(value)
 }
