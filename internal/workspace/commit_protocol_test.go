@@ -1,6 +1,10 @@
 package workspace_test
 
 import (
+	"bytes"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -214,8 +218,11 @@ func TestStructuredCheckParsersRejectGenericAndWrongFailures(t *testing.T) {
 	}
 
 	compileOutput := []byte(strings.Join([]string{
-		`{"Action":"build-output","Package":"example/pkg","Output":"./x.go:2: undefined: missing\n"}`,
-		`{"Action":"build-fail","Package":"example/pkg"}`,
+		`{"ImportPath":"example/pkg","Action":"build-output","Output":"./x.go:2: undefined: missing\n"}`,
+		`{"ImportPath":"example/pkg","Action":"build-fail"}`,
+		`{"Action":"start","Package":"example/pkg"}`,
+		`{"Action":"output","Package":"example/pkg","Output":"FAIL\texample/pkg [build failed]\n"}`,
+		`{"Action":"fail","Package":"example/pkg","FailedBuild":"example/pkg"}`,
 		"",
 	}, "\n"))
 	compileResult := mustCheckResult(t, workspace.CheckExited, 1, "", compileOutput, nil, isolation)
@@ -252,6 +259,134 @@ func TestStructuredCheckParsersRejectGenericAndWrongFailures(t *testing.T) {
 		if err != nil || outcome.Kind() != test.kind || expected.SatisfiedBy(outcome) {
 			t.Fatalf("termination %s outcome=%#v err=%v", test.termination, outcome, err)
 		}
+	}
+}
+
+func TestGoTestParserRejectsUncorrelatedBuildsAndAbnormalTermination(t *testing.T) {
+	namedFailure := []string{
+		`{"Action":"fail","Package":"example/pkg","Test":"TestExpected"}`,
+		`{"Action":"fail","Package":"example/pkg"}`,
+	}
+	tests := []struct {
+		name     string
+		exitCode int
+		lines    []string
+		stderr   string
+		want     workspace.CheckOutcomeKind
+	}{
+		{
+			name:     "build event uses Package instead of ImportPath",
+			exitCode: 1,
+			lines: []string{
+				`{"Action":"build-fail","Package":"example/pkg"}`,
+				`{"Action":"fail","Package":"example/pkg","FailedBuild":"example/pkg"}`,
+			},
+			want: workspace.CheckOutcomeMalformedOutput,
+		},
+		{
+			name:     "failed build is not correlated",
+			exitCode: 1,
+			lines: []string{
+				`{"ImportPath":"example/dependency","Action":"build-fail"}`,
+				`{"Action":"fail","Package":"example/pkg"}`,
+			},
+			want: workspace.CheckOutcomeMalformedOutput,
+		},
+		{
+			name:     "FailedBuild has no build stream",
+			exitCode: 1,
+			lines: []string{
+				`{"Action":"fail","Package":"example/pkg","FailedBuild":"example/dependency"}`,
+			},
+			want: workspace.CheckOutcomeMalformedOutput,
+		},
+		{
+			name:     "package process was signaled",
+			exitCode: 1,
+			lines: []string{
+				namedFailure[0],
+				`{"Action":"output","Package":"example/pkg","Output":"signal: killed\n"}`,
+				namedFailure[1],
+			},
+			want: workspace.CheckOutcomeSignaled,
+		},
+		{
+			name:     "package process exited abnormally",
+			exitCode: 1,
+			lines: []string{
+				namedFailure[0],
+				`{"Action":"output","Package":"example/pkg","Output":"exit status 2\n"}`,
+				namedFailure[1],
+			},
+			want: workspace.CheckOutcomeCrashed,
+		},
+		{
+			name:     "go command wrote stderr",
+			exitCode: 1,
+			lines:    namedFailure,
+			stderr:   "go: infrastructure failure\n",
+			want:     workspace.CheckOutcomeInfrastructureFailed,
+		},
+		{
+			name:     "go command used unexpected exit code",
+			exitCode: 2,
+			lines:    namedFailure,
+			want:     workspace.CheckOutcomeInfrastructureFailed,
+		},
+		{
+			name:     "duplicate event key",
+			exitCode: 1,
+			lines: []string{
+				`{"Action":"fail","Action":"pass","Package":"example/pkg","Test":"TestExpected"}`,
+				`{"Action":"fail","Package":"example/pkg"}`,
+			},
+			want: workspace.CheckOutcomeMalformedOutput,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			output := []byte(strings.Join(append(append([]string{}, test.lines...), ""), "\n"))
+			result := mustCheckResult(
+				t, workspace.CheckExited, test.exitCode, "", output, []byte(test.stderr),
+				workspace.StrictCheckIsolationProof(),
+			)
+			outcome, err := workspace.ParseCheckOutcome(workspace.CheckParserGoTestJSON, result)
+			if err != nil || outcome.Kind() != test.want {
+				t.Fatalf("outcome = %#v err=%v, want %s", outcome, err, test.want)
+			}
+		})
+	}
+}
+
+func TestGoTestParserRecognizesRealGo126CompilationFailure(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/broken\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(root, "broken.go"), []byte("package broken\nfunc Broken() { missing() }\n"), 0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("go", "test", "-json", "./...")
+	command.Dir = root
+	command.Env = append(os.Environ(), "GOFLAGS=", "GOWORK=off", "GOTOOLCHAIN=local")
+	var stdout, stderr bytes.Buffer
+	command.Stdout, command.Stderr = &stdout, &stderr
+	err := command.Run()
+	if err == nil || command.ProcessState == nil || command.ProcessState.ExitCode() != 1 {
+		t.Fatalf("broken go test err=%v exit=%v stdout=%s stderr=%s", err, command.ProcessState, stdout.String(), stderr.String())
+	}
+	if !bytes.Contains(stdout.Bytes(), []byte(`"ImportPath":"example.com/broken"`)) {
+		t.Fatalf("Go 1.26 build stream did not contain ImportPath: %s", stdout.String())
+	}
+	result := mustCheckResult(
+		t, workspace.CheckExited, command.ProcessState.ExitCode(), "", stdout.Bytes(), stderr.Bytes(),
+		workspace.StrictCheckIsolationProof(),
+	)
+	outcome, err := workspace.ParseCheckOutcome(workspace.CheckParserGoTestJSON, result)
+	if err != nil || outcome.Kind() != workspace.CheckOutcomeCompilationFailed {
+		t.Fatalf("real compilation outcome = %#v err=%v stdout=%s stderr=%s", outcome, err, stdout.String(), stderr.String())
 	}
 }
 
@@ -379,6 +514,19 @@ func TestAssertionAndDiagnosticParsersRequireExactStructuredIdentities(t *testin
 			malformedOutcome, err := workspace.ParseCheckOutcome(test.parser, malformed)
 			if err != nil || malformedOutcome.Kind() != workspace.CheckOutcomeMalformedOutput || expected.SatisfiedBy(malformedOutcome) {
 				t.Fatalf("malformed outcome = %#v err=%v", malformedOutcome, err)
+			}
+
+			for _, duplicate := range [][]byte{
+				[]byte(`{"schema_version":1,"status":"failed","status":"passed","` + test.collection + `":[{"id":"checkpoint","status":"failed"}]}`),
+				[]byte(`{"schema_version":1,"status":"failed","` + test.collection + `":[{"id":"checkpoint","id":"other","status":"failed"}]}`),
+			} {
+				duplicateResult := mustCheckResult(
+					t, workspace.CheckExited, 1, "", duplicate, nil, workspace.StrictCheckIsolationProof(),
+				)
+				duplicateOutcome, err := workspace.ParseCheckOutcome(test.parser, duplicateResult)
+				if err != nil || duplicateOutcome.Kind() != workspace.CheckOutcomeMalformedOutput {
+					t.Fatalf("duplicate-key outcome = %#v err=%v", duplicateOutcome, err)
+				}
 			}
 		})
 	}
