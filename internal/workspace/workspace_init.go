@@ -1,0 +1,173 @@
+package workspace
+
+import (
+	"encoding/json"
+	"fmt"
+	"path/filepath"
+	"time"
+)
+
+const WorkspaceRuntimeProjectionFileName = "runtime-projection.json"
+
+type WorkspaceInitializationResult struct {
+	storedGeneration StoredGeneration
+	snapshot         JournalSnapshot
+	runtime          WorkspaceRuntimeProjection
+	projectionDigest Digest
+}
+
+func (result WorkspaceInitializationResult) StoredGeneration() StoredGeneration {
+	return result.storedGeneration
+}
+func (result WorkspaceInitializationResult) Snapshot() JournalSnapshot { return result.snapshot }
+func (result WorkspaceInitializationResult) Runtime() WorkspaceRuntimeProjection {
+	return cloneWorkspaceRuntime(result.runtime)
+}
+func (result WorkspaceInitializationResult) ProjectionDigest() Digest { return result.projectionDigest }
+
+func WorkspaceRuntimeProjectionPath(workspaceDir string) string {
+	return filepath.Join(WorkspaceStateDirectory(workspaceDir), WorkspaceRuntimeProjectionFileName)
+}
+
+func InitializeWorkspaceV2(
+	workspaceDir string,
+	definition EffectiveWorkspaceDefinition,
+	occurredAt time.Time,
+) (WorkspaceInitializationResult, error) {
+	if definition.generation.IsZero() || occurredAt.IsZero() {
+		return WorkspaceInitializationResult{}, fmt.Errorf("workspace initialization requires an effective definition and occurrence time")
+	}
+	store, err := OpenGenerationStore(workspaceDir)
+	if err != nil {
+		return WorkspaceInitializationResult{}, err
+	}
+	journal, err := OpenWorkspaceJournal(workspaceDir, JournalReadWrite)
+	if err != nil {
+		return WorkspaceInitializationResult{}, err
+	}
+	defer journal.Close()
+	snapshot, err := journal.ReadSnapshot()
+	if err != nil {
+		return WorkspaceInitializationResult{}, err
+	}
+	needsInitialization := len(snapshot.records) == 0
+	if len(snapshot.records) != 0 {
+		existing, err := RebuildWorkspaceRuntime(snapshot)
+		if err != nil {
+			return WorkspaceInitializationResult{}, err
+		}
+		if existing.activeGeneration.IsZero() {
+			if existing.workspaceID != definition.workspace.id || len(existing.recoveries) == 0 {
+				return WorkspaceInitializationResult{}, fmt.Errorf("pre-initialization journal does not match workspace %s", definition.workspace.id)
+			}
+			for _, recovery := range existing.recoveries {
+				if recovery.generation != definition.generation {
+					return WorkspaceInitializationResult{}, fmt.Errorf(
+						"pre-initialization journal is bound to generation %s, not %s",
+						recovery.generation, definition.generation,
+					)
+				}
+			}
+			needsInitialization = true
+		} else if existing.workspaceID != definition.workspace.id || existing.activeGeneration != definition.generation {
+			return WorkspaceInitializationResult{}, fmt.Errorf(
+				"workspace is already initialized as %s at generation %s",
+				existing.workspaceID, existing.activeGeneration,
+			)
+		}
+	}
+	stored, err := store.Store(definition)
+	if err != nil {
+		return WorkspaceInitializationResult{}, err
+	}
+	if needsInitialization {
+		event, err := NewWorkspaceInitializedJournalEvent(definition.workspace.id, definition.generation, stored.definitionDigest)
+		if err != nil {
+			return WorkspaceInitializationResult{}, err
+		}
+		workspaceResource := WorkspaceJournalResource(definition.workspace.id)
+		generationResource := GenerationJournalResource(definition.generation)
+		workspaceRevision, _ := NewJournalResourceRevision(workspaceResource, snapshot.Revision(workspaceResource))
+		generationRevision, _ := NewJournalResourceRevision(generationResource, snapshot.Revision(generationResource))
+		appendRequest, err := NewJournalAppend(
+			event, occurredAt,
+			[]JournalResourceRevision{workspaceRevision, generationRevision},
+			[]JournalResource{workspaceResource, generationResource},
+		)
+		if err != nil {
+			return WorkspaceInitializationResult{}, err
+		}
+		if _, err := journal.Append(appendRequest); err != nil {
+			return WorkspaceInitializationResult{}, err
+		}
+		snapshot, err = journal.ReadSnapshot()
+		if err != nil {
+			return WorkspaceInitializationResult{}, err
+		}
+	}
+	runtime, err := RebuildWorkspaceRuntime(snapshot)
+	if err != nil {
+		return WorkspaceInitializationResult{}, err
+	}
+	if runtime.workspaceID != definition.workspace.id || runtime.activeGeneration != definition.generation {
+		return WorkspaceInitializationResult{}, fmt.Errorf("initialized runtime does not match the effective definition")
+	}
+	projectionDigest, err := writeWorkspaceRuntimeProjection(workspaceDir, snapshot, runtime)
+	if err != nil {
+		return WorkspaceInitializationResult{}, err
+	}
+	return WorkspaceInitializationResult{
+		storedGeneration: stored, snapshot: snapshot,
+		runtime: runtime, projectionDigest: projectionDigest,
+	}, nil
+}
+
+func RebuildWorkspaceRuntimeProjectionFile(journal *WorkspaceJournal) (Digest, error) {
+	if journal == nil {
+		return Digest{}, fmt.Errorf("workspace journal is required")
+	}
+	snapshot, err := journal.ReadSnapshot()
+	if err != nil {
+		return Digest{}, err
+	}
+	runtime, err := RebuildWorkspaceRuntime(snapshot)
+	if err != nil {
+		return Digest{}, err
+	}
+	return writeWorkspaceRuntimeProjection(journal.workspaceDir, snapshot, runtime)
+}
+
+func writeWorkspaceRuntimeProjection(
+	workspaceDir string,
+	snapshot JournalSnapshot,
+	runtime WorkspaceRuntimeProjection,
+) (Digest, error) {
+	projectionBytes, err := canonicalWorkspaceRuntime(runtime)
+	if err != nil {
+		return Digest{}, err
+	}
+	conformanceDigest, err := VerifyWorkspaceRuntimeConformance(snapshot, runtime.activeGeneration)
+	if err != nil {
+		return Digest{}, err
+	}
+	if DigestBytes(projectionBytes) != conformanceDigest {
+		return Digest{}, fmt.Errorf("runtime projection does not match replay conformance digest")
+	}
+	type projectionFile struct {
+		SchemaVersion    int             `json:"schema_version"`
+		JournalHead      string          `json:"journal_head"`
+		ProjectionDigest string          `json:"projection_digest"`
+		Projection       json.RawMessage `json:"projection"`
+	}
+	content, err := json.Marshal(projectionFile{
+		SchemaVersion: JournalSchemaVersion, JournalHead: snapshot.head.String(),
+		ProjectionDigest: conformanceDigest.String(), Projection: json.RawMessage(projectionBytes),
+	})
+	if err != nil {
+		return Digest{}, err
+	}
+	if err := atomicWriteSynchronized(WorkspaceRuntimeProjectionPath(workspaceDir), content, 0o644); err != nil {
+		return Digest{}, err
+	}
+	return conformanceDigest, nil
+}
