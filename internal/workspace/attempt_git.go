@@ -293,6 +293,12 @@ func (adapter LocalAttemptGitAdapter) InspectAttemptWorktree(
 	if record.detached {
 		return AttemptGitInspection{}, fmt.Errorf("attempt worktree %s is detached", worktree)
 	}
+	commitAdapter := LocalCommitGitAdapter{git: adapter}
+	binding, err := commitAdapter.captureTrustedWorktreeBinding(ctx, worktree)
+	if err != nil {
+		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree binding: %w", err)
+	}
+	worktree = binding.root
 	headOutput, headExit, err := adapter.run(ctx, worktree, "rev-parse", "--verify", "HEAD")
 	if err != nil || headExit != 0 {
 		if err == nil {
@@ -312,6 +318,10 @@ func (adapter LocalAttemptGitAdapter) InspectAttemptWorktree(
 		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree branch: %w", err)
 	}
 	worktreeBranch := strings.TrimSpace(string(branchOutput))
+	indexTree, err := commitAdapter.writeTree(ctx, worktree, algorithm)
+	if err != nil {
+		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree index tree: %w", err)
+	}
 	indexOutput, indexExit, err := adapter.run(ctx, worktree, "ls-files", "-v", "-z", "--")
 	if err != nil || indexExit != 0 {
 		if err == nil {
@@ -344,14 +354,35 @@ func (adapter LocalAttemptGitAdapter) InspectAttemptWorktree(
 	}
 	clean := len(statusOutput) == 0
 	if clean {
-		commitAdapter := LocalCommitGitAdapter{git: adapter}
 		tree, err := commitAdapter.resolveObject(ctx, worktree, algorithm, objectHex(head)+"^{tree}")
 		if err != nil {
 			return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree tree: %w", err)
 		}
+		if indexTree != tree {
+			return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree index tree does not match head tree")
+		}
 		if err := commitAdapter.verifyRawTreeMaterialization(ctx, worktree, tree); err != nil {
 			return AttemptGitInspection{}, fmt.Errorf("inspect attempt raw worktree: %w", err)
 		}
+	}
+	if err := commitAdapter.confirmTrustedCommitState(ctx, binding, worktreeBranch, head, indexTree); err != nil {
+		return AttemptGitInspection{}, fmt.Errorf("confirm attempt worktree Git state: %w", err)
+	}
+	confirmedBranch, confirmedExit, err := adapter.run(
+		ctx, repositoryRoot, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch,
+	)
+	if err != nil || confirmedExit != 0 {
+		if err == nil {
+			err = fmt.Errorf("Git exited with status %d", confirmedExit)
+		}
+		return AttemptGitInspection{}, fmt.Errorf("confirm attempt branch: %w", err)
+	}
+	confirmedBranchHead, err := qualifyGitObjectID(algorithm, strings.TrimSpace(string(confirmedBranch)))
+	if err != nil {
+		return AttemptGitInspection{}, err
+	}
+	if !branchExists || confirmedBranchHead != branchHead {
+		return AttemptGitInspection{}, fmt.Errorf("attempt branch changed during worktree verification")
 	}
 	return NewAttemptGitInspection(
 		branchExists, branchHead, true, true, worktreeBranch, head, clean,
@@ -369,6 +400,11 @@ func (adapter LocalAttemptGitAdapter) CreateAttemptWorktree(
 	}
 	if err := os.MkdirAll(filepath.Dir(filepath.Clean(worktree)), 0o755); err != nil {
 		return fmt.Errorf("create attempt worktree parent: %w", err)
+	}
+	commitAdapter := LocalCommitGitAdapter{git: adapter}
+	binding, err := commitAdapter.captureTrustedWorktreeBinding(ctx, repositoryRoot)
+	if err != nil {
+		return fmt.Errorf("inspect attempt materialization Git binding: %w", err)
 	}
 	baseText := strings.TrimPrefix(base.String(), string(base.algorithm)+":")
 	arguments := []string{"worktree", "add"}
@@ -389,6 +425,13 @@ func (adapter LocalAttemptGitAdapter) CreateAttemptWorktree(
 	}
 	if exitCode != 0 {
 		return fmt.Errorf("create attempt worktree: Git exited with status %d", exitCode)
+	}
+	confirmed, err := commitAdapter.captureTrustedWorktreeBinding(ctx, binding.root)
+	if err != nil {
+		return fmt.Errorf("confirm attempt materialization Git binding: %w", err)
+	}
+	if confirmed != binding {
+		return fmt.Errorf("Git worktree administration changed during attempt materialization")
 	}
 	return nil
 }

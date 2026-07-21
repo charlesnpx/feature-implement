@@ -210,6 +210,11 @@ func (adapter LocalCommitGitAdapter) inspectStagedOnce(
 	ctx context.Context,
 	worktree, branch string,
 ) (StagedCommitInspection, error) {
+	binding, err := adapter.captureTrustedWorktreeBinding(ctx, worktree)
+	if err != nil {
+		return StagedCommitInspection{}, err
+	}
+	worktree = binding.root
 	algorithm, err := adapter.git.objectFormat(ctx, worktree)
 	if err != nil {
 		return StagedCommitInspection{}, err
@@ -234,7 +239,7 @@ func (adapter LocalCommitGitAdapter) inspectStagedOnce(
 	}
 	raw, exitCode, err := adapter.git.run(
 		ctx, worktree, "diff", "--cached", "--raw", "-z", "--no-abbrev", "--find-renames=50%",
-		"--ignore-submodules=none", "HEAD", "--",
+		"--ignore-submodules=none", "--no-ext-diff", "--no-textconv", "HEAD", "--",
 	)
 	if err != nil || exitCode != 0 {
 		return StagedCommitInspection{}, gitExitError("inspect staged diff", exitCode, err)
@@ -262,6 +267,9 @@ func (adapter LocalCommitGitAdapter) inspectStagedOnce(
 		if err := adapter.verifyRawTreeMaterialization(ctx, worktree, tree); err != nil {
 			return StagedCommitInspection{}, fmt.Errorf("verify staged raw worktree: %w", err)
 		}
+	}
+	if err := adapter.confirmTrustedCommitState(ctx, binding, branch, head, tree); err != nil {
+		return StagedCommitInspection{}, fmt.Errorf("confirm staged Git state: %w", err)
 	}
 	return inspection, nil
 }
@@ -435,6 +443,11 @@ func (adapter LocalCommitGitAdapter) VerifyCleanWorktree(
 	if err := validateAttemptBranchSyntax(branch); err != nil {
 		return err
 	}
+	binding, err := adapter.captureTrustedWorktreeBinding(ctx, worktree)
+	if err != nil {
+		return err
+	}
+	worktree = binding.root
 	actualBranch, err := adapter.symbolicBranch(ctx, worktree)
 	if err != nil {
 		return err
@@ -479,6 +492,50 @@ func (adapter LocalCommitGitAdapter) VerifyCleanWorktree(
 	}
 	if err := adapter.verifyRawTreeMaterialization(ctx, worktree, commitTree); err != nil {
 		return fmt.Errorf("verify committed raw worktree: %w", err)
+	}
+	if err := adapter.confirmTrustedCommitState(ctx, binding, branch, head, commitTree); err != nil {
+		return fmt.Errorf("confirm committed Git state: %w", err)
+	}
+	return nil
+}
+
+func (adapter LocalCommitGitAdapter) confirmTrustedCommitState(
+	ctx context.Context,
+	binding trustedWorktreeBinding,
+	branch string,
+	head, tree GitObjectID,
+) error {
+	confirmed, err := adapter.captureTrustedWorktreeBinding(ctx, binding.root)
+	if err != nil {
+		return err
+	}
+	if confirmed != binding {
+		return fmt.Errorf("Git worktree administration changed during verification")
+	}
+	actualBranch, err := adapter.symbolicBranch(ctx, binding.root)
+	if err != nil {
+		return err
+	}
+	if actualBranch != branch {
+		return fmt.Errorf("worktree branch changed from %q to %q during verification", branch, actualBranch)
+	}
+	algorithm, err := adapter.git.objectFormat(ctx, binding.root)
+	if err != nil {
+		return err
+	}
+	confirmedHead, err := adapter.resolveObject(ctx, binding.root, algorithm, "HEAD")
+	if err != nil {
+		return err
+	}
+	if confirmedHead != head {
+		return fmt.Errorf("worktree head changed from %s to %s during verification", head, confirmedHead)
+	}
+	confirmedTree, err := adapter.writeTree(ctx, binding.root, algorithm)
+	if err != nil {
+		return err
+	}
+	if confirmedTree != tree {
+		return fmt.Errorf("worktree index tree changed from %s to %s during verification", tree, confirmedTree)
 	}
 	return nil
 }
@@ -674,6 +731,7 @@ func (adapter LocalCommitGitAdapter) verifyRawTreeMaterializationAtDepth(
 		}
 	}
 
+	materialized := make(map[string]struct{}, len(expected))
 	err = filepath.WalkDir(binding.root, func(absolute string, item os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -695,6 +753,7 @@ func (adapter LocalCommitGitAdapter) verifyRawTreeMaterializationAtDepth(
 		entry, tracked := expected[relative]
 		if item.IsDir() {
 			if tracked && entry.mode == GitModeSubmodule {
+				materialized[relative] = struct{}{}
 				return filepath.SkipDir
 			}
 			if _, expectedDirectory := expectedDirectories[relative]; expectedDirectory {
@@ -705,10 +764,16 @@ func (adapter LocalCommitGitAdapter) verifyRawTreeMaterializationAtDepth(
 		if !tracked || entry.mode == GitModeSubmodule {
 			return fmt.Errorf("raw worktree contains untracked path %s", relative)
 		}
+		materialized[relative] = struct{}{}
 		return nil
 	})
 	if err != nil {
 		return err
+	}
+	for expectedPath := range expected {
+		if _, exists := materialized[expectedPath]; !exists {
+			return fmt.Errorf("raw worktree tree path %s was not materialized as an exact filesystem pathname", expectedPath)
+		}
 	}
 	confirmed, err := adapter.captureTrustedWorktreeBinding(ctx, binding.root)
 	if err != nil {
@@ -853,6 +918,9 @@ func (adapter LocalCommitGitAdapter) captureTrustedWorktreeBinding(
 	default:
 		return trustedWorktreeBinding{}, fmt.Errorf("Git worktree administration has an unsupported file type")
 	}
+	if err := adapter.rejectExternalGitDrivers(ctx, root); err != nil {
+		return trustedWorktreeBinding{}, err
+	}
 	config, exitCode, err := adapter.git.run(
 		ctx, root, "config", "--null", "--list", "--show-origin", "--show-scope",
 	)
@@ -863,6 +931,31 @@ func (adapter LocalCommitGitAdapter) captureTrustedWorktreeBinding(
 		root: root, gitDir: gitDir, commonDir: commonDir,
 		admin: DigestBytes(adminBytes), config: DigestBytes(config),
 	}, nil
+}
+
+func (adapter LocalCommitGitAdapter) rejectExternalGitDrivers(ctx context.Context, repositoryRoot string) error {
+	output, exitCode, err := adapter.git.run(ctx, repositoryRoot, "config", "--null", "--name-only", "--list")
+	if err != nil || exitCode != 0 {
+		return gitExitError("inspect trusted Git driver configuration", exitCode, err)
+	}
+	if len(output) == 0 {
+		return nil
+	}
+	items := bytes.Split(output, []byte{0})
+	if len(items[len(items)-1]) != 0 {
+		return fmt.Errorf("trusted Git configuration names are not NUL terminated")
+	}
+	for _, item := range items[:len(items)-1] {
+		name := strings.ToLower(string(item))
+		filterDriver := strings.HasPrefix(name, "filter.") &&
+			(strings.HasSuffix(name, ".clean") || strings.HasSuffix(name, ".smudge") || strings.HasSuffix(name, ".process"))
+		diffDriver := name == "diff.external" ||
+			(strings.HasPrefix(name, "diff.") && strings.HasSuffix(name, ".command"))
+		if filterDriver || diffDriver {
+			return fmt.Errorf("configured execution forbids external Git filter and diff drivers (%s)", name)
+		}
+	}
+	return nil
 }
 
 func (adapter LocalCommitGitAdapter) readGitPath(

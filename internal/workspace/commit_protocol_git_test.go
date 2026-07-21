@@ -421,32 +421,56 @@ func TestLocalCommitAdapterDoesNotTrustFsmonitorOrIgnoredInputs(t *testing.T) {
 }
 
 func TestLocalCommitAdapterVerifiesRawBytesTypesAndModes(t *testing.T) {
-	t.Run("clean filter", func(t *testing.T) {
+	t.Run("external clean filter", func(t *testing.T) {
 		repository, branch, _ := newProtocolRepository(t)
 		if err := os.WriteFile(
 			filepath.Join(repository, ".gitattributes"), []byte("src/protocol.go filter=constant\n"), 0o644,
 		); err != nil {
 			t.Fatal(err)
 		}
-		runGitSetup(t, repository, "config", "filter.constant.clean", "sed 's/.*/package protocol/'")
-		runGitSetup(t, repository, "config", "filter.constant.required", "true")
-		runGitSetup(t, repository, "add", ".gitattributes", "src/protocol.go")
+		runGitSetup(t, repository, "add", ".gitattributes")
 		runGitSetup(t, repository, "commit", "-m", "Configure clean filter")
 		head := parseGitHead(t, repository)
+		tree := strings.TrimSpace(string(runGitSetup(t, repository, "rev-parse", "HEAD^{tree}")))
+		alternate := strings.TrimSpace(string(runGitSetup(
+			t, repository, "commit-tree", tree, "-p", rawGitObject(head), "-m", "Same tree attacker commit",
+		)))
+		filter := filepath.Join(t.TempDir(), "moving-clean-filter")
+		sentinel := filepath.Join(t.TempDir(), "filter-ran")
+		quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }
+		script := "#!/bin/sh\ngit -C " + quote(repository) + " update-ref refs/heads/" + branch + " " + alternate +
+			"\n: > " + quote(sentinel) + "\ncat\n"
+		if err := os.WriteFile(filter, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		runGitSetup(t, repository, "config", "filter.constant.clean", filter)
+		runGitSetup(t, repository, "config", "filter.constant.required", "true")
 		if err := os.WriteFile(
 			filepath.Join(repository, "src", "protocol.go"),
 			[]byte("malicious content\n"), 0o644,
 		); err != nil {
 			t.Fatal(err)
 		}
-		runGitSetup(t, repository, "add", "src/protocol.go")
-		if ordinary := runGitSetup(t, repository, "status", "--porcelain=v2", "-z", "--untracked-files=all"); len(ordinary) != 0 {
-			t.Fatalf("clean filter did not hide raw bytes from ordinary Git: %q", ordinary)
-		}
-		if err := workspace.DefaultLocalCommitGitAdapter().VerifyCleanWorktree(
+		adapter := workspace.DefaultLocalCommitGitAdapter()
+		if err := adapter.VerifyCleanWorktree(
 			context.Background(), repository, branch, head,
-		); err == nil || !strings.Contains(err.Error(), "bytes differ from tree") {
-			t.Fatalf("clean-filter raw verification error = %v", err)
+		); err == nil || !strings.Contains(err.Error(), "external Git filter") {
+			t.Fatalf("clean-filter rejection error = %v", err)
+		}
+		if _, err := adapter.InspectStaged(context.Background(), repository, branch); err == nil ||
+			!strings.Contains(err.Error(), "external Git filter") {
+			t.Fatalf("staged clean-filter rejection error = %v", err)
+		}
+		if _, err := workspace.DefaultLocalAttemptGitAdapter().InspectAttemptWorktree(
+			context.Background(), repository, branch, repository,
+		); err == nil || !strings.Contains(err.Error(), "external Git filter") {
+			t.Fatalf("attempt clean-filter rejection error = %v", err)
+		}
+		if moved := parseGitHead(t, repository); moved != head {
+			t.Fatalf("trusted verification executed filter and moved head from %s to %s", head, moved)
+		}
+		if _, err := os.Stat(sentinel); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("trusted verification executed external clean filter: %v", err)
 		}
 	})
 
