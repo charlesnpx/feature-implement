@@ -10,6 +10,9 @@ func reduceCommitRuntime(
 	next *WorkspaceRuntimeProjection,
 	record JournalRecord,
 ) error {
+	if isReviewFixJournalEvent(record.event) {
+		return reduceReviewFixRuntime(current, next, record)
+	}
 	if next == nil || current.workspaceID.IsZero() || current.activeGeneration.IsZero() {
 		return fmt.Errorf("commit protocol events require an initialized workspace runtime")
 	}

@@ -149,7 +149,7 @@ func marshalCommitJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, bo
 			MappingDigest: event.mappingDigest.String(),
 		}
 	default:
-		return nil, false, nil
+		return marshalReviewFixJournalEvent(event)
 	}
 	payload, err := json.Marshal(value)
 	return json.RawMessage(payload), true, err
@@ -300,7 +300,7 @@ func decodeCommitJournalEvent(
 		}
 		return event, true, nil
 	default:
-		return nil, false, nil
+		return decodeReviewFixJournalEvent(eventType, payload)
 	}
 }
 

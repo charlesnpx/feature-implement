@@ -28,6 +28,7 @@ const (
 	JournalResourceApproval       JournalResourceKind = "approval"
 	JournalResourceEvidence       JournalResourceKind = "evidence"
 	JournalResourceCommitProtocol JournalResourceKind = "commit_protocol"
+	JournalResourceReviewFix      JournalResourceKind = "review_fix"
 	JournalResourceCommitStep     JournalResourceKind = "commit_step"
 	JournalResourceCheck          JournalResourceKind = "check"
 )
@@ -39,7 +40,7 @@ func (kind JournalResourceKind) valid() bool {
 		JournalResourceAuthorization, JournalResourceOrchestration, JournalResourceGoal,
 		JournalResourceSerialSegment, JournalResourceProviderIntent, JournalResourceQueueEntry,
 		JournalResourceBudget, JournalResourceApproval, JournalResourceEvidence,
-		JournalResourceCommitProtocol, JournalResourceCommitStep, JournalResourceCheck:
+		JournalResourceCommitProtocol, JournalResourceReviewFix, JournalResourceCommitStep, JournalResourceCheck:
 		return true
 	default:
 		return false
@@ -123,6 +124,10 @@ const (
 	JournalEventCommitStepRecorded             JournalEventType = "commit.step_recorded.v2"
 	JournalEventCommitCheckRecorded            JournalEventType = "commit.check_recorded.v2"
 	JournalEventCommitProtocolRebased          JournalEventType = "commit.protocol_rebased.v2"
+	JournalEventReviewFixReserved              JournalEventType = "review_fix.reserved.v2"
+	JournalEventReviewFixIntended              JournalEventType = "review_fix.intended.v2"
+	JournalEventReviewFixCommitRecorded        JournalEventType = "review_fix.commit_recorded.v2"
+	JournalEventReviewFixCheckRecorded         JournalEventType = "review_fix.check_recorded.v2"
 )
 
 type WorkspaceJournalEvent interface {
@@ -374,7 +379,9 @@ func newJournalAppend(
 			return JournalAppend{}, fmt.Errorf("attempt boundary must use the atomic boundary workflow")
 		case CommitProtocolStartedJournalEvent, CommitStepIntendedJournalEvent,
 			CommitStepRecordedJournalEvent, CommitCheckRecordedJournalEvent,
-			CommitProtocolRebasedJournalEvent:
+			CommitProtocolRebasedJournalEvent, ReviewFixReservedJournalEvent,
+			ReviewFixIntendedJournalEvent, ReviewFixCommitRecordedJournalEvent,
+			ReviewFixCheckRecordedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("commit protocol events must use the Git-verified commit workflow")
 		}
 	}

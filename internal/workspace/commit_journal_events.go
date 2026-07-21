@@ -415,7 +415,7 @@ func isCommitJournalEvent(event WorkspaceJournalEvent) bool {
 		CommitProtocolRebasedJournalEvent:
 		return true
 	default:
-		return false
+		return isReviewFixJournalEvent(event)
 	}
 }
 
@@ -461,7 +461,7 @@ func commitJournalEventResources(event WorkspaceJournalEvent) ([]JournalResource
 		}
 		writes = append([]JournalResource(nil), reads...)
 	default:
-		return nil, nil, false
+		return reviewFixJournalEventResources(event)
 	}
 	reads = append(reads, WorkspaceJournalResource(workspaceID), GenerationJournalResource(generation))
 	return reads, writes, true
@@ -485,7 +485,7 @@ func cloneCommitJournalEvent(event WorkspaceJournalEvent) WorkspaceJournalEvent 
 		value.commits = cloneCommitObjects(value.commits)
 		return value
 	default:
-		return nil
+		return cloneReviewFixJournalEvent(event)
 	}
 }
 

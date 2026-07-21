@@ -71,6 +71,32 @@ func TestJournaledCommitProtocolStartsFromRealStagedWorktree(t *testing.T) {
 	if !exists || !hasProtocol || replayedState.Phase() != workspace.CommitProtocolComplete || replayedState.Head() != head {
 		t.Fatalf("replayed attempt=%#v exists=%v protocol=%#v hasProtocol=%v", replayedAttempt, exists, replayedState, hasProtocol)
 	}
+
+	reviewPath := filepath.Join(attempt.Worktree(), "src", "review.go")
+	if err := os.WriteFile(reviewPath, []byte("package protocol\n\nconst Reviewed = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitSetup(t, attempt.Worktree(), "add", "src/review.go")
+	reviewResult, err := workspace.ExecuteAttemptReviewFix(
+		context.Background(), harness.journal, harness.definition, shell,
+		workspace.ExecuteAttemptReviewFixRequest{
+			AttemptID: attempt.AttemptID(), Ordinal: 1, Body: "address accepted review feedback",
+			OccurredAt: mustTime(t, "2026-07-21T10:58:00Z"),
+		},
+	)
+	if err != nil {
+		t.Fatalf("execute durable review fix from staged worktree: %v", err)
+	}
+	reviewState, configured := reviewResult.State()
+	reviewHead := parseGitHead(t, attempt.Worktree())
+	if !configured || reviewState.Phase() != workspace.ReviewFixComplete || reviewState.Base() != head ||
+		reviewState.Head() != reviewHead || reviewResult.Attempt().VerifiedHead() != reviewHead ||
+		reviewHead == head || runnerCallCount(runner) != 2 {
+		t.Fatalf(
+			"review result=%#v state=%#v configured=%v head=%s checks=%d",
+			reviewResult, reviewState, configured, reviewHead, runnerCallCount(runner),
+		)
+	}
 }
 
 func (git *journalCommitGit) InspectStaged(context.Context, string, string) (workspace.StagedCommitInspection, error) {
@@ -307,6 +333,278 @@ func TestJournaledCommitProtocolRecoversEveryDurableCrashWindow(t *testing.T) {
 	}
 }
 
+func TestJournaledReviewFixRecoversEveryDurableCrashWindow(t *testing.T) {
+	tests := []struct {
+		name           string
+		point          workspace.ReviewFixFaultPoint
+		phase          workspace.ReviewFixPhase
+		crashCreates   int
+		crashPublishes int
+		crashChecks    int
+		finalCreates   int
+		finalChecks    int
+	}{
+		{"reservation", workspace.ReviewFixFaultAfterReservation, workspace.ReviewFixReserved, 0, 0, 0, 1, 1},
+		{"intent", workspace.ReviewFixFaultAfterIntent, workspace.ReviewFixAwaitingCommit, 0, 0, 0, 1, 1},
+		{"Git commit", workspace.ReviewFixFaultAfterGitCommit, workspace.ReviewFixAwaitingCommit, 1, 1, 0, 2, 1},
+		{"commit record", workspace.ReviewFixFaultAfterCommitRecord, workspace.ReviewFixAwaitingChecks, 1, 1, 0, 1, 1},
+		{"check run", workspace.ReviewFixFaultAfterCheckRun, workspace.ReviewFixAwaitingChecks, 1, 1, 1, 1, 2},
+		{"check record", workspace.ReviewFixFaultAfterCheckRecord, workspace.ReviewFixComplete, 1, 1, 1, 1, 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scenario := newJournalReviewFixScenario(t)
+			scenario.request.Fault = reviewFixFailOnce(test.point)
+			result, err := workspace.ExecuteAttemptReviewFix(
+				context.Background(), scenario.harness.journal, scenario.harness.definition,
+				scenario.shell, scenario.request,
+			)
+			if err == nil || !strings.Contains(err.Error(), string(test.point)) {
+				t.Fatalf("fault error = %v", err)
+			}
+			state, ok := result.State()
+			if !ok || state.Phase() != test.phase || state.Used() != 1 || state.Remaining() != 1 {
+				t.Fatalf("crash state = %#v configured=%v", state, ok)
+			}
+			if scenario.git.createCalls != test.crashCreates || scenario.git.publishes != test.crashPublishes ||
+				runnerCallCount(scenario.runner) != test.crashChecks {
+				t.Fatalf(
+					"crash calls: creates=%d publishes=%d checks=%d",
+					scenario.git.createCalls, scenario.git.publishes, runnerCallCount(scenario.runner),
+				)
+			}
+
+			scenario.request.OccurredAt = mustTime(t, "2026-07-21T12:14:00Z")
+			scenario.request.Fault = nil
+			result, err = workspace.ExecuteAttemptReviewFix(
+				context.Background(), scenario.harness.journal, scenario.harness.definition,
+				scenario.shell, scenario.request,
+			)
+			if err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+			state, _ = result.State()
+			if state.Phase() != workspace.ReviewFixComplete || state.Head() != scenario.commit ||
+				result.Attempt().VerifiedHead() != scenario.commit ||
+				scenario.git.createCalls != test.finalCreates || scenario.git.publishes != 1 ||
+				runnerCallCount(scenario.runner) != test.finalChecks {
+				t.Fatalf(
+					"final state=%#v head=%s creates=%d publishes=%d checks=%d",
+					state, result.Attempt().VerifiedHead(), scenario.git.createCalls,
+					scenario.git.publishes, runnerCallCount(scenario.runner),
+				)
+			}
+		})
+	}
+}
+
+func TestJournaledReviewFixReplayBudgetExactHeadAndBoundary(t *testing.T) {
+	scenario := newJournalReviewFixScenario(t)
+	result, err := workspace.ExecuteAttemptReviewFix(
+		context.Background(), scenario.harness.journal, scenario.harness.definition,
+		scenario.shell, scenario.request,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, ok := result.State()
+	if !ok || state.Phase() != workspace.ReviewFixComplete || state.Used() != 1 ||
+		state.Remaining() != 1 || result.Attempt().VerifiedHead() != scenario.commit {
+		t.Fatalf("first review fix state=%#v configured=%v attempt=%#v", state, ok, result.Attempt())
+	}
+	returnedFixes := state.Fixes()
+	returnedChecks := returnedFixes[0].Checks()
+	returnedAllowed := state.Protocol().Paths().Allowed()
+	returnedFixes[0] = workspace.ReviewFixStepState{}
+	returnedChecks[0] = workspace.CommitCheckEvidence{}
+	returnedAllowed[0] = workspace.CommitPathPattern{}
+	freshState, _ := result.State()
+	freshFixes := freshState.Fixes()
+	if len(freshFixes) != 1 || freshFixes[0].Ordinal() != 1 || len(freshFixes[0].Checks()) != 1 ||
+		freshFixes[0].Checks()[0].EvidenceDigest().IsZero() ||
+		len(freshState.Protocol().Paths().Allowed()) != 1 || freshState.Protocol().Paths().Allowed()[0].String() != "src/**" {
+		t.Fatalf("mutating returned review-fix state changed durable result: %#v", freshState)
+	}
+
+	scenario.git.head = mustGitObject(t, '9')
+	scenario.request.OccurredAt = mustTime(t, "2026-07-21T12:15:00Z")
+	if _, err := workspace.ExecuteAttemptReviewFix(
+		context.Background(), scenario.harness.journal, scenario.harness.definition,
+		scenario.shell, scenario.request,
+	); err == nil || !strings.Contains(err.Error(), "verify completed review-fix head") {
+		t.Fatalf("completed retry with drifted head error = %v", err)
+	}
+	scenario.git.head = scenario.commit
+
+	review := configuredReviewFixProtocol(t, scenario.harness.definition)
+	secondStep, err := review.Step(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondTree, secondCommit, secondChanged := mustGitObject(t, '6'), mustGitObject(t, '7'), mustGitObject(t, '8')
+	secondDiff := addedDiff(t, "src/review-two.go", secondChanged)
+	scenario.git.staged, err = workspace.NewStagedCommitInspection(
+		scenario.commit, secondTree, secondDiff, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenario.git.commit, err = workspace.NewGitCommitInspection(
+		secondCommit, []workspace.GitObjectID{scenario.commit}, secondTree,
+		secondStep.Message().Subject(), "second accepted fix", secondDiff,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRequest := workspace.ExecuteAttemptReviewFixRequest{
+		AttemptID: scenario.attempt.AttemptID(), Ordinal: 2, Body: "second accepted fix",
+		OccurredAt: mustTime(t, "2026-07-21T12:16:00Z"),
+	}
+	result, err = workspace.ExecuteAttemptReviewFix(
+		context.Background(), scenario.harness.journal, scenario.harness.definition,
+		scenario.shell, secondRequest,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, _ = result.State()
+	if state.Used() != 2 || state.Remaining() != 0 || state.Head() != secondCommit ||
+		result.Attempt().VerifiedHead() != secondCommit {
+		t.Fatalf("second review fix state=%#v attempt=%#v", state, result.Attempt())
+	}
+
+	beforeExhaustionCreates := scenario.git.createCalls
+	exhausted := secondRequest
+	exhausted.Ordinal = 3
+	exhausted.OccurredAt = mustTime(t, "2026-07-21T12:17:00Z")
+	if _, err := workspace.ExecuteAttemptReviewFix(
+		context.Background(), scenario.harness.journal, scenario.harness.definition,
+		scenario.shell, exhausted,
+	); err == nil || !strings.Contains(err.Error(), "budget is exhausted") {
+		t.Fatalf("exhausted budget error = %v", err)
+	}
+	if scenario.git.createCalls != beforeExhaustionCreates {
+		t.Fatal("budget exhaustion reached Git mutation")
+	}
+
+	snapshot, err := scenario.harness.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revision := snapshot.Revision(workspace.ReviewFixBudgetJournalResource(scenario.attempt.AttemptID())); revision != 2 {
+		t.Fatalf("durable review-fix budget revision = %d, want 2", revision)
+	}
+	if revision := snapshot.Revision(workspace.ReviewFixJournalResource(scenario.attempt.AttemptID())); revision != 8 {
+		t.Fatalf("durable review-fix state revision = %d, want 8", revision)
+	}
+	replayed, err := workspace.RebuildWorkspaceRuntime(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayedAttempt, exists := replayed.Attempt(scenario.attempt.AttemptID())
+	replayedState, hasState := replayedAttempt.ReviewFixes()
+	if !exists || !hasState || replayedState.Used() != 2 || replayedState.Head() != secondCommit ||
+		replayedAttempt.VerifiedHead() != secondCommit {
+		t.Fatalf("replayed attempt=%#v exists=%v state=%#v hasState=%v", replayedAttempt, exists, replayedState, hasState)
+	}
+	unit := configuredUnitExecution(t, scenario.harness.definition)
+	budget, configured, err := workspace.ReviewFixBudgetForAttempt(unit, replayedAttempt)
+	if err != nil || !configured || budget.Maximum() != 2 || budget.Used() != 2 || budget.Remaining() != 0 {
+		t.Fatalf("replayed budget=%#v configured=%v err=%v", budget, configured, err)
+	}
+
+	scenario.harness.git.setHead(t, scenario.attempt.Branch(), secondCommit, true)
+	boundary, err := workspace.RecordAttemptBoundary(
+		context.Background(), scenario.harness.journal, scenario.harness.definition, scenario.harness.git,
+		workspace.RecordAttemptBoundaryRequest{
+			AttemptID: scenario.attempt.AttemptID(), Evidence: boundaryEvidence(t, "review-fixes-complete"),
+			OccurredAt: mustTime(t, "2026-07-21T12:18:00Z"),
+		},
+	)
+	if err != nil || boundary.Attempt().Phase() != workspace.AttemptPaused || boundary.Boundary().Head() != secondCommit {
+		t.Fatalf("boundary after review fixes = %#v err=%v", boundary, err)
+	}
+	if err := scenario.harness.journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	diskSnapshot, err := workspace.ReadWorkspaceJournalSnapshot(scenario.harness.workspace)
+	if err != nil {
+		t.Fatalf("decode review-fix journal from disk: %v", err)
+	}
+	if _, err := workspace.RebuildWorkspaceRuntime(diskSnapshot); err != nil {
+		t.Fatalf("replay decoded review-fix journal: %v", err)
+	}
+}
+
+func TestAttemptBoundaryRejectsInFlightReviewFix(t *testing.T) {
+	scenario := newJournalReviewFixScenario(t)
+	scenario.request.Fault = reviewFixFailOnce(workspace.ReviewFixFaultAfterReservation)
+	if _, err := workspace.ExecuteAttemptReviewFix(
+		context.Background(), scenario.harness.journal, scenario.harness.definition,
+		scenario.shell, scenario.request,
+	); err == nil {
+		t.Fatal("review-fix reservation fault was not injected")
+	}
+	scenario.harness.git.setHead(t, scenario.attempt.Branch(), scenario.implementation, true)
+	if _, err := workspace.RecordAttemptBoundary(
+		context.Background(), scenario.harness.journal, scenario.harness.definition, scenario.harness.git,
+		workspace.RecordAttemptBoundaryRequest{
+			AttemptID: scenario.attempt.AttemptID(), Evidence: boundaryEvidence(t, "review-fix-in-flight"),
+			OccurredAt: mustTime(t, "2026-07-21T12:19:00Z"),
+		},
+	); err == nil || !strings.Contains(err.Error(), "in-flight review fix") {
+		t.Fatalf("in-flight review-fix boundary error = %v", err)
+	}
+}
+
+func TestReviewFixCanFollowUnconstrainedImplementationHistory(t *testing.T) {
+	harness := newReviewOnlyAttemptHarness(t)
+	attempt := harness.reserve(t, "2026-07-21T12:20:00Z")
+	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T12:21:00Z")
+	review := configuredReviewFixProtocol(t, harness.definition)
+	step, err := review.Step(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	implementationHead := mustGitObject(t, 'c')
+	tree, commitObject, changedObject := mustGitObject(t, 'e'), mustGitObject(t, 'f'), mustGitObject(t, '1')
+	diff := addedDiff(t, "src/review.go", changedObject)
+	staged, err := workspace.NewStagedCommitInspection(implementationHead, tree, diff, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit, err := workspace.NewGitCommitInspection(
+		commitObject, []workspace.GitObjectID{implementationHead}, tree,
+		step.Message().Subject(), "accepted unconstrained fix", diff,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	git := &journalCommitGit{
+		branch: attempt.Branch(), head: implementationHead, staged: staged, commit: commit,
+	}
+	runner := &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())}
+	shell, err := workspace.NewCommitProtocolShell(git, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := workspace.ExecuteAttemptReviewFix(
+		context.Background(), harness.journal, harness.definition, shell,
+		workspace.ExecuteAttemptReviewFixRequest{
+			AttemptID: attempt.AttemptID(), Ordinal: 1, Body: "accepted unconstrained fix",
+			OccurredAt: mustTime(t, "2026-07-21T12:22:00Z"),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, ok := result.State()
+	if !ok || state.Base() != implementationHead || state.Head() != commitObject ||
+		result.Attempt().VerifiedHead() != commitObject || runnerCallCount(runner) != 1 {
+		t.Fatalf("unconstrained review-fix state=%#v configured=%v attempt=%#v", state, ok, result.Attempt())
+	}
+}
+
 func TestJournaledCommitRebaseRetryIsIdempotentAndRerunsChecks(t *testing.T) {
 	scenario := newJournalCommitScenario(t)
 	result, err := workspace.ExecuteAttemptCommitStep(
@@ -444,6 +742,38 @@ func TestCommitJournalCodecRejectsTamperedProtocolPayload(t *testing.T) {
 	}
 }
 
+func TestReviewFixJournalCodecRejectsUnknownPayloadFields(t *testing.T) {
+	scenario := newJournalReviewFixScenario(t)
+	scenario.request.Fault = reviewFixFailOnce(workspace.ReviewFixFaultAfterReservation)
+	if _, err := workspace.ExecuteAttemptReviewFix(
+		context.Background(), scenario.harness.journal, scenario.harness.definition,
+		scenario.shell, scenario.request,
+	); err == nil {
+		t.Fatal("review-fix reservation fault was not injected")
+	}
+	if err := scenario.harness.journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	journalPath := workspace.WorkspaceJournalPath(scenario.harness.workspace)
+	content, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := []byte(`"type":"review_fix.reserved.v2","payload":{"workspace_id":`)
+	tampered := []byte(`"type":"review_fix.reserved.v2","payload":{"unknown":true,"workspace_id":`)
+	if bytes.Count(content, original) != 1 {
+		t.Fatalf("review-fix reservation payload occurrence count = %d", bytes.Count(content, original))
+	}
+	content = bytes.Replace(content, original, tampered, 1)
+	if err := os.WriteFile(journalPath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.ReadWorkspaceJournalSnapshot(scenario.harness.workspace); err == nil ||
+		!strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("unknown review-fix payload field error = %v", err)
+	}
+}
+
 func TestCommitEventsRejectDirectNonPrivilegedAppend(t *testing.T) {
 	scenario := newJournalCommitScenario(t)
 	protocol := configuredProtocolStep(t, scenario.harness.definition)
@@ -462,6 +792,19 @@ func TestCommitEventsRejectDirectNonPrivilegedAppend(t *testing.T) {
 		event, mustTime(t, "2026-07-21T12:08:00Z"), nil, nil,
 	); err == nil || !strings.Contains(err.Error(), "Git-verified commit workflow") {
 		t.Fatalf("direct commit append error = %v", err)
+	}
+	review := configuredReviewFixProtocol(t, scenario.harness.definition)
+	reviewEvent, err := workspace.NewReviewFixReservedJournalEvent(
+		scenario.harness.definition.Workspace().ID(), scenario.harness.definition.Generation(),
+		scenario.attempt.AttemptID(), review, 2, 1, scenario.harness.base,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.NewJournalAppend(
+		reviewEvent, mustTime(t, "2026-07-21T12:08:01Z"), nil, nil,
+	); err == nil || !strings.Contains(err.Error(), "Git-verified commit workflow") {
+		t.Fatalf("direct review-fix append error = %v", err)
 	}
 }
 
@@ -511,6 +854,17 @@ type journalCommitScenario struct {
 	commit  workspace.GitObjectID
 }
 
+type journalReviewFixScenario struct {
+	harness        attemptHarness
+	attempt        workspace.RuntimeAttemptProjection
+	git            *journalCommitGit
+	runner         *protocolCheckRunner
+	shell          workspace.CommitProtocolShell
+	request        workspace.ExecuteAttemptReviewFixRequest
+	implementation workspace.GitObjectID
+	commit         workspace.GitObjectID
+}
+
 func newJournalCommitScenario(t *testing.T) journalCommitScenario {
 	t.Helper()
 	harness := newConfiguredAttemptHarness(t)
@@ -544,6 +898,52 @@ func newJournalCommitScenario(t *testing.T) journalCommitScenario {
 	}
 }
 
+func newJournalReviewFixScenario(t *testing.T) journalReviewFixScenario {
+	t.Helper()
+	implementation := newJournalCommitScenario(t)
+	result, err := workspace.ExecuteAttemptCommitStep(
+		context.Background(), implementation.harness.journal, implementation.harness.definition,
+		implementation.shell, implementation.request,
+	)
+	if err != nil {
+		t.Fatalf("complete implementation protocol: %v", err)
+	}
+	if result.Attempt().VerifiedHead() != implementation.commit {
+		t.Fatalf("implementation head = %s", result.Attempt().VerifiedHead())
+	}
+	implementation.git.createCalls, implementation.git.publishes = 0, 0
+	implementation.runner.invocations = nil
+
+	review := configuredReviewFixProtocol(t, implementation.harness.definition)
+	step, err := review.Step(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, commitObject, changedObject := mustGitObject(t, 'e'), mustGitObject(t, 'f'), mustGitObject(t, '1')
+	diff := addedDiff(t, "src/review.go", changedObject)
+	staged, err := workspace.NewStagedCommitInspection(implementation.commit, tree, diff, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit, err := workspace.NewGitCommitInspection(
+		commitObject, []workspace.GitObjectID{implementation.commit}, tree,
+		step.Message().Subject(), "accepted fix", diff,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	implementation.git.staged, implementation.git.commit = staged, commit
+	return journalReviewFixScenario{
+		harness: implementation.harness, attempt: implementation.attempt,
+		git: implementation.git, runner: implementation.runner, shell: implementation.shell,
+		implementation: implementation.commit, commit: commitObject,
+		request: workspace.ExecuteAttemptReviewFixRequest{
+			AttemptID: implementation.attempt.AttemptID(), Ordinal: 1, Body: "accepted fix",
+			OccurredAt: mustTime(t, "2026-07-21T12:13:00Z"),
+		},
+	}
+}
+
 func newConfiguredAttemptHarness(t *testing.T) attemptHarness {
 	t.Helper()
 	fixture := newDefinitionFixture(t)
@@ -569,11 +969,76 @@ func newConfiguredAttemptHarness(t *testing.T) attemptHarness {
               expectation:
                 kind: pass
                 failure_ids: []
+    review_fix_protocol:
+      subject_prefix: Review fix
+      body_policy: required
+      allowed_paths:
+        - src/**
+      frozen_paths: []
+      checks:
+        - id: review-check
+          runner: codex
+          parser: go-test-json
+          command:
+            - go
+            - test
+            - ./...
+          expectation:
+            kind: pass
+            failure_ids: []
   - plan_id: alpha-plan
     merge_unit_id: unit-two`
 	configuration = strings.Replace(configuration, needle, protocol, 1)
 	if configuration == string(fixture.sources.ExecutionConfig.Bytes) {
 		t.Fatal("failed to install configured protocol fixture")
+	}
+	fixture.sources.ExecutionConfig.Bytes = []byte(configuration)
+	definition := mustDefinition(t, fixture.sources)
+	workspaceDir := t.TempDir()
+	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T10:00:00Z")); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	base := mustGitObject(t, 'a')
+	goal, _ := workspace.NewGoalBinding(workspace.MustID("implementation-goal"), workspace.GoalScopeMergeUnit)
+	return attemptHarness{
+		definition: definition, journal: journal, workspace: workspaceDir, git: &fakeAttemptGit{}, base: base,
+		unit: mustMergeUnitReference(t, "alpha-plan", "unit-one"), goal: goal, worktrees: t.TempDir(),
+	}
+}
+
+func newReviewOnlyAttemptHarness(t *testing.T) attemptHarness {
+	t.Helper()
+	fixture := newDefinitionFixture(t)
+	configuration := string(fixture.sources.ExecutionConfig.Bytes)
+	needle := "      max_review_fixes: 2\n  - plan_id: alpha-plan\n    merge_unit_id: unit-two"
+	protocol := `      max_review_fixes: 2
+    review_fix_protocol:
+      subject_prefix: Review fix
+      body_policy: required
+      allowed_paths:
+        - src/**
+      frozen_paths: []
+      checks:
+        - id: review-check
+          runner: codex
+          parser: go-test-json
+          command:
+            - go
+            - test
+            - ./...
+          expectation:
+            kind: pass
+            failure_ids: []
+  - plan_id: alpha-plan
+    merge_unit_id: unit-two`
+	configuration = strings.Replace(configuration, needle, protocol, 1)
+	if configuration == string(fixture.sources.ExecutionConfig.Bytes) {
+		t.Fatal("failed to install review-only protocol fixture")
 	}
 	fixture.sources.ExecutionConfig.Bytes = []byte(configuration)
 	definition := mustDefinition(t, fixture.sources)
@@ -609,12 +1074,43 @@ func configuredProtocolStep(t *testing.T, definition workspace.EffectiveWorkspac
 	return workspace.CommitStep{}
 }
 
+func configuredUnitExecution(t *testing.T, definition workspace.EffectiveWorkspaceDefinition) workspace.UnitExecution {
+	t.Helper()
+	for _, unit := range definition.ExecutionConfig().MergeUnits() {
+		if unit.MergeUnitID().String() == "unit-one" {
+			return unit
+		}
+	}
+	t.Fatal("configured unit is missing")
+	return workspace.UnitExecution{}
+}
+
+func configuredReviewFixProtocol(t *testing.T, definition workspace.EffectiveWorkspaceDefinition) workspace.ReviewFixProtocol {
+	t.Helper()
+	protocol, ok := configuredUnitExecution(t, definition).ReviewFixProtocol()
+	if !ok {
+		t.Fatal("configured unit review-fix protocol is missing")
+	}
+	return protocol
+}
+
 func commitFailOnce(point workspace.CommitProtocolFaultPoint) workspace.CommitProtocolFaultInjector {
 	fired := false
 	return func(actual workspace.CommitProtocolFaultPoint) error {
 		if actual == point && !fired {
 			fired = true
 			return errors.New("simulated commit crash")
+		}
+		return nil
+	}
+}
+
+func reviewFixFailOnce(point workspace.ReviewFixFaultPoint) workspace.ReviewFixFaultInjector {
+	fired := false
+	return func(actual workspace.ReviewFixFaultPoint) error {
+		if actual == point && !fired {
+			fired = true
+			return errors.New("simulated review-fix crash")
 		}
 		return nil
 	}

@@ -134,6 +134,7 @@ type RuntimeAttemptProjection struct {
 	goal                  GoalBinding
 	boundaries            []RuntimeBoundaryProjection
 	commitProtocol        *CommitProtocolState
+	reviewFixes           *ReviewFixState
 }
 
 func (attempt RuntimeAttemptProjection) AttemptID() ID                  { return attempt.attemptID }
@@ -168,6 +169,12 @@ func (attempt RuntimeAttemptProjection) CommitProtocol() (CommitProtocolState, b
 		return CommitProtocolState{}, false
 	}
 	return cloneCommitProtocolState(*attempt.commitProtocol), true
+}
+func (attempt RuntimeAttemptProjection) ReviewFixes() (ReviewFixState, bool) {
+	if attempt.reviewFixes == nil {
+		return ReviewFixState{}, false
+	}
+	return cloneReviewFixState(*attempt.reviewFixes), true
 }
 func (attempt RuntimeAttemptProjection) CurrentBoundary() (RuntimeBoundaryProjection, bool) {
 	if attempt.phase != AttemptPaused || len(attempt.boundaries) == 0 {
@@ -485,6 +492,10 @@ func cloneRuntimeAttempt(value RuntimeAttemptProjection) RuntimeAttemptProjectio
 		state := cloneCommitProtocolState(*value.commitProtocol)
 		value.commitProtocol = &state
 	}
+	if value.reviewFixes != nil {
+		state := cloneReviewFixState(*value.reviewFixes)
+		value.reviewFixes = &state
+	}
 	return value
 }
 
@@ -567,6 +578,7 @@ func canonicalAttemptRuntime(attempt RuntimeAttemptProjection) (json.RawMessage,
 		GoalScope             GoalScope           `json:"goal_scope,omitempty"`
 		Boundaries            []boundaryJSON      `json:"boundaries"`
 		CommitProtocol        json.RawMessage     `json:"commit_protocol,omitempty"`
+		ReviewFixes           json.RawMessage     `json:"review_fixes,omitempty"`
 	}
 	ackJSON := func(value RuntimeOrchestrationAcknowledgement) *acknowledgementJSON {
 		return &acknowledgementJSON{
@@ -593,6 +605,13 @@ func canonicalAttemptRuntime(attempt RuntimeAttemptProjection) (json.RawMessage,
 			return nil, err
 		}
 		value.CommitProtocol = protocol
+	}
+	if attempt.reviewFixes != nil {
+		reviewFixes, err := canonicalReviewFixRuntime(*attempt.reviewFixes)
+		if err != nil {
+			return nil, err
+		}
+		value.ReviewFixes = reviewFixes
 	}
 	for _, boundary := range attempt.boundaries {
 		item := boundaryJSON{

@@ -100,15 +100,32 @@ func CommitProtocolStateForUnit(
 	return state, true, nil
 }
 
-// ReviewFixBudgetForUnit binds the distinct review-fix protocol to the
-// effective merge-unit budget. Callers cannot accidentally substitute a
-// broader profile or workspace maximum.
-func ReviewFixBudgetForUnit(unit UnitExecution) (ReviewFixBudget, bool, error) {
+// ReviewFixBudgetForAttempt derives usage from replayed attempt state. Budget
+// consumption cannot be reset by constructing a new in-memory counter.
+func ReviewFixBudgetForAttempt(
+	unit UnitExecution,
+	attempt RuntimeAttemptProjection,
+) (ReviewFixBudget, bool, error) {
 	protocol, configured := unit.ReviewFixProtocol()
 	if !configured {
+		if attempt.reviewFixes != nil {
+			return ReviewFixBudget{}, false, fmt.Errorf("attempt has review-fix state without an effective protocol")
+		}
 		return ReviewFixBudget{}, false, nil
 	}
-	budget, err := NewReviewFixBudget(protocol, unit.policy.maxReviewFixes)
+	if attempt.attemptID.IsZero() || attempt.generation.IsZero() {
+		return ReviewFixBudget{}, true, fmt.Errorf("review-fix budget requires a replayed attempt")
+	}
+	used := uint16(0)
+	if attempt.reviewFixes != nil {
+		state := attempt.reviewFixes
+		if state.generation != attempt.generation || state.protocol.digest != protocol.digest ||
+			state.maximum != unit.policy.maxReviewFixes {
+			return ReviewFixBudget{}, true, fmt.Errorf("attempt review-fix state does not match its effective policy")
+		}
+		used = state.Used()
+	}
+	budget, err := newReviewFixBudget(protocol, unit.policy.maxReviewFixes, used)
 	if err != nil {
 		return ReviewFixBudget{}, true, err
 	}

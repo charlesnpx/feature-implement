@@ -371,9 +371,34 @@ func RecordAttemptBoundary(
 			return AttemptBoundaryResult{}, fmt.Errorf("attempt %s cannot reach a boundary before its configured commit protocol completes", attempt.attemptID)
 		}
 		configuredProtocolHead = attempt.commitProtocol.Head()
-		if attempt.verifiedHead != configuredProtocolHead {
-			return AttemptBoundaryResult{}, fmt.Errorf("attempt %s commit protocol head does not match its verified head", attempt.attemptID)
+	}
+	expectedCommittedHead := configuredProtocolHead
+	if reviewProtocol, configured := unitExecution.ReviewFixProtocol(); configured {
+		if attempt.reviewFixes != nil {
+			state := attempt.reviewFixes
+			if err := validateReviewFixState(*state); err != nil {
+				return AttemptBoundaryResult{}, fmt.Errorf("attempt %s review-fix state: %w", attempt.attemptID, err)
+			}
+			if state.generation != definition.generation || state.protocol.digest != reviewProtocol.digest ||
+				state.maximum != unitExecution.policy.maxReviewFixes {
+				return AttemptBoundaryResult{}, fmt.Errorf("attempt %s review-fix state does not match effective policy", attempt.attemptID)
+			}
+			if !state.Quiescent() {
+				return AttemptBoundaryResult{}, fmt.Errorf("attempt %s cannot reach a boundary with an in-flight review fix", attempt.attemptID)
+			}
+			if !configuredProtocolHead.IsZero() && state.base != configuredProtocolHead {
+				return AttemptBoundaryResult{}, fmt.Errorf("attempt %s review-fix chain does not follow its implementation protocol", attempt.attemptID)
+			}
+			expectedCommittedHead = state.Head()
 		}
+	} else if attempt.reviewFixes != nil {
+		return AttemptBoundaryResult{}, fmt.Errorf("attempt %s has review-fix state without an effective protocol", attempt.attemptID)
+	}
+	if !expectedCommittedHead.IsZero() && attempt.verifiedHead != expectedCommittedHead {
+		return AttemptBoundaryResult{}, fmt.Errorf(
+			"attempt %s completed implementation-plus-review-fix head does not match its verified head",
+			attempt.attemptID,
+		)
 	}
 	inspection, err := git.InspectAttemptWorktree(
 		ctx, definition.workspace.repositoryRoot, attempt.branch, attempt.worktree,
@@ -382,8 +407,8 @@ func RecordAttemptBoundary(
 		return AttemptBoundaryResult{}, err
 	}
 	expectedHead := inspection.worktreeHead
-	if !configuredProtocolHead.IsZero() {
-		expectedHead = configuredProtocolHead
+	if !expectedCommittedHead.IsZero() {
+		expectedHead = expectedCommittedHead
 	}
 	if err := verifyAttemptGitInspection(attempt, inspection, expectedHead); err != nil {
 		return AttemptBoundaryResult{}, err

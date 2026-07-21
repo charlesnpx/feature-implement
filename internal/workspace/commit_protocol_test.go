@@ -39,9 +39,8 @@ func TestOptionalCommitProtocolSchemaIsStrictAndAbsentMeansUnconstrained(t *test
 	if !ok || reviewFix.SubjectPrefix() != "Review fix" || reviewFix.BodyPolicy() != workspace.CommitBodyRequired {
 		t.Fatalf("review fix protocol = %#v, configured=%v", reviewFix, ok)
 	}
-	reviewBudget, configuredBudget, err := workspace.ReviewFixBudgetForUnit(units[0])
-	if err != nil || !configuredBudget || reviewBudget.Maximum() != units[0].Policy().MaxReviewFixes() {
-		t.Fatalf("review fix budget = %#v configured=%v err=%v", reviewBudget, configuredBudget, err)
+	if units[0].Policy().MaxReviewFixes() != 2 {
+		t.Fatalf("review-fix policy maximum = %d", units[0].Policy().MaxReviewFixes())
 	}
 	state, constrained, err := workspace.CommitProtocolStateForUnit(
 		units[0], workspace.DigestBytes([]byte("generation")), mustGitObject(t, '1'),
@@ -57,9 +56,6 @@ func TestOptionalCommitProtocolSchemaIsStrictAndAbsentMeansUnconstrained(t *test
 	unconfigured := unconfiguredConfig.MergeUnits()[0]
 	if _, ok := unconfigured.CommitProtocol(); ok {
 		t.Fatal("absent protocol became configured")
-	}
-	if _, configuredBudget, err := workspace.ReviewFixBudgetForUnit(unconfigured); err != nil || configuredBudget {
-		t.Fatalf("absent review-fix protocol configured=%v err=%v", configuredBudget, err)
 	}
 	if _, constrained, err := workspace.CommitProtocolStateForUnit(
 		unconfigured, workspace.DigestBytes([]byte("generation")), mustGitObject(t, '1'),
@@ -712,7 +708,7 @@ func TestCommitProtocolRebaseAcceptsACompletedPrefix(t *testing.T) {
 	}
 }
 
-func TestCommitEvidenceRejectsMergeCommitsAndReviewFixBudgetIsSeparate(t *testing.T) {
+func TestCommitEvidenceRejectsMergeCommitsAndReviewFixBudgetIsDurableState(t *testing.T) {
 	step, _ := protocolTestStep(t, "one-step", "One step")
 	diff := addedDiff(t, "src/value.go", mustGitObject(t, '4'))
 	inspection, err := workspace.NewGitCommitInspection(
@@ -727,20 +723,37 @@ func TestCommitEvidenceRejectsMergeCommitsAndReviewFixBudgetIsSeparate(t *testin
 	}
 	paths, _ := workspace.NewCommitPathPolicy([]string{"src/**"}, []string{})
 	review, _ := workspace.NewReviewFixProtocol("Review fix", workspace.CommitBodyRequired, paths, nil)
-	budget, err := workspace.NewReviewFixBudget(review, 2)
+	state, err := workspace.NewReviewFixState(
+		workspace.DigestBytes([]byte("generation")), mustGitObject(t, '1'), review, 2,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	budget, first, err := budget.ReserveNext()
-	if err != nil || first.ID().String() != "review-fix-1" || first.Message().Subject() != "Review fix 1" {
-		t.Fatalf("first review fix = %#v budget=%#v err=%v", first, budget, err)
+	reserve, _ := workspace.NewReserveReviewFix(1, state.Head())
+	reduction, err := workspace.ReduceReviewFix(state, reserve)
+	if err != nil || reduction.State().Used() != 1 || reduction.State().Remaining() != 1 {
+		t.Fatalf("first reservation state = %#v err=%v", reduction.State(), err)
 	}
-	budget, second, err := budget.ReserveNext()
-	if err != nil || second.ID().String() != "review-fix-2" || budget.Remaining() != 0 {
-		t.Fatalf("second review fix = %#v budget=%#v err=%v", second, budget, err)
+	state = reduction.State()
+	if _, err := workspace.ReduceReviewFix(state, reserve); err == nil || !strings.Contains(err.Error(), "in-flight") {
+		t.Fatalf("duplicate/in-flight reservation error = %v", err)
 	}
-	if _, _, err := budget.ReserveNext(); err == nil || !strings.Contains(err.Error(), "exhausted") {
-		t.Fatalf("exhausted budget error = %v", err)
+	reviewStep, _ := review.Step(1)
+	fixDiff := addedDiff(t, "src/review.go", mustGitObject(t, '4'))
+	staged, _ := workspace.NewStagedCommitInspection(mustGitObject(t, '1'), mustGitObject(t, '2'), fixDiff, nil, nil, nil)
+	stage, _ := workspace.NewStageReviewFix(1, staged, "accepted feedback")
+	reduction, err = workspace.ReduceReviewFix(state, stage)
+	if err != nil || reduction.State().Phase() != workspace.ReviewFixAwaitingCommit {
+		t.Fatalf("staged review fix = %#v err=%v", reduction.State(), err)
+	}
+	evidence, _ := workspace.NewCommitObjectEvidence(
+		state.Generation(), reviewStep.ID(), 1, mustGitObject(t, '3'), mustGitObject(t, '1'), mustGitObject(t, '2'),
+		reviewStep.Message().Subject(), "accepted feedback", fixDiff, reviewStep.Paths().Digest(),
+	)
+	record, _ := workspace.NewRecordReviewFixCommit(1, evidence)
+	reduction, err = workspace.ReduceReviewFix(reduction.State(), record)
+	if err != nil || reduction.State().Phase() != workspace.ReviewFixComplete || reduction.State().Head() != mustGitObject(t, '3') {
+		t.Fatalf("completed review fix = %#v err=%v", reduction.State(), err)
 	}
 }
 

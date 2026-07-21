@@ -627,29 +627,16 @@ type ReviewFixBudget struct {
 	used     uint16
 }
 
-func NewReviewFixBudget(protocol ReviewFixProtocol, maximum uint16) (ReviewFixBudget, error) {
-	if protocol.digest.IsZero() || maximum == 0 {
-		return ReviewFixBudget{}, fmt.Errorf("review-fix budget requires protocol and positive maximum")
+func newReviewFixBudget(protocol ReviewFixProtocol, maximum, used uint16) (ReviewFixBudget, error) {
+	if protocol.digest.IsZero() || maximum == 0 || used > maximum {
+		return ReviewFixBudget{}, fmt.Errorf("review-fix budget requires protocol and bounded durable usage")
 	}
-	return ReviewFixBudget{protocol: *cloneReviewFixProtocol(&protocol), maximum: maximum}, nil
+	return ReviewFixBudget{protocol: *cloneReviewFixProtocol(&protocol), maximum: maximum, used: used}, nil
 }
 
 func (budget ReviewFixBudget) Maximum() uint16   { return budget.maximum }
 func (budget ReviewFixBudget) Used() uint16      { return budget.used }
 func (budget ReviewFixBudget) Remaining() uint16 { return budget.maximum - budget.used }
-
-func (budget ReviewFixBudget) ReserveNext() (ReviewFixBudget, CommitStep, error) {
-	if budget.protocol.digest.IsZero() || budget.maximum == 0 || budget.used >= budget.maximum {
-		return ReviewFixBudget{}, CommitStep{}, fmt.Errorf("review-fix budget is exhausted")
-	}
-	next := budget
-	next.used++
-	step, err := next.protocol.Step(next.used)
-	if err != nil {
-		return ReviewFixBudget{}, CommitStep{}, err
-	}
-	return next, step, nil
-}
 
 func cloneCommitProtocolState(state CommitProtocolState) CommitProtocolState {
 	result := state
