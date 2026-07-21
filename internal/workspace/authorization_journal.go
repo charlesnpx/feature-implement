@@ -40,14 +40,16 @@ func (event AuthorizationGrantRecordedJournalEvent) validate() error {
 		return fmt.Errorf("authorization grant event requires generation-bound grant evidence")
 	}
 	if event.grant.parentGrantID.IsZero() {
-		if event.grant.scope.Digest() != event.grant.requestDigest ||
+		if !event.grant.providerObservationDigest.IsZero() ||
+			!event.grant.scope.pullRequest.IsZero() ||
+			event.grant.scope.Digest() != event.grant.requestDigest ||
 			event.grant.grantID != event.grant.scope.Digest() {
 			return fmt.Errorf("authorization grant event has invalid signed grant bindings")
 		}
 		return nil
 	}
 	derivedID, err := derivedStandingGrantID(
-		event.grant.parentGrantID, event.grant.receiptDigest,
+		event.grant.parentGrantID, event.grant.receiptDigest, event.grant.providerObservationDigest,
 		event.grant.scope.pullRequest, event.grant.scope.frontier.head,
 	)
 	if err != nil || derivedID != event.grant.grantID || event.grant.scope.pullRequest.IsZero() {
@@ -140,6 +142,95 @@ func (event AuthorizationSegmentCompletedJournalEvent) Generation() Digest { ret
 func (event AuthorizationSegmentCompletedJournalEvent) Segment() ID        { return event.segment }
 func (event AuthorizationSegmentCompletedJournalEvent) Epoch() uint64      { return event.epoch }
 
+type AuthorizationSafetyChangedJournalEvent struct {
+	workspaceID ID
+	generation  Digest
+	epoch       uint64
+	safety      AuthorizationSafetyState
+}
+
+func NewAuthorizationSafetyChangedJournalEvent(
+	workspaceID ID,
+	generation Digest,
+	epoch uint64,
+	safety AuthorizationSafetyState,
+) (AuthorizationSafetyChangedJournalEvent, error) {
+	event := AuthorizationSafetyChangedJournalEvent{
+		workspaceID: workspaceID, generation: generation, epoch: epoch, safety: safety,
+	}
+	if err := event.validate(); err != nil {
+		return AuthorizationSafetyChangedJournalEvent{}, err
+	}
+	return event, nil
+}
+
+func (AuthorizationSafetyChangedJournalEvent) isWorkspaceJournalEvent() {}
+func (AuthorizationSafetyChangedJournalEvent) eventType() JournalEventType {
+	return JournalEventAuthorizationSafetyChanged
+}
+func (event AuthorizationSafetyChangedJournalEvent) boundGeneration() Digest { return event.generation }
+func (event AuthorizationSafetyChangedJournalEvent) validate() error {
+	if event.workspaceID.IsZero() || event.generation.IsZero() || event.epoch == 0 {
+		return fmt.Errorf("authorization safety change requires workspace, generation, and epoch")
+	}
+	return nil
+}
+func (event AuthorizationSafetyChangedJournalEvent) WorkspaceID() ID    { return event.workspaceID }
+func (event AuthorizationSafetyChangedJournalEvent) Generation() Digest { return event.generation }
+func (event AuthorizationSafetyChangedJournalEvent) Epoch() uint64      { return event.epoch }
+func (event AuthorizationSafetyChangedJournalEvent) Safety() AuthorizationSafetyState {
+	return event.safety
+}
+
+type AuthorizationEffectDispatchedJournalEvent struct {
+	workspaceID ID
+	generation  Digest
+	effect      AuthorizationEffectDispatched
+}
+
+func NewAuthorizationEffectDispatchedJournalEvent(
+	workspaceID ID,
+	generation Digest,
+	effect AuthorizationEffectDispatched,
+) (AuthorizationEffectDispatchedJournalEvent, error) {
+	event := AuthorizationEffectDispatchedJournalEvent{
+		workspaceID: workspaceID, generation: generation, effect: effect,
+	}
+	if err := event.validate(); err != nil {
+		return AuthorizationEffectDispatchedJournalEvent{}, err
+	}
+	return event, nil
+}
+
+func (AuthorizationEffectDispatchedJournalEvent) isWorkspaceJournalEvent() {}
+func (AuthorizationEffectDispatchedJournalEvent) eventType() JournalEventType {
+	return JournalEventAuthorizationEffectDispatched
+}
+func (event AuthorizationEffectDispatchedJournalEvent) boundGeneration() Digest {
+	return event.generation
+}
+func (event AuthorizationEffectDispatchedJournalEvent) validate() error {
+	capability := event.effect.capability
+	if event.workspaceID.IsZero() || event.generation.IsZero() || event.effect.effectID.IsZero() ||
+		capability.grantID.IsZero() || capability.requestDigest.IsZero() || capability.stateDigest.IsZero() ||
+		capability.digest.IsZero() || capability.snapshot.journalHead.IsZero() ||
+		capability.checkpoint != AuthorizationBeforeDispatch || capability.epoch == 0 ||
+		event.effect.dispatchedAt.IsZero() || event.effect.dispatchedAt != capability.evaluatedAt ||
+		capabilityDigest(capability) != capability.digest {
+		return fmt.Errorf("authorization dispatch event requires an exact durable pre-dispatch capability")
+	}
+	return nil
+}
+func (event AuthorizationEffectDispatchedJournalEvent) WorkspaceID() ID    { return event.workspaceID }
+func (event AuthorizationEffectDispatchedJournalEvent) Generation() Digest { return event.generation }
+func (event AuthorizationEffectDispatchedJournalEvent) EffectID() ID       { return event.effect.effectID }
+func (event AuthorizationEffectDispatchedJournalEvent) Capability() AuthorizationCapability {
+	return event.effect.capability
+}
+func (event AuthorizationEffectDispatchedJournalEvent) DispatchedAt() time.Time {
+	return event.effect.dispatchedAt
+}
+
 func AuthorizationEpochJournalResource(workspaceID ID) JournalResource {
 	resource, _ := NewJournalResource(JournalResourceAuthorization, workspaceID.String()+"/epoch")
 	return resource
@@ -155,15 +246,31 @@ func AuthorizationReceiptJournalResource(receiptDigest Digest) JournalResource {
 	return resource
 }
 
+func AuthorizationProviderObservationJournalResource(observationDigest Digest) JournalResource {
+	resource, _ := NewJournalResource(JournalResourceEvidence, "provider-pr/"+observationDigest.String())
+	return resource
+}
+
 func AuthorizationSegmentJournalResource(workspaceID, segment ID) JournalResource {
 	resource, _ := NewJournalResource(JournalResourceSerialSegment, workspaceID.String()+"/"+segment.String())
+	return resource
+}
+
+func AuthorizationSafetyJournalResource(workspaceID ID) JournalResource {
+	resource, _ := NewJournalResource(JournalResourceAuthorization, workspaceID.String()+"/safety")
+	return resource
+}
+
+func AuthorizationEffectJournalResource(effectID ID) JournalResource {
+	resource, _ := NewJournalResource(JournalResourceProviderIntent, "authorization-dispatch/"+effectID.String())
 	return resource
 }
 
 func isAuthorizationJournalEvent(event WorkspaceJournalEvent) bool {
 	switch event.(type) {
 	case AuthorizationGrantRecordedJournalEvent, AuthorizationRevokedJournalEvent,
-		AuthorizationSegmentCompletedJournalEvent:
+		AuthorizationSegmentCompletedJournalEvent, AuthorizationSafetyChangedJournalEvent,
+		AuthorizationEffectDispatchedJournalEvent:
 		return true
 	default:
 		return false
@@ -186,7 +293,9 @@ func authorizationJournalEventResources(event WorkspaceJournalEvent) ([]JournalR
 			reads = append(reads,
 				AuthorizationGrantJournalResource(event.grant.parentGrantID),
 				AuthorizationReceiptJournalResource(event.grant.receiptDigest),
+				AuthorizationProviderObservationJournalResource(event.grant.providerObservationDigest),
 			)
+			writes = append(writes, AuthorizationProviderObservationJournalResource(event.grant.providerObservationDigest))
 		}
 		return reads, writes, true
 	case AuthorizationRevokedJournalEvent:
@@ -204,6 +313,23 @@ func authorizationJournalEventResources(event WorkspaceJournalEvent) ([]JournalR
 			AuthorizationSegmentJournalResource(event.workspaceID, event.segment),
 		}
 		return resources, resources, true
+	case AuthorizationSafetyChangedJournalEvent:
+		resources := []JournalResource{
+			AuthorizationEpochJournalResource(event.workspaceID),
+			AuthorizationSafetyJournalResource(event.workspaceID),
+		}
+		return resources, resources, true
+	case AuthorizationEffectDispatchedJournalEvent:
+		reads := []JournalResource{
+			AuthorizationEpochJournalResource(event.workspaceID),
+			AuthorizationGrantJournalResource(event.effect.capability.grantID),
+			AuthorizationEffectJournalResource(event.effect.effectID),
+		}
+		writes := []JournalResource{
+			AuthorizationEpochJournalResource(event.workspaceID),
+			AuthorizationEffectJournalResource(event.effect.effectID),
+		}
+		return reads, writes, true
 	default:
 		return nil, nil, false
 	}
@@ -217,6 +343,10 @@ func cloneAuthorizationJournalEvent(event WorkspaceJournalEvent) WorkspaceJourna
 	case AuthorizationRevokedJournalEvent:
 		return value
 	case AuthorizationSegmentCompletedJournalEvent:
+		return value
+	case AuthorizationSafetyChangedJournalEvent:
+		return value
+	case AuthorizationEffectDispatchedJournalEvent:
 		return value
 	default:
 		return nil
@@ -325,6 +455,43 @@ func reduceAuthorizationRuntime(
 		if event.grant.parentGrantID.IsZero() {
 			next.receipts = append(next.receipts, event.grant.receiptDigest)
 		}
+	case AuthorizationSafetyChangedJournalEvent:
+		if !current.initialized || event.workspaceID != current.state.workspaceID ||
+			event.generation != current.state.generation || event.epoch != current.state.epoch {
+			return AuthorizationRuntimeProjection{}, fmt.Errorf("authorization safety journal event has stale bindings")
+		}
+		domainEvent := NewAuthorizationSafetyChanged(event.safety)
+		state, err := ReduceAuthorization(current.state, domainEvent)
+		if err != nil {
+			return AuthorizationRuntimeProjection{}, err
+		}
+		next.state = state
+	case AuthorizationEffectDispatchedJournalEvent:
+		if !current.initialized || event.workspaceID != current.state.workspaceID ||
+			event.generation != current.state.generation {
+			return AuthorizationRuntimeProjection{}, fmt.Errorf("authorization dispatch journal event has stale bindings")
+		}
+		capability := event.effect.capability
+		if capability.snapshot.journalHead != record.previousHash {
+			return AuthorizationRuntimeProjection{}, fmt.Errorf("authorization dispatch capability is bound to a stale journal head")
+		}
+		epochResource := AuthorizationEpochJournalResource(event.workspaceID)
+		var revision uint64
+		var found bool
+		for _, read := range record.readSet {
+			if read.resource == epochResource {
+				revision, found = read.revision, true
+				break
+			}
+		}
+		if !found || capability.snapshot.authorizationRevision != revision {
+			return AuthorizationRuntimeProjection{}, fmt.Errorf("authorization dispatch capability has a stale resource revision")
+		}
+		state, err := ReduceAuthorization(current.state, event.effect)
+		if err != nil {
+			return AuthorizationRuntimeProjection{}, err
+		}
+		next.state = state
 	case AuthorizationRevokedJournalEvent:
 		if !current.initialized || event.workspaceID != current.state.workspaceID || event.generation != current.state.generation {
 			return AuthorizationRuntimeProjection{}, fmt.Errorf("authorization revocation journal event has stale bindings")
@@ -375,17 +542,18 @@ func RecordStandingGrant(
 	if err != nil {
 		return StandingGrant{}, JournalRecord{}, err
 	}
-	grant, err := VerifyStandingGrant(ctx, verifier, scope, receipt)
-	if err != nil {
-		return StandingGrant{}, JournalRecord{}, err
-	}
+	expectedGrantID := scope.Digest()
 	for _, existing := range projection.state.grants {
-		if existing.grantID == grant.grantID {
-			if existing.receiptDigest != grant.receiptDigest {
-				return StandingGrant{}, JournalRecord{}, fmt.Errorf("standing grant conflicts with durable grant %s", grant.grantID)
+		if existing.grantID == expectedGrantID {
+			if existing.receiptDigest != receipt.ReceiptDigest() {
+				return StandingGrant{}, JournalRecord{}, fmt.Errorf("standing grant conflicts with durable grant %s", expectedGrantID)
 			}
 			return cloneStandingGrant(existing), JournalRecord{}, nil
 		}
+	}
+	grant, err := VerifyStandingGrant(ctx, verifier, scope, receipt)
+	if err != nil {
+		return StandingGrant{}, JournalRecord{}, err
 	}
 	domainEvent, _ := NewAuthorizationGrantRecorded(grant)
 	if _, err := ReduceAuthorization(projection.state, domainEvent); err != nil {
@@ -400,6 +568,74 @@ func RecordStandingGrant(
 		return StandingGrant{}, JournalRecord{}, err
 	}
 	return grant, record, nil
+}
+
+// RecordDerivedStandingGrantPullRequest is the only exported path that turns
+// a provider observation into a pull-request-bound grant. It verifies the
+// exact provider result, enforces one durable child per parent, and records the
+// child through the authorization epoch CAS.
+func RecordDerivedStandingGrantPullRequest(
+	ctx context.Context,
+	journal *WorkspaceJournal,
+	definition EffectiveWorkspaceDefinition,
+	verifier ProviderPullRequestVerifierPort,
+	parentGrantID Digest,
+	observation ProviderPullRequestObservation,
+	occurredAt time.Time,
+) (StandingGrant, JournalRecord, error) {
+	if journal == nil || verifier == nil || parentGrantID.IsZero() ||
+		observation.digest.IsZero() || occurredAt.IsZero() {
+		return StandingGrant{}, JournalRecord{}, fmt.Errorf("record derived standing grant requires journal, provider verifier, parent, observation, and occurrence time")
+	}
+	snapshot, projection, err := readAuthorizationRuntime(journal, definition)
+	if err != nil {
+		return StandingGrant{}, JournalRecord{}, err
+	}
+	var parent StandingGrant
+	for _, existing := range projection.state.grants {
+		if existing.parentGrantID == parentGrantID {
+			if existing.providerObservationDigest != observation.digest ||
+				existing.scope.pullRequest != observation.identity || existing.scope.frontier.head != observation.head {
+				return StandingGrant{}, JournalRecord{}, fmt.Errorf("standing grant %s already has a different provider-derived child", parentGrantID)
+			}
+			return cloneStandingGrant(existing), JournalRecord{}, nil
+		}
+		if existing.grantID == parentGrantID {
+			parent = existing
+		}
+	}
+	if parent.grantID.IsZero() {
+		return StandingGrant{}, JournalRecord{}, fmt.Errorf("provider-derived standing grant parent %s is not active", parentGrantID)
+	}
+	verification, err := newProviderPullRequestVerification(parent.scope, parentGrantID, observation)
+	if err != nil {
+		return StandingGrant{}, JournalRecord{}, err
+	}
+	if err := verifier.VerifyProviderPullRequest(ctx, verification, observation); err != nil {
+		return StandingGrant{}, JournalRecord{}, fmt.Errorf("verify provider pull request observation: %w", err)
+	}
+	derived, err := deriveStandingGrantPullRequest(parent, observation)
+	if err != nil {
+		return StandingGrant{}, JournalRecord{}, err
+	}
+	domainEvent, err := NewAuthorizationGrantRecorded(derived)
+	if err != nil {
+		return StandingGrant{}, JournalRecord{}, err
+	}
+	if _, err := ReduceAuthorization(projection.state, domainEvent); err != nil {
+		return StandingGrant{}, JournalRecord{}, err
+	}
+	event, err := NewAuthorizationGrantRecordedJournalEvent(
+		definition.workspace.id, definition.generation, derived,
+	)
+	if err != nil {
+		return StandingGrant{}, JournalRecord{}, err
+	}
+	record, err := appendAuthorizationJournalEvent(journal, snapshot, event, occurredAt)
+	if err != nil {
+		return StandingGrant{}, JournalRecord{}, err
+	}
+	return derived, record, nil
 }
 
 func RecordAuthorizationRevocation(
@@ -417,6 +653,20 @@ func RecordAuthorizationRevocation(
 	snapshot, projection, err := readAuthorizationRuntime(journal, definition)
 	if err != nil {
 		return AuthorizationRevocation{}, JournalRecord{}, err
+	}
+	expected, err := newAuthorizationRevocation(options)
+	if err != nil {
+		return AuthorizationRevocation{}, JournalRecord{}, err
+	}
+	for _, record := range snapshot.records {
+		existing, ok := record.event.(AuthorizationRevokedJournalEvent)
+		if !ok || existing.revocation.digest != expected.digest {
+			continue
+		}
+		if existing.revocation.receipt != receipt.ReceiptDigest() {
+			return AuthorizationRevocation{}, JournalRecord{}, fmt.Errorf("authorization revocation conflicts with durable request %s", expected.digest)
+		}
+		return existing.revocation, JournalRecord{}, nil
 	}
 	revocation, err := VerifyAuthorizationRevocation(ctx, verifier, options, receipt)
 	if err != nil {
@@ -466,6 +716,121 @@ func RecordAuthorizationSegmentCompletion(
 		return JournalRecord{}, err
 	}
 	return appendAuthorizationJournalEvent(journal, snapshot, event, occurredAt)
+}
+
+func RecordAuthorizationSafetyChange(
+	journal *WorkspaceJournal,
+	definition EffectiveWorkspaceDefinition,
+	safety AuthorizationSafetyState,
+	occurredAt time.Time,
+) (JournalRecord, error) {
+	if journal == nil || occurredAt.IsZero() {
+		return JournalRecord{}, fmt.Errorf("record authorization safety change requires journal and occurrence time")
+	}
+	snapshot, projection, err := readAuthorizationRuntime(journal, definition)
+	if err != nil {
+		return JournalRecord{}, err
+	}
+	if projection.state.safety == safety {
+		return JournalRecord{}, nil
+	}
+	domainEvent := NewAuthorizationSafetyChanged(safety)
+	if _, err := ReduceAuthorization(projection.state, domainEvent); err != nil {
+		return JournalRecord{}, err
+	}
+	event, err := NewAuthorizationSafetyChangedJournalEvent(
+		definition.workspace.id, definition.generation, projection.state.epoch, safety,
+	)
+	if err != nil {
+		return JournalRecord{}, err
+	}
+	return appendAuthorizationJournalEvent(journal, snapshot, event, occurredAt)
+}
+
+// ReadAuthorizationEvaluationSnapshot returns an immutable state and the
+// exact journal head/resource revision that every checkpoint must retain.
+func ReadAuthorizationEvaluationSnapshot(
+	journal *WorkspaceJournal,
+	definition EffectiveWorkspaceDefinition,
+) (AuthorizationState, AuthorizationSnapshotBinding, error) {
+	if journal == nil {
+		return AuthorizationState{}, AuthorizationSnapshotBinding{}, fmt.Errorf("authorization evaluation snapshot requires journal")
+	}
+	snapshot, projection, err := readAuthorizationRuntime(journal, definition)
+	if err != nil {
+		return AuthorizationState{}, AuthorizationSnapshotBinding{}, err
+	}
+	binding, err := NewAuthorizationSnapshotBinding(
+		snapshot.head, snapshot.Revision(AuthorizationEpochJournalResource(definition.workspace.id)),
+	)
+	if err != nil {
+		return AuthorizationState{}, AuthorizationSnapshotBinding{}, err
+	}
+	return projection.State(), binding, nil
+}
+
+// RecordAuthorizationEffectDispatched is the durable revocation
+// linearization point. It reloads the current journal state, re-evaluates with
+// the protected clock, and atomically records the reconciliation obligation
+// before any provider broker may be invoked.
+func RecordAuthorizationEffectDispatched(
+	journal *WorkspaceJournal,
+	definition EffectiveWorkspaceDefinition,
+	evaluator *AuthorizationEvaluator,
+	request AuthorizationRequest,
+	queueEntry AuthorizationCapability,
+	effectID ID,
+) (AuthorizationDispatchObligation, JournalRecord, error) {
+	if journal == nil || evaluator == nil || effectID.IsZero() || request.digest.IsZero() {
+		return AuthorizationDispatchObligation{}, JournalRecord{}, fmt.Errorf("record authorization dispatch requires journal, evaluator, request, queue capability, and effect")
+	}
+	snapshot, projection, err := readAuthorizationRuntime(journal, definition)
+	if err != nil {
+		return AuthorizationDispatchObligation{}, JournalRecord{}, err
+	}
+	for _, obligation := range projection.state.obligations {
+		if obligation.effectID != effectID {
+			continue
+		}
+		if obligation.requestDigest != request.digest || obligation.grantID != queueEntry.grantID ||
+			obligation.epoch != queueEntry.epoch {
+			return AuthorizationDispatchObligation{}, JournalRecord{}, fmt.Errorf("authorization effect %s conflicts with its durable dispatch", effectID)
+		}
+		return obligation, JournalRecord{}, nil
+	}
+	binding, err := NewAuthorizationSnapshotBinding(
+		snapshot.head, snapshot.Revision(AuthorizationEpochJournalResource(definition.workspace.id)),
+	)
+	if err != nil {
+		return AuthorizationDispatchObligation{}, JournalRecord{}, err
+	}
+	capability, err := evaluator.AuthorizeImmediatelyBeforeDispatch(
+		projection.state, request, binding, queueEntry,
+	)
+	if err != nil {
+		return AuthorizationDispatchObligation{}, JournalRecord{}, err
+	}
+	effect, err := NewAuthorizationEffectDispatched(effectID, capability)
+	if err != nil {
+		return AuthorizationDispatchObligation{}, JournalRecord{}, err
+	}
+	if _, err := ReduceAuthorization(projection.state, effect); err != nil {
+		return AuthorizationDispatchObligation{}, JournalRecord{}, err
+	}
+	event, err := NewAuthorizationEffectDispatchedJournalEvent(
+		definition.workspace.id, definition.generation, effect,
+	)
+	if err != nil {
+		return AuthorizationDispatchObligation{}, JournalRecord{}, err
+	}
+	record, err := appendAuthorizationJournalEvent(journal, snapshot, event, effect.dispatchedAt)
+	if err != nil {
+		return AuthorizationDispatchObligation{}, JournalRecord{}, err
+	}
+	return AuthorizationDispatchObligation{
+		effectID: effectID, requestDigest: capability.requestDigest,
+		grantID: capability.grantID, epoch: capability.epoch, dispatchedAt: effect.dispatchedAt,
+	}, record, nil
 }
 
 func readAuthorizationRuntime(

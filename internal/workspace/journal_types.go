@@ -133,6 +133,8 @@ const (
 	JournalEventAuthorizationGrantRecorded     JournalEventType = "authorization.grant_recorded.v2"
 	JournalEventAuthorizationRevoked           JournalEventType = "authorization.revoked.v2"
 	JournalEventAuthorizationSegmentCompleted  JournalEventType = "authorization.segment_completed.v2"
+	JournalEventAuthorizationSafetyChanged     JournalEventType = "authorization.safety_changed.v2"
+	JournalEventAuthorizationEffectDispatched  JournalEventType = "authorization.effect_dispatched.v2"
 )
 
 type WorkspaceJournalEvent interface {
@@ -389,7 +391,8 @@ func newJournalAppend(
 			ReviewFixCheckRecordedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("commit protocol events must use the Git-verified commit workflow")
 		case AuthorizationGrantRecordedJournalEvent, AuthorizationRevokedJournalEvent,
-			AuthorizationSegmentCompletedJournalEvent:
+			AuthorizationSegmentCompletedJournalEvent, AuthorizationSafetyChangedJournalEvent,
+			AuthorizationEffectDispatchedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("authorization events must use the protected control-plane workflow")
 		}
 	}

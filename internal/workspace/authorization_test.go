@@ -19,7 +19,11 @@ type authorizationFixture struct {
 	state       workspace.AuthorizationState
 }
 
-func TestStandingAuthorizationCoversPrePRDerivedPRAndReviewFixFrontiers(t *testing.T) {
+type authorizationTestClock struct{ now time.Time }
+
+func (clock *authorizationTestClock) Now() time.Time { return clock.now }
+
+func TestStandingAuthorizationCoversPrePRAndRejectsCallerManufacturedPRGrants(t *testing.T) {
 	fixture := newAuthorizationFixture(t)
 	scope := authorizationScope(
 		t, fixture, fixture.frontier, workspace.PullRequestIdentity{}, "2026-07-21T20:00:00Z", 1,
@@ -39,22 +43,24 @@ func TestStandingAuthorizationCoversPrePRDerivedPRAndReviewFixFrontiers(t *testi
 
 	push := authorizationRequest(t, fixture, fixture.frontier, workspace.StandingAuthorizationPush, workspace.PullRequestIdentity{}, 1)
 	now := mustTime(t, "2026-07-21T18:00:00Z")
-	planned, err := workspace.PlanAuthorization(state, push, now)
+	evaluator := authorizationEvaluator(t, now)
+	snapshot := authorizationSnapshot(t, "pre-pr")
+	planned, err := evaluator.PlanAuthorization(state, push, snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := workspace.AuthorizeImmediatelyBeforeDispatch(state, push, planned, now); err == nil {
+	if _, err := evaluator.AuthorizeImmediatelyBeforeDispatch(state, push, snapshot, planned); err == nil {
 		t.Fatal("planning capability skipped intent reservation and queue entry")
 	}
-	reserved, err := workspace.ReserveAuthorizationIntent(state, push, planned, now)
+	reserved, err := evaluator.ReserveAuthorizationIntent(state, push, snapshot, planned)
 	if err != nil {
 		t.Fatal(err)
 	}
-	queued, err := workspace.EnterAuthorizationQueue(state, push, reserved, now)
+	queued, err := evaluator.EnterAuthorizationQueue(state, push, snapshot, reserved)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dispatch, err := workspace.AuthorizeImmediatelyBeforeDispatch(state, push, queued, now)
+	dispatch, err := evaluator.AuthorizeImmediatelyBeforeDispatch(state, push, snapshot, queued)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +77,7 @@ func TestStandingAuthorizationCoversPrePRDerivedPRAndReviewFixFrontiers(t *testi
 	openPR := authorizationRequest(
 		t, fixture, fixture.frontier, workspace.StandingAuthorizationOpenPullRequest, workspace.PullRequestIdentity{}, 1,
 	)
-	if _, err := workspace.AuthorizeImmediatelyBeforeDispatch(state, openPR, queued, now); err == nil {
+	if _, err := evaluator.AuthorizeImmediatelyBeforeDispatch(state, openPR, snapshot, queued); err == nil {
 		t.Fatal("queue capability authorized a different request")
 	}
 	if _, err := authorizationBeforeDispatch(state, openPR, now); err != nil {
@@ -82,54 +88,24 @@ func TestStandingAuthorizationCoversPrePRDerivedPRAndReviewFixFrontiers(t *testi
 		t.Fatal("pre-PR grant authorized merge without derived PR identity")
 	}
 
-	pr, err := workspace.NewPullRequestIdentity(workspace.MustID("github"), fixture.repository, 71)
+	observation, err := workspace.NewProviderPullRequestObservation(
+		workspace.MustID("github"), fixture.repository, 71, fixture.frontier.Head(),
+		workspace.DigestBytes([]byte("provider-result-71")),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	derived, err := workspace.DeriveStandingGrantPullRequest(grant, pr, fixture.frontier.Head())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if derived.GrantID() == grant.GrantID() {
-		t.Fatal("provider-derived PR did not create a distinct grant identity")
-	}
-	derivedEvent, _ := workspace.NewAuthorizationGrantRecorded(derived)
-	state, err = workspace.ReduceAuthorization(state, derivedEvent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	merge := authorizationRequest(t, fixture, fixture.frontier, workspace.StandingAuthorizationMerge, pr, 1)
-	if _, err := authorizationBeforeDispatch(state, merge, now); err != nil {
-		t.Fatalf("derived PR merge authorization: %v", err)
-	}
-
-	reviewFixFrontier, err := workspace.NewAuthorizationFrontier(fixture.frontier.Head(), mustGitObject(t, 'd'))
-	if err != nil {
-		t.Fatal(err)
-	}
-	reviewFixScope := authorizationScope(
-		t, fixture, reviewFixFrontier, pr, "2026-07-21T20:00:00Z", 1,
+	pr := observation.PullRequest()
+	callerManufacturedScope := authorizationScope(
+		t, fixture, fixture.frontier, pr, "2026-07-21T20:00:00Z", 1,
 		workspace.StandingAuthorizationPush, workspace.StandingAuthorizationMerge,
 	)
-	reviewFixGrant := verifiedTestStandingGrant(t, reviewFixScope, "review-fix-grant")
-	reviewFixEvent, _ := workspace.NewAuthorizationGrantRecorded(reviewFixGrant)
-	state, err = workspace.ReduceAuthorization(state, reviewFixEvent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	reviewFixPush := authorizationRequest(t, fixture, reviewFixFrontier, workspace.StandingAuthorizationPush, pr, 1)
-	if _, err := authorizationBeforeDispatch(state, reviewFixPush, now); err != nil {
-		t.Fatalf("review-fix push authorization: %v", err)
-	}
-	wrongFrontier, _ := workspace.NewAuthorizationFrontier(fixture.frontier.Head(), mustGitObject(t, 'e'))
-	wrongHead := authorizationRequest(t, fixture, wrongFrontier, workspace.StandingAuthorizationPush, pr, 1)
-	if _, err := authorizationBeforeDispatch(state, wrongHead, now); err == nil {
-		t.Fatal("wrong review-fix head was authorized")
-	}
-	wrongRepository, _ := workspace.NewRepositoryIdentity("https://github.com/example/other.git")
-	wrongPR, _ := workspace.NewPullRequestIdentity(workspace.MustID("github"), wrongRepository, 71)
-	if _, err := workspace.DeriveStandingGrantPullRequest(grant, wrongPR, fixture.frontier.Head()); err == nil {
-		t.Fatal("wrong-repository PR identity was derived")
+	manufacturedBinding, _ := workspace.StandingGrantControlPlaneBinding(callerManufacturedScope)
+	if _, err := workspace.VerifyStandingGrant(
+		context.Background(), &boundaryVerifier{expectedRequest: callerManufacturedScope.Digest()},
+		callerManufacturedScope, controlPlaneReceipt(t, manufacturedBinding, "caller-manufactured-pr"),
+	); err == nil || !strings.Contains(err.Error(), "provider-derived") {
+		t.Fatalf("caller-manufactured PR grant error = %v", err)
 	}
 
 	actions := scope.Actions()
@@ -174,7 +150,9 @@ func TestAuthorizationBlocksGatesReconciliationDriftAmbiguitySegmentsAndStaleEpo
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := workspace.AuthorizeImmediatelyBeforeDispatch(state, request, queued, now); err == nil || !strings.Contains(err.Error(), test.want) {
+			if _, err := authorizationEvaluatorAt(now).AuthorizeImmediatelyBeforeDispatch(
+				state, request, authorizationSnapshotValue(), queued,
+			); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("%s blocker error = %v", test.name, err)
 			}
 		})
@@ -185,7 +163,9 @@ func TestAuthorizationBlocksGatesReconciliationDriftAmbiguitySegmentsAndStaleEpo
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := workspace.AuthorizeImmediatelyBeforeDispatch(segmentState, request, queued, now); err == nil || !strings.Contains(err.Error(), "complete") {
+	if _, err := authorizationEvaluatorAt(now).AuthorizeImmediatelyBeforeDispatch(
+		segmentState, request, authorizationSnapshotValue(), queued,
+	); err == nil || !strings.Contains(err.Error(), "complete") {
 		t.Fatalf("segment completion error = %v", err)
 	}
 
@@ -199,16 +179,62 @@ func TestAuthorizationBlocksGatesReconciliationDriftAmbiguitySegmentsAndStaleEpo
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := workspace.AuthorizeImmediatelyBeforeDispatch(ambiguousState, request, queued, now); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+	if _, err := authorizationEvaluatorAt(now).AuthorizeImmediatelyBeforeDispatch(
+		ambiguousState, request, authorizationSnapshotValue(), queued,
+	); err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("overlapping grant ambiguity error = %v", err)
 	}
 
-	if _, err := workspace.AuthorizeImmediatelyBeforeDispatch(baseState, request, queued, scope.ExpiresAt()); err == nil {
+	if _, err := authorizationEvaluatorAt(scope.ExpiresAt()).AuthorizeImmediatelyBeforeDispatch(
+		baseState, request, authorizationSnapshotValue(), queued,
+	); err == nil {
 		t.Fatal("expired standing grant was authorized")
 	}
 	staleRequest := authorizationRequest(t, fixture, fixture.frontier, workspace.StandingAuthorizationPush, workspace.PullRequestIdentity{}, 2)
-	if _, err := workspace.PlanAuthorization(baseState, staleRequest, now); err == nil || !strings.Contains(err.Error(), "stale") {
+	if _, err := authorizationEvaluatorAt(now).PlanAuthorization(
+		baseState, staleRequest, authorizationSnapshotValue(),
+	); err == nil || !strings.Contains(err.Error(), "stale") {
 		t.Fatalf("stale epoch request error = %v", err)
+	}
+}
+
+func TestAuthorizationEvaluatorUsesProtectedClockAtEveryCheckpoint(t *testing.T) {
+	fixture := newAuthorizationFixture(t)
+	scope := authorizationScope(
+		t, fixture, fixture.frontier, workspace.PullRequestIdentity{}, "2026-07-21T20:00:00Z", 1,
+		workspace.StandingAuthorizationPush,
+	)
+	grant := verifiedTestStandingGrant(t, scope, "trusted-clock-grant")
+	event, _ := workspace.NewAuthorizationGrantRecorded(grant)
+	state, err := workspace.ReduceAuthorization(fixture.state, event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := authorizationRequest(
+		t, fixture, fixture.frontier, workspace.StandingAuthorizationPush, workspace.PullRequestIdentity{}, 1,
+	)
+	clock := &authorizationTestClock{now: mustTime(t, "2026-07-21T18:00:00Z")}
+	evaluator, err := workspace.NewAuthorizationEvaluator(clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := authorizationSnapshotValue()
+	planned, err := evaluator.PlanAuthorization(state, request, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserved, err := evaluator.ReserveAuthorizationIntent(state, request, snapshot, planned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, err := evaluator.EnterAuthorizationQueue(state, request, snapshot, reserved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.now = scope.ExpiresAt()
+	if _, err := evaluator.AuthorizeImmediatelyBeforeDispatch(state, request, snapshot, queued); err == nil ||
+		!strings.Contains(err.Error(), "fresh matching") {
+		t.Fatalf("expired grant passed protected-clock dispatch check: %v", err)
 	}
 }
 
@@ -231,19 +257,11 @@ func TestRevocationLinearizesBeforeDispatchAndPreservesPostDispatchObligation(t 
 	}
 	revocation := verifiedTestRevocation(t, fixture, grant.GrantID(), 2, "revoke")
 	revokedEvent, _ := workspace.NewAuthorizationRevoked(revocation)
-	if _, err := workspace.NewAuthorizationEffectDispatched(
-		workspace.MustID("expired-push-effect"), capability, scope.ExpiresAt(),
-	); err == nil {
-		t.Fatal("expired pre-dispatch capability created a dispatched effect")
-	}
-
 	revokedBeforeDispatch, err := workspace.ReduceAuthorization(state, revokedEvent)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dispatched, _ := workspace.NewAuthorizationEffectDispatched(
-		workspace.MustID("push-effect"), capability, mustTime(t, "2026-07-21T18:00:01Z"),
-	)
+	dispatched, _ := workspace.NewAuthorizationEffectDispatched(workspace.MustID("push-effect"), capability)
 	if _, err := workspace.ReduceAuthorization(revokedBeforeDispatch, dispatched); err == nil || !strings.Contains(err.Error(), "stale") {
 		t.Fatalf("pre-dispatch revocation did not fence capability: %v", err)
 	}
@@ -255,9 +273,7 @@ func TestRevocationLinearizesBeforeDispatchAndPreservesPostDispatchObligation(t 
 	if len(postDispatch.OutstandingReconciliationObligations()) != 1 {
 		t.Fatal("dispatched effect did not become a reconciliation obligation")
 	}
-	replayedDispatch, _ := workspace.NewAuthorizationEffectDispatched(
-		workspace.MustID("second-push-effect"), capability, mustTime(t, "2026-07-21T18:00:02Z"),
-	)
+	replayedDispatch, _ := workspace.NewAuthorizationEffectDispatched(workspace.MustID("second-push-effect"), capability)
 	if _, err := workspace.ReduceAuthorization(postDispatch, replayedDispatch); err == nil || !strings.Contains(err.Error(), "stale") {
 		t.Fatalf("pre-dispatch capability was reusable after dispatch: %v", err)
 	}
@@ -268,7 +284,9 @@ func TestRevocationLinearizesBeforeDispatchAndPreservesPostDispatchObligation(t 
 	if len(postDispatchRevoked.OutstandingReconciliationObligations()) != 1 || postDispatchRevoked.Epoch() != 2 {
 		t.Fatal("post-dispatch revocation erased its reconciliation obligation")
 	}
-	if _, err := workspace.PlanAuthorization(postDispatchRevoked, request, mustTime(t, "2026-07-21T18:00:00Z")); err == nil {
+	if _, err := authorizationEvaluatorAt(mustTime(t, "2026-07-21T18:00:00Z")).PlanAuthorization(
+		postDispatchRevoked, request, authorizationSnapshotValue(),
+	); err == nil {
 		t.Fatal("revoked state authorized another dispatch")
 	}
 }
@@ -359,15 +377,17 @@ func authorizationThroughQueue(
 	request workspace.AuthorizationRequest,
 	now time.Time,
 ) (workspace.AuthorizationCapability, error) {
-	planned, err := workspace.PlanAuthorization(state, request, now)
+	evaluator := authorizationEvaluatorAt(now)
+	snapshot := authorizationSnapshotValue()
+	planned, err := evaluator.PlanAuthorization(state, request, snapshot)
 	if err != nil {
 		return workspace.AuthorizationCapability{}, err
 	}
-	reserved, err := workspace.ReserveAuthorizationIntent(state, request, planned, now)
+	reserved, err := evaluator.ReserveAuthorizationIntent(state, request, snapshot, planned)
 	if err != nil {
 		return workspace.AuthorizationCapability{}, err
 	}
-	return workspace.EnterAuthorizationQueue(state, request, reserved, now)
+	return evaluator.EnterAuthorizationQueue(state, request, snapshot, reserved)
 }
 
 func authorizationBeforeDispatch(
@@ -379,7 +399,37 @@ func authorizationBeforeDispatch(
 	if err != nil {
 		return workspace.AuthorizationCapability{}, err
 	}
-	return workspace.AuthorizeImmediatelyBeforeDispatch(state, request, queued, now)
+	return authorizationEvaluatorAt(now).AuthorizeImmediatelyBeforeDispatch(
+		state, request, authorizationSnapshotValue(), queued,
+	)
+}
+
+func authorizationEvaluator(t *testing.T, now time.Time) *workspace.AuthorizationEvaluator {
+	t.Helper()
+	evaluator, err := workspace.NewAuthorizationEvaluator(&authorizationTestClock{now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return evaluator
+}
+
+func authorizationEvaluatorAt(now time.Time) *workspace.AuthorizationEvaluator {
+	evaluator, _ := workspace.NewAuthorizationEvaluator(&authorizationTestClock{now: now})
+	return evaluator
+}
+
+func authorizationSnapshot(t *testing.T, label string) workspace.AuthorizationSnapshotBinding {
+	t.Helper()
+	binding, err := workspace.NewAuthorizationSnapshotBinding(workspace.DigestBytes([]byte(label)), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return binding
+}
+
+func authorizationSnapshotValue() workspace.AuthorizationSnapshotBinding {
+	binding, _ := workspace.NewAuthorizationSnapshotBinding(workspace.DigestBytes([]byte("default")), 1)
+	return binding
 }
 
 func verifiedTestRevocation(

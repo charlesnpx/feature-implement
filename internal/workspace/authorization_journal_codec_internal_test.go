@@ -38,11 +38,13 @@ func TestAuthorizationJournalCodecPreservesProviderDerivedGrantParent(t *testing
 		scope: scope, grantID: scope.Digest(), requestDigest: scope.Digest(),
 		receiptDigest: DigestBytes([]byte("receipt-one")),
 	}
-	pullRequest, err := NewPullRequestIdentity(MustID("github"), repository, 71)
+	observation, err := NewProviderPullRequestObservation(
+		MustID("github"), repository, 71, head, DigestBytes([]byte("provider-result-one")),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	derived, err := DeriveStandingGrantPullRequest(parent, pullRequest, head)
+	derived, err := deriveStandingGrantPullRequest(parent, observation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +62,8 @@ func TestAuthorizationJournalCodecPreservesProviderDerivedGrantParent(t *testing
 	}
 	replayed := decoded.(AuthorizationGrantRecordedJournalEvent)
 	if replayed.grant.parentGrantID != parent.grantID ||
-		replayed.grant.grantID != derived.grantID || replayed.grant.scope.pullRequest != pullRequest {
+		replayed.grant.grantID != derived.grantID || replayed.grant.scope.pullRequest != observation.identity ||
+		replayed.grant.providerObservationDigest != observation.digest {
 		t.Fatalf("derived grant parent or identity was not preserved: %#v", replayed.grant)
 	}
 

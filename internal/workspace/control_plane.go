@@ -45,7 +45,10 @@ type PullRequestIdentity struct {
 	number     uint64
 }
 
-func NewPullRequestIdentity(provider ID, repository RepositoryIdentity, number uint64) (PullRequestIdentity, error) {
+// newPullRequestIdentity is deliberately package-private. Pull request
+// identities become usable authorization inputs only after a trusted provider
+// observation has been verified and durably recorded.
+func newPullRequestIdentity(provider ID, repository RepositoryIdentity, number uint64) (PullRequestIdentity, error) {
 	if provider.IsZero() || repository.String() == "" || number == 0 {
 		return PullRequestIdentity{}, fmt.Errorf("pull request identity requires provider, repository, and positive number")
 	}
@@ -57,6 +60,131 @@ func (identity PullRequestIdentity) Repository() RepositoryIdentity { return ide
 func (identity PullRequestIdentity) Number() uint64                 { return identity.number }
 func (identity PullRequestIdentity) IsZero() bool {
 	return identity.provider.IsZero() && identity.repository.String() == "" && identity.number == 0
+}
+
+// ProviderPullRequestObservation is untrusted until a
+// ProviderPullRequestVerifierPort accepts it for an exact pre-PR grant. Its
+// digest binds provider result identity and the observed remote head.
+type ProviderPullRequestObservation struct {
+	identity     PullRequestIdentity
+	head         GitObjectID
+	resultDigest Digest
+	digest       Digest
+}
+
+func NewProviderPullRequestObservation(
+	provider ID,
+	repository RepositoryIdentity,
+	number uint64,
+	head GitObjectID,
+	resultDigest Digest,
+) (ProviderPullRequestObservation, error) {
+	identity, err := newPullRequestIdentity(provider, repository, number)
+	if err != nil {
+		return ProviderPullRequestObservation{}, err
+	}
+	if head.IsZero() || resultDigest.IsZero() {
+		return ProviderPullRequestObservation{}, fmt.Errorf("provider pull request observation requires exact head and result digest")
+	}
+	type observationJSON struct {
+		SchemaVersion int    `json:"schema_version"`
+		Provider      string `json:"provider"`
+		Repository    string `json:"repository"`
+		Number        uint64 `json:"number"`
+		Head          string `json:"head"`
+		ResultDigest  string `json:"result_digest"`
+	}
+	canonical, err := json.Marshal(observationJSON{
+		SchemaVersion: 2, Provider: provider.String(), Repository: repository.String(),
+		Number: number, Head: head.String(), ResultDigest: resultDigest.String(),
+	})
+	if err != nil {
+		return ProviderPullRequestObservation{}, err
+	}
+	return ProviderPullRequestObservation{
+		identity: identity, head: head, resultDigest: resultDigest, digest: DigestBytes(canonical),
+	}, nil
+}
+
+func (observation ProviderPullRequestObservation) Provider() ID {
+	return observation.identity.provider
+}
+func (observation ProviderPullRequestObservation) Repository() RepositoryIdentity {
+	return observation.identity.repository
+}
+func (observation ProviderPullRequestObservation) Number() uint64    { return observation.identity.number }
+func (observation ProviderPullRequestObservation) Head() GitObjectID { return observation.head }
+func (observation ProviderPullRequestObservation) ResultDigest() Digest {
+	return observation.resultDigest
+}
+func (observation ProviderPullRequestObservation) Digest() Digest { return observation.digest }
+
+// PullRequest returns the untrusted observed identity for request matching.
+// It does not create a derived standing grant; only the verifier-backed
+// durable recording workflow can do that.
+func (observation ProviderPullRequestObservation) PullRequest() PullRequestIdentity {
+	return observation.identity
+}
+
+// ProviderPullRequestVerification is the exact provider boundary expected by
+// a pre-PR standing grant. It contains no executable command or credential.
+type ProviderPullRequestVerification struct {
+	workspaceID   ID
+	generation    Digest
+	repository    RepositoryIdentity
+	remote        string
+	serialSegment ID
+	frontier      AuthorizationFrontier
+	parentGrantID Digest
+	observation   Digest
+}
+
+func newProviderPullRequestVerification(
+	scope StandingGrantScope,
+	parentGrantID Digest,
+	observation ProviderPullRequestObservation,
+) (ProviderPullRequestVerification, error) {
+	if scope.workspaceID.IsZero() || scope.generation.IsZero() || scope.repository.String() == "" ||
+		scope.serialSegment.IsZero() || scope.frontier.base.IsZero() || scope.frontier.head.IsZero() ||
+		parentGrantID.IsZero() || observation.digest.IsZero() {
+		return ProviderPullRequestVerification{}, fmt.Errorf("provider pull request verification requires exact grant and observation bindings")
+	}
+	if observation.identity.repository != scope.repository || observation.head != scope.frontier.head {
+		return ProviderPullRequestVerification{}, fmt.Errorf("provider pull request observation does not match the granted repository and frontier")
+	}
+	return ProviderPullRequestVerification{
+		workspaceID: scope.workspaceID, generation: scope.generation, repository: scope.repository,
+		remote: scope.remote, serialSegment: scope.serialSegment, frontier: scope.frontier,
+		parentGrantID: parentGrantID, observation: observation.digest,
+	}, nil
+}
+
+func (verification ProviderPullRequestVerification) WorkspaceID() ID { return verification.workspaceID }
+func (verification ProviderPullRequestVerification) Generation() Digest {
+	return verification.generation
+}
+func (verification ProviderPullRequestVerification) Repository() RepositoryIdentity {
+	return verification.repository
+}
+func (verification ProviderPullRequestVerification) Remote() string { return verification.remote }
+func (verification ProviderPullRequestVerification) SerialSegment() ID {
+	return verification.serialSegment
+}
+func (verification ProviderPullRequestVerification) Frontier() AuthorizationFrontier {
+	return verification.frontier
+}
+func (verification ProviderPullRequestVerification) ParentGrantID() Digest {
+	return verification.parentGrantID
+}
+func (verification ProviderPullRequestVerification) ObservationDigest() Digest {
+	return verification.observation
+}
+
+// ProviderPullRequestVerifierPort is implemented by the trusted provider
+// boundary. Local callers may describe an observation but cannot authorize it
+// without this independent verification.
+type ProviderPullRequestVerifierPort interface {
+	VerifyProviderPullRequest(context.Context, ProviderPullRequestVerification, ProviderPullRequestObservation) error
 }
 
 // ControlPlaneBindingOptions contains only typed, transition-derived values.
@@ -427,7 +555,7 @@ func bindingFromControlPlaneWire(wire controlPlanePayloadWire) (ControlPlaneBind
 		if err != nil {
 			return ControlPlaneBinding{}, err
 		}
-		pullRequest, err = NewPullRequestIdentity(provider, prRepository, wire.PullRequest.Number)
+		pullRequest, err = newPullRequestIdentity(provider, prRepository, wire.PullRequest.Number)
 		if err != nil {
 			return ControlPlaneBinding{}, err
 		}
@@ -580,9 +708,11 @@ func (claim ControlPlaneReplayClaim) PayloadDigest() Digest { return claim.paylo
 func (claim ControlPlaneReplayClaim) ReceiptDigest() Digest { return claim.receiptDigest }
 func (claim ControlPlaneReplayClaim) ExpiresAt() time.Time  { return claim.expiresAt }
 
-// ControlPlaneReplayPort atomically claims key/nonce pairs. Implementations may
-// treat the exact same receipt digest as an idempotent retry, but must reject a
-// nonce already bound to any different payload or receipt.
+// ControlPlaneReplayPort atomically claims key/nonce pairs. Implementations
+// must accept the exact same receipt digest as an idempotent retry and must
+// reject a nonce already bound to any different payload or receipt. The exact
+// retry guarantee is required for recovery after a nonce claim succeeds but a
+// journal CAS or process fails before the protected transition is recorded.
 type ControlPlaneReplayPort interface {
 	ClaimControlPlaneNonce(context.Context, ControlPlaneReplayClaim) error
 }

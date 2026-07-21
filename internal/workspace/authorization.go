@@ -137,11 +137,12 @@ func (scope StandingGrantScope) Digest() Digest {
 }
 
 type StandingGrant struct {
-	scope         StandingGrantScope
-	grantID       Digest
-	requestDigest Digest
-	receiptDigest Digest
-	parentGrantID Digest
+	scope                     StandingGrantScope
+	grantID                   Digest
+	requestDigest             Digest
+	receiptDigest             Digest
+	parentGrantID             Digest
+	providerObservationDigest Digest
 }
 
 func VerifyStandingGrant(
@@ -152,6 +153,9 @@ func VerifyStandingGrant(
 ) (StandingGrant, error) {
 	if verifier == nil || scope.Digest().IsZero() || receipt.ReceiptDigest().IsZero() {
 		return StandingGrant{}, fmt.Errorf("standing grant requires scope, receipt, and protected verifier")
+	}
+	if !scope.pullRequest.IsZero() {
+		return StandingGrant{}, fmt.Errorf("pull-request-bound grants must use the verified provider-derived recording workflow")
 	}
 	if receipt.ExpiresAt().Before(scope.expiresAt) {
 		return StandingGrant{}, fmt.Errorf("standing grant outlives its control-plane receipt")
@@ -193,51 +197,62 @@ func (grant StandingGrant) ReceiptDigest() Digest     { return grant.receiptDige
 func (grant StandingGrant) ParentGrantID() (Digest, bool) {
 	return grant.parentGrantID, !grant.parentGrantID.IsZero()
 }
+func (grant StandingGrant) ProviderObservationDigest() (Digest, bool) {
+	return grant.providerObservationDigest, !grant.providerObservationDigest.IsZero()
+}
 
-func DeriveStandingGrantPullRequest(
+func deriveStandingGrantPullRequest(
 	grant StandingGrant,
-	identity PullRequestIdentity,
-	observedHead GitObjectID,
+	observation ProviderPullRequestObservation,
 ) (StandingGrant, error) {
-	if grant.grantID.IsZero() || grant.scope.pullRequest.IsZero() == false || identity.IsZero() ||
-		identity.repository != grant.scope.repository || observedHead != grant.scope.frontier.head ||
+	identity := observation.identity
+	if grant.grantID.IsZero() || !grant.parentGrantID.IsZero() || !grant.scope.pullRequest.IsZero() ||
+		identity.IsZero() || observation.digest.IsZero() ||
+		identity.repository != grant.scope.repository || observation.head != grant.scope.frontier.head ||
 		!grant.scope.Allows(StandingAuthorizationOpenPullRequest) {
 		return StandingGrant{}, fmt.Errorf("derived pull request does not match the pre-PR grant and frontier")
 	}
 	derivedScope := cloneStandingGrantScope(grant.scope)
 	derivedScope.pullRequest = identity
-	grantID, err := derivedStandingGrantID(grant.grantID, grant.receiptDigest, identity, observedHead)
+	grantID, err := derivedStandingGrantID(
+		grant.grantID, grant.receiptDigest, observation.digest, identity, observation.head,
+	)
 	if err != nil {
 		return StandingGrant{}, err
 	}
 	return StandingGrant{
 		scope: derivedScope, grantID: grantID, requestDigest: grant.requestDigest,
 		receiptDigest: grant.receiptDigest, parentGrantID: grant.grantID,
+		providerObservationDigest: observation.digest,
 	}, nil
 }
 
 func derivedStandingGrantID(
 	parentGrantID Digest,
 	receiptDigest Digest,
+	providerObservationDigest Digest,
 	identity PullRequestIdentity,
 	observedHead GitObjectID,
 ) (Digest, error) {
-	if parentGrantID.IsZero() || receiptDigest.IsZero() || identity.IsZero() || observedHead.IsZero() {
-		return Digest{}, fmt.Errorf("derived standing grant requires parent, receipt, pull request, and head")
+	if parentGrantID.IsZero() || receiptDigest.IsZero() || providerObservationDigest.IsZero() ||
+		identity.IsZero() || observedHead.IsZero() {
+		return Digest{}, fmt.Errorf("derived standing grant requires parent, receipt, provider observation, pull request, and head")
 	}
 	type derivedJSON struct {
-		SchemaVersion int    `json:"schema_version"`
-		Kind          string `json:"kind"`
-		ParentGrant   string `json:"parent_grant"`
-		Receipt       string `json:"receipt"`
-		Provider      string `json:"provider"`
-		Repository    string `json:"repository"`
-		Number        uint64 `json:"number"`
-		Head          string `json:"head"`
+		SchemaVersion       int    `json:"schema_version"`
+		Kind                string `json:"kind"`
+		ParentGrant         string `json:"parent_grant"`
+		Receipt             string `json:"receipt"`
+		ProviderObservation string `json:"provider_observation"`
+		Provider            string `json:"provider"`
+		Repository          string `json:"repository"`
+		Number              uint64 `json:"number"`
+		Head                string `json:"head"`
 	}
 	canonical, err := json.Marshal(derivedJSON{
 		SchemaVersion: 2, Kind: "derived_pull_request", ParentGrant: parentGrantID.String(),
-		Receipt: receiptDigest.String(), Provider: identity.provider.String(),
+		Receipt: receiptDigest.String(), ProviderObservation: providerObservationDigest.String(),
+		Provider:   identity.provider.String(),
 		Repository: identity.repository.String(), Number: identity.number, Head: observedHead.String(),
 	})
 	if err != nil {
@@ -470,10 +485,38 @@ func NewAuthorizationRequest(options AuthorizationRequestOptions) (Authorization
 
 func (request AuthorizationRequest) Digest() Digest { return request.digest }
 
+// AuthorizationSnapshotBinding ties every checkpoint to one exact durable
+// journal snapshot. A revocation, safety transition, or competing dispatch
+// changes the head or authorization revision and invalidates the chain.
+type AuthorizationSnapshotBinding struct {
+	journalHead           Digest
+	authorizationRevision uint64
+}
+
+func NewAuthorizationSnapshotBinding(
+	journalHead Digest,
+	authorizationRevision uint64,
+) (AuthorizationSnapshotBinding, error) {
+	if journalHead.IsZero() {
+		return AuthorizationSnapshotBinding{}, fmt.Errorf("authorization snapshot binding requires a journal head")
+	}
+	return AuthorizationSnapshotBinding{
+		journalHead: journalHead, authorizationRevision: authorizationRevision,
+	}, nil
+}
+
+func (binding AuthorizationSnapshotBinding) JournalHead() Digest { return binding.journalHead }
+func (binding AuthorizationSnapshotBinding) AuthorizationRevision() uint64 {
+	return binding.authorizationRevision
+}
+
 type AuthorizationCapability struct {
 	grantID       Digest
 	requestDigest Digest
 	stateDigest   Digest
+	priorDigest   Digest
+	digest        Digest
+	snapshot      AuthorizationSnapshotBinding
 	checkpoint    AuthorizationCheckpoint
 	epoch         uint64
 	evaluatedAt   time.Time
@@ -483,6 +526,11 @@ type AuthorizationCapability struct {
 func (capability AuthorizationCapability) GrantID() Digest       { return capability.grantID }
 func (capability AuthorizationCapability) RequestDigest() Digest { return capability.requestDigest }
 func (capability AuthorizationCapability) StateDigest() Digest   { return capability.stateDigest }
+func (capability AuthorizationCapability) PriorDigest() Digest   { return capability.priorDigest }
+func (capability AuthorizationCapability) Digest() Digest        { return capability.digest }
+func (capability AuthorizationCapability) Snapshot() AuthorizationSnapshotBinding {
+	return capability.snapshot
+}
 func (capability AuthorizationCapability) Checkpoint() AuthorizationCheckpoint {
 	return capability.checkpoint
 }
@@ -495,6 +543,7 @@ type AuthorizationDispatchObligation struct {
 	requestDigest Digest
 	grantID       Digest
 	epoch         uint64
+	dispatchedAt  time.Time
 }
 
 func (obligation AuthorizationDispatchObligation) EffectID() ID { return obligation.effectID }
@@ -503,6 +552,9 @@ func (obligation AuthorizationDispatchObligation) RequestDigest() Digest {
 }
 func (obligation AuthorizationDispatchObligation) GrantID() Digest { return obligation.grantID }
 func (obligation AuthorizationDispatchObligation) Epoch() uint64   { return obligation.epoch }
+func (obligation AuthorizationDispatchObligation) DispatchedAt() time.Time {
+	return obligation.dispatchedAt
+}
 
 type AuthorizationState struct {
 	workspaceID       ID
@@ -563,6 +615,9 @@ func NewAuthorizationGrantRecorded(grant StandingGrant) (AuthorizationGrantRecor
 	if grant.grantID.IsZero() || grant.receiptDigest.IsZero() {
 		return AuthorizationGrantRecorded{}, fmt.Errorf("authorization grant event requires verified grant evidence")
 	}
+	if grant.parentGrantID.IsZero() != grant.providerObservationDigest.IsZero() {
+		return AuthorizationGrantRecorded{}, fmt.Errorf("derived authorization grant requires parent and provider observation together")
+	}
 	return AuthorizationGrantRecorded{grant: grant}, nil
 }
 func (AuthorizationGrantRecorded) isAuthorizationEvent() {}
@@ -603,16 +658,17 @@ type AuthorizationEffectDispatched struct {
 func NewAuthorizationEffectDispatched(
 	effectID ID,
 	capability AuthorizationCapability,
-	dispatchedAt time.Time,
 ) (AuthorizationEffectDispatched, error) {
 	if effectID.IsZero() || capability.grantID.IsZero() || capability.requestDigest.IsZero() ||
-		capability.stateDigest.IsZero() || capability.checkpoint != AuthorizationBeforeDispatch || capability.epoch == 0 ||
-		capability.evaluatedAt.IsZero() || dispatchedAt.IsZero() || dispatchedAt.Before(capability.evaluatedAt) ||
-		!dispatchedAt.Before(capability.expiresAt) {
+		capability.stateDigest.IsZero() || capability.digest.IsZero() ||
+		capability.snapshot.journalHead.IsZero() || capability.checkpoint != AuthorizationBeforeDispatch ||
+		capability.epoch == 0 || capability.evaluatedAt.IsZero() ||
+		!capability.evaluatedAt.Before(capability.expiresAt) ||
+		capabilityDigest(capability) != capability.digest {
 		return AuthorizationEffectDispatched{}, fmt.Errorf("dispatched effect requires a pre-dispatch capability")
 	}
 	return AuthorizationEffectDispatched{
-		effectID: effectID, capability: capability, dispatchedAt: dispatchedAt.UTC(),
+		effectID: effectID, capability: capability, dispatchedAt: capability.evaluatedAt.UTC(),
 	}, nil
 }
 func (AuthorizationEffectDispatched) isAuthorizationEvent() {}
@@ -640,17 +696,24 @@ func ReduceAuthorization(current AuthorizationState, event AuthorizationEvent) (
 		if !value.grant.parentGrantID.IsZero() {
 			var parent StandingGrant
 			for _, grant := range current.grants {
+				if grant.parentGrantID == value.grant.parentGrantID {
+					return AuthorizationState{}, fmt.Errorf("standing grant %s already has a provider-derived child", value.grant.parentGrantID)
+				}
 				if grant.grantID == value.grant.parentGrantID {
 					parent = grant
-					break
 				}
 			}
 			if parent.grantID.IsZero() {
 				return AuthorizationState{}, fmt.Errorf("derived standing grant has no durable parent %s", value.grant.parentGrantID)
 			}
-			derived, err := DeriveStandingGrantPullRequest(parent, scope.pullRequest, scope.frontier.head)
+			observation := ProviderPullRequestObservation{
+				identity: scope.pullRequest, head: scope.frontier.head,
+				digest: value.grant.providerObservationDigest,
+			}
+			derived, err := deriveStandingGrantPullRequest(parent, observation)
 			if err != nil || derived.grantID != value.grant.grantID ||
 				derived.requestDigest != value.grant.requestDigest || derived.receiptDigest != value.grant.receiptDigest ||
+				derived.providerObservationDigest != value.grant.providerObservationDigest ||
 				derived.scope.Digest() != value.grant.scope.Digest() {
 				return AuthorizationState{}, fmt.Errorf("derived standing grant does not match its durable parent")
 			}
@@ -704,6 +767,7 @@ func ReduceAuthorization(current AuthorizationState, event AuthorizationEvent) (
 		next.obligations = append(next.obligations, AuthorizationDispatchObligation{
 			effectID: value.effectID, requestDigest: value.capability.requestDigest,
 			grantID: value.capability.grantID, epoch: value.capability.epoch,
+			dispatchedAt: value.dispatchedAt,
 		})
 	default:
 		return AuthorizationState{}, fmt.Errorf("unsupported authorization event %T", event)
@@ -711,53 +775,71 @@ func ReduceAuthorization(current AuthorizationState, event AuthorizationEvent) (
 	return next, nil
 }
 
-func PlanAuthorization(
-	state AuthorizationState,
-	request AuthorizationRequest,
-	now time.Time,
-) (AuthorizationCapability, error) {
-	return evaluateAuthorization(state, request, AuthorizationAtPlanning, AuthorizationCapability{}, now)
+// AuthorizationEvaluator owns the trusted clock for all four checkpoints.
+// Callers cannot supply or backdate evaluation timestamps.
+type AuthorizationEvaluator struct {
+	clock ClockPort
 }
 
-func ReserveAuthorizationIntent(
+func NewAuthorizationEvaluator(clock ClockPort) (*AuthorizationEvaluator, error) {
+	if clock == nil {
+		return nil, fmt.Errorf("authorization evaluator requires a protected clock")
+	}
+	return &AuthorizationEvaluator{clock: clock}, nil
+}
+
+func (evaluator *AuthorizationEvaluator) PlanAuthorization(
 	state AuthorizationState,
 	request AuthorizationRequest,
+	snapshot AuthorizationSnapshotBinding,
+) (AuthorizationCapability, error) {
+	return evaluator.evaluate(state, request, snapshot, AuthorizationAtPlanning, AuthorizationCapability{})
+}
+
+func (evaluator *AuthorizationEvaluator) ReserveAuthorizationIntent(
+	state AuthorizationState,
+	request AuthorizationRequest,
+	snapshot AuthorizationSnapshotBinding,
 	planning AuthorizationCapability,
-	now time.Time,
 ) (AuthorizationCapability, error) {
-	return evaluateAuthorization(state, request, AuthorizationAtIntentReservation, planning, now)
+	return evaluator.evaluate(state, request, snapshot, AuthorizationAtIntentReservation, planning)
 }
 
-func EnterAuthorizationQueue(
+func (evaluator *AuthorizationEvaluator) EnterAuthorizationQueue(
 	state AuthorizationState,
 	request AuthorizationRequest,
+	snapshot AuthorizationSnapshotBinding,
 	reservation AuthorizationCapability,
-	now time.Time,
 ) (AuthorizationCapability, error) {
-	return evaluateAuthorization(state, request, AuthorizationAtQueueEntry, reservation, now)
+	return evaluator.evaluate(state, request, snapshot, AuthorizationAtQueueEntry, reservation)
 }
 
-func AuthorizeImmediatelyBeforeDispatch(
+func (evaluator *AuthorizationEvaluator) AuthorizeImmediatelyBeforeDispatch(
 	state AuthorizationState,
 	request AuthorizationRequest,
+	snapshot AuthorizationSnapshotBinding,
 	queueEntry AuthorizationCapability,
-	now time.Time,
 ) (AuthorizationCapability, error) {
-	return evaluateAuthorization(state, request, AuthorizationBeforeDispatch, queueEntry, now)
+	return evaluator.evaluate(state, request, snapshot, AuthorizationBeforeDispatch, queueEntry)
 }
 
-func evaluateAuthorization(
+func (evaluator *AuthorizationEvaluator) evaluate(
 	state AuthorizationState,
 	request AuthorizationRequest,
+	snapshot AuthorizationSnapshotBinding,
 	checkpoint AuthorizationCheckpoint,
 	prior AuthorizationCapability,
-	now time.Time,
 ) (AuthorizationCapability, error) {
-	if !checkpoint.valid() || now.IsZero() || request.digest.IsZero() {
-		return AuthorizationCapability{}, fmt.Errorf("authorization evaluation requires checkpoint, request, and time")
+	if evaluator == nil || evaluator.clock == nil {
+		return AuthorizationCapability{}, fmt.Errorf("authorization evaluator protected clock is unavailable")
+	}
+	now := evaluator.clock.Now().UTC()
+	if !checkpoint.valid() || now.IsZero() || request.digest.IsZero() || snapshot.journalHead.IsZero() {
+		return AuthorizationCapability{}, fmt.Errorf("authorization evaluation requires checkpoint, request, durable snapshot, and protected time")
 	}
 	if checkpoint == AuthorizationAtPlanning {
 		if !prior.grantID.IsZero() || !prior.requestDigest.IsZero() || !prior.stateDigest.IsZero() ||
+			!prior.priorDigest.IsZero() || !prior.digest.IsZero() || !prior.snapshot.journalHead.IsZero() ||
 			prior.checkpoint != "" || prior.epoch != 0 || !prior.evaluatedAt.IsZero() {
 			return AuthorizationCapability{}, fmt.Errorf("planning authorization cannot reuse a prior capability")
 		}
@@ -769,7 +851,8 @@ func evaluateAuthorization(
 		case AuthorizationBeforeDispatch:
 			expectedPrior = AuthorizationAtQueueEntry
 		}
-		if prior.checkpoint != expectedPrior || prior.requestDigest != request.digest ||
+		if prior.checkpoint != expectedPrior || prior.requestDigest != request.digest || prior.digest.IsZero() ||
+			capabilityDigest(prior) != prior.digest || prior.snapshot != snapshot ||
 			prior.grantID.IsZero() || prior.stateDigest.IsZero() || prior.evaluatedAt.IsZero() ||
 			now.Before(prior.evaluatedAt) || !now.Before(prior.expiresAt) {
 			return AuthorizationCapability{}, fmt.Errorf("authorization checkpoint %s requires a fresh matching %s capability", checkpoint, expectedPrior)
@@ -820,10 +903,50 @@ func evaluateAuthorization(
 		(prior.epoch != state.epoch || prior.stateDigest != stateDigest || prior.grantID != grant.grantID) {
 		return AuthorizationCapability{}, fmt.Errorf("authorization state or grant changed between %s and %s", prior.checkpoint, checkpoint)
 	}
-	return AuthorizationCapability{
+	capability := AuthorizationCapability{
 		grantID: grant.grantID, requestDigest: request.digest, stateDigest: stateDigest,
-		checkpoint: checkpoint, epoch: state.epoch, evaluatedAt: now.UTC(), expiresAt: grant.scope.expiresAt,
-	}, nil
+		priorDigest: prior.digest, snapshot: snapshot, checkpoint: checkpoint,
+		epoch: state.epoch, evaluatedAt: now, expiresAt: grant.scope.expiresAt,
+	}
+	capability.digest = capabilityDigest(capability)
+	if capability.digest.IsZero() {
+		return AuthorizationCapability{}, fmt.Errorf("authorization capability cannot be canonically bound")
+	}
+	return capability, nil
+}
+
+func capabilityDigest(capability AuthorizationCapability) Digest {
+	if capability.grantID.IsZero() || capability.requestDigest.IsZero() || capability.stateDigest.IsZero() ||
+		capability.snapshot.journalHead.IsZero() || !capability.checkpoint.valid() || capability.epoch == 0 ||
+		capability.evaluatedAt.IsZero() || capability.expiresAt.IsZero() {
+		return Digest{}
+	}
+	type capabilityJSON struct {
+		SchemaVersion         int                     `json:"schema_version"`
+		GrantID               string                  `json:"grant_id"`
+		RequestDigest         string                  `json:"request_digest"`
+		StateDigest           string                  `json:"state_digest"`
+		PriorDigest           string                  `json:"prior_digest,omitempty"`
+		JournalHead           string                  `json:"journal_head"`
+		AuthorizationRevision uint64                  `json:"authorization_revision"`
+		Checkpoint            AuthorizationCheckpoint `json:"checkpoint"`
+		Epoch                 uint64                  `json:"epoch"`
+		EvaluatedAt           string                  `json:"evaluated_at"`
+		ExpiresAt             string                  `json:"expires_at"`
+	}
+	canonical, err := json.Marshal(capabilityJSON{
+		SchemaVersion: 2, GrantID: capability.grantID.String(), RequestDigest: capability.requestDigest.String(),
+		StateDigest: capability.stateDigest.String(), PriorDigest: capability.priorDigest.String(),
+		JournalHead:           capability.snapshot.journalHead.String(),
+		AuthorizationRevision: capability.snapshot.authorizationRevision,
+		Checkpoint:            capability.checkpoint, Epoch: capability.epoch,
+		EvaluatedAt: capability.evaluatedAt.UTC().Format(time.RFC3339Nano),
+		ExpiresAt:   capability.expiresAt.UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		return Digest{}
+	}
+	return DigestBytes(canonical)
 }
 
 func standingGrantMatchesRequest(grant StandingGrant, request AuthorizationRequest, now time.Time) bool {
@@ -897,16 +1020,18 @@ func cloneAuthorizationState(state AuthorizationState) AuthorizationState {
 
 func authorizationStateDigest(state AuthorizationState) Digest {
 	type grantJSON struct {
-		GrantID       string `json:"grant_id"`
-		RequestDigest string `json:"request_digest"`
-		ReceiptDigest string `json:"receipt_digest"`
-		ParentGrantID string `json:"parent_grant_id,omitempty"`
+		GrantID                   string `json:"grant_id"`
+		RequestDigest             string `json:"request_digest"`
+		ReceiptDigest             string `json:"receipt_digest"`
+		ParentGrantID             string `json:"parent_grant_id,omitempty"`
+		ProviderObservationDigest string `json:"provider_observation_digest,omitempty"`
 	}
 	type obligationJSON struct {
 		EffectID      string `json:"effect_id"`
 		RequestDigest string `json:"request_digest"`
 		GrantID       string `json:"grant_id"`
 		Epoch         uint64 `json:"epoch"`
+		DispatchedAt  string `json:"dispatched_at"`
 	}
 	type stateJSON struct {
 		SchemaVersion         int              `json:"schema_version"`
@@ -937,6 +1062,7 @@ func authorizationStateDigest(state AuthorizationState) Digest {
 		wire.Grants = append(wire.Grants, grantJSON{
 			GrantID: grant.grantID.String(), RequestDigest: grant.requestDigest.String(),
 			ReceiptDigest: grant.receiptDigest.String(), ParentGrantID: grant.parentGrantID.String(),
+			ProviderObservationDigest: grant.providerObservationDigest.String(),
 		})
 	}
 	for _, grantID := range state.revokedGrantIDs {
@@ -949,6 +1075,7 @@ func authorizationStateDigest(state AuthorizationState) Digest {
 		wire.Obligations = append(wire.Obligations, obligationJSON{
 			EffectID: obligation.effectID.String(), RequestDigest: obligation.requestDigest.String(),
 			GrantID: obligation.grantID.String(), Epoch: obligation.epoch,
+			DispatchedAt: obligation.dispatchedAt.UTC().Format(time.RFC3339Nano),
 		})
 	}
 	canonical, err := json.Marshal(wire)

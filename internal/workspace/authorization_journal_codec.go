@@ -21,13 +21,14 @@ type standingGrantScopeWire struct {
 }
 
 type authorizationGrantPayloadWire struct {
-	WorkspaceID   string                 `json:"workspace_id"`
-	Generation    string                 `json:"generation"`
-	Scope         standingGrantScopeWire `json:"scope"`
-	GrantID       string                 `json:"grant_id"`
-	ParentGrantID string                 `json:"parent_grant_id,omitempty"`
-	RequestDigest string                 `json:"request_digest"`
-	ReceiptDigest string                 `json:"receipt_digest"`
+	WorkspaceID               string                 `json:"workspace_id"`
+	Generation                string                 `json:"generation"`
+	Scope                     standingGrantScopeWire `json:"scope"`
+	GrantID                   string                 `json:"grant_id"`
+	ParentGrantID             string                 `json:"parent_grant_id,omitempty"`
+	ProviderObservationDigest string                 `json:"provider_observation_digest,omitempty"`
+	RequestDigest             string                 `json:"request_digest"`
+	ReceiptDigest             string                 `json:"receipt_digest"`
 }
 
 type authorizationRevocationPayloadWire struct {
@@ -49,6 +50,38 @@ type authorizationSegmentPayloadWire struct {
 	Epoch       uint64 `json:"epoch"`
 }
 
+type authorizationSafetyPayloadWire struct {
+	WorkspaceID           string `json:"workspace_id"`
+	Generation            string `json:"generation"`
+	Epoch                 uint64 `json:"epoch"`
+	GatesBlocked          bool   `json:"gates_blocked"`
+	ReconciliationPending bool   `json:"reconciliation_pending"`
+	DriftDetected         bool   `json:"drift_detected"`
+	AmbiguousEffect       bool   `json:"ambiguous_effect"`
+}
+
+type authorizationCapabilityWire struct {
+	GrantID               string                  `json:"grant_id"`
+	RequestDigest         string                  `json:"request_digest"`
+	StateDigest           string                  `json:"state_digest"`
+	PriorDigest           string                  `json:"prior_digest"`
+	Digest                string                  `json:"digest"`
+	JournalHead           string                  `json:"journal_head"`
+	AuthorizationRevision uint64                  `json:"authorization_revision"`
+	Checkpoint            AuthorizationCheckpoint `json:"checkpoint"`
+	Epoch                 uint64                  `json:"epoch"`
+	EvaluatedAt           string                  `json:"evaluated_at"`
+	ExpiresAt             string                  `json:"expires_at"`
+}
+
+type authorizationDispatchPayloadWire struct {
+	WorkspaceID  string                      `json:"workspace_id"`
+	Generation   string                      `json:"generation"`
+	EffectID     string                      `json:"effect_id"`
+	Capability   authorizationCapabilityWire `json:"capability"`
+	DispatchedAt string                      `json:"dispatched_at"`
+}
+
 func marshalAuthorizationJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, bool, error) {
 	var value any
 	switch event := event.(type) {
@@ -56,8 +89,9 @@ func marshalAuthorizationJournalEvent(event WorkspaceJournalEvent) (json.RawMess
 		value = authorizationGrantPayloadWire{
 			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
 			Scope: standingGrantScopeToWire(event.grant.scope), GrantID: event.grant.grantID.String(),
-			ParentGrantID: event.grant.parentGrantID.String(),
-			RequestDigest: event.grant.requestDigest.String(), ReceiptDigest: event.grant.receiptDigest.String(),
+			ParentGrantID:             event.grant.parentGrantID.String(),
+			ProviderObservationDigest: event.grant.providerObservationDigest.String(),
+			RequestDigest:             event.grant.requestDigest.String(), ReceiptDigest: event.grant.receiptDigest.String(),
 		}
 	case AuthorizationRevokedJournalEvent:
 		value = authorizationRevocationPayloadWire{
@@ -71,6 +105,18 @@ func marshalAuthorizationJournalEvent(event WorkspaceJournalEvent) (json.RawMess
 		value = authorizationSegmentPayloadWire{
 			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
 			Segment: event.segment.String(), Epoch: event.epoch,
+		}
+	case AuthorizationSafetyChangedJournalEvent:
+		value = authorizationSafetyPayloadWire{
+			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(), Epoch: event.epoch,
+			GatesBlocked: event.safety.gatesBlocked, ReconciliationPending: event.safety.reconciliationPending,
+			DriftDetected: event.safety.driftDetected, AmbiguousEffect: event.safety.ambiguousEffect,
+		}
+	case AuthorizationEffectDispatchedJournalEvent:
+		value = authorizationDispatchPayloadWire{
+			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
+			EffectID: event.effect.effectID.String(), Capability: authorizationCapabilityToWire(event.effect.capability),
+			DispatchedAt: event.effect.dispatchedAt.UTC().Format(time.RFC3339Nano),
 		}
 	default:
 		return nil, false, nil
@@ -108,6 +154,13 @@ func decodeAuthorizationJournalEvent(
 				return nil, true, err
 			}
 		}
+		var providerObservationDigest Digest
+		if wire.ProviderObservationDigest != "" {
+			providerObservationDigest, err = ParseDigest(wire.ProviderObservationDigest)
+			if err != nil {
+				return nil, true, err
+			}
+		}
 		requestDigest, err := ParseDigest(wire.RequestDigest)
 		if err != nil {
 			return nil, true, err
@@ -118,7 +171,8 @@ func decodeAuthorizationJournalEvent(
 		}
 		grant := StandingGrant{
 			scope: scope, grantID: grantID, parentGrantID: parentGrantID,
-			requestDigest: requestDigest, receiptDigest: receiptDigest,
+			providerObservationDigest: providerObservationDigest,
+			requestDigest:             requestDigest, receiptDigest: receiptDigest,
 		}
 		event, err := NewAuthorizationGrantRecordedJournalEvent(workspaceID, generation, grant)
 		return event, true, err
@@ -178,6 +232,47 @@ func decodeAuthorizationJournalEvent(
 			return nil, true, err
 		}
 		event, err := NewAuthorizationSegmentCompletedJournalEvent(workspaceID, generation, segment, wire.Epoch)
+		return event, true, err
+	case JournalEventAuthorizationSafetyChanged:
+		var wire authorizationSafetyPayloadWire
+		if err := decodeStrictJSON(payload, &wire); err != nil {
+			return nil, true, fmt.Errorf("decode authorization safety change: %w", err)
+		}
+		workspaceID, generation, err := parseAuthorizationEnvelope(wire.WorkspaceID, wire.Generation)
+		if err != nil {
+			return nil, true, err
+		}
+		safety := NewAuthorizationSafetyState(
+			wire.GatesBlocked, wire.ReconciliationPending, wire.DriftDetected, wire.AmbiguousEffect,
+		)
+		event, err := NewAuthorizationSafetyChangedJournalEvent(workspaceID, generation, wire.Epoch, safety)
+		return event, true, err
+	case JournalEventAuthorizationEffectDispatched:
+		var wire authorizationDispatchPayloadWire
+		if err := decodeStrictJSON(payload, &wire); err != nil {
+			return nil, true, fmt.Errorf("decode authorization dispatch: %w", err)
+		}
+		workspaceID, generation, err := parseAuthorizationEnvelope(wire.WorkspaceID, wire.Generation)
+		if err != nil {
+			return nil, true, err
+		}
+		effectID, err := NewID(wire.EffectID)
+		if err != nil {
+			return nil, true, err
+		}
+		capability, err := authorizationCapabilityFromWire(wire.Capability)
+		if err != nil {
+			return nil, true, err
+		}
+		dispatchedAt, err := parseCanonicalAuthorizationTime("authorization dispatch", wire.DispatchedAt)
+		if err != nil || dispatchedAt != capability.evaluatedAt {
+			return nil, true, fmt.Errorf("authorization dispatch time does not match its capability")
+		}
+		effect, err := NewAuthorizationEffectDispatched(effectID, capability)
+		if err != nil {
+			return nil, true, err
+		}
+		event, err := NewAuthorizationEffectDispatchedJournalEvent(workspaceID, generation, effect)
 		return event, true, err
 	default:
 		return nil, false, nil
@@ -240,7 +335,7 @@ func standingGrantScopeFromWire(wire standingGrantScopeWire) (StandingGrantScope
 		if err != nil {
 			return StandingGrantScope{}, err
 		}
-		pullRequest, err = NewPullRequestIdentity(provider, prRepository, wire.PullRequest.Number)
+		pullRequest, err = newPullRequestIdentity(provider, prRepository, wire.PullRequest.Number)
 		if err != nil {
 			return StandingGrantScope{}, err
 		}
@@ -250,6 +345,74 @@ func standingGrantScopeFromWire(wire standingGrantScopeWire) (StandingGrantScope
 		SerialSegment: segment, Frontier: frontier, Actions: wire.Actions,
 		ExpiresAt: expiresAt, Epoch: wire.Epoch, PullRequest: pullRequest,
 	})
+}
+
+func authorizationCapabilityToWire(capability AuthorizationCapability) authorizationCapabilityWire {
+	return authorizationCapabilityWire{
+		GrantID: capability.grantID.String(), RequestDigest: capability.requestDigest.String(),
+		StateDigest: capability.stateDigest.String(), PriorDigest: capability.priorDigest.String(),
+		Digest: capability.digest.String(), JournalHead: capability.snapshot.journalHead.String(),
+		AuthorizationRevision: capability.snapshot.authorizationRevision,
+		Checkpoint:            capability.checkpoint, Epoch: capability.epoch,
+		EvaluatedAt: capability.evaluatedAt.UTC().Format(time.RFC3339Nano),
+		ExpiresAt:   capability.expiresAt.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func authorizationCapabilityFromWire(wire authorizationCapabilityWire) (AuthorizationCapability, error) {
+	grantID, err := ParseDigest(wire.GrantID)
+	if err != nil {
+		return AuthorizationCapability{}, err
+	}
+	requestDigest, err := ParseDigest(wire.RequestDigest)
+	if err != nil {
+		return AuthorizationCapability{}, err
+	}
+	stateDigest, err := ParseDigest(wire.StateDigest)
+	if err != nil {
+		return AuthorizationCapability{}, err
+	}
+	priorDigest, err := ParseDigest(wire.PriorDigest)
+	if err != nil {
+		return AuthorizationCapability{}, err
+	}
+	digest, err := ParseDigest(wire.Digest)
+	if err != nil {
+		return AuthorizationCapability{}, err
+	}
+	journalHead, err := ParseDigest(wire.JournalHead)
+	if err != nil {
+		return AuthorizationCapability{}, err
+	}
+	evaluatedAt, err := parseCanonicalAuthorizationTime("authorization capability evaluation", wire.EvaluatedAt)
+	if err != nil {
+		return AuthorizationCapability{}, err
+	}
+	expiresAt, err := parseCanonicalAuthorizationTime("authorization capability expiry", wire.ExpiresAt)
+	if err != nil {
+		return AuthorizationCapability{}, err
+	}
+	capability := AuthorizationCapability{
+		grantID: grantID, requestDigest: requestDigest, stateDigest: stateDigest,
+		priorDigest: priorDigest, digest: digest,
+		snapshot: AuthorizationSnapshotBinding{
+			journalHead: journalHead, authorizationRevision: wire.AuthorizationRevision,
+		},
+		checkpoint: wire.Checkpoint, epoch: wire.Epoch,
+		evaluatedAt: evaluatedAt, expiresAt: expiresAt,
+	}
+	if capabilityDigest(capability) != capability.digest {
+		return AuthorizationCapability{}, fmt.Errorf("authorization capability digest mismatch")
+	}
+	return capability, nil
+}
+
+func parseCanonicalAuthorizationTime(label, value string) (time.Time, error) {
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil || value != parsed.UTC().Format(time.RFC3339Nano) {
+		return time.Time{}, fmt.Errorf("%s must be canonical UTC RFC3339Nano", label)
+	}
+	return parsed.UTC(), nil
 }
 
 func parseAuthorizationEnvelope(workspaceText, generationText string) (ID, Digest, error) {
