@@ -60,6 +60,7 @@ func ValidateDefinition(sources DefinitionSources) (EffectiveWorkspaceDefinition
 	if err != nil {
 		return EffectiveWorkspaceDefinition{}, fmt.Errorf("workspace source path: %w", err)
 	}
+	artifactPaths := map[string]string{workspacePath: "workspace"}
 	workspaceSource := append([]byte(nil), sources.Workspace.Bytes...)
 	workspace, err := DecodeWorkspaceManifest(workspaceSource)
 	if err != nil {
@@ -79,9 +80,10 @@ func ValidateDefinition(sources DefinitionSources) (EffectiveWorkspaceDefinition
 		if err != nil {
 			return EffectiveWorkspaceDefinition{}, fmt.Errorf("plan source %d: %w", index, err)
 		}
-		if _, exists := planSources[sourcePath]; exists {
-			return EffectiveWorkspaceDefinition{}, fmt.Errorf("duplicate plan input source %s", sourcePath)
+		if prior, exists := artifactPaths[sourcePath]; exists {
+			return EffectiveWorkspaceDefinition{}, fmt.Errorf("artifact source path %s is claimed by both %s and plan input %d", sourcePath, prior, index)
 		}
+		artifactPaths[sourcePath] = fmt.Sprintf("plan input %d", index)
 		planSources[sourcePath] = append([]byte(nil), source.Bytes...)
 	}
 	if len(planSources) != len(workspace.plans) {
@@ -107,13 +109,16 @@ func ValidateDefinition(sources DefinitionSources) (EffectiveWorkspaceDefinition
 		plans = append(plans, plan)
 		artifacts = append(artifacts, newArtifact(ArtifactPlan, plan.id, reference.source, source, canonical))
 	}
-	if err := validateWorkspaceDependencyTargets(workspace, plans); err != nil {
+	if err := validateWorkspaceMergeUnitGraph(workspace, plans); err != nil {
 		return EffectiveWorkspaceDefinition{}, err
 	}
 
 	executionPath, err := normalizeSourcePath(sources.ExecutionConfig.Path)
 	if err != nil {
 		return EffectiveWorkspaceDefinition{}, fmt.Errorf("execution config source path: %w", err)
+	}
+	if prior, exists := artifactPaths[executionPath]; exists {
+		return EffectiveWorkspaceDefinition{}, fmt.Errorf("artifact source path %s is claimed by both %s and execution config", executionPath, prior)
 	}
 	if executionPath != workspace.executionConfig {
 		return EffectiveWorkspaceDefinition{}, fmt.Errorf("execution config input %s does not match workspace discovery path %s", executionPath, workspace.executionConfig)
@@ -238,11 +243,30 @@ func validateExecutionCoverage(plans []Plan, execution ExecutionConfig) error {
 	return nil
 }
 
-func validateWorkspaceDependencyTargets(workspace WorkspaceManifest, plans []Plan) error {
+func validateWorkspaceMergeUnitGraph(workspace WorkspaceManifest, plans []Plan) error {
 	known := make(map[string]struct{})
+	storyUnits := make(map[string]string)
+	ids := make([]string, 0)
+	edges := make(map[string][]string)
 	for _, plan := range plans {
 		for _, unit := range plan.mergeUnits {
-			known[MergeUnitReference{planID: plan.id, mergeUnitID: unit.id}.key()] = struct{}{}
+			unitKey := MergeUnitReference{planID: plan.id, mergeUnitID: unit.id}.key()
+			known[unitKey] = struct{}{}
+			ids = append(ids, unitKey)
+			for _, storyID := range unit.storyIDs {
+				storyUnits[plan.id.String()+"\x00"+storyID.String()] = unitKey
+			}
+		}
+	}
+	for _, plan := range plans {
+		for _, story := range plan.stories {
+			unitKey := storyUnits[plan.id.String()+"\x00"+story.id.String()]
+			for _, dependency := range story.dependencies {
+				dependencyUnit := storyUnits[plan.id.String()+"\x00"+dependency.String()]
+				if dependencyUnit != unitKey {
+					edges[unitKey] = append(edges[unitKey], dependencyUnit)
+				}
+			}
 		}
 	}
 	for _, dependency := range workspace.dependencies {
@@ -251,8 +275,13 @@ func validateWorkspaceDependencyTargets(workspace WorkspaceManifest, plans []Pla
 				return fmt.Errorf("workspace dependency references unknown merge unit %s/%s", reference.planID, reference.mergeUnitID)
 			}
 		}
+		edges[dependency.after.key()] = append(edges[dependency.after.key()], dependency.before.key())
 	}
-	return nil
+	sort.Strings(ids)
+	for id := range edges {
+		sort.Strings(edges[id])
+	}
+	return validateDAG("workspace merge-unit", ids, edges)
 }
 
 type canonicalWorkspace struct {

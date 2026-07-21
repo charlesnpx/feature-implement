@@ -485,6 +485,7 @@ func validateWorkspaceDependencyDAG(dependencies []WorkspaceDependency) error {
 	for id := range idSet {
 		ids = append(ids, id)
 	}
+	sort.Strings(ids)
 	return validateDAG("workspace merge-unit", ids, edges)
 }
 

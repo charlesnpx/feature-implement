@@ -24,11 +24,36 @@ func NewRootedPath(root, relative string) (RootedPath, error) {
 	if err != nil {
 		return RootedPath{}, err
 	}
+	if !filepath.IsLocal(filepath.FromSlash(relative)) || !isPortableRelativePath(relative) {
+		return RootedPath{}, fmt.Errorf("rooted path %q is not a portable relative path", relative)
+	}
 	return RootedPath{root: root, relative: relative}, nil
 }
 
 func (path RootedPath) Root() string     { return path.root }
 func (path RootedPath) Relative() string { return path.relative }
+
+func isPortableRelativePath(relative string) bool {
+	if strings.Contains(relative, ":") {
+		return false
+	}
+	for _, component := range strings.Split(relative, "/") {
+		trimmed := strings.TrimRight(component, ". ")
+		if trimmed == "" || trimmed != component {
+			return false
+		}
+		stem, _, _ := strings.Cut(trimmed, ".")
+		upper := strings.ToUpper(stem)
+		switch upper {
+		case "CON", "PRN", "AUX", "NUL", "CLOCK$", "CONIN$", "CONOUT$":
+			return false
+		}
+		if len(upper) == 4 && (strings.HasPrefix(upper, "COM") || strings.HasPrefix(upper, "LPT")) && upper[3] >= '1' && upper[3] <= '9' {
+			return false
+		}
+	}
+	return true
+}
 
 type FileInfo struct {
 	size       int64

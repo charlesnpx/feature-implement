@@ -338,6 +338,118 @@ merge_units:
 	}
 }
 
+func TestEffectiveDefinitionRejectsCombinedCrossPlanCycle(t *testing.T) {
+	fixture := newDefinitionFixture(t)
+	sources := cloneDefinitionSources(fixture.sources)
+	sources.Workspace.Bytes = []byte(strings.Replace(string(sources.Workspace.Bytes),
+		"  - id: alpha-plan\n    source: plans/alpha.yaml\ndependencies: []",
+		"  - id: alpha-plan\n    source: plans/alpha.yaml\n  - id: beta-plan\n    source: plans/beta.yaml\ndependencies:\n  - before:\n      plan_id: alpha-plan\n      merge_unit_id: unit-two\n    after:\n      plan_id: beta-plan\n      merge_unit_id: unit-one\n  - before:\n      plan_id: beta-plan\n      merge_unit_id: unit-two\n    after:\n      plan_id: alpha-plan\n      merge_unit_id: unit-one",
+		1,
+	))
+	sources.Plans = append(sources.Plans, workspace.SourceArtifact{Path: "plans/beta.yaml", Bytes: []byte(strings.Replace(string(sources.Plans[0].Bytes), "id: alpha-plan", "id: beta-plan", 1))})
+	sources.ExecutionConfig.Bytes = append(sources.ExecutionConfig.Bytes, []byte(`  - plan_id: beta-plan
+    merge_unit_id: unit-one
+    profile: standard
+    policy:
+      require_passing_checks: true
+      require_signed_receipts: true
+      allow_write_network: false
+      max_attempts: 2
+      max_review_rounds: 2
+      max_review_fixes: 2
+  - plan_id: beta-plan
+    merge_unit_id: unit-two
+    profile: standard
+    policy:
+      require_passing_checks: true
+      require_signed_receipts: true
+      allow_write_network: false
+      max_attempts: 2
+      max_review_rounds: 2
+      max_review_fixes: 2
+`)...)
+	if _, err := workspace.ValidateDefinition(sources); err == nil || !strings.Contains(err.Error(), "workspace merge-unit dependency cycle") {
+		t.Fatalf("combined cross-plan cycle error = %v", err)
+	}
+}
+
+func TestEffectiveDefinitionRejectsCycleIntroducedByMergeUnitGrouping(t *testing.T) {
+	fixture := newDefinitionFixture(t)
+	sources := cloneDefinitionSources(fixture.sources)
+	sources.Plans[0].Bytes = []byte(`schema_version: 2
+id: alpha-plan
+title: Grouped Plan
+stories:
+  - id: story-a-one
+    summary: First story in unit A.
+    acceptance: [Unit A is explicit.]
+    implementation: [Implement unit A.]
+    testing: [Test unit A.]
+    dependencies: [story-b-one]
+  - id: story-a-two
+    summary: Second story in unit A.
+    acceptance: [Unit A remains explicit.]
+    implementation: [Implement the second part of unit A.]
+    testing: [Test the second part of unit A.]
+    dependencies: []
+  - id: story-b-one
+    summary: First story in unit B.
+    acceptance: [Unit B is explicit.]
+    implementation: [Implement unit B.]
+    testing: [Test unit B.]
+    dependencies: []
+  - id: story-b-two
+    summary: Second story in unit B.
+    acceptance: [Unit B remains explicit.]
+    implementation: [Implement the second part of unit B.]
+    testing: [Test the second part of unit B.]
+    dependencies: [story-a-two]
+merge_units:
+  - id: unit-one
+    name: Unit A
+    story_ids: [story-a-one, story-a-two]
+  - id: unit-two
+    name: Unit B
+    story_ids: [story-b-one, story-b-two]
+`)
+	if _, err := workspace.ValidateDefinition(sources); err == nil || !strings.Contains(err.Error(), "workspace merge-unit dependency cycle") {
+		t.Fatalf("grouped merge-unit cycle error = %v", err)
+	}
+}
+
+func TestEffectiveDefinitionRejectsCrossRoleArtifactPathCollisions(t *testing.T) {
+	fixture := newDefinitionFixture(t)
+	tests := []struct {
+		name   string
+		mutate func(*workspace.DefinitionSources)
+		roles  string
+	}{
+		{
+			name: "workspace and plan",
+			mutate: func(sources *workspace.DefinitionSources) {
+				sources.Plans[0].Path = sources.Workspace.Path
+			},
+			roles: "workspace and plan input 0",
+		},
+		{
+			name: "plan and execution config",
+			mutate: func(sources *workspace.DefinitionSources) {
+				sources.ExecutionConfig.Path = sources.Plans[0].Path
+			},
+			roles: "plan input 0 and execution config",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sources := cloneDefinitionSources(fixture.sources)
+			test.mutate(&sources)
+			if _, err := workspace.ValidateDefinition(sources); err == nil || !strings.Contains(err.Error(), test.roles) {
+				t.Fatalf("artifact collision error = %v", err)
+			}
+		})
+	}
+}
+
 func TestValidationIsIndependentOfDirtyCheckout(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	first, err := workspace.ValidateDefinition(fixture.sources)

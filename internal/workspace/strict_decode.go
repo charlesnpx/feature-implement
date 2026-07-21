@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"reflect"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -46,6 +48,13 @@ func decodeStrictV2(kind string, source []byte, target any) error {
 	if err != nil {
 		return fmt.Errorf("invalid %s YAML: %w", kind, err)
 	}
+	targetType := reflect.TypeOf(target)
+	if targetType == nil || targetType.Kind() != reflect.Pointer || targetType.Elem().Kind() != reflect.Struct {
+		return fmt.Errorf("decode %s target must be a struct pointer", kind)
+	}
+	if err := validateYAMLTypes(root, targetType.Elem(), "root"); err != nil {
+		return fmt.Errorf("invalid %s YAML: %w", kind, err)
+	}
 	version, present := mappingScalar(root, "schema_version")
 	if !present {
 		return fmt.Errorf("%s schema_version is required", kind)
@@ -61,6 +70,62 @@ func decodeStrictV2(kind string, source []byte, target any) error {
 	}
 	if err := strict.Decode(&trailing); err != io.EOF {
 		return fmt.Errorf("%s must contain exactly one YAML document", kind)
+	}
+	return nil
+}
+
+func validateYAMLTypes(node *yaml.Node, target reflect.Type, location string) error {
+	for target.Kind() == reflect.Pointer {
+		target = target.Elem()
+	}
+
+	switch target.Kind() {
+	case reflect.Struct:
+		if node.Kind != yaml.MappingNode {
+			return fmt.Errorf("%s must be a mapping", location)
+		}
+		fields := make(map[string]reflect.Type, target.NumField())
+		for index := 0; index < target.NumField(); index++ {
+			field := target.Field(index)
+			name, _, _ := strings.Cut(field.Tag.Get("yaml"), ",")
+			if name != "" && name != "-" {
+				fields[name] = field.Type
+			}
+		}
+		for index := 0; index < len(node.Content); index += 2 {
+			name := node.Content[index].Value
+			fieldType, exists := fields[name]
+			if !exists {
+				continue // KnownFields reports the unsupported field after type validation.
+			}
+			if err := validateYAMLTypes(node.Content[index+1], fieldType, location+"."+name); err != nil {
+				return err
+			}
+		}
+	case reflect.Slice:
+		if node.Kind != yaml.SequenceNode {
+			return fmt.Errorf("%s must be a sequence", location)
+		}
+		for index, item := range node.Content {
+			if err := validateYAMLTypes(item, target.Elem(), fmt.Sprintf("%s[%d]", location, index)); err != nil {
+				return err
+			}
+		}
+	case reflect.String:
+		if node.Kind != yaml.ScalarNode || node.Tag != "!!str" {
+			return fmt.Errorf("%s must be a string", location)
+		}
+	case reflect.Bool:
+		if node.Kind != yaml.ScalarNode || node.Tag != "!!bool" {
+			return fmt.Errorf("%s must be a boolean", location)
+		}
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		if node.Kind != yaml.ScalarNode || node.Tag != "!!int" {
+			return fmt.Errorf("%s must be an integer", location)
+		}
+	default:
+		return fmt.Errorf("%s uses unsupported destination type %s", location, target)
 	}
 	return nil
 }

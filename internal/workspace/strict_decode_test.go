@@ -57,6 +57,16 @@ func TestStrictWorkspaceDecoderRejectsNonV2AndAmbiguousYAML(t *testing.T) {
 			wantErr: `scalar tag "!!null" is not supported`,
 		},
 		{
+			name:    "boolean in string field",
+			source:  strings.Replace(valid, "id: example-workspace", "id: true", 1),
+			wantErr: "root.id must be a string",
+		},
+		{
+			name:    "integer in string field",
+			source:  strings.Replace(valid, "remote: origin", "remote: 7", 1),
+			wantErr: "root.remote must be a string",
+		},
+		{
 			name:    "noncanonical integer",
 			source:  strings.Replace(valid, "schema_version: 2", "schema_version: 02", 1),
 			wantErr: "must use unsigned decimal form",
@@ -131,6 +141,16 @@ func TestExecutionPolicyRejectsImplicitOrWeakeningPrecedence(t *testing.T) {
 			name:    "implicit field",
 			source:  strings.Replace(valid, "  require_signed_receipts: true\n", "", 1),
 			wantErr: "must explicitly define every policy field",
+		},
+		{
+			name:    "legacy boolean spelling",
+			source:  strings.Replace(valid, "  allow_write_network: false", "  allow_write_network: yes", 1),
+			wantErr: "root.policy.allow_write_network must be a boolean",
+		},
+		{
+			name:    "quoted boolean",
+			source:  strings.Replace(valid, "  allow_write_network: false", `  allow_write_network: "false"`, 1),
+			wantErr: "root.policy.allow_write_network must be a boolean",
 		},
 		{
 			name:    "profile weakens maximum",
@@ -212,8 +232,8 @@ authority_sources: []
 		t.Fatalf("cross-plan dependencies = %#v", dependencies)
 	}
 	cycle := strings.Replace(valid, "authority_sources: []", "  - before:\n      plan_id: second-plan\n      merge_unit_id: second-unit\n    after:\n      plan_id: first-plan\n      merge_unit_id: first-unit\nauthority_sources: []", 1)
-	if _, err := workspace.DecodeWorkspaceManifest([]byte(cycle)); err == nil || !strings.Contains(err.Error(), "workspace merge-unit dependency cycle") {
-		t.Fatalf("cycle error = %v", err)
+	if _, err := workspace.DecodeWorkspaceManifest([]byte(cycle)); err == nil || err.Error() != "workspace merge-unit dependency cycle includes first-plan\x00first-unit" {
+		t.Fatalf("deterministic cycle error = %v", err)
 	}
 }
 

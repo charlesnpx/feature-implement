@@ -277,27 +277,45 @@ type Evidence struct {
 }
 
 func NewEvidence(kind ID, digest Digest, items []EvidenceItem) (Evidence, error) {
-	if kind.IsZero() || digest.IsZero() {
-		return Evidence{}, fmt.Errorf("evidence kind and digest are required")
+	evidence := Evidence{kind: kind, digest: digest, items: append([]EvidenceItem(nil), items...)}
+	if err := evidence.validate(); err != nil {
+		return Evidence{}, err
 	}
-	copyItems := append([]EvidenceItem(nil), items...)
-	seen := make(map[string]struct{}, len(copyItems))
-	for _, item := range copyItems {
-		if item.name.IsZero() {
-			return Evidence{}, fmt.Errorf("evidence item name is required")
-		}
-		if _, exists := seen[item.name.String()]; exists {
-			return Evidence{}, fmt.Errorf("duplicate evidence item %s", item.name)
-		}
-		seen[item.name.String()] = struct{}{}
-	}
-	return Evidence{kind: kind, digest: digest, items: copyItems}, nil
+	return evidence, nil
 }
 
 func (evidence Evidence) Kind() ID       { return evidence.kind }
 func (evidence Evidence) Digest() Digest { return evidence.digest }
 func (evidence Evidence) Items() []EvidenceItem {
 	return append([]EvidenceItem(nil), evidence.items...)
+}
+
+func (evidence Evidence) validate() error {
+	if evidence.kind.IsZero() || evidence.digest.IsZero() {
+		return fmt.Errorf("evidence kind and digest are required")
+	}
+	seen := make(map[string]struct{}, len(evidence.items))
+	for _, item := range evidence.items {
+		if item.name.IsZero() {
+			return fmt.Errorf("evidence item name is required")
+		}
+		if err := validateBoundedText("evidence value", item.value, 16*1024); err != nil {
+			return err
+		}
+		if _, exists := seen[item.name.String()]; exists {
+			return fmt.Errorf("duplicate evidence item %s", item.name)
+		}
+		seen[item.name.String()] = struct{}{}
+	}
+	return nil
+}
+
+func cloneEvidence(values []Evidence) []Evidence {
+	result := append([]Evidence(nil), values...)
+	for index := range result {
+		result[index].items = append([]EvidenceItem(nil), result[index].items...)
+	}
+	return result
 }
 
 // Receipt is immutable signed evidence. Signature bytes are always copied.

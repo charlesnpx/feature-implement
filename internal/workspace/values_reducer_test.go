@@ -151,7 +151,11 @@ func TestPureReducerIsDeterministicAndReturnsClosedEffects(t *testing.T) {
 			t.Fatal(err)
 		}
 		state = reduction.State()
-		reduction, err = workspace.Reduce(state, workspace.NewCompleteDefinition([]workspace.Evidence{evidence}))
+		complete, err := workspace.NewCompleteDefinition([]workspace.Evidence{evidence})
+		if err != nil {
+			t.Fatal(err)
+		}
+		reduction, err = workspace.Reduce(state, complete)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -196,8 +200,22 @@ func TestReducerRejectsInvalidTransitionsAndStaleGeneration(t *testing.T) {
 	if _, err := workspace.Reduce(paused.State(), staleResume); err == nil || !strings.Contains(err.Error(), "active generation") {
 		t.Fatalf("stale resume error = %v", err)
 	}
-	if _, err := workspace.Reduce(paused.State(), workspace.NewCompleteDefinition(nil)); err == nil {
+	complete, err := workspace.NewCompleteDefinition(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.Reduce(paused.State(), complete); err == nil {
 		t.Fatal("completion from paused state succeeded")
+	}
+}
+
+func TestReducerEventsRejectMalformedEvidence(t *testing.T) {
+	malformed := []workspace.Evidence{{}}
+	if _, err := workspace.NewPauseDefinition(workspace.MustID("gate"), malformed); err == nil || !strings.Contains(err.Error(), "kind and digest") {
+		t.Fatalf("malformed pause evidence error = %v", err)
+	}
+	if _, err := workspace.NewCompleteDefinition(malformed); err == nil || !strings.Contains(err.Error(), "kind and digest") {
+		t.Fatalf("malformed completion evidence error = %v", err)
 	}
 }
 
@@ -207,6 +225,11 @@ func TestTypedPortsRejectUnrootedPathsAndShellLikeInvalidValues(t *testing.T) {
 	}
 	if _, err := workspace.NewRootedPath("/repo", "../escape"); err == nil {
 		t.Fatal("escaping relative path accepted")
+	}
+	for _, relative := range []string{"C:/escape", "C:escape", "logs/output:stream", "CON", "aux.txt", "LPT1/output.txt", "dir./file.txt"} {
+		if _, err := workspace.NewRootedPath("/repo", relative); err == nil {
+			t.Fatalf("non-portable relative path %q accepted", relative)
+		}
 	}
 	rooted, err := workspace.NewRootedPath("/repo/./root", "config/../config/policy.yaml")
 	if err != nil {

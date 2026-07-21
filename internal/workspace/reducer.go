@@ -23,7 +23,7 @@ func InitialReducerState() ReducerState { return ReducerState{phase: CoreEmpty} 
 func (state ReducerState) Phase() CorePhase     { return state.phase }
 func (state ReducerState) Revision() uint64     { return state.revision }
 func (state ReducerState) Generation() Digest   { return state.generation }
-func (state ReducerState) Evidence() []Evidence { return append([]Evidence(nil), state.evidence...) }
+func (state ReducerState) Evidence() []Evidence { return cloneEvidence(state.evidence) }
 
 type CoreEvent interface {
 	isCoreEvent()
@@ -49,11 +49,14 @@ func NewPauseDefinition(reason ID, evidence []Evidence) (PauseDefinition, error)
 	if reason.IsZero() {
 		return PauseDefinition{}, fmt.Errorf("pause reason is required")
 	}
-	return PauseDefinition{reason: reason, evidence: append([]Evidence(nil), evidence...)}, nil
+	if err := validateEventEvidence(evidence); err != nil {
+		return PauseDefinition{}, fmt.Errorf("pause evidence: %w", err)
+	}
+	return PauseDefinition{reason: reason, evidence: cloneEvidence(evidence)}, nil
 }
 func (PauseDefinition) isCoreEvent()               {}
 func (event PauseDefinition) Reason() ID           { return event.reason }
-func (event PauseDefinition) Evidence() []Evidence { return append([]Evidence(nil), event.evidence...) }
+func (event PauseDefinition) Evidence() []Evidence { return cloneEvidence(event.evidence) }
 
 type ResumeDefinition struct{ generation Digest }
 
@@ -68,12 +71,15 @@ func (event ResumeDefinition) Generation() Digest { return event.generation }
 
 type CompleteDefinition struct{ evidence []Evidence }
 
-func NewCompleteDefinition(evidence []Evidence) CompleteDefinition {
-	return CompleteDefinition{evidence: append([]Evidence(nil), evidence...)}
+func NewCompleteDefinition(evidence []Evidence) (CompleteDefinition, error) {
+	if err := validateEventEvidence(evidence); err != nil {
+		return CompleteDefinition{}, fmt.Errorf("completion evidence: %w", err)
+	}
+	return CompleteDefinition{evidence: cloneEvidence(evidence)}, nil
 }
 func (CompleteDefinition) isCoreEvent() {}
 func (event CompleteDefinition) Evidence() []Evidence {
-	return append([]Evidence(nil), event.evidence...)
+	return cloneEvidence(event.evidence)
 }
 
 type Effect interface {
@@ -141,8 +147,11 @@ func Reduce(current ReducerState, event CoreEvent) (Reduction, error) {
 		if current.phase != CoreActive || value.reason.IsZero() {
 			return Reduction{}, fmt.Errorf("definition pause requires active state and a reason")
 		}
+		if err := validateEventEvidence(value.evidence); err != nil {
+			return Reduction{}, fmt.Errorf("definition pause has invalid evidence: %w", err)
+		}
 		next.phase = CorePaused
-		next.evidence = append(next.evidence, value.evidence...)
+		next.evidence = append(next.evidence, cloneEvidence(value.evidence)...)
 	case ResumeDefinition:
 		if current.phase != CorePaused || value.generation != current.generation {
 			return Reduction{}, fmt.Errorf("definition resume requires paused state and the active generation")
@@ -152,8 +161,11 @@ func Reduce(current ReducerState, event CoreEvent) (Reduction, error) {
 		if current.phase != CoreActive {
 			return Reduction{}, fmt.Errorf("definition completion requires active state")
 		}
+		if err := validateEventEvidence(value.evidence); err != nil {
+			return Reduction{}, fmt.Errorf("definition completion has invalid evidence: %w", err)
+		}
 		next.phase = CoreCompleted
-		next.evidence = append(next.evidence, value.evidence...)
+		next.evidence = append(next.evidence, cloneEvidence(value.evidence)...)
 	default:
 		return Reduction{}, fmt.Errorf("unsupported core event %T", event)
 	}
@@ -171,6 +183,15 @@ func Reduce(current ReducerState, event CoreEvent) (Reduction, error) {
 }
 
 func cloneReducerState(state ReducerState) ReducerState {
-	state.evidence = append([]Evidence(nil), state.evidence...)
+	state.evidence = cloneEvidence(state.evidence)
 	return state
+}
+
+func validateEventEvidence(values []Evidence) error {
+	for index, evidence := range values {
+		if err := evidence.validate(); err != nil {
+			return fmt.Errorf("item %d: %w", index, err)
+		}
+	}
+	return nil
 }
