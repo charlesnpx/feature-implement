@@ -387,6 +387,36 @@ func RecordAttemptBoundary(
 	if err != nil {
 		return AttemptBoundaryResult{}, err
 	}
+	if configuredLoop, required := unitExecution.ReviewLoop(); required {
+		reviewRuntime, rebuildErr := RebuildReviewRuntime(snapshot, definition)
+		if rebuildErr != nil {
+			return AttemptBoundaryResult{}, rebuildErr
+		}
+		reviewState, reviewed := reviewRuntime.State(attempt.attemptID)
+		if !reviewed || reviewState.loop.digest != configuredLoop.digest {
+			return AttemptBoundaryResult{}, fmt.Errorf(
+				"attempt %s cannot reach a boundary before its configured review loop starts",
+				attempt.attemptID,
+			)
+		}
+		if reviewErr := validateAttemptReviewProtocolState(
+			definition, unitExecution, attempt, reviewState, true, false,
+		); reviewErr != nil {
+			return AttemptBoundaryResult{}, reviewErr
+		}
+		if exhaustion, exhausted := reviewState.Exhaustion(); exhausted {
+			return AttemptBoundaryResult{}, fmt.Errorf(
+				"attempt %s cannot reach a boundary because its configured review loop is exhausted (%s)",
+				attempt.attemptID, exhaustion.reason,
+			)
+		}
+		if !reviewState.MergeReady() || reviewState.head != attempt.verifiedHead {
+			return AttemptBoundaryResult{}, fmt.Errorf(
+				"attempt %s cannot reach a boundary before every configured review profile confirms its exact head and tree",
+				attempt.attemptID,
+			)
+		}
+	}
 	var configuredProtocolHead GitObjectID
 	if configured, required := unitExecution.CommitProtocol(); required {
 		if attempt.commitProtocol == nil || attempt.commitProtocol.protocol.digest != configured.digest ||

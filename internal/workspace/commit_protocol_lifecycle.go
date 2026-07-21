@@ -260,7 +260,7 @@ func recordAttemptProtocolChainRebase(
 	requireImplementation, requireReviewFixes bool,
 	afterRecord func() error,
 ) (RuntimeAttemptProjection, error) {
-	_, runtime, err := readAttemptRuntime(journal, definition)
+	snapshot, runtime, err := readAttemptRuntime(journal, definition)
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
@@ -293,6 +293,9 @@ func recordAttemptProtocolChainRebase(
 			unit.policy.maxReviewFixes != attempt.reviewFixes.maximum {
 			return attempt, fmt.Errorf("attempt review-fix protocol does not match the active generation")
 		}
+	}
+	if err := validateAttemptReviewRebase(snapshot, definition, unit, attempt, newHead); err != nil {
+		return attempt, err
 	}
 	if attempt.commitProtocol == nil && attempt.reviewFixes == nil {
 		return attempt, fmt.Errorf("attempt %s has no recorded commit chain", attemptID)
@@ -405,7 +408,7 @@ func recordAttemptProtocolChainRebase(
 	if err != nil {
 		return attempt, err
 	}
-	if _, err := appendCommitProtocolEvent(journal, event, occurredAt); err != nil {
+	if _, err := appendCommitProtocolEventAtSnapshot(journal, snapshot, event, occurredAt); err != nil {
 		return attempt, err
 	}
 	_, runtime, loadErr := readAttemptRuntime(journal, definition)
@@ -575,13 +578,22 @@ func appendCommitProtocolEvent(
 	event WorkspaceJournalEvent,
 	occurredAt time.Time,
 ) (JournalRecord, error) {
-	reads, writes, ok := commitJournalEventResources(event)
-	if !ok {
-		return JournalRecord{}, fmt.Errorf("unsupported commit protocol event %T", event)
-	}
 	snapshot, err := journal.ReadSnapshot()
 	if err != nil {
 		return JournalRecord{}, err
+	}
+	return appendCommitProtocolEventAtSnapshot(journal, snapshot, event, occurredAt)
+}
+
+func appendCommitProtocolEventAtSnapshot(
+	journal *WorkspaceJournal,
+	snapshot JournalSnapshot,
+	event WorkspaceJournalEvent,
+	occurredAt time.Time,
+) (JournalRecord, error) {
+	reads, writes, ok := commitJournalEventResources(event)
+	if !ok {
+		return JournalRecord{}, fmt.Errorf("unsupported commit protocol event %T", event)
 	}
 	runtime, err := RebuildWorkspaceRuntime(snapshot)
 	if err != nil {

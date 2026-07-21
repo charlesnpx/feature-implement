@@ -120,6 +120,7 @@ type UnitExecution struct {
 	boundary          AttemptBoundaryPolicy
 	commitProtocol    *CommitProtocol
 	reviewFixProtocol *ReviewFixProtocol
+	reviewLoop        *ReviewLoop
 }
 
 func (unit UnitExecution) PlanID() ID              { return unit.planID }
@@ -141,12 +142,19 @@ func (unit UnitExecution) ReviewFixProtocol() (ReviewFixProtocol, bool) {
 	}
 	return *cloneReviewFixProtocol(unit.reviewFixProtocol), true
 }
+func (unit UnitExecution) ReviewLoop() (ReviewLoop, bool) {
+	if unit.reviewLoop == nil {
+		return ReviewLoop{}, false
+	}
+	return cloneReviewLoop(*unit.reviewLoop), true
+}
 
 // ExecutionConfig is the one policy authority for all workspace merge units.
 type ExecutionConfig struct {
-	policy     ExecutionPolicy
-	profiles   []ExecutionProfile
-	mergeUnits []UnitExecution
+	policy         ExecutionPolicy
+	profiles       []ExecutionProfile
+	reviewProfiles []ReviewProfile
+	mergeUnits     []UnitExecution
 }
 
 func DecodeExecutionConfig(source []byte) (ExecutionConfig, error) {
@@ -191,6 +199,10 @@ func normalizeExecutionConfig(wire executionConfigWire) (ExecutionConfig, error)
 		profiles = append(profiles, profile)
 	}
 	sort.Slice(profiles, func(i, j int) bool { return profiles[i].id.String() < profiles[j].id.String() })
+	reviewProfiles, reviewProfileByID, err := normalizeReviewProfiles(wire.ReviewProfiles)
+	if err != nil {
+		return ExecutionConfig{}, err
+	}
 
 	units := make([]UnitExecution, 0, len(wire.MergeUnits))
 	unitKeys := make(map[string]struct{}, len(wire.MergeUnits))
@@ -234,6 +246,16 @@ func normalizeExecutionConfig(wire executionConfigWire) (ExecutionConfig, error)
 		if err != nil {
 			return ExecutionConfig{}, err
 		}
+		reviewLoop, err := normalizeReviewLoop(
+			item.ReviewLoop, reviewProfileByID, unitPolicy,
+			fmt.Sprintf("merge unit %s/%s review_loop", planID, mergeUnitID),
+		)
+		if err != nil {
+			return ExecutionConfig{}, err
+		}
+		if reviewLoop != nil && reviewFixProtocol == nil {
+			return ExecutionConfig{}, fmt.Errorf("merge unit %s/%s review_loop requires review_fix_protocol", planID, mergeUnitID)
+		}
 		key := planID.String() + "\x00" + mergeUnitID.String()
 		if _, exists := unitKeys[key]; exists {
 			return ExecutionConfig{}, fmt.Errorf("duplicate execution policy for merge unit %s/%s", planID, mergeUnitID)
@@ -242,7 +264,7 @@ func normalizeExecutionConfig(wire executionConfigWire) (ExecutionConfig, error)
 		units = append(units, UnitExecution{
 			planID: planID, mergeUnitID: mergeUnitID, profileID: profileID,
 			policy: unitPolicy, boundary: boundary,
-			commitProtocol: commitProtocol, reviewFixProtocol: reviewFixProtocol,
+			commitProtocol: commitProtocol, reviewFixProtocol: reviewFixProtocol, reviewLoop: reviewLoop,
 		})
 	}
 	sort.Slice(units, func(i, j int) bool {
@@ -251,18 +273,25 @@ func normalizeExecutionConfig(wire executionConfigWire) (ExecutionConfig, error)
 		return left < right
 	})
 
-	return ExecutionConfig{policy: policy, profiles: profiles, mergeUnits: units}, nil
+	return ExecutionConfig{policy: policy, profiles: profiles, reviewProfiles: reviewProfiles, mergeUnits: units}, nil
 }
 
 func (config ExecutionConfig) Policy() ExecutionPolicy { return config.policy }
 func (config ExecutionConfig) Profiles() []ExecutionProfile {
 	return append([]ExecutionProfile(nil), config.profiles...)
 }
+func (config ExecutionConfig) ReviewProfiles() []ReviewProfile {
+	return append([]ReviewProfile(nil), config.reviewProfiles...)
+}
 func (config ExecutionConfig) MergeUnits() []UnitExecution {
 	result := append([]UnitExecution(nil), config.mergeUnits...)
 	for index := range result {
 		result[index].commitProtocol = cloneCommitProtocol(result[index].commitProtocol)
 		result[index].reviewFixProtocol = cloneReviewFixProtocol(result[index].reviewFixProtocol)
+		if result[index].reviewLoop != nil {
+			loop := cloneReviewLoop(*result[index].reviewLoop)
+			result[index].reviewLoop = &loop
+		}
 	}
 	return result
 }

@@ -526,6 +526,10 @@ func commitJournalEventResources(event WorkspaceJournalEvent) ([]JournalResource
 			)
 		}
 		writes = append([]JournalResource(nil), reads...)
+		// Rebase admission depends on the review loop being quiescent and
+		// having confirmation budget remaining. Keep that exact review state
+		// in the event's read footprint without claiming to mutate it.
+		reads = append(reads, ReviewJournalResource(attemptID))
 		if len(event.reviewCommits) != 0 {
 			reads = append(reads, ReviewFixBudgetJournalResource(attemptID))
 		}

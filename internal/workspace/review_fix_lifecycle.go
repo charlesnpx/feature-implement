@@ -21,11 +21,12 @@ const (
 type ReviewFixFaultInjector func(ReviewFixFaultPoint) error
 
 type ExecuteAttemptReviewFixRequest struct {
-	AttemptID  ID
-	Ordinal    uint16
-	Body       string
-	OccurredAt time.Time
-	Fault      ReviewFixFaultInjector
+	AttemptID          ID
+	Ordinal            uint16
+	Body               string
+	AcceptedFindingIDs []Digest
+	OccurredAt         time.Time
+	Fault              ReviewFixFaultInjector
 }
 
 type AttemptReviewFixResult struct {
@@ -62,6 +63,17 @@ func ExecuteAttemptReviewFix(
 	result, unit, protocol, err := loadReviewFixExecution(journal, definition, request.AttemptID)
 	if err != nil || !result.configured {
 		return result, err
+	}
+	if _, reviewConfigured := unit.ReviewLoop(); reviewConfigured {
+		if len(request.AcceptedFindingIDs) == 0 {
+			return result, fmt.Errorf("configured review-loop fix requires accepted finding identities")
+		}
+		if _, err := ReserveAttemptReviewFix(journal, definition, ReserveAttemptReviewFixRequest{
+			AttemptID: request.AttemptID, Ordinal: request.Ordinal,
+			AcceptedFindingIDs: request.AcceptedFindingIDs, OccurredAt: request.OccurredAt,
+		}); err != nil {
+			return result, err
+		}
 	}
 	if request.Ordinal > unit.policy.maxReviewFixes {
 		return result, fmt.Errorf("review-fix budget is exhausted at ordinal %d", request.Ordinal)
