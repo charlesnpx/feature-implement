@@ -719,6 +719,36 @@ func TestPauseOnlyBoundaryAtomicallyPausesAndResumesSameGoal(t *testing.T) {
 	}
 }
 
+func TestLocalAttemptInspectionRejectsHiddenIndexFlags(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		flag string
+	}{
+		{name: "assume unchanged", flag: "--assume-unchanged"},
+		{name: "skip worktree", flag: "--skip-worktree"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository, _, _ := newProtocolRepository(t)
+			worktree := filepath.Join(t.TempDir(), "attempt")
+			branch := "attempt-hidden-index"
+			runGitSetup(t, repository, "worktree", "add", "-b", branch, worktree, "HEAD")
+			runGitSetup(t, worktree, "update-index", test.flag, "src/protocol.go")
+			if err := os.WriteFile(
+				filepath.Join(worktree, "src", "protocol.go"),
+				[]byte("package protocol\n\nconst HiddenAtBoundary = true\n"), 0o644,
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := workspace.DefaultLocalAttemptGitAdapter().InspectAttemptWorktree(
+				context.Background(), repository, branch, worktree,
+			); err == nil || !strings.Contains(err.Error(), "assume-unchanged and skip-worktree") {
+				t.Fatalf("InspectAttemptWorktree hidden-index error = %v", err)
+			}
+		})
+	}
+}
+
 func TestCompleteGoalBoundaryRecoversIdempotentlyThroughHandoffAndRejectsStaleHead(t *testing.T) {
 	harness := newAttemptHarness(t, "unit-two")
 	attempt := harness.reserve(t, "2026-07-21T12:01:00Z")

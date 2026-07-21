@@ -302,6 +302,22 @@ func TestGoTestParserRejectsPartialMultiPackageStreams(t *testing.T) {
 				`{"Action":"run","Package":"example/b","Test":"TestIncomplete"}`,
 			},
 		},
+		{
+			name:     "late event after terminal failure",
+			exitCode: 1,
+			lines: []string{
+				`{"Action":"fail","Package":"example/a","Test":"TestExpected"}`,
+				`{"Action":"fail","Package":"example/a"}`,
+				`{"Action":"run","Package":"example/a","Test":"TestLate"}`,
+			},
+		},
+		{
+			name: "late event after terminal pass",
+			lines: []string{
+				`{"Action":"pass","Package":"example/a"}`,
+				`{"Action":"start","Package":"example/a"}`,
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

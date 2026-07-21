@@ -68,13 +68,15 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 		Elapsed     float64 `json:"Elapsed"`
 		Time        string  `json:"Time"`
 	}
+	type goTestPackageState struct {
+		terminal bool
+	}
 	scanner := bufio.NewScanner(bytes.NewReader(result.stdout))
 	scanner.Buffer(make([]byte, 64*1024), maxAttemptGitOutputBytes)
 	failures := make(map[string]struct{})
 	namedFailurePackages := make(map[string]struct{})
 	packageFailures := make(map[string]struct{})
-	observedPackages := make(map[string]struct{})
-	terminalPackages := make(map[string]struct{})
+	packages := make(map[string]goTestPackageState)
 	structured, buildFailure := 0, false
 	crashed, timedOut := false, false
 	for scanner.Scan() {
@@ -87,9 +89,14 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 		}
 		structured++
-		if event.Package != "" {
-			observedPackages[event.Package] = struct{}{}
+		if event.Package == "" {
+			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 		}
+		packageState := packages[event.Package]
+		if packageState.terminal {
+			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+		}
+		terminal := false
 		switch event.Action {
 		case "start", "run", "pause", "cont", "bench":
 		case "output", "build-output":
@@ -107,10 +114,10 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 			}
 		case "build-fail":
 			buildFailure = true
-			terminalPackages[event.Package] = struct{}{}
+			terminal = true
 		case "pass", "skip":
 			if event.Test == "" {
-				terminalPackages[event.Package] = struct{}{}
+				terminal = true
 			}
 		case "fail":
 			if event.Test != "" {
@@ -122,7 +129,7 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 				namedFailurePackages[event.Package] = struct{}{}
 			} else {
 				packageFailures[event.Package] = struct{}{}
-				terminalPackages[event.Package] = struct{}{}
+				terminal = true
 				if event.FailedBuild != "" {
 					buildFailure = true
 				}
@@ -130,12 +137,14 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 		default:
 			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 		}
+		packageState.terminal = terminal
+		packages[event.Package] = packageState
 	}
-	if err := scanner.Err(); err != nil || structured == 0 || len(observedPackages) == 0 {
+	if err := scanner.Err(); err != nil || structured == 0 || len(packages) == 0 {
 		return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 	}
-	for packageName := range observedPackages {
-		if _, terminal := terminalPackages[packageName]; !terminal {
+	for _, packageState := range packages {
+		if !packageState.terminal {
 			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 		}
 	}

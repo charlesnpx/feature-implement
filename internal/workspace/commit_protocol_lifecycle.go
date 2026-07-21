@@ -242,13 +242,23 @@ func RecordAttemptCommitRebase(
 	if result.protocol.phase == CommitProtocolAwaitingChecks && alreadyRecorded && result.protocol.rebaseEpoch > 0 {
 		// A crash can occur after the rebase event is durable but before the
 		// caller observes success. The remapped checks are intentionally still
-		// pending; replaying the rebase itself is a successful no-op.
+		// pending. Re-prove the recorded Git mapping before treating the retry
+		// as a successful no-op so branch, worktree, or history drift cannot be
+		// hidden by journal idempotency.
+		if err := verifyRecordedAttemptCommitRebase(ctx, shell, result, newBase, newHead); err != nil {
+			return result, err
+		}
 		return result, nil
 	}
 	if result.protocol.phase != CommitProtocolReady && result.protocol.phase != CommitProtocolComplete {
 		return result, fmt.Errorf("commit rebase is blocked by an in-flight commit or check")
 	}
 	if alreadyRecorded {
+		if result.protocol.rebaseEpoch > 0 {
+			if err := verifyRecordedAttemptCommitRebase(ctx, shell, result, newBase, newHead); err != nil {
+				return result, err
+			}
+		}
 		return result, nil
 	}
 	if err := shell.git.VerifyCleanWorktree(ctx, result.attempt.worktree, result.attempt.branch, newHead); err != nil {
@@ -292,6 +302,46 @@ func RecordAttemptCommitRebase(
 		return loadAttemptCommitProtocolResult(journal, attemptID, true, err)
 	}
 	return loadAttemptCommitProtocolResult(journal, attemptID, true, nil)
+}
+
+func verifyRecordedAttemptCommitRebase(
+	ctx context.Context,
+	shell CommitProtocolShell,
+	result AttemptCommitProtocolResult,
+	newBase, newHead GitObjectID,
+) error {
+	if err := shell.git.VerifyCleanWorktree(
+		ctx, result.attempt.worktree, result.attempt.branch, newHead,
+	); err != nil {
+		return fmt.Errorf("verify recorded commit rebase worktree: %w", err)
+	}
+	inspections, err := shell.git.InspectFirstParentRange(
+		ctx, result.attempt.worktree, newBase, newHead,
+	)
+	if err != nil {
+		return fmt.Errorf("verify recorded commit rebase range: %w", err)
+	}
+	if len(inspections) != len(result.protocol.steps) {
+		return fmt.Errorf(
+			"recorded rebased commit count %d no longer matches %d",
+			len(inspections), len(result.protocol.steps),
+		)
+	}
+	for index, inspection := range inspections {
+		evidence, err := inspection.Evidence(
+			result.protocol.generation, result.protocol.protocol.steps[index], uint16(index+1),
+		)
+		if err != nil {
+			return fmt.Errorf("re-prove recorded rebased commit %d: %w", index+1, err)
+		}
+		if evidence.evidence != result.protocol.steps[index].commit.evidence {
+			return fmt.Errorf(
+				"recorded rebased commit step %s no longer matches Git evidence",
+				result.protocol.protocol.steps[index].id,
+			)
+		}
+	}
+	return nil
 }
 
 func ensureAttemptCommitProtocolStarted(

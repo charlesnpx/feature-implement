@@ -244,6 +244,7 @@ func (adapter LocalCommitGitAdapter) inspectStagedOnce(
 	}
 	status, exitCode, err := adapter.git.run(
 		ctx, worktree, "status", "--porcelain=v2", "-z", "--untracked-files=all", "--ignore-submodules=none",
+		"--ignored=matching",
 	)
 	if err != nil || exitCode != 0 {
 		return StagedCommitInspection{}, gitExitError("inspect commit worktree status", exitCode, err)
@@ -447,6 +448,7 @@ func (adapter LocalCommitGitAdapter) VerifyCleanWorktree(
 	}
 	status, exitCode, err := adapter.git.run(
 		ctx, worktree, "status", "--porcelain=v2", "-z", "--untracked-files=all", "--ignore-submodules=none",
+		"--ignored=matching",
 	)
 	if err != nil || exitCode != 0 {
 		return gitExitError("verify clean worktree", exitCode, err)
@@ -473,6 +475,29 @@ func (adapter LocalCommitGitAdapter) rejectHiddenIndexEntries(ctx context.Contex
 	if err != nil || exitCode != 0 {
 		return gitExitError("inspect commit index flags", exitCode, err)
 	}
+	if err := rejectHiddenIndexRecords(output); err != nil {
+		return err
+	}
+	output, exitCode, err = adapter.git.run(ctx, worktree, "ls-files", "-f", "-z", "--")
+	if err != nil || exitCode != 0 {
+		return gitExitError("inspect commit fsmonitor flags", exitCode, err)
+	}
+	return rejectFSMonitorIndexRecords(output)
+}
+
+func rejectHiddenIndexRecords(output []byte) error {
+	return rejectIndexTagRecords(output, func(tag byte) bool {
+		return tag == 'S' || (tag >= 'a' && tag <= 'z')
+	}, "configured execution forbids assume-unchanged and skip-worktree index entries")
+}
+
+func rejectFSMonitorIndexRecords(output []byte) error {
+	return rejectIndexTagRecords(output, func(tag byte) bool {
+		return tag >= 'a' && tag <= 'z'
+	}, "configured execution forbids fsmonitor-valid index entries")
+}
+
+func rejectIndexTagRecords(output []byte, forbidden func(byte) bool, message string) error {
 	for _, record := range bytes.Split(output, []byte{0}) {
 		if len(record) == 0 {
 			continue
@@ -481,8 +506,8 @@ func (adapter LocalCommitGitAdapter) rejectHiddenIndexEntries(ctx context.Contex
 			return fmt.Errorf("Git index flag record is malformed")
 		}
 		tag := record[0]
-		if tag == 'S' || (tag >= 'a' && tag <= 'z') {
-			return fmt.Errorf("configured commit forbids assume-unchanged and skip-worktree index entries")
+		if forbidden(tag) {
+			return fmt.Errorf("%s", message)
 		}
 	}
 	return nil
@@ -549,7 +574,10 @@ func (adapter LocalCommitGitAdapter) runWithInput(
 	if !filepath.IsAbs(repositoryRoot) {
 		return nil, -1, fmt.Errorf("Git repository root must be absolute")
 	}
-	argv := append([]string{"-C", repositoryRoot}, arguments...)
+	argv := append(
+		[]string{"--no-replace-objects", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-C", repositoryRoot},
+		arguments...,
+	)
 	command := exec.CommandContext(ctx, adapter.git.executable, argv...)
 	command.Env = mergeProcessEnvironment(os.Environ(), adapter.git.environment)
 	command.Stdin = bytes.NewReader(input)
@@ -704,6 +732,10 @@ func parsePorcelainV2Status(content []byte) (unstaged, untracked, conflicted []s
 			}
 			untracked = append(untracked, record[2:])
 		case '!':
+			if len(record) < 3 || record[1] != ' ' {
+				return nil, nil, nil, fmt.Errorf("ignored Git status record is malformed")
+			}
+			untracked = append(untracked, record[2:])
 		case '#':
 		default:
 			return nil, nil, nil, fmt.Errorf("unsupported Git status record %q", record)

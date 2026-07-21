@@ -312,8 +312,29 @@ func (adapter LocalAttemptGitAdapter) InspectAttemptWorktree(
 		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree branch: %w", err)
 	}
 	worktreeBranch := strings.TrimSpace(string(branchOutput))
+	indexOutput, indexExit, err := adapter.run(ctx, worktree, "ls-files", "-v", "-z", "--")
+	if err != nil || indexExit != 0 {
+		if err == nil {
+			err = fmt.Errorf("Git exited with status %d", indexExit)
+		}
+		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree index flags: %w", err)
+	}
+	if err := rejectHiddenIndexRecords(indexOutput); err != nil {
+		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree index flags: %w", err)
+	}
+	fsmonitorOutput, fsmonitorExit, err := adapter.run(ctx, worktree, "ls-files", "-f", "-z", "--")
+	if err != nil || fsmonitorExit != 0 {
+		if err == nil {
+			err = fmt.Errorf("Git exited with status %d", fsmonitorExit)
+		}
+		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree fsmonitor flags: %w", err)
+	}
+	if err := rejectFSMonitorIndexRecords(fsmonitorOutput); err != nil {
+		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree fsmonitor flags: %w", err)
+	}
 	statusOutput, statusExit, err := adapter.run(
-		ctx, worktree, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none",
+		ctx, worktree, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching",
+		"--ignore-submodules=none",
 	)
 	if err != nil || statusExit != 0 {
 		if err == nil {
@@ -724,7 +745,10 @@ func (adapter LocalAttemptGitAdapter) run(
 	if !filepath.IsAbs(repositoryRoot) {
 		return nil, -1, fmt.Errorf("Git repository root must be absolute")
 	}
-	argv := append([]string{"-C", repositoryRoot}, arguments...)
+	argv := append(
+		[]string{"--no-replace-objects", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-C", repositoryRoot},
+		arguments...,
+	)
 	command := exec.CommandContext(ctx, adapter.executable, argv...)
 	command.Env = mergeProcessEnvironment(os.Environ(), adapter.environment)
 	var stdout, stderr boundedProcessBuffer
@@ -780,6 +804,8 @@ func mergeProcessEnvironment(base []string, additions []EnvironmentVariable) []s
 	for _, variable := range additions {
 		values[variable.name] = variable.value
 	}
+	values["GIT_NO_REPLACE_OBJECTS"] = "1"
+	values["GIT_GRAFT_FILE"] = os.DevNull
 	names := make([]string, 0, len(values))
 	for name := range values {
 		names = append(names, name)
@@ -795,7 +821,8 @@ func mergeProcessEnvironment(base []string, additions []EnvironmentVariable) []s
 func unsafeAttemptGitEnvironment(name string) bool {
 	switch name {
 	case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
-		"GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_ALTERNATE_OBJECT_DIRECTORIES":
+		"GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+		"GIT_NO_REPLACE_OBJECTS", "GIT_GRAFT_FILE":
 		return true
 	default:
 		return false

@@ -212,6 +212,9 @@ func (shell CommitProtocolShell) VerifySequence(
 	repositoryRoot string,
 	base, head GitObjectID,
 ) error {
+	if shell.git == nil {
+		return fmt.Errorf("commit protocol shell has no Git adapter")
+	}
 	if err := validateCommitProtocolState(state); err != nil {
 		return err
 	}

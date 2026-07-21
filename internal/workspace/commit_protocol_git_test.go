@@ -59,6 +59,11 @@ func TestLocalCommitShellCreatesExactCommitAndRevalidatesAfterRebase(t *testing.
 	if state.Phase() != workspace.CommitProtocolComplete || len(runner.invocations) != 1 {
 		t.Fatalf("state=%#v runner calls=%d", state, len(runner.invocations))
 	}
+	var zeroShell workspace.CommitProtocolShell
+	if err := zeroShell.VerifySequence(context.Background(), state, repository, base, state.Head()); err == nil ||
+		!strings.Contains(err.Error(), "no Git adapter") {
+		t.Fatalf("zero-value VerifySequence error = %v", err)
+	}
 	head := parseGitHead(t, repository)
 	completed := state.CompletedSteps()
 	if len(completed) != 1 || completed[0].Commit().Commit() != head || len(completed[0].Checks()) != 1 {
@@ -288,6 +293,129 @@ func TestLocalCommitAdapterRejectsHiddenIndexFlags(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLocalCommitAdapterIgnoresReplacementRefsAndLegacyGrafts(t *testing.T) {
+	t.Run("replacement ref", func(t *testing.T) {
+		repository, _, base := newProtocolRepository(t)
+		tracked := filepath.Join(repository, "src", "protocol.go")
+		if err := os.WriteFile(tracked, []byte("package protocol\n\nconst Real = true\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runGitSetup(t, repository, "add", "src/protocol.go")
+		runGitSetup(t, repository, "commit", "-m", "Real commit")
+		realCommit := parseGitHead(t, repository)
+		tree := strings.TrimSpace(string(runGitSetup(t, repository, "rev-parse", rawGitObject(realCommit)+"^{tree}")))
+		replacement := strings.TrimSpace(string(runGitSetup(
+			t, repository, "commit-tree", tree, "-p", rawGitObject(base), "-m", "Replacement commit",
+		)))
+		runGitSetup(t, repository, "replace", rawGitObject(realCommit), replacement)
+		if raw := string(runGitSetup(t, repository, "cat-file", "commit", rawGitObject(realCommit))); !strings.Contains(raw, "Replacement commit") {
+			t.Fatalf("replacement ref did not affect ordinary Git inspection: %q", raw)
+		}
+
+		adapter := workspace.DefaultLocalCommitGitAdapter()
+		inspection, err := adapter.InspectCommit(context.Background(), repository, realCommit)
+		if err != nil {
+			t.Fatalf("InspectCommit with replacement ref: %v", err)
+		}
+		if inspection.Subject() != "Real commit" || len(inspection.Parents()) != 1 || inspection.Parents()[0] != base {
+			t.Fatalf("replacement ref changed trusted inspection: %#v", inspection)
+		}
+		rangeInspection, err := adapter.InspectFirstParentRange(
+			context.Background(), repository, base, realCommit,
+		)
+		if err != nil || len(rangeInspection) != 1 || rangeInspection[0].Subject() != "Real commit" {
+			t.Fatalf("replacement ref changed trusted range: %#v err=%v", rangeInspection, err)
+		}
+	})
+
+	t.Run("legacy graft", func(t *testing.T) {
+		repository, _, base := newProtocolRepository(t)
+		tracked := filepath.Join(repository, "src", "protocol.go")
+		if err := os.WriteFile(tracked, []byte("package protocol\n\nconst Real = true\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runGitSetup(t, repository, "add", "src/protocol.go")
+		runGitSetup(t, repository, "commit", "-m", "Real graft target")
+		realCommit := parseGitHead(t, repository)
+		gitDir := strings.TrimSpace(string(runGitSetup(t, repository, "rev-parse", "--absolute-git-dir")))
+		runGitSetup(t, repository, "config", "advice.graftFileDeprecated", "false")
+		if err := os.WriteFile(
+			filepath.Join(gitDir, "info", "grafts"), []byte(rawGitObject(realCommit)+"\n"), 0o600,
+		); err != nil {
+			t.Fatal(err)
+		}
+		ordinaryParents := strings.Fields(string(runGitSetup(
+			t, repository, "rev-list", "--parents", "-n", "1", rawGitObject(realCommit),
+		)))
+		if len(ordinaryParents) != 1 {
+			t.Fatalf("legacy graft did not affect ordinary Git history: %v", ordinaryParents)
+		}
+
+		inspection, err := workspace.DefaultLocalCommitGitAdapter().InspectCommit(
+			context.Background(), repository, realCommit,
+		)
+		if err != nil {
+			t.Fatalf("InspectCommit with legacy graft: %v", err)
+		}
+		if len(inspection.Parents()) != 1 || inspection.Parents()[0] != base {
+			t.Fatalf("legacy graft changed trusted inspection: %#v", inspection)
+		}
+	})
+}
+
+func TestLocalCommitAdapterDoesNotTrustFsmonitorOrIgnoredInputs(t *testing.T) {
+	t.Run("lying fsmonitor", func(t *testing.T) {
+		repository, branch, head := newProtocolRepository(t)
+		hook := filepath.Join(t.TempDir(), "lying-fsmonitor")
+		if err := os.WriteFile(hook, []byte("#!/bin/sh\nprintf 'token\\000'\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		runGitSetup(t, repository, "config", "core.fsmonitor", hook)
+		runGitSetup(t, repository, "config", "core.fsmonitorHookVersion", "2")
+		_ = runGitSetup(t, repository, "status", "--porcelain=v2", "-z", "--untracked-files=all")
+		if err := os.WriteFile(
+			filepath.Join(repository, "src", "protocol.go"),
+			[]byte("package protocol\n\nconst HiddenByMonitor = true\n"), 0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if ordinary := runGitSetup(t, repository, "status", "--porcelain=v2", "-z", "--untracked-files=all"); len(ordinary) != 0 {
+			t.Fatalf("lying fsmonitor did not hide the change from ordinary Git: %q", ordinary)
+		}
+		if err := workspace.DefaultLocalCommitGitAdapter().VerifyCleanWorktree(
+			context.Background(), repository, branch, head,
+		); err == nil {
+			t.Fatal("trusted clean-worktree verification accepted a change hidden by fsmonitor")
+		}
+	})
+
+	t.Run("ignored input", func(t *testing.T) {
+		repository, branch, _ := newProtocolRepository(t)
+		if err := os.WriteFile(filepath.Join(repository, ".gitignore"), []byte("generated/\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runGitSetup(t, repository, "add", ".gitignore")
+		runGitSetup(t, repository, "commit", "-m", "Ignore generated inputs")
+		head := parseGitHead(t, repository)
+		if err := os.MkdirAll(filepath.Join(repository, "generated"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(
+			filepath.Join(repository, "generated", "input.go"), []byte("package generated\n"), 0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if ordinary := runGitSetup(t, repository, "status", "--porcelain=v2", "-z", "--untracked-files=all"); len(ordinary) != 0 {
+			t.Fatalf("ignored input was not hidden from ordinary Git status: %q", ordinary)
+		}
+		if err := workspace.DefaultLocalCommitGitAdapter().VerifyCleanWorktree(
+			context.Background(), repository, branch, head,
+		); err == nil || !strings.Contains(err.Error(), "dirty") {
+			t.Fatalf("ignored-input clean-worktree error = %v", err)
+		}
+	})
 }
 
 func TestCommitShellRejectsDirtyStateWeakIsolationAndWrongFailure(t *testing.T) {

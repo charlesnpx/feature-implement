@@ -359,6 +359,30 @@ func TestJournaledCommitRebaseRetryIsIdempotentAndRerunsChecks(t *testing.T) {
 		)
 	}
 
+	scenario.git.head = newBase
+	if _, err := workspace.RecordAttemptCommitRebase(
+		context.Background(), scenario.harness.journal, scenario.harness.definition, scenario.shell,
+		scenario.attempt.AttemptID(), newBase, newCommit, mustTime(t, "2026-07-21T12:05:10Z"), nil,
+	); err == nil || !strings.Contains(err.Error(), "verify recorded commit rebase worktree") {
+		t.Fatalf("retry with drifted head error = %v", err)
+	}
+	scenario.git.head = newCommit
+	drifted, err := workspace.NewGitCommitInspection(
+		newCommit, []workspace.GitObjectID{newBase}, mustGitObject(t, '8'),
+		step.Message().Subject(), "", scenario.git.commit.Diff(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenario.git.commit = drifted
+	if _, err := workspace.RecordAttemptCommitRebase(
+		context.Background(), scenario.harness.journal, scenario.harness.definition, scenario.shell,
+		scenario.attempt.AttemptID(), newBase, newCommit, mustTime(t, "2026-07-21T12:05:20Z"), nil,
+	); err == nil || !strings.Contains(err.Error(), "no longer matches Git evidence") {
+		t.Fatalf("retry with drifted mapping error = %v", err)
+	}
+	scenario.git.commit = rebased
+
 	result, err = workspace.RecordAttemptCommitRebase(
 		context.Background(), scenario.harness.journal, scenario.harness.definition, scenario.shell,
 		scenario.attempt.AttemptID(), newBase, newCommit, mustTime(t, "2026-07-21T12:06:00Z"), nil,
