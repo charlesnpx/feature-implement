@@ -90,6 +90,173 @@ func TestAuthorizationJournalProtectedWorkflowsUseRealEd25519(t *testing.T) {
 	}
 }
 
+func TestAuthorizationSafetyChangesRequireExactSignedDurableReceipt(t *testing.T) {
+	fixture := newDefinitionFixture(t)
+	definition := mustDefinition(t, fixture.sources)
+	workspaceDir := t.TempDir()
+	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frontier, _ := workspace.NewAuthorizationFrontier(mustGitObject(t, 'a'), mustGitObject(t, 'b'))
+	segment := workspace.MustID("serial-safety")
+	scope, err := workspace.NewStandingGrantScope(workspace.StandingGrantScopeOptions{
+		WorkspaceID: definition.Workspace().ID(), Repository: definition.Workspace().Repository(),
+		Remote: definition.Workspace().Remote(), Generation: definition.Generation(), SerialSegment: segment,
+		Frontier: frontier, Actions: []workspace.StandingAuthorizationAction{workspace.StandingAuthorizationPush},
+		ExpiresAt: mustTime(t, "2026-07-21T20:00:00Z"), Epoch: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grantBinding, _ := workspace.StandingGrantControlPlaneBinding(scope)
+	if _, _, err := workspace.RecordStandingGrant(
+		context.Background(), journal, definition, &boundaryVerifier{expectedRequest: scope.Digest()}, scope,
+		controlPlaneReceipt(t, grantBinding, "safety-grant"), mustTime(t, "2026-07-21T16:01:00Z"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	clock := &authorizationTestClock{now: mustTime(t, "2026-07-21T18:00:00Z")}
+	evaluator, _ := workspace.NewAuthorizationEvaluator(clock)
+	request := authorizationJournalRequest(t, definition, segment, frontier, 1)
+	queued := authorizationJournalQueue(t, journal, definition, evaluator, request)
+	_, beforeSafety, err := workspace.ReadAuthorizationEvaluationSnapshot(journal, definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	keyID := workspace.MustID("authorization-safety-key")
+	adapterID := workspace.MustID("authorization-safety-coordinator")
+	privateKey := ed25519.NewKeyFromSeed(bytesOf(44, ed25519.SeedSize))
+	publicKey := privateKey.Public().(ed25519.PublicKey)
+	replay := &controlPlaneTestReplay{}
+	signSafety := func(
+		state workspace.AuthorizationState,
+		target workspace.AuthorizationSafetyState,
+		nonce string,
+	) (workspace.ControlPlaneBinding, workspace.ControlPlaneReceiptV2) {
+		t.Helper()
+		binding, bindingErr := workspace.AuthorizationSafetyChangeControlPlaneBinding(state, target)
+		if bindingErr != nil {
+			t.Fatal(bindingErr)
+		}
+		envelope, envelopeErr := workspace.NewControlPlaneEnvelopeV2(
+			binding, keyID, nonce, mustTime(t, "2026-07-21T20:00:00Z"), adapterID,
+		)
+		if envelopeErr != nil {
+			t.Fatal(envelopeErr)
+		}
+		return binding, signedControlPlaneReceipt(t, envelope, privateKey)
+	}
+	verifier := func(now string) *workspace.Ed25519ControlPlaneVerifier {
+		return realControlPlaneVerifier(
+			t, adapterID, keyID, publicKey, workspace.ControlPlaneReceiptReconciliation,
+			mustTime(t, now), replay,
+		)
+	}
+
+	state, _, err := workspace.ReadAuthorizationEvaluationSnapshot(journal, definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := workspace.NewAuthorizationSafetyState(true, true, true, true)
+	_, blockedReceipt := signSafety(state, blocked, "safety-blocked")
+	blockedRecord, err := workspace.RecordAuthorizationSafetyChange(
+		context.Background(), journal, definition, verifier("2026-07-21T16:02:00Z"), blocked,
+		blockedReceipt, mustTime(t, "2026-07-21T16:02:00Z"),
+	)
+	if err != nil || blockedRecord.EventType() != workspace.JournalEventAuthorizationSafetyChanged {
+		t.Fatalf("record signed blocked safety = %#v, %v", blockedRecord, err)
+	}
+
+	blockedState, _, err := workspace.ReadAuthorizationEvaluationSnapshot(journal, definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clear := workspace.NewAuthorizationSafetyState(false, false, false, false)
+	clearBinding, clearReceipt := signSafety(blockedState, clear, "safety-cleared")
+	if _, err := workspace.RecordAuthorizationSafetyChange(
+		context.Background(), journal, definition, nil, clear, clearReceipt,
+		mustTime(t, "2026-07-21T16:02:30Z"),
+	); err == nil || !strings.Contains(err.Error(), "verifier") {
+		t.Fatalf("unsigned safety clearing error = %v", err)
+	}
+	wrongTarget := workspace.NewAuthorizationSafetyState(false, true, false, false)
+	_, wrongReceipt := signSafety(blockedState, wrongTarget, "safety-wrong-request")
+	if _, err := workspace.RecordAuthorizationSafetyChange(
+		context.Background(), journal, definition, verifier("2026-07-21T16:02:45Z"), clear, wrongReceipt,
+		mustTime(t, "2026-07-21T16:02:45Z"),
+	); err == nil || !strings.Contains(err.Error(), "exact protected transition") {
+		t.Fatalf("wrong safety request receipt error = %v", err)
+	}
+
+	clearRecord, err := workspace.RecordAuthorizationSafetyChange(
+		context.Background(), journal, definition, verifier("2026-07-21T16:03:00Z"), clear,
+		clearReceipt, mustTime(t, "2026-07-21T16:03:00Z"),
+	)
+	if err != nil || clearRecord.EventType() != workspace.JournalEventAuthorizationSafetyChanged {
+		t.Fatalf("record signed clear safety = %#v, %v", clearRecord, err)
+	}
+	retryVerifier := &boundaryVerifier{expectedRequest: clearBinding.RequestDigest()}
+	if retry, err := workspace.RecordAuthorizationSafetyChange(
+		context.Background(), journal, definition, retryVerifier, clear, clearReceipt,
+		mustTime(t, "2026-07-21T16:03:30Z"),
+	); err != nil || retry.Sequence() != 0 || retryVerifier.calls != 0 {
+		t.Fatalf("durable safety retry = %#v, verifier calls=%d, %v", retry, retryVerifier.calls, err)
+	}
+	if _, err := workspace.NewJournalAppend(
+		clearRecord.Event(), mustTime(t, "2026-07-21T16:03:45Z"),
+		clearRecord.ReadSet(), clearRecord.WriteSet(),
+	); err == nil || !strings.Contains(err.Error(), "protected control-plane") {
+		t.Fatalf("direct safety append error = %v", err)
+	}
+
+	afterState, afterSafety, err := workspace.ReadAuthorizationEvaluationSnapshot(journal, definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterState.Safety() != clear || afterSafety.JournalHead() == beforeSafety.JournalHead() ||
+		afterSafety.AuthorizationRevision() <= beforeSafety.AuthorizationRevision() {
+		t.Fatalf("safety transitions did not advance exact capability bindings: before=%#v after=%#v", beforeSafety, afterSafety)
+	}
+	if _, _, err := workspace.RecordAuthorizationEffectDispatched(
+		journal, definition, evaluator, request, queued, workspace.MustID("stale-after-safety"),
+	); err == nil || !strings.Contains(err.Error(), "fresh matching") {
+		t.Fatalf("safety transition did not invalidate queued capability: %v", err)
+	}
+	snapshot, err := journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection, err := workspace.RebuildAuthorizationRuntime(snapshot, definition)
+	if err != nil || projection.State().Safety() != clear || len(projection.ReceiptDigests()) != 3 {
+		t.Fatalf("signed safety projection = %#v, %v", projection, err)
+	}
+	if snapshot.Revision(workspace.AuthorizationReceiptJournalResource(blockedReceipt.ReceiptDigest())) != 1 ||
+		snapshot.Revision(workspace.AuthorizationReceiptJournalResource(clearReceipt.ReceiptDigest())) != 1 {
+		t.Fatal("signed safety receipts did not receive exact CAS resources")
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	reopenedSnapshot, err := reopened.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := workspace.RebuildAuthorizationRuntime(reopenedSnapshot, definition)
+	if err != nil || replayed.State().Safety() != clear || len(replayed.ReceiptDigests()) != 3 {
+		t.Fatalf("replayed signed safety state = %#v, %v", replayed, err)
+	}
+}
+
 func (verifier *providerPullRequestVerifier) VerifyProviderPullRequest(
 	_ context.Context,
 	verification workspace.ProviderPullRequestVerification,

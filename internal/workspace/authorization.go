@@ -406,6 +406,54 @@ func (state AuthorizationSafetyState) ReconciliationPending() bool {
 func (state AuthorizationSafetyState) DriftDetected() bool   { return state.driftDetected }
 func (state AuthorizationSafetyState) AmbiguousEffect() bool { return state.ambiguousEffect }
 
+func authorizationSafetyChangeRequestDigest(
+	state AuthorizationState,
+	safety AuthorizationSafetyState,
+) (Digest, error) {
+	priorStateDigest := authorizationStateDigest(state)
+	if priorStateDigest.IsZero() || state.epoch == 0 {
+		return Digest{}, fmt.Errorf("authorization safety change requires initialized prior state")
+	}
+	type safetyChangeJSON struct {
+		SchemaVersion         int    `json:"schema_version"`
+		Kind                  string `json:"kind"`
+		PriorStateDigest      string `json:"prior_authorization_state_digest"`
+		Epoch                 uint64 `json:"epoch"`
+		GatesBlocked          bool   `json:"gates_blocked"`
+		ReconciliationPending bool   `json:"reconciliation_pending"`
+		DriftDetected         bool   `json:"drift_detected"`
+		AmbiguousEffect       bool   `json:"ambiguous_effect"`
+	}
+	canonical, err := json.Marshal(safetyChangeJSON{
+		SchemaVersion: JournalSchemaVersion, Kind: "authorization_safety_change",
+		PriorStateDigest: priorStateDigest.String(), Epoch: state.epoch,
+		GatesBlocked: safety.gatesBlocked, ReconciliationPending: safety.reconciliationPending,
+		DriftDetected: safety.driftDetected, AmbiguousEffect: safety.ambiguousEffect,
+	})
+	if err != nil {
+		return Digest{}, err
+	}
+	return DigestBytes(canonical), nil
+}
+
+// AuthorizationSafetyChangeControlPlaneBinding derives the exact protected
+// reconciliation request for one safety transition. The prior state digest
+// prevents a receipt from being reused after any authorization state change.
+func AuthorizationSafetyChangeControlPlaneBinding(
+	state AuthorizationState,
+	safety AuthorizationSafetyState,
+) (ControlPlaneBinding, error) {
+	requestDigest, err := authorizationSafetyChangeRequestDigest(state, safety)
+	if err != nil {
+		return ControlPlaneBinding{}, err
+	}
+	return NewControlPlaneBinding(ControlPlaneBindingOptions{
+		Kind: ControlPlaneReceiptReconciliation, WorkspaceID: state.workspaceID,
+		Generation: state.generation, RequestDigest: requestDigest,
+		Repository: state.repository, Remote: state.remote,
+	})
+}
+
 type AuthorizationRequestOptions struct {
 	WorkspaceID   ID
 	Repository    RepositoryIdentity
@@ -593,6 +641,9 @@ func NewAuthorizationState(
 }
 
 func (state AuthorizationState) Epoch() uint64 { return state.epoch }
+func (state AuthorizationState) Safety() AuthorizationSafetyState {
+	return state.safety
+}
 func (state AuthorizationState) Grants() []StandingGrant {
 	result := append([]StandingGrant(nil), state.grants...)
 	for index := range result {

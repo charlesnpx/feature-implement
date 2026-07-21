@@ -143,10 +143,12 @@ func (event AuthorizationSegmentCompletedJournalEvent) Segment() ID        { ret
 func (event AuthorizationSegmentCompletedJournalEvent) Epoch() uint64      { return event.epoch }
 
 type AuthorizationSafetyChangedJournalEvent struct {
-	workspaceID ID
-	generation  Digest
-	epoch       uint64
-	safety      AuthorizationSafetyState
+	workspaceID   ID
+	generation    Digest
+	epoch         uint64
+	safety        AuthorizationSafetyState
+	requestDigest Digest
+	receiptDigest Digest
 }
 
 func NewAuthorizationSafetyChangedJournalEvent(
@@ -154,9 +156,11 @@ func NewAuthorizationSafetyChangedJournalEvent(
 	generation Digest,
 	epoch uint64,
 	safety AuthorizationSafetyState,
+	requestDigest, receiptDigest Digest,
 ) (AuthorizationSafetyChangedJournalEvent, error) {
 	event := AuthorizationSafetyChangedJournalEvent{
 		workspaceID: workspaceID, generation: generation, epoch: epoch, safety: safety,
+		requestDigest: requestDigest, receiptDigest: receiptDigest,
 	}
 	if err := event.validate(); err != nil {
 		return AuthorizationSafetyChangedJournalEvent{}, err
@@ -170,8 +174,9 @@ func (AuthorizationSafetyChangedJournalEvent) eventType() JournalEventType {
 }
 func (event AuthorizationSafetyChangedJournalEvent) boundGeneration() Digest { return event.generation }
 func (event AuthorizationSafetyChangedJournalEvent) validate() error {
-	if event.workspaceID.IsZero() || event.generation.IsZero() || event.epoch == 0 {
-		return fmt.Errorf("authorization safety change requires workspace, generation, and epoch")
+	if event.workspaceID.IsZero() || event.generation.IsZero() || event.epoch == 0 ||
+		event.requestDigest.IsZero() || event.receiptDigest.IsZero() {
+		return fmt.Errorf("authorization safety change requires workspace, generation, epoch, request, and receipt")
 	}
 	return nil
 }
@@ -180,6 +185,12 @@ func (event AuthorizationSafetyChangedJournalEvent) Generation() Digest { return
 func (event AuthorizationSafetyChangedJournalEvent) Epoch() uint64      { return event.epoch }
 func (event AuthorizationSafetyChangedJournalEvent) Safety() AuthorizationSafetyState {
 	return event.safety
+}
+func (event AuthorizationSafetyChangedJournalEvent) RequestDigest() Digest {
+	return event.requestDigest
+}
+func (event AuthorizationSafetyChangedJournalEvent) ReceiptDigest() Digest {
+	return event.receiptDigest
 }
 
 type AuthorizationEffectDispatchedJournalEvent struct {
@@ -317,6 +328,7 @@ func authorizationJournalEventResources(event WorkspaceJournalEvent) ([]JournalR
 		resources := []JournalResource{
 			AuthorizationEpochJournalResource(event.workspaceID),
 			AuthorizationSafetyJournalResource(event.workspaceID),
+			AuthorizationReceiptJournalResource(event.receiptDigest),
 		}
 		return resources, resources, true
 	case AuthorizationEffectDispatchedJournalEvent:
@@ -460,12 +472,20 @@ func reduceAuthorizationRuntime(
 			event.generation != current.state.generation || event.epoch != current.state.epoch {
 			return AuthorizationRuntimeProjection{}, fmt.Errorf("authorization safety journal event has stale bindings")
 		}
+		expectedRequest, err := authorizationSafetyChangeRequestDigest(current.state, event.safety)
+		if err != nil || expectedRequest != event.requestDigest {
+			return AuthorizationRuntimeProjection{}, fmt.Errorf("authorization safety journal event has invalid prior-state bindings")
+		}
+		if containsDigest(current.receipts, event.receiptDigest) {
+			return AuthorizationRuntimeProjection{}, fmt.Errorf("control-plane receipt %s was replayed", event.receiptDigest)
+		}
 		domainEvent := NewAuthorizationSafetyChanged(event.safety)
 		state, err := ReduceAuthorization(current.state, domainEvent)
 		if err != nil {
 			return AuthorizationRuntimeProjection{}, err
 		}
 		next.state = state
+		next.receipts = append(next.receipts, event.receiptDigest)
 	case AuthorizationEffectDispatchedJournalEvent:
 		if !current.initialized || event.workspaceID != current.state.workspaceID ||
 			event.generation != current.state.generation {
@@ -719,20 +739,51 @@ func RecordAuthorizationSegmentCompletion(
 }
 
 func RecordAuthorizationSafetyChange(
+	ctx context.Context,
 	journal *WorkspaceJournal,
 	definition EffectiveWorkspaceDefinition,
+	verifier ControlPlaneVerifierPort,
 	safety AuthorizationSafetyState,
+	receipt ControlPlaneReceiptV2,
 	occurredAt time.Time,
 ) (JournalRecord, error) {
-	if journal == nil || occurredAt.IsZero() {
-		return JournalRecord{}, fmt.Errorf("record authorization safety change requires journal and occurrence time")
+	if journal == nil || verifier == nil || receipt.ReceiptDigest().IsZero() || occurredAt.IsZero() {
+		return JournalRecord{}, fmt.Errorf("record authorization safety change requires journal, verifier, receipt, and occurrence time")
 	}
 	snapshot, projection, err := readAuthorizationRuntime(journal, definition)
 	if err != nil {
 		return JournalRecord{}, err
 	}
+	receiptRequest := receipt.Binding().RequestDigest()
+	for _, record := range snapshot.records {
+		existing, ok := record.event.(AuthorizationSafetyChangedJournalEvent)
+		if !ok {
+			continue
+		}
+		if existing.receiptDigest == receipt.ReceiptDigest() {
+			if existing.requestDigest != receiptRequest || existing.safety != safety ||
+				projection.state.safety != safety {
+				return JournalRecord{}, fmt.Errorf("authorization safety receipt conflicts with its durable transition")
+			}
+			return JournalRecord{}, nil
+		}
+		if existing.requestDigest == receiptRequest {
+			return JournalRecord{}, fmt.Errorf("authorization safety request conflicts with its durable receipt")
+		}
+	}
 	if projection.state.safety == safety {
-		return JournalRecord{}, nil
+		return JournalRecord{}, fmt.Errorf("authorization safety already matches target without this durable receipt")
+	}
+	binding, err := AuthorizationSafetyChangeControlPlaneBinding(projection.state, safety)
+	if err != nil {
+		return JournalRecord{}, err
+	}
+	verification, err := NewControlPlaneVerification(binding)
+	if err != nil {
+		return JournalRecord{}, err
+	}
+	if err := verifier.Verify(ctx, verification, receipt); err != nil {
+		return JournalRecord{}, fmt.Errorf("verify authorization safety change: %w", err)
 	}
 	domainEvent := NewAuthorizationSafetyChanged(safety)
 	if _, err := ReduceAuthorization(projection.state, domainEvent); err != nil {
@@ -740,6 +791,7 @@ func RecordAuthorizationSafetyChange(
 	}
 	event, err := NewAuthorizationSafetyChangedJournalEvent(
 		definition.workspace.id, definition.generation, projection.state.epoch, safety,
+		binding.RequestDigest(), receipt.ReceiptDigest(),
 	)
 	if err != nil {
 		return JournalRecord{}, err

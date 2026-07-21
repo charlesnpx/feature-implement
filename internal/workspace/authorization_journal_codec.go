@@ -58,6 +58,8 @@ type authorizationSafetyPayloadWire struct {
 	ReconciliationPending bool   `json:"reconciliation_pending"`
 	DriftDetected         bool   `json:"drift_detected"`
 	AmbiguousEffect       bool   `json:"ambiguous_effect"`
+	RequestDigest         string `json:"request_digest"`
+	ReceiptDigest         string `json:"receipt_digest"`
 }
 
 type authorizationCapabilityWire struct {
@@ -111,6 +113,7 @@ func marshalAuthorizationJournalEvent(event WorkspaceJournalEvent) (json.RawMess
 			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(), Epoch: event.epoch,
 			GatesBlocked: event.safety.gatesBlocked, ReconciliationPending: event.safety.reconciliationPending,
 			DriftDetected: event.safety.driftDetected, AmbiguousEffect: event.safety.ambiguousEffect,
+			RequestDigest: event.requestDigest.String(), ReceiptDigest: event.receiptDigest.String(),
 		}
 	case AuthorizationEffectDispatchedJournalEvent:
 		value = authorizationDispatchPayloadWire{
@@ -245,7 +248,17 @@ func decodeAuthorizationJournalEvent(
 		safety := NewAuthorizationSafetyState(
 			wire.GatesBlocked, wire.ReconciliationPending, wire.DriftDetected, wire.AmbiguousEffect,
 		)
-		event, err := NewAuthorizationSafetyChangedJournalEvent(workspaceID, generation, wire.Epoch, safety)
+		requestDigest, err := ParseDigest(wire.RequestDigest)
+		if err != nil {
+			return nil, true, err
+		}
+		receiptDigest, err := ParseDigest(wire.ReceiptDigest)
+		if err != nil {
+			return nil, true, err
+		}
+		event, err := NewAuthorizationSafetyChangedJournalEvent(
+			workspaceID, generation, wire.Epoch, safety, requestDigest, receiptDigest,
+		)
 		return event, true, err
 	case JournalEventAuthorizationEffectDispatched:
 		var wire authorizationDispatchPayloadWire
