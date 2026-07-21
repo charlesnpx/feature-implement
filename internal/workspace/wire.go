@@ -68,10 +68,11 @@ type mergeUnitWire struct {
 }
 
 type executionConfigWire struct {
-	SchemaVersion int                    `yaml:"schema_version"`
-	Policy        executionPolicyWire    `yaml:"policy"`
-	Profiles      []executionProfileWire `yaml:"profiles"`
-	MergeUnits    []unitExecutionWire    `yaml:"merge_units"`
+	SchemaVersion  int                    `yaml:"schema_version"`
+	Policy         executionPolicyWire    `yaml:"policy"`
+	Profiles       []executionProfileWire `yaml:"profiles"`
+	ReviewProfiles []reviewProfileWire    `yaml:"review_profiles"`
+	MergeUnits     []unitExecutionWire    `yaml:"merge_units"`
 }
 
 type executionPolicyWire struct {
@@ -89,6 +90,12 @@ type executionProfileWire struct {
 	Policy executionPolicyWire `yaml:"policy"`
 }
 
+type reviewProfileWire struct {
+	ID             string `yaml:"id"`
+	Runner         string `yaml:"runner"`
+	ReviewerPolicy string `yaml:"reviewer_policy"`
+}
+
 type unitExecutionWire struct {
 	PlanID            string                     `yaml:"plan_id"`
 	MergeUnitID       string                     `yaml:"merge_unit_id"`
@@ -97,6 +104,12 @@ type unitExecutionWire struct {
 	Boundary          *attemptBoundaryPolicyWire `yaml:"boundary"`
 	CommitProtocol    *commitProtocolWire        `yaml:"commit_protocol"`
 	ReviewFixProtocol *reviewFixProtocolWire     `yaml:"review_fix_protocol"`
+	ReviewLoop        *reviewLoopWire            `yaml:"review_loop"`
+}
+
+type reviewLoopWire struct {
+	Profiles                 []string `yaml:"profiles"`
+	MaxInfrastructureRetries *uint16  `yaml:"max_infrastructure_retries"`
 }
 
 type attemptBoundaryPolicyWire struct {

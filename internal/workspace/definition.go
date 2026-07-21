@@ -394,10 +394,11 @@ func canonicalPlanBytes(plan Plan) ([]byte, error) {
 }
 
 type canonicalExecution struct {
-	SchemaVersion int                      `json:"schema_version"`
-	Policy        canonicalPolicy          `json:"policy"`
-	Profiles      []canonicalProfile       `json:"profiles"`
-	MergeUnits    []canonicalUnitExecution `json:"merge_units"`
+	SchemaVersion  int                      `json:"schema_version"`
+	Policy         canonicalPolicy          `json:"policy"`
+	Profiles       []canonicalProfile       `json:"profiles"`
+	ReviewProfiles []canonicalReviewProfile `json:"review_profiles"`
+	MergeUnits     []canonicalUnitExecution `json:"merge_units"`
 }
 type canonicalPolicy struct {
 	RequirePassingChecks  bool   `json:"require_passing_checks"`
@@ -412,6 +413,11 @@ type canonicalProfile struct {
 	Runner string          `json:"runner"`
 	Policy canonicalPolicy `json:"policy"`
 }
+type canonicalReviewProfile struct {
+	ID             string               `json:"id"`
+	Runner         string               `json:"runner"`
+	ReviewerPolicy ReviewReviewerPolicy `json:"reviewer_policy"`
+}
 type canonicalUnitExecution struct {
 	PlanID            string                      `json:"plan_id"`
 	MergeUnitID       string                      `json:"merge_unit_id"`
@@ -421,6 +427,14 @@ type canonicalUnitExecution struct {
 	SerialSegment     string                      `json:"serial_segment,omitempty"`
 	CommitProtocol    *canonicalCommitProtocol    `json:"commit_protocol,omitempty"`
 	ReviewFixProtocol *canonicalReviewFixProtocol `json:"review_fix_protocol,omitempty"`
+	ReviewLoop        *canonicalReviewLoop        `json:"review_loop,omitempty"`
+}
+
+type canonicalReviewLoop struct {
+	Profiles                 []string `json:"profiles"`
+	MaxReviewRounds          uint16   `json:"max_review_rounds"`
+	MaxReviewFixes           uint16   `json:"max_review_fixes"`
+	MaxInfrastructureRetries uint16   `json:"max_infrastructure_retries"`
 }
 
 type canonicalCommitProtocol struct {
@@ -455,9 +469,17 @@ type canonicalReviewFixProtocol struct {
 }
 
 func canonicalExecutionBytes(config ExecutionConfig) ([]byte, error) {
-	value := canonicalExecution{SchemaVersion: 2, Policy: canonicalizePolicy(config.policy)}
+	value := canonicalExecution{
+		SchemaVersion: 2, Policy: canonicalizePolicy(config.policy),
+		ReviewProfiles: make([]canonicalReviewProfile, 0, len(config.reviewProfiles)),
+	}
 	for _, profile := range config.profiles {
 		value.Profiles = append(value.Profiles, canonicalProfile{ID: profile.id.String(), Runner: profile.runner.String(), Policy: canonicalizePolicy(profile.policy)})
+	}
+	for _, profile := range config.reviewProfiles {
+		value.ReviewProfiles = append(value.ReviewProfiles, canonicalReviewProfile{
+			ID: profile.id.String(), Runner: profile.runner.String(), ReviewerPolicy: profile.reviewerPolicy,
+		})
 	}
 	for _, unit := range config.mergeUnits {
 		canonicalUnit := canonicalUnitExecution{
@@ -472,6 +494,17 @@ func canonicalExecutionBytes(config ExecutionConfig) ([]byte, error) {
 		if unit.reviewFixProtocol != nil {
 			protocol := canonicalizeReviewFixProtocol(*unit.reviewFixProtocol)
 			canonicalUnit.ReviewFixProtocol = &protocol
+		}
+		if unit.reviewLoop != nil {
+			loop := canonicalReviewLoop{
+				Profiles:        make([]string, 0, len(unit.reviewLoop.profiles)),
+				MaxReviewRounds: unit.reviewLoop.maxRounds, MaxReviewFixes: unit.reviewLoop.maxFixes,
+				MaxInfrastructureRetries: unit.reviewLoop.maxInfrastructureRetries,
+			}
+			for _, profile := range unit.reviewLoop.profiles {
+				loop.Profiles = append(loop.Profiles, profile.id.String())
+			}
+			canonicalUnit.ReviewLoop = &loop
 		}
 		value.MergeUnits = append(value.MergeUnits, canonicalUnit)
 	}

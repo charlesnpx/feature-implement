@@ -281,6 +281,9 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 		} else if isAuthorizationJournalEvent(record.event) {
 			// Authorization has its own definition-aware projection. The core
 			// runtime deliberately does not reinterpret its protected payloads.
+		} else if isReviewJournalEvent(record.event) {
+			// Review has its own definition-aware projection. The core attempt
+			// runtime remains the Git and review-fix source of truth.
 		} else {
 			return WorkspaceRuntimeProjection{}, fmt.Errorf("unsupported runtime event %T", record.event)
 		}

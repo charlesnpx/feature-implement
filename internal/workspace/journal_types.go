@@ -29,6 +29,8 @@ const (
 	JournalResourceEvidence       JournalResourceKind = "evidence"
 	JournalResourceCommitProtocol JournalResourceKind = "commit_protocol"
 	JournalResourceReviewFix      JournalResourceKind = "review_fix"
+	JournalResourceReview         JournalResourceKind = "review"
+	JournalResourceReviewProfile  JournalResourceKind = "review_profile"
 	JournalResourceCommitStep     JournalResourceKind = "commit_step"
 	JournalResourceCheck          JournalResourceKind = "check"
 	JournalResourceControlReceipt JournalResourceKind = "control_receipt"
@@ -42,7 +44,7 @@ func (kind JournalResourceKind) valid() bool {
 		JournalResourceSerialSegment, JournalResourceProviderIntent, JournalResourceQueueEntry,
 		JournalResourceBudget, JournalResourceApproval, JournalResourceEvidence,
 		JournalResourceCommitProtocol, JournalResourceReviewFix, JournalResourceCommitStep,
-		JournalResourceCheck, JournalResourceControlReceipt:
+		JournalResourceReview, JournalResourceReviewProfile, JournalResourceCheck, JournalResourceControlReceipt:
 		return true
 	default:
 		return false
@@ -135,6 +137,9 @@ const (
 	JournalEventAuthorizationSegmentCompleted  JournalEventType = "authorization.segment_completed.v2"
 	JournalEventAuthorizationSafetyChanged     JournalEventType = "authorization.safety_changed.v2"
 	JournalEventAuthorizationEffectDispatched  JournalEventType = "authorization.effect_dispatched.v2"
+	JournalEventReviewRoundStarted             JournalEventType = "review.round_started.v2"
+	JournalEventReviewResultRecorded           JournalEventType = "review.result_recorded.v2"
+	JournalEventReviewFixApplied               JournalEventType = "review.fix_applied.v2"
 )
 
 type WorkspaceJournalEvent interface {
@@ -394,6 +399,8 @@ func newJournalAppend(
 			AuthorizationSegmentCompletedJournalEvent, AuthorizationSafetyChangedJournalEvent,
 			AuthorizationEffectDispatchedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("authorization events must use the protected control-plane workflow")
+		case ReviewRoundStartedJournalEvent, ReviewResultRecordedJournalEvent, ReviewFixAppliedJournalEvent:
+			return JournalAppend{}, fmt.Errorf("review events must use the exact-head verifier-backed review workflow")
 		}
 	}
 	if occurredAt.IsZero() {
@@ -431,7 +438,8 @@ func supportedWorkspaceJournalEvent(event WorkspaceJournalEvent) bool {
 		GenerationActivatedJournalEvent, JournalTailRecoveredEvent:
 		return true
 	default:
-		return isAttemptJournalEvent(event) || isCommitJournalEvent(event) || isAuthorizationJournalEvent(event)
+		return isAttemptJournalEvent(event) || isCommitJournalEvent(event) || isAuthorizationJournalEvent(event) ||
+			isReviewJournalEvent(event)
 	}
 }
 
@@ -474,9 +482,12 @@ func validateJournalEventResources(
 		}
 		if !ok {
 			expectedReads, expectedWrites, ok = authorizationJournalEventResources(event)
-			if !ok {
-				return fmt.Errorf("unsupported workspace journal event %T", event)
-			}
+		}
+		if !ok {
+			expectedReads, expectedWrites, ok = reviewJournalEventResources(event)
+		}
+		if !ok {
+			return fmt.Errorf("unsupported workspace journal event %T", event)
 		}
 	}
 	expectedWrites, _ = normalizeJournalWriteSet(expectedWrites)
@@ -601,6 +612,9 @@ func cloneWorkspaceJournalEvent(event WorkspaceJournalEvent) WorkspaceJournalEve
 		if cloned := cloneCommitJournalEvent(event); cloned != nil {
 			return cloned
 		}
-		return cloneAuthorizationJournalEvent(event)
+		if cloned := cloneAuthorizationJournalEvent(event); cloned != nil {
+			return cloned
+		}
+		return cloneReviewJournalEvent(event)
 	}
 }
