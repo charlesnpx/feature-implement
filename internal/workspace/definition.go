@@ -397,7 +397,7 @@ type canonicalExecution struct {
 	SchemaVersion  int                      `json:"schema_version"`
 	Policy         canonicalPolicy          `json:"policy"`
 	Profiles       []canonicalProfile       `json:"profiles"`
-	ReviewProfiles []canonicalReviewProfile `json:"review_profiles"`
+	ReviewProfiles []canonicalReviewProfile `json:"review_profiles,omitempty"`
 	MergeUnits     []canonicalUnitExecution `json:"merge_units"`
 }
 type canonicalPolicy struct {
@@ -469,10 +469,7 @@ type canonicalReviewFixProtocol struct {
 }
 
 func canonicalExecutionBytes(config ExecutionConfig) ([]byte, error) {
-	value := canonicalExecution{
-		SchemaVersion: 2, Policy: canonicalizePolicy(config.policy),
-		ReviewProfiles: make([]canonicalReviewProfile, 0, len(config.reviewProfiles)),
-	}
+	value := canonicalExecution{SchemaVersion: 2, Policy: canonicalizePolicy(config.policy)}
 	for _, profile := range config.profiles {
 		value.Profiles = append(value.Profiles, canonicalProfile{ID: profile.id.String(), Runner: profile.runner.String(), Policy: canonicalizePolicy(profile.policy)})
 	}

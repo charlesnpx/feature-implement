@@ -3,6 +3,7 @@ package workspace_test
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -144,6 +145,28 @@ func TestReviewConfigurationPreservesLoopOrderAndRejectsUnsafeSchemas(t *testing
 	if _, err := workspace.DecodeExecutionConfig([]byte(withoutFixProtocol)); err == nil ||
 		!strings.Contains(err.Error(), "requires review_fix_protocol") {
 		t.Fatalf("review loop without fix protocol error = %v", err)
+	}
+}
+
+func TestReviewResultRejectsAggregatePayloadThatCannotFitJournal(t *testing.T) {
+	findings := make([]workspace.ReviewFinding, 0, 128)
+	for index := 0; index < 128; index++ {
+		finding, err := workspace.NewReviewFinding(workspace.ReviewFindingOptions{
+			Severity: workspace.ReviewSeverityLow, Category: workspace.MustID("journal-bound"),
+			Summary:        fmt.Sprintf("%03d:%s", index, strings.Repeat("x", 8188)),
+			EvidenceDigest: workspace.DigestBytes([]byte(fmt.Sprintf("oversized-finding-%d", index))),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		findings = append(findings, finding)
+	}
+	if _, err := workspace.NewReviewResultSubmission(workspace.ReviewResultSubmissionOptions{
+		RequestDigest:    workspace.DigestBytes([]byte("oversized-review-request")),
+		ReviewerInstance: workspace.MustID("oversized-reviewer"), Status: workspace.ReviewResultCompleted,
+		Findings: findings, Isolation: workspace.StrictReviewIsolationProof(),
+	}); err == nil || !strings.Contains(err.Error(), "aggregate safe journal bound") {
+		t.Fatalf("oversized aggregate review result error = %v", err)
 	}
 }
 
@@ -413,6 +436,41 @@ func TestReviewLifecycleVerifiesSignedExactHeadEvidenceAndBoundaryReadiness(t *t
 		readiness.Round() != 1 || readiness.Digest().IsZero() {
 		t.Fatalf("review readiness = %#v error=%v", readiness, err)
 	}
+	manifest := harness.definition.Workspace()
+	if readiness.Purpose() != workspace.ReviewMergeReadinessPurpose ||
+		readiness.WorkspaceID() != manifest.ID() || readiness.Generation() != harness.definition.Generation() ||
+		readiness.MergeUnit() != harness.attempt.MergeUnit() || readiness.Repository() != manifest.Repository() ||
+		readiness.Remote() != manifest.Remote() {
+		t.Fatalf("review readiness scope = %#v", readiness)
+	}
+	type readinessJSON struct {
+		SchemaVersion int    `json:"schema_version"`
+		Purpose       string `json:"purpose"`
+		WorkspaceID   string `json:"workspace_id"`
+		Generation    string `json:"generation"`
+		PlanID        string `json:"plan_id"`
+		MergeUnitID   string `json:"merge_unit_id"`
+		Repository    string `json:"repository"`
+		Remote        string `json:"remote"`
+		AttemptID     string `json:"attempt_id"`
+		Round         uint16 `json:"round"`
+		Head          string `json:"head"`
+		Tree          string `json:"tree"`
+		Loop          string `json:"loop_digest"`
+	}
+	canonicalReadiness, err := json.Marshal(readinessJSON{
+		SchemaVersion: 2, Purpose: workspace.ReviewMergeReadinessPurpose,
+		WorkspaceID: manifest.ID().String(), Generation: harness.definition.Generation().String(),
+		PlanID:      harness.attempt.MergeUnit().PlanID().String(),
+		MergeUnitID: harness.attempt.MergeUnit().MergeUnitID().String(),
+		Repository:  manifest.Repository().String(), Remote: manifest.Remote(),
+		AttemptID: harness.attempt.AttemptID().String(), Round: 1,
+		Head: harness.attempt.VerifiedHead().String(), Tree: harness.tree.String(),
+		Loop: mustReviewState(t, harness.journal, harness.definition, harness.attempt.AttemptID()).Loop().Digest().String(),
+	})
+	if err != nil || readiness.Digest() != workspace.DigestBytes(canonicalReadiness) {
+		t.Fatalf("review readiness digest is not scoped canonically: %v", err)
+	}
 	result, err := workspace.RecordAttemptBoundary(
 		context.Background(), harness.journal, harness.definition, harness.git,
 		workspace.RecordAttemptBoundaryRequest{
@@ -561,6 +619,7 @@ func TestReviewInvocationReservationSerializesRunnerAndCountsRawFailureIdentity(
 		}
 		entered, release := make(chan struct{}), make(chan struct{})
 		firstErr := make(chan error, 1)
+		idempotencyKey := workspace.DigestBytes([]byte("serialized-review-one"))
 		go func() {
 			_, _, err := workspace.ExecuteNextReviewProfile(
 				context.Background(), harness.journal, harness.definition, harness.repository,
@@ -571,13 +630,31 @@ func TestReviewInvocationReservationSerializesRunnerAndCountsRawFailureIdentity(
 				}},
 				harness.verifier, workspace.ExecuteNextReviewProfileRequest{
 					AttemptID: harness.attempt.AttemptID(), ReviewerInstance: workspace.MustID("security-one"),
-					IdempotencyKey: workspace.DigestBytes([]byte("serialized-review-one")),
+					IdempotencyKey: idempotencyKey,
 					OccurredAt:     mustTime(t, "2026-07-21T11:15:01Z"),
 				},
 			)
 			firstErr <- err
 		}()
 		<-entered
+		sameKeyRunnerCalled := false
+		if _, _, err := workspace.ExecuteNextReviewProfile(
+			context.Background(), harness.journal, harness.definition, harness.repository,
+			reviewRunnerStub{run: func(workspace.ReviewInvocation) (workspace.ReviewRunnerOutput, error) {
+				sameKeyRunnerCalled = true
+				return workspace.ReviewRunnerOutput{}, errors.New("same-key runner was invoked")
+			}},
+			harness.verifier, workspace.ExecuteNextReviewProfileRequest{
+				AttemptID: harness.attempt.AttemptID(), ReviewerInstance: workspace.MustID("security-one"),
+				IdempotencyKey: idempotencyKey,
+				OccurredAt:     mustTime(t, "2026-07-21T11:15:01.5Z"),
+			},
+		); err == nil || !strings.Contains(err.Error(), "durable executor claim") {
+			t.Fatalf("same-key pending review invocation error = %v", err)
+		}
+		if sameKeyRunnerCalled {
+			t.Fatal("same-key retry invoked a second reviewer")
+		}
 		if _, _, err := workspace.ExecuteNextReviewProfile(
 			context.Background(), harness.journal, harness.definition, harness.repository,
 			reviewRunnerStub{run: func(workspace.ReviewInvocation) (workspace.ReviewRunnerOutput, error) {
@@ -594,6 +671,23 @@ func TestReviewInvocationReservationSerializesRunnerAndCountsRawFailureIdentity(
 		close(release)
 		if err := <-firstErr; err != nil {
 			t.Fatalf("durably reserved review invocation: %v", err)
+		}
+		retryRunnerCalled := false
+		retried, retryRecord, err := workspace.ExecuteNextReviewProfile(
+			context.Background(), harness.journal, harness.definition, harness.repository,
+			reviewRunnerStub{run: func(workspace.ReviewInvocation) (workspace.ReviewRunnerOutput, error) {
+				retryRunnerCalled = true
+				return workspace.ReviewRunnerOutput{}, errors.New("completed retry runner was invoked")
+			}},
+			harness.verifier, workspace.ExecuteNextReviewProfileRequest{
+				AttemptID: harness.attempt.AttemptID(), ReviewerInstance: workspace.MustID("security-one"),
+				IdempotencyKey: idempotencyKey,
+				OccurredAt:     mustTime(t, "2026-07-21T11:15:03Z"),
+			},
+		)
+		if err != nil || retryRecord.Sequence() != 0 ||
+			retried.Submission().Digest() != submission.Digest() || retryRunnerCalled {
+			t.Fatalf("completed exact retry = %#v record=%#v runner=%v error=%v", retried, retryRecord, retryRunnerCalled, err)
 		}
 	})
 
@@ -618,6 +712,7 @@ func TestReviewInvocationReservationSerializesRunnerAndCountsRawFailureIdentity(
 			t.Fatalf("fresh review request = %#v ok=%v err=%v", correctness, ok, err)
 		}
 		rawFailure := errors.New("reviewer process disappeared")
+		rawFailureKey := workspace.DigestBytes([]byte("raw-failure-one"))
 		if _, _, err := workspace.ExecuteNextReviewProfile(
 			context.Background(), harness.journal, harness.definition, harness.repository,
 			reviewRunnerStub{run: func(workspace.ReviewInvocation) (workspace.ReviewRunnerOutput, error) {
@@ -625,11 +720,29 @@ func TestReviewInvocationReservationSerializesRunnerAndCountsRawFailureIdentity(
 			}},
 			harness.verifier, workspace.ExecuteNextReviewProfileRequest{
 				AttemptID: harness.attempt.AttemptID(), ReviewerInstance: workspace.MustID("correctness-one"),
-				IdempotencyKey: workspace.DigestBytes([]byte("raw-failure-one")),
+				IdempotencyKey: rawFailureKey,
 				OccurredAt:     mustTime(t, "2026-07-21T11:16:02Z"),
 			},
 		); !errors.Is(err, rawFailure) {
 			t.Fatalf("raw runner failure = %v", err)
+		}
+		failedRetryRunnerCalled := false
+		if _, _, err := workspace.ExecuteNextReviewProfile(
+			context.Background(), harness.journal, harness.definition, harness.repository,
+			reviewRunnerStub{run: func(workspace.ReviewInvocation) (workspace.ReviewRunnerOutput, error) {
+				failedRetryRunnerCalled = true
+				return workspace.ReviewRunnerOutput{}, errors.New("failed retry runner was invoked")
+			}},
+			harness.verifier, workspace.ExecuteNextReviewProfileRequest{
+				AttemptID: harness.attempt.AttemptID(), ReviewerInstance: workspace.MustID("correctness-one"),
+				IdempotencyKey: rawFailureKey,
+				OccurredAt:     mustTime(t, "2026-07-21T11:16:02.5Z"),
+			},
+		); err == nil || !strings.Contains(err.Error(), "already failed with digest") {
+			t.Fatalf("failed exact retry error = %v", err)
+		}
+		if failedRetryRunnerCalled {
+			t.Fatal("failed exact retry invoked a second reviewer")
 		}
 		state = mustReviewState(t, harness.journal, harness.definition, harness.attempt.AttemptID())
 		retry, ok, err := state.NextRequest()

@@ -280,6 +280,7 @@ type ReviewInvocationReservationResult struct {
 	state       ReviewState
 	reservation ReviewInvocationReservation
 	record      JournalRecord
+	acquired    bool
 }
 
 func (result ReviewInvocationReservationResult) State() ReviewState {
@@ -289,6 +290,40 @@ func (result ReviewInvocationReservationResult) Reservation() ReviewInvocationRe
 	return result.reservation
 }
 func (result ReviewInvocationReservationResult) Record() JournalRecord { return result.record }
+func (result ReviewInvocationReservationResult) Acquired() bool        { return result.acquired }
+
+type reviewInvocationOutcome struct {
+	reservation ReviewInvocationReservation
+	result      VerifiedReviewResult
+	failure     ReviewInvocationFailure
+	hasResult   bool
+	hasFailure  bool
+}
+
+func findReviewInvocationOutcome(state ReviewState, idempotencyKey Digest) (reviewInvocationOutcome, bool) {
+	for _, round := range state.rounds {
+		for _, reservation := range round.reservations {
+			if reservation.idempotencyKey != idempotencyKey {
+				continue
+			}
+			outcome := reviewInvocationOutcome{reservation: reservation}
+			for _, result := range round.attempts {
+				if result.reservationDigest == reservation.digest {
+					outcome.result, outcome.hasResult = result, true
+					return outcome, true
+				}
+			}
+			for _, failure := range round.failures {
+				if failure.reservationDigest == reservation.digest {
+					outcome.failure, outcome.hasFailure = failure, true
+					return outcome, true
+				}
+			}
+			return outcome, true
+		}
+	}
+	return reviewInvocationOutcome{}, false
+}
 
 func ReserveAttemptReviewInvocation(
 	journal *WorkspaceJournal,
@@ -317,6 +352,14 @@ func ReserveAttemptReviewInvocation(
 	}
 	if err := validateAttemptReviewProtocolState(definition, unit, attempt, state, true, false); err != nil {
 		return ReviewInvocationReservationResult{}, err
+	}
+	if outcome, exists := findReviewInvocationOutcome(state, request.IdempotencyKey); exists {
+		if outcome.reservation.reviewerInstance != request.ReviewerInstance {
+			return ReviewInvocationReservationResult{}, fmt.Errorf("review invocation idempotency key is already bound to another reviewer")
+		}
+		return ReviewInvocationReservationResult{
+			state: state, reservation: outcome.reservation,
+		}, nil
 	}
 	pending, ok, err := state.NextRequest()
 	if err != nil || !ok {
@@ -357,7 +400,9 @@ func ReserveAttemptReviewInvocation(
 		return ReviewInvocationReservationResult{}, err
 	}
 	state, _ = updated.State(request.AttemptID)
-	return ReviewInvocationReservationResult{state: state, reservation: reservation, record: record}, nil
+	return ReviewInvocationReservationResult{
+		state: state, reservation: reservation, record: record, acquired: true,
+	}, nil
 }
 
 type RecordAttemptReviewResultRequest struct {
@@ -585,6 +630,25 @@ func ExecuteNextReviewProfile(
 	})
 	if err != nil {
 		return VerifiedReviewResult{}, JournalRecord{}, err
+	}
+	if !reserved.acquired {
+		outcome, exists := findReviewInvocationOutcome(reserved.state, request.IdempotencyKey)
+		if !exists || outcome.reservation.digest != reserved.reservation.digest {
+			return VerifiedReviewResult{}, JournalRecord{}, fmt.Errorf("durable review invocation outcome is unavailable")
+		}
+		if outcome.hasResult {
+			return outcome.result, JournalRecord{}, nil
+		}
+		if outcome.hasFailure {
+			return VerifiedReviewResult{}, JournalRecord{}, fmt.Errorf(
+				"review invocation %s already failed with digest %s",
+				outcome.reservation.digest, outcome.failure.failureDigest,
+			)
+		}
+		return VerifiedReviewResult{}, JournalRecord{}, fmt.Errorf(
+			"review invocation %s is already pending under its durable executor claim",
+			outcome.reservation.digest,
+		)
 	}
 	_, projection, err := readReviewRuntime(journal, definition)
 	if err != nil {
@@ -884,19 +948,33 @@ func RecordReviewFixApplication(
 	return updated, record, nil
 }
 
+const ReviewMergeReadinessPurpose = "review_merge_readiness"
+
 type ReviewReadiness struct {
-	attemptID ID
-	round     uint16
-	head      GitObjectID
-	tree      GitObjectID
-	digest    Digest
+	purpose    string
+	workspace  ID
+	generation Digest
+	attemptID  ID
+	mergeUnit  MergeUnitReference
+	repository RepositoryIdentity
+	remote     string
+	round      uint16
+	head       GitObjectID
+	tree       GitObjectID
+	digest     Digest
 }
 
-func (readiness ReviewReadiness) AttemptID() ID     { return readiness.attemptID }
-func (readiness ReviewReadiness) Round() uint16     { return readiness.round }
-func (readiness ReviewReadiness) Head() GitObjectID { return readiness.head }
-func (readiness ReviewReadiness) Tree() GitObjectID { return readiness.tree }
-func (readiness ReviewReadiness) Digest() Digest    { return readiness.digest }
+func (readiness ReviewReadiness) Purpose() string                { return readiness.purpose }
+func (readiness ReviewReadiness) WorkspaceID() ID                { return readiness.workspace }
+func (readiness ReviewReadiness) Generation() Digest             { return readiness.generation }
+func (readiness ReviewReadiness) AttemptID() ID                  { return readiness.attemptID }
+func (readiness ReviewReadiness) MergeUnit() MergeUnitReference  { return readiness.mergeUnit }
+func (readiness ReviewReadiness) Repository() RepositoryIdentity { return readiness.repository }
+func (readiness ReviewReadiness) Remote() string                 { return readiness.remote }
+func (readiness ReviewReadiness) Round() uint16                  { return readiness.round }
+func (readiness ReviewReadiness) Head() GitObjectID              { return readiness.head }
+func (readiness ReviewReadiness) Tree() GitObjectID              { return readiness.tree }
+func (readiness ReviewReadiness) Digest() Digest                 { return readiness.digest }
 
 func ConfirmReviewMergeReadiness(
 	ctx context.Context,
@@ -935,9 +1013,21 @@ func ConfirmReviewMergeReadiness(
 	if err != nil || !snapshot.clean || snapshot.head != state.head || snapshot.tree != state.tree {
 		return ReviewReadiness{}, fmt.Errorf("review readiness is stale against repository head/tree")
 	}
-	readiness := ReviewReadiness{attemptID: attemptID, round: state.RoundsUsed(), head: state.head, tree: state.tree}
+	readiness := ReviewReadiness{
+		purpose: ReviewMergeReadinessPurpose, workspace: definition.workspace.id,
+		generation: definition.generation, attemptID: attemptID, mergeUnit: attempt.mergeUnit,
+		repository: attempt.repository, remote: definition.workspace.remote,
+		round: state.RoundsUsed(), head: state.head, tree: state.tree,
+	}
 	type readinessJSON struct {
 		SchemaVersion int    `json:"schema_version"`
+		Purpose       string `json:"purpose"`
+		WorkspaceID   string `json:"workspace_id"`
+		Generation    string `json:"generation"`
+		PlanID        string `json:"plan_id"`
+		MergeUnitID   string `json:"merge_unit_id"`
+		Repository    string `json:"repository"`
+		Remote        string `json:"remote"`
 		AttemptID     string `json:"attempt_id"`
 		Round         uint16 `json:"round"`
 		Head          string `json:"head"`
@@ -945,8 +1035,11 @@ func ConfirmReviewMergeReadiness(
 		Loop          string `json:"loop_digest"`
 	}
 	canonical, _ := json.Marshal(readinessJSON{
-		SchemaVersion: 2, AttemptID: attemptID.String(), Round: readiness.round, Head: readiness.head.String(),
-		Tree: readiness.tree.String(), Loop: state.loop.digest.String(),
+		SchemaVersion: 2, Purpose: readiness.purpose, WorkspaceID: readiness.workspace.String(),
+		Generation: readiness.generation.String(), PlanID: readiness.mergeUnit.planID.String(),
+		MergeUnitID: readiness.mergeUnit.mergeUnitID.String(), Repository: readiness.repository.String(),
+		Remote: readiness.remote, AttemptID: attemptID.String(), Round: readiness.round,
+		Head: readiness.head.String(), Tree: readiness.tree.String(), Loop: state.loop.digest.String(),
 	})
 	readiness.digest = DigestBytes(canonical)
 	return readiness, nil

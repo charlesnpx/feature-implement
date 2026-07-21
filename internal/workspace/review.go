@@ -253,6 +253,9 @@ func NewReviewResultSubmission(options ReviewResultSubmissionOptions) (ReviewRes
 	if err != nil {
 		return ReviewResultSubmission{}, err
 	}
+	if len(canonical) > MaxJournalRecordBytes-2*reviewJournalRecordSafetyBytes {
+		return ReviewResultSubmission{}, fmt.Errorf("review result exceeds the aggregate safe journal bound")
+	}
 	result.digest = DigestBytes(canonical)
 	return result, nil
 }

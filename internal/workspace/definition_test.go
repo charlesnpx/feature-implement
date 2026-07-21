@@ -260,6 +260,22 @@ func TestSourceAndSemanticHashesHaveDistinctContracts(t *testing.T) {
 	}
 }
 
+func TestNoReviewExecutionCanonicalFormPreservesPreReviewSemanticHash(t *testing.T) {
+	fixture := newDefinitionFixture(t)
+	definition, err := workspace.ValidateDefinition(fixture.sources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution := artifactByKind(t, definition, workspace.ArtifactExecutionConfig)
+	if strings.Contains(string(execution.CanonicalBytes()), "review_profiles") {
+		t.Fatalf("no-review canonical execution gained a review_profiles field: %s", execution.CanonicalBytes())
+	}
+	const preReviewSemanticHash = "sha256:005977c9af3bfe559b2adf55ec1e15bac02989dadf09e305c5174c3fe9ebba6d"
+	if got := execution.SemanticHash().String(); got != preReviewSemanticHash {
+		t.Fatalf("no-review execution semantic hash = %s, want %s", got, preReviewSemanticHash)
+	}
+}
+
 func TestAuthorityChangesCreateNewGeneration(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	first, err := workspace.ValidateDefinition(fixture.sources)
