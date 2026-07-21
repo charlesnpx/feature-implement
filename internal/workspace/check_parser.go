@@ -71,7 +71,9 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(result.stdout))
 	scanner.Buffer(make([]byte, 64*1024), maxAttemptGitOutputBytes)
 	failures := make(map[string]struct{})
-	structured, terminal, packageFailure, buildFailure := 0, false, false, false
+	namedFailurePackages := make(map[string]struct{})
+	packageFailures := make(map[string]struct{})
+	structured, terminal, buildFailure := 0, false, false
 	crashed, timedOut := false, false
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
@@ -111,8 +113,9 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 					return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 				}
 				failures[identity] = struct{}{}
+				namedFailurePackages[event.Package] = struct{}{}
 			} else {
-				packageFailure, terminal = true, true
+				packageFailures[event.Package], terminal = struct{}{}, true
 				if event.FailedBuild != "" {
 					buildFailure = true
 				}
@@ -133,21 +136,31 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 	if buildFailure {
 		return NewParsedCheckOutcome(CheckOutcomeCompilationFailed, nil)
 	}
+	setupFailure := false
+	for packageName := range packageFailures {
+		if _, hasNamedFailure := namedFailurePackages[packageName]; !hasNamedFailure {
+			setupFailure = true
+			break
+		}
+	}
 	identities := make([]string, 0, len(failures))
 	for identity := range failures {
 		identities = append(identities, identity)
 	}
 	sort.Strings(identities)
 	if result.exitCode == 0 {
-		if packageFailure || len(identities) != 0 {
+		if len(packageFailures) != 0 || len(identities) != 0 {
 			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 		}
 		return NewParsedCheckOutcome(CheckOutcomePassed, nil)
 	}
+	if setupFailure {
+		return NewParsedCheckOutcome(CheckOutcomeSetupFailed, nil)
+	}
 	if len(identities) != 0 {
 		return NewParsedCheckOutcome(CheckOutcomeAssertionFailed, identities)
 	}
-	if packageFailure {
+	if len(packageFailures) != 0 {
 		return NewParsedCheckOutcome(CheckOutcomeSetupFailed, nil)
 	}
 	return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)

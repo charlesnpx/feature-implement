@@ -268,7 +268,7 @@ func NewCommitPathPolicy(allowed, frozen []string) (CommitPathPolicy, error) {
 		Allowed []string `json:"allowed_paths"`
 		Frozen  []string `json:"frozen_paths"`
 	}
-	value := canonical{Allowed: append([]string(nil), allowed...), Frozen: append([]string(nil), frozen...)}
+	value := canonical{Allowed: append([]string{}, allowed...), Frozen: append([]string{}, frozen...)}
 	content, _ := json.Marshal(value)
 	return CommitPathPolicy{allowed: allowedPatterns, frozen: frozenPatterns, digest: DigestBytes(content)}, nil
 }

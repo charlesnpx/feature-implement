@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -18,6 +19,58 @@ type journalCommitGit struct {
 	commit      workspace.GitCommitInspection
 	createCalls int
 	publishes   int
+}
+
+func TestJournaledCommitProtocolStartsFromRealStagedWorktree(t *testing.T) {
+	seed, _, base := newProtocolRepository(t)
+	harness := newConfiguredAttemptHarness(t)
+	harness.base = base
+	attempt := harness.reserve(t, "2026-07-21T10:55:00Z")
+	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T10:56:00Z")
+
+	runGitSetup(t, "", "clone", "--no-local", seed, attempt.Worktree())
+	runGitSetup(t, attempt.Worktree(), "config", "user.name", "Protocol Test")
+	runGitSetup(t, attempt.Worktree(), "config", "user.email", "protocol@example.test")
+	runGitSetup(t, attempt.Worktree(), "switch", "-c", attempt.Branch(), rawGitObject(base))
+	tracked := filepath.Join(attempt.Worktree(), "src", "protocol.go")
+	if err := os.WriteFile(tracked, []byte("package protocol\n\nconst Durable = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitSetup(t, attempt.Worktree(), "add", "src/protocol.go")
+
+	runner := &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())}
+	shell, err := workspace.NewCommitProtocolShell(workspace.DefaultLocalCommitGitAdapter(), runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := workspace.ExecuteAttemptCommitStep(
+		context.Background(), harness.journal, harness.definition, shell,
+		workspace.ExecuteAttemptCommitStepRequest{
+			AttemptID: attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T10:57:00Z"),
+		},
+	)
+	if err != nil {
+		t.Fatalf("execute durable protocol from staged worktree: %v", err)
+	}
+	state, configured := result.Protocol()
+	head := parseGitHead(t, attempt.Worktree())
+	if !configured || state.Phase() != workspace.CommitProtocolComplete || state.Head() != head ||
+		result.Attempt().VerifiedHead() != head || head == base || runnerCallCount(runner) != 1 {
+		t.Fatalf("result=%#v state=%#v configured=%v head=%s checks=%d", result, state, configured, head, runnerCallCount(runner))
+	}
+	snapshot, err := harness.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := workspace.RebuildWorkspaceRuntime(snapshot)
+	if err != nil {
+		t.Fatalf("replay durable protocol: %v", err)
+	}
+	replayedAttempt, exists := replayed.Attempt(attempt.AttemptID())
+	replayedState, hasProtocol := replayedAttempt.CommitProtocol()
+	if !exists || !hasProtocol || replayedState.Phase() != workspace.CommitProtocolComplete || replayedState.Head() != head {
+		t.Fatalf("replayed attempt=%#v exists=%v protocol=%#v hasProtocol=%v", replayedAttempt, exists, replayedState, hasProtocol)
+	}
 }
 
 func (git *journalCommitGit) InspectStaged(context.Context, string, string) (workspace.StagedCommitInspection, error) {

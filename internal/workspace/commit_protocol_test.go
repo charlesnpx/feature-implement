@@ -255,6 +255,31 @@ func TestStructuredCheckParsersRejectGenericAndWrongFailures(t *testing.T) {
 	}
 }
 
+func TestGoTestParserDoesNotHideSetupFailureBehindExpectedTestFailure(t *testing.T) {
+	output := []byte(strings.Join([]string{
+		`{"Action":"fail","Package":"example/a","Test":"TestExpected"}`,
+		`{"Action":"fail","Package":"example/a"}`,
+		`{"Action":"fail","Package":"example/b"}`,
+		"",
+	}, "\n"))
+	result := mustCheckResult(
+		t, workspace.CheckExited, 1, "", output, nil, workspace.StrictCheckIsolationProof(),
+	)
+	outcome, err := workspace.ParseCheckOutcome(workspace.CheckParserGoTestJSON, result)
+	if err != nil || outcome.Kind() != workspace.CheckOutcomeSetupFailed || len(outcome.Identities()) != 0 {
+		t.Fatalf("mixed-package outcome = %#v err=%v", outcome, err)
+	}
+	expected, err := workspace.NewCheckExpectation(
+		workspace.CheckExpectationExpectedTestFailure, []string{"example/a::TestExpected"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expected.SatisfiedBy(outcome) {
+		t.Fatal("package setup failure satisfied an expected test-failure check")
+	}
+}
+
 func TestAssertionAndDiagnosticParsersRequireExactStructuredIdentities(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -377,6 +402,37 @@ func TestCommitProtocolReducerOrdersCommitAndChecksAndInvalidatesChecksOnRebase(
 	completed := reduction.State().CompletedSteps()
 	if len(completed) != 1 || completed[0].Commit().Commit() != newCommit || len(completed[0].Checks()) != 0 {
 		t.Fatalf("rebased state = %#v", completed)
+	}
+}
+
+func TestCommitCheckEvidenceRejectsOutcomeUnrelatedToProcessResult(t *testing.T) {
+	generation := workspace.DigestBytes([]byte("generation"))
+	base, tree, commit := mustGitObject(t, '1'), mustGitObject(t, '2'), mustGitObject(t, '3')
+	step, check := protocolTestStep(t, "protocol-step", "Implement protocol")
+	diff := addedDiff(t, "src/protocol.go", mustGitObject(t, '4'))
+	commitEvidence, err := workspace.NewCommitObjectEvidence(
+		generation, step.ID(), 1, commit, base, tree,
+		step.Message().Subject(), "", diff, step.Paths().Digest(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	passOutcome, err := workspace.ParseCheckOutcome(
+		workspace.CheckParserGoTestJSON,
+		passingCheckResult(t, workspace.StrictCheckIsolationProof()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failingResult := mustCheckResult(
+		t, workspace.CheckExited, 1, "",
+		[]byte("{\"Action\":\"fail\",\"Package\":\"example/pkg\",\"Test\":\"TestBroken\"}\n{\"Action\":\"fail\",\"Package\":\"example/pkg\"}\n"),
+		nil, workspace.StrictCheckIsolationProof(),
+	)
+	if _, err := workspace.NewCommitCheckEvidence(
+		generation, step, check, commitEvidence, failingResult, passOutcome,
+	); err == nil || !strings.Contains(err.Error(), "does not match its process result") {
+		t.Fatalf("unrelated outcome error = %v", err)
 	}
 }
 

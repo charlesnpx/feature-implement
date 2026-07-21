@@ -329,8 +329,20 @@ func ensureAttemptCommitProtocolStarted(
 			configured: true, attempt: attempt, protocol: cloneCommitProtocolState(*attempt.commitProtocol),
 		}, nil
 	}
-	if err := shell.git.VerifyCleanWorktree(ctx, attempt.worktree, attempt.branch, attempt.verifiedHead); err != nil {
-		return AttemptCommitProtocolResult{}, fmt.Errorf("verify attempt before commit protocol start: %w", err)
+	inspection, err := shell.git.InspectStaged(ctx, attempt.worktree, attempt.branch)
+	if err != nil {
+		return AttemptCommitProtocolResult{}, fmt.Errorf("inspect attempt before commit protocol start: %w", err)
+	}
+	initial, err := NewCommitProtocolState(definition.generation, attempt.verifiedHead, protocol)
+	if err != nil {
+		return AttemptCommitProtocolResult{}, err
+	}
+	stage, err := NewStageCommitStep(inspection, request.Body)
+	if err != nil {
+		return AttemptCommitProtocolResult{}, err
+	}
+	if _, err := ReduceCommitProtocol(initial, stage); err != nil {
+		return AttemptCommitProtocolResult{}, fmt.Errorf("preflight first configured commit: %w", err)
 	}
 	event, err := NewCommitProtocolStartedJournalEvent(
 		definition.workspace.id, definition.generation, attempt.attemptID, attempt.verifiedHead, protocol,

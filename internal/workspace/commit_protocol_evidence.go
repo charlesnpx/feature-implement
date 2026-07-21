@@ -674,6 +674,13 @@ func NewCommitCheckEvidence(
 	if generation != commit.generation || step.id != commit.stepID || !result.isolation.Strict() {
 		return CommitCheckEvidence{}, fmt.Errorf("check evidence generation, step, or isolation does not match")
 	}
+	parsed, err := ParseCheckOutcome(check.parser, result)
+	if err != nil {
+		return CommitCheckEvidence{}, fmt.Errorf("parse check evidence outcome: %w", err)
+	}
+	if parsed.digest != outcome.digest {
+		return CommitCheckEvidence{}, fmt.Errorf("check evidence outcome does not match its process result")
+	}
 	if !check.expectation.SatisfiedBy(outcome) {
 		return CommitCheckEvidence{}, fmt.Errorf("check %s outcome %s does not satisfy %s", check.id, outcome.kind, check.expectation.kind)
 	}
