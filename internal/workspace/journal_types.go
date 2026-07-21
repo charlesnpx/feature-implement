@@ -16,6 +16,12 @@ const (
 	JournalResourceGeneration     JournalResourceKind = "generation"
 	JournalResourceRecovery       JournalResourceKind = "recovery"
 	JournalResourceAttempt        JournalResourceKind = "attempt"
+	JournalResourceMergeUnit      JournalResourceKind = "merge_unit"
+	JournalResourceLease          JournalResourceKind = "lease"
+	JournalResourceAuthorization  JournalResourceKind = "authorization"
+	JournalResourceOrchestration  JournalResourceKind = "orchestration"
+	JournalResourceGoal           JournalResourceKind = "goal"
+	JournalResourceSerialSegment  JournalResourceKind = "serial_segment"
 	JournalResourceProviderIntent JournalResourceKind = "provider_intent"
 	JournalResourceQueueEntry     JournalResourceKind = "queue_entry"
 	JournalResourceBudget         JournalResourceKind = "budget"
@@ -26,7 +32,9 @@ const (
 func (kind JournalResourceKind) valid() bool {
 	switch kind {
 	case JournalResourceWorkspace, JournalResourceGeneration, JournalResourceRecovery,
-		JournalResourceAttempt, JournalResourceProviderIntent, JournalResourceQueueEntry,
+		JournalResourceAttempt, JournalResourceMergeUnit, JournalResourceLease,
+		JournalResourceAuthorization, JournalResourceOrchestration, JournalResourceGoal,
+		JournalResourceSerialSegment, JournalResourceProviderIntent, JournalResourceQueueEntry,
 		JournalResourceBudget, JournalResourceApproval, JournalResourceEvidence:
 		return true
 	default:
@@ -94,10 +102,18 @@ func (revision JournalResourceRevision) Revision() uint64          { return revi
 type JournalEventType string
 
 const (
-	JournalEventWorkspaceInitialized JournalEventType = "workspace.initialized.v2"
-	JournalEventCandidateStored      JournalEventType = "generation.candidate_stored.v2"
-	JournalEventGenerationActivated  JournalEventType = "generation.activated.v2"
-	JournalEventTailRecovered        JournalEventType = "journal.tail_recovered.v2"
+	JournalEventWorkspaceInitialized           JournalEventType = "workspace.initialized.v2"
+	JournalEventCandidateStored                JournalEventType = "generation.candidate_stored.v2"
+	JournalEventGenerationActivated            JournalEventType = "generation.activated.v2"
+	JournalEventTailRecovered                  JournalEventType = "journal.tail_recovered.v2"
+	JournalEventAttemptReserved                JournalEventType = "attempt.reserved.v2"
+	JournalEventAttemptMaterializationIntended JournalEventType = "attempt.materialization_intended.v2"
+	JournalEventAttemptStarted                 JournalEventType = "attempt.started.v2"
+	JournalEventAttemptBoundary                JournalEventType = "attempt.boundary_reached.v2"
+	JournalEventNextGoalIntended               JournalEventType = "attempt.next_goal_intended.v2"
+	JournalEventOrchestrationAck               JournalEventType = "attempt.orchestration_acknowledged.v2"
+	JournalEventOwnerResponse                  JournalEventType = "attempt.owner_response_recorded.v2"
+	JournalEventAttemptResumed                 JournalEventType = "attempt.resumed.v2"
 )
 
 type WorkspaceJournalEvent interface {
@@ -331,6 +347,22 @@ func newJournalAppend(
 			if event.recovered {
 				return JournalAppend{}, fmt.Errorf("recovered candidates must use the orphan recovery workflow")
 			}
+		case AttemptOrchestrationAcknowledgedJournalEvent:
+			return JournalAppend{}, fmt.Errorf("orchestration acknowledgements must use the idempotent acknowledgement workflow")
+		case AttemptNextGoalIntendedJournalEvent:
+			return JournalAppend{}, fmt.Errorf("next-goal intents must use the durable intent workflow")
+		case AttemptOwnerResponseJournalEvent:
+			return JournalAppend{}, fmt.Errorf("owner responses must use the verifier-backed response workflow")
+		case AttemptResumedJournalEvent:
+			return JournalAppend{}, fmt.Errorf("attempt resume must use the verified resume workflow")
+		case AttemptReservedJournalEvent:
+			return JournalAppend{}, fmt.Errorf("attempt reservation must use the ref-verified reservation workflow")
+		case AttemptMaterializationIntendedJournalEvent:
+			return JournalAppend{}, fmt.Errorf("materialization intent must use the reconciled materialization workflow")
+		case AttemptStartedJournalEvent:
+			return JournalAppend{}, fmt.Errorf("attempt start must use the Git-verified materialization workflow")
+		case AttemptBoundaryReachedJournalEvent:
+			return JournalAppend{}, fmt.Errorf("attempt boundary must use the atomic boundary workflow")
 		}
 	}
 	if occurredAt.IsZero() {
@@ -368,7 +400,7 @@ func supportedWorkspaceJournalEvent(event WorkspaceJournalEvent) bool {
 		GenerationActivatedJournalEvent, JournalTailRecoveredEvent:
 		return true
 	default:
-		return false
+		return isAttemptJournalEvent(event)
 	}
 }
 
@@ -404,7 +436,11 @@ func validateJournalEventResources(
 		}
 		expectedWrites = append([]JournalResource(nil), expectedReads...)
 	default:
-		return fmt.Errorf("unsupported workspace journal event %T", event)
+		var ok bool
+		expectedReads, expectedWrites, ok = attemptJournalEventResources(event)
+		if !ok {
+			return fmt.Errorf("unsupported workspace journal event %T", event)
+		}
 	}
 	expectedWrites, _ = normalizeJournalWriteSet(expectedWrites)
 	if len(reads) != len(expectedReads) || len(writes) != len(expectedWrites) {
@@ -522,6 +558,6 @@ func cloneWorkspaceJournalEvent(event WorkspaceJournalEvent) WorkspaceJournalEve
 	case JournalTailRecoveredEvent:
 		return value
 	default:
-		return nil
+		return cloneAttemptJournalEvent(event)
 	}
 }

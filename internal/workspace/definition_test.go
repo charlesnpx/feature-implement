@@ -102,6 +102,9 @@ merge_units:
   - plan_id: alpha-plan
     merge_unit_id: unit-one
     profile: standard
+    boundary:
+      mode: pause_only
+      serial_segment: serial-alpha
     policy:
       require_passing_checks: true
       require_signed_receipts: true
@@ -112,6 +115,8 @@ merge_units:
   - plan_id: alpha-plan
     merge_unit_id: unit-two
     profile: standard
+    boundary:
+      mode: complete_goal_and_wait
     policy:
       require_passing_checks: true
       require_signed_receipts: true
@@ -316,6 +321,8 @@ merge_units:
 	sources.ExecutionConfig.Bytes = append(sources.ExecutionConfig.Bytes, []byte(`  - plan_id: beta-plan
     merge_unit_id: beta-unit
     profile: standard
+    boundary:
+      mode: pause_only
     policy:
       require_passing_checks: true
       require_signed_receipts: true
@@ -350,6 +357,8 @@ func TestEffectiveDefinitionRejectsCombinedCrossPlanCycle(t *testing.T) {
 	sources.ExecutionConfig.Bytes = append(sources.ExecutionConfig.Bytes, []byte(`  - plan_id: beta-plan
     merge_unit_id: unit-one
     profile: standard
+    boundary:
+      mode: pause_only
     policy:
       require_passing_checks: true
       require_signed_receipts: true
@@ -360,6 +369,8 @@ func TestEffectiveDefinitionRejectsCombinedCrossPlanCycle(t *testing.T) {
   - plan_id: beta-plan
     merge_unit_id: unit-two
     profile: standard
+    boundary:
+      mode: pause_only
     policy:
       require_passing_checks: true
       require_signed_receipts: true

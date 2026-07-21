@@ -413,10 +413,12 @@ type canonicalProfile struct {
 	Policy canonicalPolicy `json:"policy"`
 }
 type canonicalUnitExecution struct {
-	PlanID      string          `json:"plan_id"`
-	MergeUnitID string          `json:"merge_unit_id"`
-	Profile     string          `json:"profile"`
-	Policy      canonicalPolicy `json:"policy"`
+	PlanID        string              `json:"plan_id"`
+	MergeUnitID   string              `json:"merge_unit_id"`
+	Profile       string              `json:"profile"`
+	Policy        canonicalPolicy     `json:"policy"`
+	BoundaryMode  AttemptBoundaryMode `json:"boundary_mode"`
+	SerialSegment string              `json:"serial_segment,omitempty"`
 }
 
 func canonicalExecutionBytes(config ExecutionConfig) ([]byte, error) {
@@ -426,7 +428,9 @@ func canonicalExecutionBytes(config ExecutionConfig) ([]byte, error) {
 	}
 	for _, unit := range config.mergeUnits {
 		value.MergeUnits = append(value.MergeUnits, canonicalUnitExecution{
-			PlanID: unit.planID.String(), MergeUnitID: unit.mergeUnitID.String(), Profile: unit.profileID.String(), Policy: canonicalizePolicy(unit.policy),
+			PlanID: unit.planID.String(), MergeUnitID: unit.mergeUnitID.String(), Profile: unit.profileID.String(),
+			Policy: canonicalizePolicy(unit.policy), BoundaryMode: unit.boundary.mode,
+			SerialSegment: unit.boundary.serialSegment.String(),
 		})
 	}
 	return json.Marshal(value)

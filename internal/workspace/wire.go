@@ -90,8 +90,14 @@ type executionProfileWire struct {
 }
 
 type unitExecutionWire struct {
-	PlanID      string              `yaml:"plan_id"`
-	MergeUnitID string              `yaml:"merge_unit_id"`
-	Profile     string              `yaml:"profile"`
-	Policy      executionPolicyWire `yaml:"policy"`
+	PlanID      string                     `yaml:"plan_id"`
+	MergeUnitID string                     `yaml:"merge_unit_id"`
+	Profile     string                     `yaml:"profile"`
+	Policy      executionPolicyWire        `yaml:"policy"`
+	Boundary    *attemptBoundaryPolicyWire `yaml:"boundary"`
+}
+
+type attemptBoundaryPolicyWire struct {
+	Mode          string  `yaml:"mode"`
+	SerialSegment *string `yaml:"serial_segment"`
 }

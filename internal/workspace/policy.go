@@ -5,6 +5,44 @@ import (
 	"sort"
 )
 
+type AttemptBoundaryMode string
+
+const (
+	AttemptBoundaryPauseOnly           AttemptBoundaryMode = "pause_only"
+	AttemptBoundaryCompleteGoalAndWait AttemptBoundaryMode = "complete_goal_and_wait"
+)
+
+func (mode AttemptBoundaryMode) valid() bool {
+	return mode == AttemptBoundaryPauseOnly || mode == AttemptBoundaryCompleteGoalAndWait
+}
+
+type AttemptBoundaryPolicy struct {
+	mode          AttemptBoundaryMode
+	serialSegment ID
+}
+
+func newAttemptBoundaryPolicy(wire *attemptBoundaryPolicyWire, location string) (AttemptBoundaryPolicy, error) {
+	if wire == nil {
+		return AttemptBoundaryPolicy{}, fmt.Errorf("%s boundary policy must be explicit", location)
+	}
+	mode := AttemptBoundaryMode(wire.Mode)
+	if !mode.valid() {
+		return AttemptBoundaryPolicy{}, fmt.Errorf("%s boundary mode %q is unsupported", location, wire.Mode)
+	}
+	var serialSegment ID
+	if wire.SerialSegment != nil {
+		parsed, err := NewID(*wire.SerialSegment)
+		if err != nil {
+			return AttemptBoundaryPolicy{}, fmt.Errorf("%s serial_segment: %w", location, err)
+		}
+		serialSegment = parsed
+	}
+	return AttemptBoundaryPolicy{mode: mode, serialSegment: serialSegment}, nil
+}
+
+func (policy AttemptBoundaryPolicy) Mode() AttemptBoundaryMode { return policy.mode }
+func (policy AttemptBoundaryPolicy) SerialSegment() ID         { return policy.serialSegment }
+
 // ExecutionPolicy uses explicit fields whose strengthening directions are
 // defined below. Required controls may only become true, permissions may only
 // become false, and positive budgets may only decrease.
@@ -79,12 +117,16 @@ type UnitExecution struct {
 	mergeUnitID ID
 	profileID   ID
 	policy      ExecutionPolicy
+	boundary    AttemptBoundaryPolicy
 }
 
 func (unit UnitExecution) PlanID() ID              { return unit.planID }
 func (unit UnitExecution) MergeUnitID() ID         { return unit.mergeUnitID }
 func (unit UnitExecution) ProfileID() ID           { return unit.profileID }
 func (unit UnitExecution) Policy() ExecutionPolicy { return unit.policy }
+func (unit UnitExecution) Boundary() AttemptBoundaryPolicy {
+	return unit.boundary
+}
 
 // ExecutionConfig is the one policy authority for all workspace merge units.
 type ExecutionConfig struct {
@@ -162,12 +204,19 @@ func normalizeExecutionConfig(wire executionConfigWire) (ExecutionConfig, error)
 		if err := unitPolicy.validateStrengthens(profile.policy, fmt.Sprintf("merge unit %s/%s policy", planID, mergeUnitID)); err != nil {
 			return ExecutionConfig{}, err
 		}
+		boundary, err := newAttemptBoundaryPolicy(item.Boundary, fmt.Sprintf("merge unit %s/%s", planID, mergeUnitID))
+		if err != nil {
+			return ExecutionConfig{}, err
+		}
 		key := planID.String() + "\x00" + mergeUnitID.String()
 		if _, exists := unitKeys[key]; exists {
 			return ExecutionConfig{}, fmt.Errorf("duplicate execution policy for merge unit %s/%s", planID, mergeUnitID)
 		}
 		unitKeys[key] = struct{}{}
-		units = append(units, UnitExecution{planID: planID, mergeUnitID: mergeUnitID, profileID: profileID, policy: unitPolicy})
+		units = append(units, UnitExecution{
+			planID: planID, mergeUnitID: mergeUnitID, profileID: profileID,
+			policy: unitPolicy, boundary: boundary,
+		})
 	}
 	sort.Slice(units, func(i, j int) bool {
 		left := units[i].planID.String() + "\x00" + units[i].mergeUnitID.String()
