@@ -90,14 +90,51 @@ type executionProfileWire struct {
 }
 
 type unitExecutionWire struct {
-	PlanID      string                     `yaml:"plan_id"`
-	MergeUnitID string                     `yaml:"merge_unit_id"`
-	Profile     string                     `yaml:"profile"`
-	Policy      executionPolicyWire        `yaml:"policy"`
-	Boundary    *attemptBoundaryPolicyWire `yaml:"boundary"`
+	PlanID            string                     `yaml:"plan_id"`
+	MergeUnitID       string                     `yaml:"merge_unit_id"`
+	Profile           string                     `yaml:"profile"`
+	Policy            executionPolicyWire        `yaml:"policy"`
+	Boundary          *attemptBoundaryPolicyWire `yaml:"boundary"`
+	CommitProtocol    *commitProtocolWire        `yaml:"commit_protocol"`
+	ReviewFixProtocol *reviewFixProtocolWire     `yaml:"review_fix_protocol"`
 }
 
 type attemptBoundaryPolicyWire struct {
 	Mode          string  `yaml:"mode"`
 	SerialSegment *string `yaml:"serial_segment"`
+}
+
+type commitProtocolWire struct {
+	Steps []commitStepWire `yaml:"steps"`
+}
+
+type commitStepWire struct {
+	ID           string             `yaml:"id"`
+	Subject      string             `yaml:"subject"`
+	BodyPolicy   string             `yaml:"body_policy"`
+	ExactBody    *string            `yaml:"exact_body"`
+	AllowedPaths *[]string          `yaml:"allowed_paths"`
+	FrozenPaths  *[]string          `yaml:"frozen_paths"`
+	Checks       *[]commitCheckWire `yaml:"checks"`
+}
+
+type reviewFixProtocolWire struct {
+	SubjectPrefix string             `yaml:"subject_prefix"`
+	BodyPolicy    string             `yaml:"body_policy"`
+	AllowedPaths  *[]string          `yaml:"allowed_paths"`
+	FrozenPaths   *[]string          `yaml:"frozen_paths"`
+	Checks        *[]commitCheckWire `yaml:"checks"`
+}
+
+type commitCheckWire struct {
+	ID          string               `yaml:"id"`
+	Runner      string               `yaml:"runner"`
+	Parser      string               `yaml:"parser"`
+	Command     []string             `yaml:"command"`
+	Expectation checkExpectationWire `yaml:"expectation"`
+}
+
+type checkExpectationWire struct {
+	Kind       string    `yaml:"kind"`
+	FailureIDs *[]string `yaml:"failure_ids"`
 }

@@ -133,6 +133,8 @@ type RuntimeAttemptProjection struct {
 	authorizationID       ID
 	goal                  GoalBinding
 	boundaries            []RuntimeBoundaryProjection
+	commitProtocol        *CommitProtocolState
+	reviewFixes           *ReviewFixState
 }
 
 func (attempt RuntimeAttemptProjection) AttemptID() ID                  { return attempt.attemptID }
@@ -161,6 +163,18 @@ func (attempt RuntimeAttemptProjection) AuthorizationID() ID       { return atte
 func (attempt RuntimeAttemptProjection) Goal() GoalBinding         { return attempt.goal }
 func (attempt RuntimeAttemptProjection) Boundaries() []RuntimeBoundaryProjection {
 	return cloneRuntimeBoundaries(attempt.boundaries)
+}
+func (attempt RuntimeAttemptProjection) CommitProtocol() (CommitProtocolState, bool) {
+	if attempt.commitProtocol == nil {
+		return CommitProtocolState{}, false
+	}
+	return cloneCommitProtocolState(*attempt.commitProtocol), true
+}
+func (attempt RuntimeAttemptProjection) ReviewFixes() (ReviewFixState, bool) {
+	if attempt.reviewFixes == nil {
+		return ReviewFixState{}, false
+	}
+	return cloneReviewFixState(*attempt.reviewFixes), true
 }
 func (attempt RuntimeAttemptProjection) CurrentBoundary() (RuntimeBoundaryProjection, bool) {
 	if attempt.phase != AttemptPaused || len(attempt.boundaries) == 0 {
@@ -474,6 +488,14 @@ func cloneRuntimeAttempts(values []RuntimeAttemptProjection) []RuntimeAttemptPro
 
 func cloneRuntimeAttempt(value RuntimeAttemptProjection) RuntimeAttemptProjection {
 	value.boundaries = cloneRuntimeBoundaries(value.boundaries)
+	if value.commitProtocol != nil {
+		state := cloneCommitProtocolState(*value.commitProtocol)
+		value.commitProtocol = &state
+	}
+	if value.reviewFixes != nil {
+		state := cloneReviewFixState(*value.reviewFixes)
+		value.reviewFixes = &state
+	}
 	return value
 }
 
@@ -555,6 +577,8 @@ func canonicalAttemptRuntime(attempt RuntimeAttemptProjection) (json.RawMessage,
 		GoalID                string              `json:"goal_id,omitempty"`
 		GoalScope             GoalScope           `json:"goal_scope,omitempty"`
 		Boundaries            []boundaryJSON      `json:"boundaries"`
+		CommitProtocol        json.RawMessage     `json:"commit_protocol,omitempty"`
+		ReviewFixes           json.RawMessage     `json:"review_fixes,omitempty"`
 	}
 	ackJSON := func(value RuntimeOrchestrationAcknowledgement) *acknowledgementJSON {
 		return &acknowledgementJSON{
@@ -574,6 +598,20 @@ func canonicalAttemptRuntime(attempt RuntimeAttemptProjection) (json.RawMessage,
 		LeaseID: attempt.leaseID.String(), AuthorizationID: attempt.authorizationID.String(),
 		GoalID: attempt.goal.id.String(), GoalScope: attempt.goal.scope,
 		Boundaries: make([]boundaryJSON, 0, len(attempt.boundaries)),
+	}
+	if attempt.commitProtocol != nil {
+		protocol, err := canonicalCommitProtocolRuntime(*attempt.commitProtocol)
+		if err != nil {
+			return nil, err
+		}
+		value.CommitProtocol = protocol
+	}
+	if attempt.reviewFixes != nil {
+		reviewFixes, err := canonicalReviewFixRuntime(*attempt.reviewFixes)
+		if err != nil {
+			return nil, err
+		}
+		value.ReviewFixes = reviewFixes
 	}
 	for _, boundary := range attempt.boundaries {
 		item := boundaryJSON{

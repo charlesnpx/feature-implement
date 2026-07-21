@@ -413,12 +413,45 @@ type canonicalProfile struct {
 	Policy canonicalPolicy `json:"policy"`
 }
 type canonicalUnitExecution struct {
-	PlanID        string              `json:"plan_id"`
-	MergeUnitID   string              `json:"merge_unit_id"`
-	Profile       string              `json:"profile"`
-	Policy        canonicalPolicy     `json:"policy"`
-	BoundaryMode  AttemptBoundaryMode `json:"boundary_mode"`
-	SerialSegment string              `json:"serial_segment,omitempty"`
+	PlanID            string                      `json:"plan_id"`
+	MergeUnitID       string                      `json:"merge_unit_id"`
+	Profile           string                      `json:"profile"`
+	Policy            canonicalPolicy             `json:"policy"`
+	BoundaryMode      AttemptBoundaryMode         `json:"boundary_mode"`
+	SerialSegment     string                      `json:"serial_segment,omitempty"`
+	CommitProtocol    *canonicalCommitProtocol    `json:"commit_protocol,omitempty"`
+	ReviewFixProtocol *canonicalReviewFixProtocol `json:"review_fix_protocol,omitempty"`
+}
+
+type canonicalCommitProtocol struct {
+	Steps []canonicalCommitStep `json:"steps"`
+}
+
+type canonicalCommitStep struct {
+	ID           string                 `json:"id"`
+	Subject      string                 `json:"subject"`
+	BodyPolicy   CommitBodyPolicy       `json:"body_policy"`
+	ExactBody    string                 `json:"exact_body,omitempty"`
+	AllowedPaths []string               `json:"allowed_paths"`
+	FrozenPaths  []string               `json:"frozen_paths"`
+	Checks       []canonicalCommitCheck `json:"checks"`
+}
+
+type canonicalCommitCheck struct {
+	ID          string               `json:"id"`
+	Runner      string               `json:"runner"`
+	Parser      CheckParserKind      `json:"parser"`
+	Command     []string             `json:"command"`
+	Expectation CheckExpectationKind `json:"expectation"`
+	FailureIDs  []string             `json:"failure_ids"`
+}
+
+type canonicalReviewFixProtocol struct {
+	SubjectPrefix string                 `json:"subject_prefix"`
+	BodyPolicy    CommitBodyPolicy       `json:"body_policy"`
+	AllowedPaths  []string               `json:"allowed_paths"`
+	FrozenPaths   []string               `json:"frozen_paths"`
+	Checks        []canonicalCommitCheck `json:"checks"`
 }
 
 func canonicalExecutionBytes(config ExecutionConfig) ([]byte, error) {
@@ -427,13 +460,73 @@ func canonicalExecutionBytes(config ExecutionConfig) ([]byte, error) {
 		value.Profiles = append(value.Profiles, canonicalProfile{ID: profile.id.String(), Runner: profile.runner.String(), Policy: canonicalizePolicy(profile.policy)})
 	}
 	for _, unit := range config.mergeUnits {
-		value.MergeUnits = append(value.MergeUnits, canonicalUnitExecution{
+		canonicalUnit := canonicalUnitExecution{
 			PlanID: unit.planID.String(), MergeUnitID: unit.mergeUnitID.String(), Profile: unit.profileID.String(),
 			Policy: canonicalizePolicy(unit.policy), BoundaryMode: unit.boundary.mode,
 			SerialSegment: unit.boundary.serialSegment.String(),
-		})
+		}
+		if unit.commitProtocol != nil {
+			protocol := canonicalizeCommitProtocol(*unit.commitProtocol)
+			canonicalUnit.CommitProtocol = &protocol
+		}
+		if unit.reviewFixProtocol != nil {
+			protocol := canonicalizeReviewFixProtocol(*unit.reviewFixProtocol)
+			canonicalUnit.ReviewFixProtocol = &protocol
+		}
+		value.MergeUnits = append(value.MergeUnits, canonicalUnit)
 	}
 	return json.Marshal(value)
+}
+
+func canonicalizeCommitProtocol(protocol CommitProtocol) canonicalCommitProtocol {
+	value := canonicalCommitProtocol{Steps: make([]canonicalCommitStep, 0, len(protocol.steps))}
+	for _, step := range protocol.steps {
+		value.Steps = append(value.Steps, canonicalizeCommitStep(step))
+	}
+	return value
+}
+
+func canonicalizeCommitStep(step CommitStep) canonicalCommitStep {
+	allowed := make([]string, 0, len(step.paths.allowed))
+	for _, pattern := range step.paths.allowed {
+		allowed = append(allowed, pattern.value)
+	}
+	frozen := make([]string, 0, len(step.paths.frozen))
+	for _, pattern := range step.paths.frozen {
+		frozen = append(frozen, pattern.value)
+	}
+	return canonicalCommitStep{
+		ID: step.id.String(), Subject: step.message.subject, BodyPolicy: step.message.body,
+		ExactBody: step.message.exactBody, AllowedPaths: allowed, FrozenPaths: frozen,
+		Checks: canonicalizeCommitChecks(step.checks),
+	}
+}
+
+func canonicalizeCommitChecks(checks []CommitCheck) []canonicalCommitCheck {
+	result := make([]canonicalCommitCheck, 0, len(checks))
+	for _, check := range checks {
+		result = append(result, canonicalCommitCheck{
+			ID: check.id.String(), Runner: check.runner.String(), Parser: check.parser,
+			Command: check.command.Values(), Expectation: check.expectation.kind,
+			FailureIDs: check.expectation.FailureIDs(),
+		})
+	}
+	return result
+}
+
+func canonicalizeReviewFixProtocol(protocol ReviewFixProtocol) canonicalReviewFixProtocol {
+	allowed := make([]string, 0, len(protocol.paths.allowed))
+	for _, pattern := range protocol.paths.allowed {
+		allowed = append(allowed, pattern.value)
+	}
+	frozen := make([]string, 0, len(protocol.paths.frozen))
+	for _, pattern := range protocol.paths.frozen {
+		frozen = append(frozen, pattern.value)
+	}
+	return canonicalReviewFixProtocol{
+		SubjectPrefix: protocol.subjectPrefix, BodyPolicy: protocol.body,
+		AllowedPaths: allowed, FrozenPaths: frozen, Checks: canonicalizeCommitChecks(protocol.checks),
+	}
 }
 
 func canonicalizePolicy(policy ExecutionPolicy) canonicalPolicy {

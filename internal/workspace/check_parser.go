@@ -1,0 +1,549 @@
+package workspace
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+func ParseCheckOutcome(parser CheckParserKind, result CheckProcessResult) (ParsedCheckOutcome, error) {
+	if !parser.valid() {
+		return ParsedCheckOutcome{}, fmt.Errorf("unsupported structured check parser %q", parser)
+	}
+	if !result.termination.valid() || result.output.IsZero() {
+		return ParsedCheckOutcome{}, fmt.Errorf("check parser requires a complete process result")
+	}
+	if result.termination != CheckExited {
+		kind := CheckOutcomeInfrastructureFailed
+		switch result.termination {
+		case CheckTimedOut:
+			kind = CheckOutcomeTimedOut
+		case CheckSignaled:
+			kind = CheckOutcomeSignaled
+		case CheckCrashed:
+			kind = CheckOutcomeCrashed
+		case CheckMissingExecutable:
+			kind = CheckOutcomeMissingExecutable
+		case CheckInfrastructure:
+			kind = CheckOutcomeInfrastructureFailed
+		}
+		return NewParsedCheckOutcome(kind, nil)
+	}
+	if len(result.stderr) != 0 {
+		return NewParsedCheckOutcome(CheckOutcomeInfrastructureFailed, nil)
+	}
+	switch parser {
+	case CheckParserGoTestJSON:
+		return parseGoTestJSON(result)
+	case CheckParserAssertionJSON:
+		return parseAssertionDocument(result, false)
+	case CheckParserDiagnosticJSON:
+		return parseAssertionDocument(result, true)
+	default:
+		return ParsedCheckOutcome{}, fmt.Errorf("unsupported structured check parser %q", parser)
+	}
+}
+
+func GoTestFailureIdentity(packageName, testName string) (string, error) {
+	packageName = strings.TrimSpace(packageName)
+	testName = strings.TrimSpace(testName)
+	if packageName == "" || testName == "" || strings.ContainsAny(packageName+testName, "\x00\r\n") {
+		return "", fmt.Errorf("Go test failure identity requires package and test")
+	}
+	identity := packageName + "::" + testName
+	if len(identity) > maxCheckFailureIDBytes {
+		return "", fmt.Errorf("Go test failure identity exceeds its bound")
+	}
+	return identity, nil
+}
+
+func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
+	type goTestEvent struct {
+		Action      string  `json:"Action"`
+		Package     string  `json:"Package"`
+		ImportPath  string  `json:"ImportPath"`
+		Test        string  `json:"Test"`
+		Output      string  `json:"Output"`
+		FailedBuild string  `json:"FailedBuild"`
+		Elapsed     float64 `json:"Elapsed"`
+		Time        string  `json:"Time"`
+	}
+	type goTestPackageState struct {
+		terminalAction string
+		namedFailure   bool
+		failedBuild    string
+		timedOut       bool
+		signaled       bool
+		crashed        bool
+	}
+	type goTestAbnormalState struct {
+		timedOut bool
+		signaled bool
+		crashed  bool
+	}
+	type goTestBuildState struct {
+		failed bool
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(result.stdout))
+	scanner.Buffer(make([]byte, 64*1024), maxAttemptGitOutputBytes)
+	failures := make(map[string]struct{})
+	testTerminalActions := make(map[string]string)
+	activeTestRuns := make(map[string]map[string]struct{})
+	testAbnormalExits := make(map[string]goTestAbnormalState)
+	testFailureBanners := make(map[string]struct{})
+	confirmedTestCrashes := make(map[string]struct{})
+	namedFailurePackages := make(map[string]struct{})
+	packageFailures := make(map[string]struct{})
+	packages := make(map[string]goTestPackageState)
+	builds := make(map[string]goTestBuildState)
+	packageAbnormalExit := func(packageName string, packageState goTestPackageState) goTestAbnormalState {
+		abnormal := goTestAbnormalState{
+			timedOut: packageState.timedOut,
+			signaled: packageState.signaled,
+			crashed:  packageState.crashed,
+		}
+		for testIdentity := range activeTestRuns[packageName] {
+			testAbnormal := testAbnormalExits[testIdentity]
+			abnormal.timedOut = abnormal.timedOut || testAbnormal.timedOut
+			abnormal.signaled = abnormal.signaled || testAbnormal.signaled
+			abnormal.crashed = abnormal.crashed || testAbnormal.crashed
+		}
+		return abnormal
+	}
+	structured := 0
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var event goTestEvent
+		if err := rejectDuplicateJSONObjectKeys(line); err != nil {
+			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+		}
+		if err := json.Unmarshal(line, &event); err != nil || event.Action == "" {
+			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+		}
+		structured++
+		if event.Action == "build-output" || event.Action == "build-fail" {
+			if event.ImportPath == "" || event.Package != "" || event.Test != "" || event.FailedBuild != "" {
+				return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+			}
+			buildState := builds[event.ImportPath]
+			if buildState.failed {
+				return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+			}
+			if event.Action == "build-fail" {
+				buildState.failed = true
+			}
+			builds[event.ImportPath] = buildState
+			continue
+		}
+		if event.Package == "" || event.ImportPath != "" ||
+			(event.FailedBuild != "" && (event.Action != "fail" || event.Test != "")) {
+			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+		}
+		packageState := packages[event.Package]
+		if packageState.terminalAction != "" {
+			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+		}
+		testIdentity := ""
+		if event.Test != "" {
+			var err error
+			testIdentity, err = GoTestFailureIdentity(event.Package, event.Test)
+			if err != nil {
+				return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+			}
+			if event.Action == "run" {
+				active := activeTestRuns[event.Package]
+				if active == nil {
+					active = make(map[string]struct{})
+					activeTestRuns[event.Package] = active
+				}
+				if _, running := active[testIdentity]; running {
+					return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+				}
+				delete(testTerminalActions, testIdentity)
+				delete(testAbnormalExits, testIdentity)
+				delete(testFailureBanners, testIdentity)
+				delete(confirmedTestCrashes, testIdentity)
+				active[testIdentity] = struct{}{}
+			}
+		}
+		terminal := false
+		switch event.Action {
+		case "start", "run", "pause", "cont", "bench":
+		case "output":
+			text := strings.ToLower(event.Output)
+			outputTimedOut, outputSignaled, outputCrashed := goTestPackageAbnormalExit(text)
+			if event.Test == "" {
+				packageState.timedOut = packageState.timedOut || outputTimedOut
+				packageState.signaled = packageState.signaled || outputSignaled
+				packageState.crashed = packageState.crashed || outputCrashed
+			} else {
+				if goTestFailureBanner(event.Output, event.Test) {
+					testFailureBanners[testIdentity] = struct{}{}
+				}
+				testAbnormal := testAbnormalExits[testIdentity]
+				testAbnormal.timedOut = testAbnormal.timedOut || outputTimedOut
+				testAbnormal.signaled = testAbnormal.signaled || outputSignaled
+				testAbnormal.crashed = testAbnormal.crashed || outputCrashed
+				testAbnormalExits[testIdentity] = testAbnormal
+				_, sawFailureBanner := testFailureBanners[testIdentity]
+				if sawFailureBanner && outputCrashed && goTestRecoveredPanic(event.Output) {
+					confirmedTestCrashes[testIdentity] = struct{}{}
+				}
+			}
+		case "pass", "skip":
+			if event.Test != "" {
+				if testTerminalActions[testIdentity] != "" {
+					return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+				}
+				if _, crashed := confirmedTestCrashes[testIdentity]; crashed {
+					return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+				}
+				testTerminalActions[testIdentity] = event.Action
+				delete(activeTestRuns[event.Package], testIdentity)
+				delete(testAbnormalExits, testIdentity)
+				delete(testFailureBanners, testIdentity)
+				delete(confirmedTestCrashes, testIdentity)
+			} else {
+				if len(activeTestRuns[event.Package]) != 0 {
+					return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+				}
+				if packageState.namedFailure {
+					return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+				}
+				terminal, packageState.terminalAction = true, event.Action
+			}
+		case "fail":
+			if event.Test != "" {
+				if testTerminalActions[testIdentity] != "" {
+					return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+				}
+				if _, crashed := confirmedTestCrashes[testIdentity]; crashed {
+					testAbnormal := testAbnormalExits[testIdentity]
+					packageState.timedOut = packageState.timedOut || testAbnormal.timedOut
+					packageState.signaled = packageState.signaled || testAbnormal.signaled
+					packageState.crashed = true
+				}
+				testTerminalActions[testIdentity] = event.Action
+				delete(activeTestRuns[event.Package], testIdentity)
+				delete(testAbnormalExits, testIdentity)
+				delete(testFailureBanners, testIdentity)
+				delete(confirmedTestCrashes, testIdentity)
+				failures[testIdentity] = struct{}{}
+				namedFailurePackages[event.Package] = struct{}{}
+				packageState.namedFailure = true
+			} else {
+				abnormal := packageAbnormalExit(event.Package, packageState)
+				if len(activeTestRuns[event.Package]) != 0 &&
+					(result.exitCode == 0 || !abnormal.timedOut && !abnormal.signaled && !abnormal.crashed) {
+					return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+				}
+				packageFailures[event.Package] = struct{}{}
+				terminal, packageState.terminalAction = true, event.Action
+				if event.FailedBuild != "" {
+					if packageState.namedFailure {
+						return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+					}
+					packageState.failedBuild = event.FailedBuild
+				}
+			}
+		default:
+			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+		}
+		if !terminal {
+			packageState.terminalAction = ""
+		}
+		packages[event.Package] = packageState
+	}
+	if err := scanner.Err(); err != nil || structured == 0 || len(packages) == 0 {
+		return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+	}
+	for packageName, tests := range activeTestRuns {
+		packageState, exists := packages[packageName]
+		abnormal := packageAbnormalExit(packageName, packageState)
+		if len(tests) != 0 && (result.exitCode == 0 || !exists || packageState.terminalAction != "fail" ||
+			!abnormal.timedOut && !abnormal.signaled && !abnormal.crashed) {
+			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+		}
+	}
+	for _, packageState := range packages {
+		if packageState.terminalAction == "" {
+			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+		}
+	}
+	for packageName := range namedFailurePackages {
+		if _, failed := packageFailures[packageName]; !failed || packages[packageName].terminalAction != "fail" ||
+			packages[packageName].failedBuild != "" {
+			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+		}
+	}
+	referencedBuilds := make(map[string]struct{})
+	for _, packageState := range packages {
+		if packageState.failedBuild == "" {
+			continue
+		}
+		buildState, exists := builds[packageState.failedBuild]
+		if !exists || !buildState.failed {
+			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+		}
+		referencedBuilds[packageState.failedBuild] = struct{}{}
+	}
+	for importPath, buildState := range builds {
+		if buildState.failed {
+			if _, referenced := referencedBuilds[importPath]; !referenced {
+				return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+			}
+		}
+	}
+	timedOut, signaled, crashed := false, false, false
+	if result.exitCode != 0 {
+		for packageName, packageState := range packages {
+			if packageState.terminalAction != "fail" {
+				continue
+			}
+			abnormal := packageAbnormalExit(packageName, packageState)
+			timedOut = timedOut || abnormal.timedOut
+			signaled = signaled || abnormal.signaled
+			crashed = crashed || abnormal.crashed
+		}
+	}
+	if timedOut {
+		return NewParsedCheckOutcome(CheckOutcomeTimedOut, nil)
+	}
+	if signaled {
+		return NewParsedCheckOutcome(CheckOutcomeSignaled, nil)
+	}
+	if crashed {
+		return NewParsedCheckOutcome(CheckOutcomeCrashed, nil)
+	}
+	if result.exitCode > 1 {
+		return NewParsedCheckOutcome(CheckOutcomeInfrastructureFailed, nil)
+	}
+	if len(referencedBuilds) != 0 {
+		return NewParsedCheckOutcome(CheckOutcomeCompilationFailed, nil)
+	}
+	setupFailure := false
+	for packageName := range packageFailures {
+		if _, hasNamedFailure := namedFailurePackages[packageName]; !hasNamedFailure {
+			setupFailure = true
+			break
+		}
+	}
+	identities := make([]string, 0, len(failures))
+	for identity := range failures {
+		identities = append(identities, identity)
+	}
+	sort.Strings(identities)
+	if result.exitCode == 0 {
+		if len(packageFailures) != 0 || len(identities) != 0 {
+			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+		}
+		return NewParsedCheckOutcome(CheckOutcomePassed, nil)
+	}
+	if setupFailure {
+		return NewParsedCheckOutcome(CheckOutcomeSetupFailed, nil)
+	}
+	if len(identities) != 0 {
+		return NewParsedCheckOutcome(CheckOutcomeAssertionFailed, identities)
+	}
+	if len(packageFailures) != 0 {
+		return NewParsedCheckOutcome(CheckOutcomeSetupFailed, nil)
+	}
+	return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+}
+
+func goTestPackageAbnormalExit(output string) (timedOut, signaled, crashed bool) {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "panic: test timed out after") {
+			timedOut = true
+			crashed = true
+			continue
+		}
+		if strings.HasPrefix(line, "panic:") || strings.HasPrefix(line, "fatal error:") {
+			crashed = true
+			continue
+		}
+		if strings.HasPrefix(line, "signal:") && len(strings.TrimSpace(strings.TrimPrefix(line, "signal:"))) != 0 {
+			signaled = true
+			continue
+		}
+		const exitStatus = "exit status "
+		if !strings.HasPrefix(line, exitStatus) {
+			continue
+		}
+		code, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, exitStatus)))
+		if err == nil && code != 0 {
+			crashed = true
+		}
+	}
+	return timedOut, signaled, crashed
+}
+
+func goTestFailureBanner(output, testName string) bool {
+	prefix := "--- FAIL: " + testName
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == prefix || strings.HasPrefix(line, prefix+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+func goTestRecoveredPanic(output string) bool {
+	for _, line := range strings.Split(strings.ToLower(output), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "panic:") && strings.Contains(line, "[recovered") {
+			return true
+		}
+	}
+	return false
+}
+
+type structuredResultItem struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}
+
+type structuredCheckDocument struct {
+	SchemaVersion int                     `json:"schema_version"`
+	Status        string                  `json:"status"`
+	Assertions    *[]structuredResultItem `json:"assertions"`
+	Diagnostics   *[]structuredResultItem `json:"diagnostics"`
+}
+
+func parseAssertionDocument(result CheckProcessResult, diagnostics bool) (ParsedCheckOutcome, error) {
+	if err := rejectDuplicateJSONObjectKeys(result.stdout); err != nil {
+		return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+	}
+	var document structuredCheckDocument
+	decoder := json.NewDecoder(bytes.NewReader(result.stdout))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&document); err != nil {
+		return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+	}
+	if document.SchemaVersion != 1 || (document.Status != "passed" && document.Status != "failed") {
+		return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+	}
+	var items *[]structuredResultItem
+	if diagnostics {
+		if document.Diagnostics == nil || document.Assertions != nil {
+			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+		}
+		items = document.Diagnostics
+	} else {
+		if document.Assertions == nil || document.Diagnostics != nil {
+			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+		}
+		items = document.Assertions
+	}
+	failures := make([]string, 0)
+	seen := make(map[string]struct{}, len(*items))
+	for _, item := range *items {
+		if item.ID == "" || strings.TrimSpace(item.ID) != item.ID || len(item.ID) > maxCheckFailureIDBytes ||
+			strings.ContainsAny(item.ID, "\x00\r\n") || (item.Status != "passed" && item.Status != "failed") {
+			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+		}
+		if _, exists := seen[item.ID]; exists {
+			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+		}
+		seen[item.ID] = struct{}{}
+		if item.Status == "failed" {
+			failures = append(failures, item.ID)
+		}
+	}
+	sort.Strings(failures)
+	if result.exitCode == 0 {
+		if document.Status != "passed" || len(failures) != 0 {
+			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+		}
+		return NewParsedCheckOutcome(CheckOutcomePassed, nil)
+	}
+	if document.Status != "failed" || len(failures) == 0 {
+		return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+	}
+	if diagnostics {
+		return NewParsedCheckOutcome(CheckOutcomeDiagnosticFailed, failures)
+	}
+	return NewParsedCheckOutcome(CheckOutcomeAssertionFailed, failures)
+}
+
+func rejectDuplicateJSONObjectKeys(content []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.UseNumber()
+	if err := consumeUniqueJSONValue(decoder, 0); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("structured JSON contains trailing data")
+		}
+		return err
+	}
+	return nil
+}
+
+func consumeUniqueJSONValue(decoder *json.Decoder, depth uint8) error {
+	if depth > 64 {
+		return fmt.Errorf("structured JSON exceeds its nesting bound")
+	}
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, composite := token.(json.Delim)
+	if !composite {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return fmt.Errorf("structured JSON object key is not a string")
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return fmt.Errorf("structured JSON contains duplicate key %q", key)
+			}
+			seen[key] = struct{}{}
+			if err := consumeUniqueJSONValue(decoder, depth+1); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim('}') {
+			return fmt.Errorf("structured JSON object is incomplete")
+		}
+	case '[':
+		for decoder.More() {
+			if err := consumeUniqueJSONValue(decoder, depth+1); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim(']') {
+			return fmt.Errorf("structured JSON array is incomplete")
+		}
+	default:
+		return fmt.Errorf("structured JSON contains an invalid delimiter")
+	}
+	return nil
+}

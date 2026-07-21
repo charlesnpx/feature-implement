@@ -132,6 +132,7 @@ func (git *fakeAttemptGit) setHead(t *testing.T, branch string, head workspace.G
 type attemptHarness struct {
 	definition workspace.EffectiveWorkspaceDefinition
 	journal    *workspace.WorkspaceJournal
+	workspace  string
 	git        *fakeAttemptGit
 	base       workspace.GitObjectID
 	unit       workspace.MergeUnitReference
@@ -161,7 +162,7 @@ func newAttemptHarness(t *testing.T, unitID string) attemptHarness {
 		t.Fatal(err)
 	}
 	return attemptHarness{
-		definition: definition, journal: journal, git: &fakeAttemptGit{}, base: base,
+		definition: definition, journal: journal, workspace: workspaceDir, git: &fakeAttemptGit{}, base: base,
 		unit: mustMergeUnitReference(t, "alpha-plan", unitID), goal: goal, worktrees: t.TempDir(),
 	}
 }
@@ -632,6 +633,8 @@ func TestPauseOnlyBoundaryAtomicallyPausesAndResumesSameGoal(t *testing.T) {
 	harness := newAttemptHarness(t, "unit-one")
 	attempt := harness.reserve(t, "2026-07-21T11:01:00Z")
 	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T11:02:00Z")
+	unconstrainedHead := mustGitObject(t, 'b')
+	harness.git.setHead(t, attempt.Branch(), unconstrainedHead, true)
 	lease, authorization := attempt.LeaseID(), attempt.AuthorizationID()
 	evidence := boundaryEvidence(t, "pause-only")
 	result, err := workspace.RecordAttemptBoundary(
@@ -650,7 +653,7 @@ func TestPauseOnlyBoundaryAtomicallyPausesAndResumesSameGoal(t *testing.T) {
 	}
 	boundary := result.Boundary()
 	if boundary.LeaseID() != lease || boundary.AuthorizationID() != authorization || boundary.EvidenceDigest().IsZero() ||
-		!boundary.AuthorizationClosed() || !boundary.LeaseFencedAndReleased() {
+		boundary.Head() != unconstrainedHead || !boundary.AuthorizationClosed() || !boundary.LeaseFencedAndReleased() {
 		t.Fatalf("boundary did not checkpoint closed bindings: %#v", boundary)
 	}
 	snapshot, err := harness.journal.ReadSnapshot()
@@ -713,6 +716,56 @@ func TestPauseOnlyBoundaryAtomicallyPausesAndResumesSameGoal(t *testing.T) {
 	if resumed.Phase() != workspace.AttemptActive || resumed.Goal() != harness.goal ||
 		resumed.LeaseID() == lease || resumed.AuthorizationID() == authorization || !resumed.SerialSegmentHeld() {
 		t.Fatalf("pause-only resume bindings = %#v", resumed)
+	}
+}
+
+func TestLocalAttemptInspectionRejectsHiddenIndexFlags(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		flag string
+	}{
+		{name: "assume unchanged", flag: "--assume-unchanged"},
+		{name: "skip worktree", flag: "--skip-worktree"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository, _, _ := newProtocolRepository(t)
+			worktree := filepath.Join(t.TempDir(), "attempt")
+			branch := "attempt-hidden-index"
+			runGitSetup(t, repository, "worktree", "add", "-b", branch, worktree, "HEAD")
+			runGitSetup(t, worktree, "update-index", test.flag, "src/protocol.go")
+			if err := os.WriteFile(
+				filepath.Join(worktree, "src", "protocol.go"),
+				[]byte("package protocol\n\nconst HiddenAtBoundary = true\n"), 0o644,
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := workspace.DefaultLocalAttemptGitAdapter().InspectAttemptWorktree(
+				context.Background(), repository, branch, worktree,
+			); err == nil || !strings.Contains(err.Error(), "assume-unchanged and skip-worktree") {
+				t.Fatalf("InspectAttemptWorktree hidden-index error = %v", err)
+			}
+		})
+	}
+}
+
+func TestLocalAttemptInspectionRejectsRawModeDrift(t *testing.T) {
+	repository, _, _ := newProtocolRepository(t)
+	worktree := filepath.Join(t.TempDir(), "attempt")
+	branch := "attempt-raw-mode"
+	runGitSetup(t, repository, "worktree", "add", "-b", branch, worktree, "HEAD")
+	runGitSetup(t, repository, "config", "core.fileMode", "false")
+	tracked := filepath.Join(worktree, "src", "protocol.go")
+	if err := os.Chmod(tracked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if ordinary := runGitSetup(t, worktree, "status", "--porcelain=v1", "-z"); len(ordinary) != 0 {
+		t.Fatalf("core.fileMode=false did not hide attempt mode drift: %q", ordinary)
+	}
+	if _, err := workspace.DefaultLocalAttemptGitAdapter().InspectAttemptWorktree(
+		context.Background(), repository, branch, worktree,
+	); err == nil || !strings.Contains(err.Error(), "executable mode differs") {
+		t.Fatalf("attempt raw-mode inspection error = %v", err)
 	}
 }
 
