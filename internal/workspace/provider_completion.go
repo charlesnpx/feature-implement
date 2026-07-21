@@ -310,6 +310,191 @@ func canonicalProviderPullRequestState(state ProviderPullRequestState) ([]byte, 
 	return json.Marshal(wire)
 }
 
+// ProviderMergePreflight is the durable, provider-observed policy boundary
+// captured before a merge write is dispatched. Required check and review
+// identities therefore cannot first appear after the external merge.
+type ProviderMergePreflight struct {
+	intentID        ID
+	intentDigest    Digest
+	repository      RepositoryIdentity
+	pullRequest     PullRequestIdentity
+	baseRef         string
+	branch          string
+	baseHead        GitObjectID
+	head            GitObjectID
+	headTree        GitObjectID
+	remoteHead      GitObjectID
+	requiredChecks  []ProviderCheckState
+	requiredReviews []ProviderReviewState
+	observation     Digest
+	digest          Digest
+}
+
+func newProviderMergePreflight(
+	intent ProviderIntent,
+	state ProviderPullRequestState,
+) (ProviderMergePreflight, error) {
+	if intent.kind != ProviderIntentMerge || intent.intentID.IsZero() || intent.digest.IsZero() {
+		return ProviderMergePreflight{}, fmt.Errorf("provider merge preflight requires a typed merge intent")
+	}
+	if err := state.validate(); err != nil {
+		return ProviderMergePreflight{}, err
+	}
+	if state.repository != intent.scope.repository || state.pullRequest != intent.pullRequest ||
+		state.baseRef != intent.baseRef || state.branch != intent.branch ||
+		state.baseHeadBeforeMerge != intent.scope.frontier.base || state.head != intent.head ||
+		state.headTree != intent.tree || state.remoteBranchHead != intent.head || state.merged {
+		return ProviderMergePreflight{}, fmt.Errorf("provider merge preflight does not match the exact unmerged intent topology")
+	}
+	preflight := ProviderMergePreflight{
+		intentID: intent.intentID, intentDigest: intent.digest, repository: state.repository,
+		pullRequest: state.pullRequest, baseRef: state.baseRef, branch: state.branch,
+		baseHead: state.baseHeadBeforeMerge, head: state.head, headTree: state.headTree,
+		remoteHead: state.remoteBranchHead, observation: state.digest,
+	}
+	for _, check := range state.checks {
+		if !check.required {
+			continue
+		}
+		if check.conclusion != ProviderCheckPassed {
+			return ProviderMergePreflight{}, fmt.Errorf("provider-required check %s is not passing", check.id)
+		}
+		preflight.requiredChecks = append(preflight.requiredChecks, check)
+	}
+	for _, review := range state.reviews {
+		if !review.required {
+			continue
+		}
+		if review.conclusion != ProviderReviewApproved {
+			return ProviderMergePreflight{}, fmt.Errorf("provider-required review %s is not approved", review.id)
+		}
+		preflight.requiredReviews = append(preflight.requiredReviews, review)
+	}
+	canonical, err := canonicalProviderMergePreflight(preflight)
+	if err != nil {
+		return ProviderMergePreflight{}, err
+	}
+	preflight.digest = DigestBytes(canonical)
+	return preflight, nil
+}
+
+func (preflight ProviderMergePreflight) IntentID() ID              { return preflight.intentID }
+func (preflight ProviderMergePreflight) IntentDigest() Digest      { return preflight.intentDigest }
+func (preflight ProviderMergePreflight) ObservationDigest() Digest { return preflight.observation }
+func (preflight ProviderMergePreflight) Digest() Digest            { return preflight.digest }
+func (preflight ProviderMergePreflight) RequiredChecks() []ProviderCheckState {
+	return append([]ProviderCheckState(nil), preflight.requiredChecks...)
+}
+func (preflight ProviderMergePreflight) RequiredReviews() []ProviderReviewState {
+	return append([]ProviderReviewState(nil), preflight.requiredReviews...)
+}
+
+func canonicalProviderMergePreflight(preflight ProviderMergePreflight) ([]byte, error) {
+	if preflight.intentID.IsZero() || preflight.intentDigest.IsZero() ||
+		preflight.repository.String() == "" || preflight.pullRequest.IsZero() ||
+		preflight.pullRequest.repository != preflight.repository || preflight.baseHead.IsZero() ||
+		preflight.head.IsZero() || preflight.headTree.IsZero() || preflight.remoteHead.IsZero() ||
+		preflight.observation.IsZero() {
+		return nil, fmt.Errorf("provider merge preflight requires exact intent, provider, and Git bindings")
+	}
+	if preflight.head.Algorithm() != preflight.headTree.Algorithm() ||
+		preflight.head.Algorithm() != preflight.remoteHead.Algorithm() ||
+		preflight.head.Algorithm() != preflight.baseHead.Algorithm() {
+		return nil, fmt.Errorf("provider merge preflight uses different Git object formats")
+	}
+	type canonical struct {
+		SchemaVersion   int                         `json:"schema_version"`
+		IntentID        string                      `json:"intent_id"`
+		IntentDigest    string                      `json:"intent_digest"`
+		Repository      string                      `json:"repository"`
+		PullRequest     controlPlanePullRequestWire `json:"pull_request"`
+		BaseRef         string                      `json:"base_ref"`
+		Branch          string                      `json:"branch"`
+		BaseHead        string                      `json:"base_head"`
+		Head            string                      `json:"head"`
+		HeadTree        string                      `json:"head_tree"`
+		RemoteHead      string                      `json:"remote_head"`
+		RequiredChecks  []providerCheckStateWire    `json:"required_checks"`
+		RequiredReviews []providerReviewStateWire   `json:"required_reviews"`
+		Observation     string                      `json:"provider_observation_digest"`
+	}
+	wire := canonical{
+		SchemaVersion: JournalSchemaVersion, IntentID: preflight.intentID.String(),
+		IntentDigest: preflight.intentDigest.String(), Repository: preflight.repository.String(),
+		PullRequest: controlPlanePullRequestWire{
+			Provider: preflight.pullRequest.provider.String(), Repository: preflight.pullRequest.repository.String(),
+			Number: preflight.pullRequest.number,
+		},
+		BaseRef: preflight.baseRef, Branch: preflight.branch, BaseHead: preflight.baseHead.String(),
+		Head: preflight.head.String(), HeadTree: preflight.headTree.String(), RemoteHead: preflight.remoteHead.String(),
+		RequiredChecks:  make([]providerCheckStateWire, 0, len(preflight.requiredChecks)),
+		RequiredReviews: make([]providerReviewStateWire, 0, len(preflight.requiredReviews)),
+		Observation:     preflight.observation.String(),
+	}
+	for _, check := range preflight.requiredChecks {
+		if !check.required || check.conclusion != ProviderCheckPassed || check.id.IsZero() || check.evidence.IsZero() {
+			return nil, fmt.Errorf("provider merge preflight has invalid required check evidence")
+		}
+		wire.RequiredChecks = append(wire.RequiredChecks, providerCheckStateWire{
+			ID: check.id.String(), Required: true, Conclusion: check.conclusion, Evidence: check.evidence.String(),
+		})
+	}
+	for _, review := range preflight.requiredReviews {
+		if !review.required || review.conclusion != ProviderReviewApproved || review.id.IsZero() || review.evidence.IsZero() {
+			return nil, fmt.Errorf("provider merge preflight has invalid required review evidence")
+		}
+		wire.RequiredReviews = append(wire.RequiredReviews, providerReviewStateWire{
+			ID: review.id.String(), Required: true, Conclusion: review.conclusion, Evidence: review.evidence.String(),
+		})
+	}
+	return json.Marshal(wire)
+}
+
+func validateProviderStateAgainstMergePreflight(
+	preflight ProviderMergePreflight,
+	state ProviderPullRequestState,
+) error {
+	canonical, err := canonicalProviderMergePreflight(preflight)
+	if err != nil || preflight.digest != DigestBytes(canonical) {
+		return fmt.Errorf("provider merge preflight digest mismatch")
+	}
+	if err := state.validate(); err != nil {
+		return err
+	}
+	if state.repository != preflight.repository || state.pullRequest != preflight.pullRequest ||
+		state.baseRef != preflight.baseRef || state.branch != preflight.branch ||
+		state.baseHeadBeforeMerge != preflight.baseHead || state.head != preflight.head ||
+		state.headTree != preflight.headTree || state.remoteBranchHead != preflight.remoteHead {
+		return fmt.Errorf("provider pull request state drifted from its durable merge preflight")
+	}
+	requiredChecks := make([]ProviderCheckState, 0)
+	for _, check := range state.checks {
+		if check.required {
+			requiredChecks = append(requiredChecks, check)
+		}
+	}
+	requiredReviews := make([]ProviderReviewState, 0)
+	for _, review := range state.reviews {
+		if review.required {
+			requiredReviews = append(requiredReviews, review)
+		}
+	}
+	if len(requiredChecks) != len(preflight.requiredChecks) || len(requiredReviews) != len(preflight.requiredReviews) {
+		return fmt.Errorf("provider-required evidence identities drifted from durable merge preflight")
+	}
+	for index := range requiredChecks {
+		if requiredChecks[index] != preflight.requiredChecks[index] || requiredChecks[index].conclusion != ProviderCheckPassed {
+			return fmt.Errorf("provider-required check evidence drifted from durable merge preflight")
+		}
+	}
+	for index := range requiredReviews {
+		if requiredReviews[index] != preflight.requiredReviews[index] || requiredReviews[index].conclusion != ProviderReviewApproved {
+			return fmt.Errorf("provider-required review evidence drifted from durable merge preflight")
+		}
+	}
+	return nil
+}
+
 type ProviderGitCommit struct {
 	commit  GitObjectID
 	tree    GitObjectID
@@ -335,24 +520,65 @@ func (commit ProviderGitCommit) Parents() []GitObjectID {
 	return append([]GitObjectID(nil), commit.parents...)
 }
 
-// ProviderCompletionGitPort independently observes Git. Implementations must
-// disable replacement refs, grafts, hooks, credentials and credential
-// helpers, and must not obtain a provider-broker capability.
+type ProviderCompletionGitInspection struct {
+	remoteBranchHead GitObjectID
+	finalBaseHead    GitObjectID
+	headCommit       ProviderGitCommit
+	mergeCommit      ProviderGitCommit
+	baseAncestor     bool
+	headAncestor     bool
+}
+
+func NewProviderCompletionGitInspection(
+	remoteBranchHead, finalBaseHead GitObjectID,
+	headCommit, mergeCommit ProviderGitCommit,
+	baseAncestor, headAncestor bool,
+) (ProviderCompletionGitInspection, error) {
+	if remoteBranchHead.IsZero() || finalBaseHead.IsZero() ||
+		headCommit.commit.IsZero() || mergeCommit.commit.IsZero() {
+		return ProviderCompletionGitInspection{}, fmt.Errorf("provider Git inspection requires exact remote and commit identities")
+	}
+	return ProviderCompletionGitInspection{
+		remoteBranchHead: remoteBranchHead, finalBaseHead: finalBaseHead,
+		headCommit: headCommit, mergeCommit: mergeCommit,
+		baseAncestor: baseAncestor, headAncestor: headAncestor,
+	}, nil
+}
+
+func (inspection ProviderCompletionGitInspection) RemoteBranchHead() GitObjectID {
+	return inspection.remoteBranchHead
+}
+func (inspection ProviderCompletionGitInspection) FinalBaseHead() GitObjectID {
+	return inspection.finalBaseHead
+}
+func (inspection ProviderCompletionGitInspection) HeadCommit() ProviderGitCommit {
+	return inspection.headCommit
+}
+func (inspection ProviderCompletionGitInspection) MergeCommit() ProviderGitCommit {
+	return inspection.mergeCommit
+}
+func (inspection ProviderCompletionGitInspection) BaseAncestor() bool { return inspection.baseAncestor }
+func (inspection ProviderCompletionGitInspection) HeadAncestor() bool { return inspection.headAncestor }
+
+// ProviderCompletionGitPort independently observes refs, acquires their
+// objects into an isolated store, and verifies topology there. Implementations
+// must not move user refs or obtain a provider-broker capability.
 type ProviderCompletionGitPort interface {
-	InspectRemoteBranch(context.Context, string, string, string) (GitObjectID, error)
-	InspectRemoteBase(context.Context, string, string, string) (GitObjectID, error)
-	InspectCommit(context.Context, string, GitObjectID) (ProviderGitCommit, error)
-	IsAncestor(context.Context, string, GitObjectID, GitObjectID) (bool, error)
+	InspectRemoteTopology(
+		context.Context,
+		string,
+		string,
+		string,
+		string,
+		GitObjectID,
+		GitObjectID,
+		GitObjectID,
+	) (ProviderCompletionGitInspection, error)
 }
 
 type ProviderCompletionRequest struct {
-	AttemptID             ID
-	RequiredChecks        []ID
-	RequiredReviews       []ID
-	ReviewReadiness       ReviewReadiness
-	CheckEvidenceDigests  []Digest
-	ReviewEvidenceDigests []Digest
-	OccurredAt            time.Time
+	AttemptID  ID
+	OccurredAt time.Time
 }
 
 type ProviderCompletionReceipt struct {
@@ -684,7 +910,8 @@ func newProviderCompletionReceipt(
 	attempt RuntimeAttemptProjection,
 	state ProviderPullRequestState,
 	mergeTree GitObjectID,
-	request ProviderCompletionRequest,
+	readiness ReviewReadiness,
+	checkEvidence, reviewEvidence []Digest,
 	ownerReceipts, providerResults []Digest,
 	topology Digest,
 ) (ProviderCompletionReceipt, error) {
@@ -692,13 +919,13 @@ func newProviderCompletionReceipt(
 	if err != nil {
 		return ProviderCompletionReceipt{}, err
 	}
-	checks, err := normalizeDigestEvidence(request.CheckEvidenceDigests)
+	checks, err := normalizeDigestEvidence(checkEvidence)
 	if err != nil {
 		return ProviderCompletionReceipt{}, err
 	}
-	reviews := append([]Digest(nil), request.ReviewEvidenceDigests...)
-	if !request.ReviewReadiness.digest.IsZero() {
-		reviews = append(reviews, request.ReviewReadiness.digest)
+	reviews := append([]Digest(nil), reviewEvidence...)
+	if !readiness.digest.IsZero() {
+		reviews = append(reviews, readiness.digest)
 	}
 	reviews, err = normalizeDigestEvidence(reviews)
 	if err != nil {
@@ -720,7 +947,7 @@ func newProviderCompletionReceipt(
 		pullRequest: state.pullRequest, baseHead: state.baseHeadBeforeMerge,
 		head: state.head, headTree: state.headTree, mergeCommit: state.mergeCommit,
 		mergeTree: mergeTree, finalBaseHead: state.finalBaseHead, mergeStrategy: state.mergeStrategy,
-		providerObservation: state.digest, reviewReadiness: request.ReviewReadiness.digest,
+		providerObservation: state.digest, reviewReadiness: readiness.digest,
 		checkEvidence: checks, reviewEvidence: reviews, ownerReceipts: owners,
 		providerResults: results, topologyDigest: topology,
 	}
@@ -765,14 +992,6 @@ func VerifyAndRecordProviderCompletion(
 		attempt.generation != definition.generation || attempt.repository != definition.workspace.repository {
 		return ProviderCompletionReceipt{}, JournalRecord{}, fmt.Errorf("provider completion attempt does not match the active definition")
 	}
-	unit, err := executionForMergeUnit(definition.execution, attempt.mergeUnit)
-	if err != nil {
-		return ProviderCompletionReceipt{}, JournalRecord{}, err
-	}
-	_, reviewConfigured := unit.ReviewLoop()
-	if reviewConfigured && request.ReviewReadiness.digest.IsZero() {
-		return ProviderCompletionReceipt{}, JournalRecord{}, fmt.Errorf("provider completion requires exact-head local review readiness")
-	}
 	var openIntent, mergeIntent ProviderIntentProjection
 	providerResults := make([]Digest, 0)
 	for _, projected := range providerProjection.intents {
@@ -787,6 +1006,9 @@ func VerifyAndRecordProviderCompletion(
 		}
 		if !projected.reconciliation.digest.IsZero() {
 			providerResults = append(providerResults, projected.reconciliation.digest)
+		}
+		if !projected.preflight.digest.IsZero() {
+			providerResults = append(providerResults, projected.preflight.digest)
 		}
 		if !providerProjectionEffectApplied(projected) {
 			continue
@@ -816,6 +1038,22 @@ func VerifyAndRecordProviderCompletion(
 		openIntent.intent.baseRef != definition.workspace.baseRef {
 		return ProviderCompletionReceipt{}, JournalRecord{}, fmt.Errorf("provider completion intent topology does not match durable pull request and workspace base")
 	}
+	preflight, hasPreflight := mergeIntent.MergePreflight()
+	if !hasPreflight || preflight.intentID != mergeIntent.intent.intentID ||
+		preflight.intentDigest != mergeIntent.intent.digest {
+		return ProviderCompletionReceipt{}, JournalRecord{}, fmt.Errorf("provider completion requires durable pre-effect merge evidence")
+	}
+	if err := validateProviderMergeExecutionReadiness(
+		snapshot, definition, attempt, mergeIntent.intent.head, mergeIntent.intent.tree,
+	); err != nil {
+		return ProviderCompletionReceipt{}, JournalRecord{}, err
+	}
+	readiness, checkEvidence, reviewEvidence, err := providerCompletionLocalEvidence(
+		snapshot, definition, attempt, mergeIntent.intent.head, mergeIntent.intent.tree,
+	)
+	if err != nil {
+		return ProviderCompletionReceipt{}, JournalRecord{}, err
+	}
 	query, err := NewProviderPullRequestQuery(definition.workspace.repository, pullRequest)
 	if err != nil {
 		return ProviderCompletionReceipt{}, JournalRecord{}, err
@@ -832,47 +1070,47 @@ func VerifyAndRecordProviderCompletion(
 		providerState.mergeCommit.IsZero() || providerState.finalBaseHead != providerState.mergeCommit {
 		return ProviderCompletionReceipt{}, JournalRecord{}, fmt.Errorf("provider completion observation has wrong branch, head/tree, base, strategy, or merge state")
 	}
+	if err := validateProviderStateAgainstMergePreflight(preflight, providerState); err != nil {
+		return ProviderCompletionReceipt{}, JournalRecord{}, err
+	}
 	mergeIdentity, ok := providerProjectionMergeIdentity(mergeIntent)
 	if !ok || mergeIdentity != providerState.mergeCommit {
 		return ProviderCompletionReceipt{}, JournalRecord{}, fmt.Errorf("provider completion observation does not match durable merge result")
 	}
-	if err := verifyRequiredProviderEvidence(providerState, request.RequiredChecks, request.RequiredReviews); err != nil {
-		return ProviderCompletionReceipt{}, JournalRecord{}, err
+	for _, check := range providerState.checks {
+		checkEvidence = append(checkEvidence, check.evidence)
 	}
-	if !request.ReviewReadiness.digest.IsZero() {
-		readiness := request.ReviewReadiness
-		if readiness.workspace != definition.workspace.id || readiness.generation != definition.generation ||
-			readiness.attemptID != attempt.attemptID || readiness.mergeUnit != attempt.mergeUnit ||
-			readiness.repository != definition.workspace.repository || readiness.remote != definition.workspace.remote ||
-			readiness.head != providerState.head || readiness.tree != providerState.headTree {
-			return ProviderCompletionReceipt{}, JournalRecord{}, fmt.Errorf("provider completion review readiness is stale or misbound")
-		}
+	for _, review := range providerState.reviews {
+		reviewEvidence = append(reviewEvidence, review.evidence)
 	}
 	repositoryRoot := definition.workspace.repositoryRoot
-	remoteBranchHead, err := git.InspectRemoteBranch(ctx, repositoryRoot, definition.workspace.remote, providerState.branch)
-	if err != nil || remoteBranchHead != providerState.head {
+	inspection, err := git.InspectRemoteTopology(
+		ctx, repositoryRoot, definition.workspace.remote, providerState.branch, definition.workspace.baseRef,
+		providerState.head, providerState.mergeCommit, providerState.baseHeadBeforeMerge,
+	)
+	if err != nil {
+		return ProviderCompletionReceipt{}, JournalRecord{}, fmt.Errorf("independent Git remote topology inspection failed: %w", err)
+	}
+	if inspection.remoteBranchHead != providerState.head {
 		return ProviderCompletionReceipt{}, JournalRecord{}, fmt.Errorf("independent Git remote branch verification failed")
 	}
-	finalBaseHead, err := git.InspectRemoteBase(ctx, repositoryRoot, definition.workspace.remote, definition.workspace.baseRef)
-	if err != nil || finalBaseHead != providerState.mergeCommit || finalBaseHead != providerState.finalBaseHead {
+	if inspection.finalBaseHead != providerState.mergeCommit || inspection.finalBaseHead != providerState.finalBaseHead {
 		return ProviderCompletionReceipt{}, JournalRecord{}, fmt.Errorf("independent Git final base verification failed")
 	}
-	headCommit, err := git.InspectCommit(ctx, repositoryRoot, providerState.head)
-	if err != nil || headCommit.commit != providerState.head || headCommit.tree != providerState.headTree {
+	headCommit := inspection.headCommit
+	if headCommit.commit != providerState.head || headCommit.tree != providerState.headTree {
 		return ProviderCompletionReceipt{}, JournalRecord{}, fmt.Errorf("independent Git reviewed head/tree verification failed")
 	}
-	mergeCommit, err := git.InspectCommit(ctx, repositoryRoot, providerState.mergeCommit)
-	if err != nil || mergeCommit.commit != providerState.mergeCommit || len(mergeCommit.parents) != 2 ||
+	mergeCommit := inspection.mergeCommit
+	if mergeCommit.commit != providerState.mergeCommit || len(mergeCommit.parents) != 2 ||
 		mergeCommit.parents[0] != providerState.baseHeadBeforeMerge || mergeCommit.parents[1] != providerState.head ||
 		mergeCommit.tree != providerState.headTree {
 		return ProviderCompletionReceipt{}, JournalRecord{}, fmt.Errorf("independent Git merge parents or tree do not match exact merge topology")
 	}
-	baseAncestor, err := git.IsAncestor(ctx, repositoryRoot, providerState.baseHeadBeforeMerge, providerState.mergeCommit)
-	if err != nil || !baseAncestor {
+	if !inspection.baseAncestor {
 		return ProviderCompletionReceipt{}, JournalRecord{}, fmt.Errorf("independent Git base ancestry verification failed")
 	}
-	headAncestor, err := git.IsAncestor(ctx, repositoryRoot, providerState.head, providerState.mergeCommit)
-	if err != nil || !headAncestor {
+	if !inspection.headAncestor {
 		return ProviderCompletionReceipt{}, JournalRecord{}, fmt.Errorf("independent Git head ancestry verification failed")
 	}
 	topologyDigest, err := providerTopologyDigest(providerState, headCommit, mergeCommit)
@@ -884,7 +1122,7 @@ func VerifyAndRecordProviderCompletion(
 		return ProviderCompletionReceipt{}, JournalRecord{}, err
 	}
 	receipt, err := newProviderCompletionReceipt(
-		definition, attempt, providerState, mergeCommit.tree, request,
+		definition, attempt, providerState, mergeCommit.tree, readiness, checkEvidence, reviewEvidence,
 		authorization.receipts, providerResults, topologyDigest,
 	)
 	if err != nil {
@@ -903,6 +1141,81 @@ func VerifyAndRecordProviderCompletion(
 	return receipt, record, nil
 }
 
+func providerCompletionLocalEvidence(
+	snapshot JournalSnapshot,
+	definition EffectiveWorkspaceDefinition,
+	attempt RuntimeAttemptProjection,
+	head, tree GitObjectID,
+) (ReviewReadiness, []Digest, []Digest, error) {
+	unit, err := executionForMergeUnit(definition.execution, attempt.mergeUnit)
+	if err != nil {
+		return ReviewReadiness{}, nil, nil, err
+	}
+	checkEvidence := make([]Digest, 0)
+	if protocol, configured := unit.CommitProtocol(); configured {
+		if attempt.commitProtocol == nil || attempt.commitProtocol.protocol.digest != protocol.digest ||
+			attempt.commitProtocol.generation != definition.generation ||
+			attempt.commitProtocol.phase != CommitProtocolComplete || attempt.commitProtocol.Head() != head {
+			return ReviewReadiness{}, nil, nil, fmt.Errorf("provider completion commit protocol evidence is incomplete or stale")
+		}
+		completed, err := completedProtocolEffect(*attempt.commitProtocol)
+		if err != nil {
+			return ReviewReadiness{}, nil, nil, err
+		}
+		checkEvidence = append(checkEvidence, completed.evidence)
+		for _, step := range attempt.commitProtocol.steps {
+			for _, check := range step.checks {
+				checkEvidence = append(checkEvidence, check.evidence)
+			}
+		}
+	}
+	if attempt.reviewFixes != nil {
+		for index, fix := range attempt.reviewFixes.fixes {
+			if fix.phase != ReviewFixComplete {
+				return ReviewReadiness{}, nil, nil, fmt.Errorf("provider completion review-fix evidence is incomplete")
+			}
+			completed, err := completedReviewFixEffect(*attempt.reviewFixes, index)
+			if err != nil {
+				return ReviewReadiness{}, nil, nil, err
+			}
+			checkEvidence = append(checkEvidence, completed.evidence)
+			for _, check := range fix.checks {
+				checkEvidence = append(checkEvidence, check.evidence)
+			}
+		}
+	}
+	var readiness ReviewReadiness
+	reviewEvidence := make([]Digest, 0)
+	if _, configured := unit.ReviewLoop(); configured {
+		projection, err := RebuildReviewRuntime(snapshot, definition)
+		if err != nil {
+			return ReviewReadiness{}, nil, nil, err
+		}
+		state, exists := projection.State(attempt.attemptID)
+		if !exists || !state.MergeReady() || state.head != head || state.tree != tree {
+			return ReviewReadiness{}, nil, nil, fmt.Errorf("provider completion review evidence is incomplete or stale")
+		}
+		readiness, err = newReviewMergeReadiness(definition, attempt, state)
+		if err != nil {
+			return ReviewReadiness{}, nil, nil, err
+		}
+		rounds := state.Rounds()
+		last := rounds[len(rounds)-1]
+		for _, result := range last.Results() {
+			reviewEvidence = append(
+				reviewEvidence,
+				result.submission.digest,
+				result.reservationDigest,
+				result.receiptDigest,
+			)
+		}
+		for _, fix := range state.Fixes() {
+			reviewEvidence = append(reviewEvidence, fix.evidence)
+		}
+	}
+	return readiness, checkEvidence, reviewEvidence, nil
+}
+
 func providerProjectionEffectApplied(projected ProviderIntentProjection) bool {
 	if projected.status == ProviderIntentSucceeded {
 		return true
@@ -919,63 +1232,6 @@ func providerProjectionMergeIdentity(projected ProviderIntentProjection) (GitObj
 		return projected.reconciliation.mergeCommit, true
 	}
 	return GitObjectID{}, false
-}
-
-func verifyRequiredProviderEvidence(state ProviderPullRequestState, requiredChecks, requiredReviews []ID) error {
-	checks, err := normalizeRequiredIDs(requiredChecks)
-	if err != nil {
-		return err
-	}
-	reviews, err := normalizeRequiredIDs(requiredReviews)
-	if err != nil {
-		return err
-	}
-	for _, required := range checks {
-		found := false
-		for _, check := range state.checks {
-			if check.id == required {
-				found = check.required && check.conclusion == ProviderCheckPassed
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("required provider check %s is missing, not required, or not passing", required)
-		}
-	}
-	for _, required := range reviews {
-		found := false
-		for _, review := range state.reviews {
-			if review.id == required {
-				found = review.required && review.conclusion == ProviderReviewApproved
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("required provider review %s is missing, not required, or not approved", required)
-		}
-	}
-	for _, check := range state.checks {
-		if check.required && check.conclusion != ProviderCheckPassed {
-			return fmt.Errorf("provider-required check %s is not passing", check.id)
-		}
-	}
-	for _, review := range state.reviews {
-		if review.required && review.conclusion != ProviderReviewApproved {
-			return fmt.Errorf("provider-required review %s is not approved", review.id)
-		}
-	}
-	return nil
-}
-
-func normalizeRequiredIDs(values []ID) ([]ID, error) {
-	result := append([]ID(nil), values...)
-	sort.Slice(result, func(i, j int) bool { return result[i].String() < result[j].String() })
-	for index, value := range result {
-		if value.IsZero() || index > 0 && value == result[index-1] {
-			return nil, fmt.Errorf("required provider evidence identities must be nonzero and unique")
-		}
-	}
-	return result, nil
 }
 
 func providerTopologyDigest(

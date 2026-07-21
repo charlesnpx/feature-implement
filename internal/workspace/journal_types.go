@@ -145,6 +145,8 @@ const (
 	JournalEventReviewFindingFixReserved       JournalEventType = "review.finding_fix_reserved.v2"
 	JournalEventReviewFixApplied               JournalEventType = "review.fix_applied.v2"
 	JournalEventProviderIntentReserved         JournalEventType = "provider.intent_reserved.v2"
+	JournalEventProviderIntentAbandoned        JournalEventType = "provider.intent_abandoned.v2"
+	JournalEventProviderMergePreflightRecorded JournalEventType = "provider.merge_preflight_recorded.v2"
 	JournalEventProviderIntentDispatched       JournalEventType = "provider.intent_dispatched.v2"
 	JournalEventProviderResultRecorded         JournalEventType = "provider.result_recorded.v2"
 	JournalEventProviderIntentReconciled       JournalEventType = "provider.intent_reconciled.v2"
@@ -412,7 +414,8 @@ func newJournalAppend(
 			ReviewInvocationFailedJournalEvent, ReviewResultRecordedJournalEvent,
 			ReviewFindingFixReservedJournalEvent, ReviewFixAppliedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("review events must use the exact-head verifier-backed review workflow")
-		case ProviderIntentReservedJournalEvent, ProviderIntentDispatchedJournalEvent,
+		case ProviderIntentReservedJournalEvent, ProviderIntentAbandonedJournalEvent,
+			ProviderMergePreflightRecordedJournalEvent, ProviderIntentDispatchedJournalEvent,
 			ProviderResultRecordedJournalEvent, ProviderIntentReconciledJournalEvent,
 			ProviderCompletionVerifiedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("provider events must use the trusted broker and verifier-backed provider workflow")

@@ -408,6 +408,7 @@ func (broker *ProviderBroker) dispatch(
 	ctx context.Context,
 	capability providerBrokerCapability,
 	intent ProviderIntent,
+	preflight ProviderMergePreflight,
 ) (ProviderResult, error) {
 	if capability.intentID != intent.intentID || capability.intentDigest != intent.digest ||
 		capability.idempotencyKey != intent.idempotencyKey || capability.epoch != intent.scope.epoch ||
@@ -420,6 +421,13 @@ func (broker *ProviderBroker) dispatch(
 	}
 	if err := broker.consume(capability.digest); err != nil {
 		return ProviderResult{}, err
+	}
+	if intent.kind == ProviderIntentMerge {
+		if preflight.intentID != intent.intentID || preflight.intentDigest != intent.digest || preflight.digest.IsZero() {
+			return broker.failureResult(intent, ProviderAdapterFailedBeforeEffect, "merge-preflight-missing", fmt.Errorf("merge dispatch lacks durable provider preflight evidence"))
+		}
+	} else if !preflight.digest.IsZero() {
+		return ProviderResult{}, fmt.Errorf("non-merge provider dispatch cannot carry merge preflight evidence")
 	}
 	if err := ctx.Err(); err != nil {
 		return broker.failureResult(intent, ProviderAdapterFailedBeforeEffect, "context-cancelled-before-provider", err)
@@ -475,10 +483,8 @@ func (broker *ProviderBroker) dispatch(
 		if observeErr != nil {
 			return broker.failureResult(intent, ProviderAdapterFailedBeforeEffect, "merge-preflight-query-failed", observeErr)
 		}
-		if observed.pullRequest != intent.pullRequest || observed.baseRef != intent.baseRef ||
-			observed.branch != intent.branch || observed.head != intent.head || observed.headTree != intent.tree ||
-			observed.remoteBranchHead != intent.head || observed.baseHeadBeforeMerge != intent.scope.frontier.base ||
-			observed.merged || !providerRequiredEvidenceReady(observed) {
+		if observed.merged || !providerRequiredEvidenceReady(observed) ||
+			validateProviderStateAgainstMergePreflight(preflight, observed) != nil {
 			return broker.failureResult(intent, ProviderAdapterFailedBeforeEffect, "merge-preflight-drift", fmt.Errorf("pull request head, tree, identity, or merge state drifted"))
 		}
 		result, callErr := broker.adapter.Merge(ctx, ProviderMergeRequest{intent: intent})

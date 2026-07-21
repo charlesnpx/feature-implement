@@ -28,7 +28,11 @@ func ReserveProviderIntent(
 		if existing.intent.digest != request.Intent.digest {
 			return ProviderIntentProjection{}, JournalRecord{}, fmt.Errorf("provider intent identity conflicts with durable intent")
 		}
-		return existing, JournalRecord{}, nil
+		retryable := existing.status == ProviderIntentFailedBeforeEffect ||
+			existing.status == ProviderIntentReconciled && !existing.reconciliation.effectApplied
+		if !retryable {
+			return existing, JournalRecord{}, nil
+		}
 	}
 	if err := validateProviderIntentAgainstRuntime(snapshot, definition, core, providerProjection, request.Intent); err != nil {
 		return ProviderIntentProjection{}, JournalRecord{}, err
@@ -135,26 +139,160 @@ func validateProviderIntentAgainstRuntime(
 		if !found || open.branch != intent.branch || open.baseRef != intent.baseRef {
 			return fmt.Errorf("provider merge does not match the durable pull request branch and base")
 		}
-		unit, unitErr := executionForMergeUnit(definition.execution, attempt.mergeUnit)
-		if unitErr != nil {
-			return unitErr
-		}
-		if _, configured := unit.ReviewLoop(); configured {
-			reviews, reviewErr := RebuildReviewRuntime(snapshot, definition)
-			if reviewErr != nil {
-				return reviewErr
-			}
-			review, exists := reviews.State(attempt.attemptID)
-			if !exists || !review.MergeReady() || review.Head() != intent.head || review.Tree() != intent.tree {
-				return fmt.Errorf("provider merge requires exact-head clean review readiness")
-			}
+		if err := validateProviderMergeExecutionReadiness(
+			snapshot, definition, attempt, intent.head, intent.tree,
+		); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
+func validateProviderMergeExecutionReadiness(
+	snapshot JournalSnapshot,
+	definition EffectiveWorkspaceDefinition,
+	attempt RuntimeAttemptProjection,
+	head, tree GitObjectID,
+) error {
+	unit, err := executionForMergeUnit(definition.execution, attempt.mergeUnit)
+	if err != nil {
+		return err
+	}
+	if protocol, configured := unit.CommitProtocol(); configured {
+		if attempt.commitProtocol == nil || attempt.commitProtocol.generation != definition.generation ||
+			attempt.commitProtocol.protocol.digest != protocol.digest ||
+			attempt.commitProtocol.phase != CommitProtocolComplete || attempt.commitProtocol.Head() != head {
+			return fmt.Errorf("provider merge requires the configured commit protocol to be complete on the exact head")
+		}
+	}
+	if _, configured := unit.ReviewLoop(); configured {
+		reviews, reviewErr := RebuildReviewRuntime(snapshot, definition)
+		if reviewErr != nil {
+			return reviewErr
+		}
+		review, exists := reviews.State(attempt.attemptID)
+		if !exists || !review.MergeReady() || review.Head() != head || review.Tree() != tree {
+			return fmt.Errorf("provider merge requires exact-head clean review readiness")
+		}
+	}
+	return nil
+}
+
+// AbandonProviderIntent durably resolves a reservation that has not crossed
+// the dispatch linearization point. It is deliberately unavailable once an
+// effect may have reached the provider.
+func AbandonProviderIntent(
+	journal *WorkspaceJournal,
+	definition EffectiveWorkspaceDefinition,
+	intentID ID,
+	occurredAt time.Time,
+) (ProviderIntentProjection, JournalRecord, error) {
+	if journal == nil || intentID.IsZero() || occurredAt.IsZero() {
+		return ProviderIntentProjection{}, JournalRecord{}, fmt.Errorf("abandon provider intent requires journal, intent, and occurrence time")
+	}
+	snapshot, err := journal.ReadSnapshot()
+	if err != nil {
+		return ProviderIntentProjection{}, JournalRecord{}, err
+	}
+	projection, err := RebuildProviderRuntime(snapshot, definition)
+	if err != nil {
+		return ProviderIntentProjection{}, JournalRecord{}, err
+	}
+	projected, exists := projection.Intent(intentID)
+	if !exists {
+		return ProviderIntentProjection{}, JournalRecord{}, fmt.Errorf("provider intent %s is not reserved", intentID)
+	}
+	if projected.status == ProviderIntentAbandoned {
+		return projected, JournalRecord{}, nil
+	}
+	if projected.status != ProviderIntentReserved {
+		return ProviderIntentProjection{}, JournalRecord{}, fmt.Errorf("provider intent %s crossed the dispatch boundary and cannot be abandoned", intentID)
+	}
+	event, err := NewProviderIntentAbandonedJournalEvent(
+		definition.workspace.id, definition.generation, projected.intent,
+	)
+	if err != nil {
+		return ProviderIntentProjection{}, JournalRecord{}, err
+	}
+	record, err := appendProviderJournalEvent(journal, snapshot, event, occurredAt)
+	if err != nil {
+		return ProviderIntentProjection{}, JournalRecord{}, err
+	}
+	updated, err := readProviderProjection(journal, definition)
+	if err != nil {
+		return ProviderIntentProjection{}, JournalRecord{}, err
+	}
+	resolved, exists := updated.Intent(intentID)
+	if !exists || resolved.status != ProviderIntentAbandoned {
+		return ProviderIntentProjection{}, JournalRecord{}, fmt.Errorf("provider intent abandonment did not replay")
+	}
+	return resolved, record, nil
+}
+
+// RecordProviderMergePreflight captures the trusted provider's required
+// checks and reviews before the merge effect is authorized for dispatch.
+func RecordProviderMergePreflight(
+	ctx context.Context,
+	journal *WorkspaceJournal,
+	definition EffectiveWorkspaceDefinition,
+	broker *ProviderBroker,
+	intentID ID,
+	occurredAt time.Time,
+) (ProviderMergePreflight, JournalRecord, error) {
+	if journal == nil || broker == nil || intentID.IsZero() || occurredAt.IsZero() {
+		return ProviderMergePreflight{}, JournalRecord{}, fmt.Errorf("record provider merge preflight requires journal, broker, intent, and occurrence time")
+	}
+	if broker.provider != definition.workspace.provider {
+		return ProviderMergePreflight{}, JournalRecord{}, fmt.Errorf("provider merge preflight broker does not match active definition")
+	}
+	snapshot, projection, _, core, err := readProviderLifecycleRuntime(journal, definition)
+	if err != nil {
+		return ProviderMergePreflight{}, JournalRecord{}, err
+	}
+	projected, exists := projection.Intent(intentID)
+	if !exists || projected.status != ProviderIntentReserved || projected.intent.kind != ProviderIntentMerge {
+		return ProviderMergePreflight{}, JournalRecord{}, fmt.Errorf("provider merge preflight requires an exact reserved merge intent")
+	}
+	if err := validateProviderIntentAgainstRuntime(snapshot, definition, core, projection, projected.intent); err != nil {
+		return ProviderMergePreflight{}, JournalRecord{}, err
+	}
+	state, err := broker.observePullRequest(ctx, ProviderPullRequestQuery{
+		repository: projected.intent.scope.repository, pullRequest: projected.intent.pullRequest,
+	})
+	if err != nil {
+		return ProviderMergePreflight{}, JournalRecord{}, fmt.Errorf("observe provider merge preflight: %w", err)
+	}
+	preflight, err := newProviderMergePreflight(projected.intent, state)
+	if err != nil {
+		return ProviderMergePreflight{}, JournalRecord{}, err
+	}
+	if existing, ok := projected.MergePreflight(); ok && existing.digest == preflight.digest {
+		return existing, JournalRecord{}, nil
+	}
+	event, err := NewProviderMergePreflightRecordedJournalEvent(
+		definition.workspace.id, definition.generation, preflight,
+	)
+	if err != nil {
+		return ProviderMergePreflight{}, JournalRecord{}, err
+	}
+	record, err := appendProviderJournalEvent(journal, snapshot, event, occurredAt)
+	if err != nil {
+		return ProviderMergePreflight{}, JournalRecord{}, err
+	}
+	updated, err := readProviderProjection(journal, definition)
+	if err != nil {
+		return ProviderMergePreflight{}, JournalRecord{}, err
+	}
+	resolved, exists := updated.Intent(intentID)
+	if !exists || resolved.preflight.digest != preflight.digest {
+		return ProviderMergePreflight{}, JournalRecord{}, fmt.Errorf("provider merge preflight did not replay")
+	}
+	return resolved.preflight, record, nil
+}
+
 type ProviderDispatchTicket struct {
 	intent     ProviderIntent
+	preflight  ProviderMergePreflight
 	record     JournalRecord
 	capability providerBrokerCapability
 }
@@ -185,6 +323,9 @@ func AuthorizeProviderIntentDispatch(
 	}
 	if err := validateProviderIntentAgainstRuntime(snapshot, definition, core, providerProjection, projected.intent); err != nil {
 		return ProviderDispatchTicket{}, err
+	}
+	if projected.intent.kind == ProviderIntentMerge && projected.preflight.digest.IsZero() {
+		return ProviderDispatchTicket{}, fmt.Errorf("provider merge dispatch requires durable provider preflight evidence")
 	}
 	binding, err := NewAuthorizationSnapshotBinding(
 		snapshot.head, snapshot.Revision(AuthorizationEpochJournalResource(definition.workspace.id)),
@@ -233,7 +374,9 @@ func AuthorizeProviderIntentDispatch(
 	if err != nil {
 		return ProviderDispatchTicket{}, err
 	}
-	return ProviderDispatchTicket{intent: projected.intent, record: record, capability: capability}, nil
+	return ProviderDispatchTicket{
+		intent: projected.intent, preflight: projected.preflight, record: record, capability: capability,
+	}, nil
 }
 
 type ProviderExecutionResult struct {
@@ -272,7 +415,7 @@ func ExecuteProviderIntent(
 		projected.dispatchRecordHash != ticket.record.eventHash || projected.intent.digest != ticket.intent.digest {
 		return ProviderExecutionResult{}, fmt.Errorf("provider dispatch ticket is stale or already resolved")
 	}
-	providerResult, brokerErr := broker.dispatch(ctx, ticket.capability, ticket.intent)
+	providerResult, brokerErr := broker.dispatch(ctx, ticket.capability, ticket.intent, ticket.preflight)
 	if providerResult.digest.IsZero() {
 		if brokerErr == nil {
 			brokerErr = fmt.Errorf("provider broker returned no canonical result")

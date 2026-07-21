@@ -75,6 +75,26 @@ type providerCompletionGit struct {
 	ancestors    map[string]bool
 }
 
+func (git *providerCompletionGit) InspectRemoteTopology(
+	_ context.Context,
+	_, _, _, _ string,
+	head, merge, base workspace.GitObjectID,
+) (workspace.ProviderCompletionGitInspection, error) {
+	headCommit, exists := git.commits[head.String()]
+	if !exists {
+		return workspace.ProviderCompletionGitInspection{}, errors.New("head commit not found")
+	}
+	mergeCommit, exists := git.commits[merge.String()]
+	if !exists {
+		return workspace.ProviderCompletionGitInspection{}, errors.New("merge commit not found")
+	}
+	return workspace.NewProviderCompletionGitInspection(
+		git.remoteBranch, git.remoteBase, headCommit, mergeCommit,
+		git.ancestors[base.String()+"\x00"+merge.String()],
+		git.ancestors[head.String()+"\x00"+merge.String()],
+	)
+}
+
 func (git *providerCompletionGit) InspectRemoteBranch(
 	context.Context,
 	string,
@@ -221,6 +241,12 @@ func TestProviderLifecycleDispatchesThroughSingleUseBrokerAndRecordsCanonicalCom
 	); err != nil {
 		t.Fatalf("reserve merge: %v", err)
 	}
+	if _, _, err := workspace.RecordProviderMergePreflight(
+		context.Background(), harness.journal, harness.definition, broker, mergeIntent.IntentID(),
+		mustTime(t, "2026-07-21T10:07:02Z"),
+	); err != nil {
+		t.Fatalf("record merge preflight: %v", err)
+	}
 	clock.now = mustTime(t, "2026-07-21T10:08:00Z")
 	mergeTicket, err := workspace.AuthorizeProviderIntentDispatch(
 		harness.journal, harness.definition, evaluator, mergeIntent.IntentID(),
@@ -251,16 +277,10 @@ func TestProviderLifecycleDispatchesThroughSingleUseBrokerAndRecordsCanonicalCom
 			head.String() + "\x00" + mergeCommit.String(): true,
 		},
 	}
-	checkEvidence := workspace.DigestBytes([]byte("local-check-evidence"))
-	reviewEvidence := workspace.DigestBytes([]byte("local-review-evidence"))
 	receipt, record, err := workspace.VerifyAndRecordProviderCompletion(
 		context.Background(), harness.journal, harness.definition, broker, git,
 		workspace.ProviderCompletionRequest{
-			AttemptID: attempt.AttemptID(), RequiredChecks: []workspace.ID{workspace.MustID("ci")},
-			RequiredReviews:       []workspace.ID{workspace.MustID("owners")},
-			CheckEvidenceDigests:  []workspace.Digest{checkEvidence},
-			ReviewEvidenceDigests: []workspace.Digest{reviewEvidence},
-			OccurredAt:            mustTime(t, "2026-07-21T10:09:00Z"),
+			AttemptID: attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T10:09:00Z"),
 		},
 	)
 	if err != nil || receipt.Digest().IsZero() || record.EventType() != workspace.JournalEventProviderCompletionVerified {
@@ -360,6 +380,61 @@ func TestProviderAmbiguityBlocksDispatchUntilTypedQueryReconciles(t *testing.T) 
 	state, _, _ = workspace.ReadAuthorizationEvaluationSnapshot(harness.journal, harness.definition)
 	if len(state.OutstandingReconciliationObligations()) != 0 {
 		t.Fatalf("reconciled obligations = %#v", state.OutstandingReconciliationObligations())
+	}
+}
+
+func TestProviderReconciledNotAppliedIntentCanBeReservedAndDispatchedAgain(t *testing.T) {
+	scenario := newProviderPushScenario(t, "11")
+	ticket := scenario.authorize(t, "11")
+	scenario.adapter.pushErr = errors.New("provider outcome unknown")
+	first, err := workspace.ExecuteProviderIntent(
+		context.Background(), scenario.harness.journal, scenario.harness.definition,
+		scenario.broker, ticket, mustTime(t, "2026-07-21T11:05:01Z"),
+	)
+	if err == nil || first.Result().Status() != workspace.ProviderIntentAmbiguous {
+		t.Fatalf("ambiguous first dispatch = %#v err=%v", first, err)
+	}
+	scenario.adapter.reconciliation, _ = workspace.NewProviderReconciliationObservation(
+		workspace.ProviderReconciliationObservationOptions{
+			Disposition: workspace.ProviderEffectNotApplied, RequestMarker: "query-not-applied",
+		},
+	)
+	resolved, err := workspace.ReconcileProviderIntent(
+		context.Background(), scenario.harness.journal, scenario.harness.definition,
+		scenario.broker, scenario.intent.IntentID(), mustTime(t, "2026-07-21T11:06:00Z"),
+	)
+	if err != nil || resolved.Projection().Status() != workspace.ProviderIntentReconciled ||
+		resolved.Reconciliation().EffectApplied() {
+		t.Fatalf("not-applied reconciliation = %#v err=%v", resolved, err)
+	}
+	scenario.clock.now = mustTime(t, "2026-07-21T11:07:00Z")
+	retried, record, err := workspace.ReserveProviderIntent(
+		scenario.harness.journal, scenario.harness.definition, scenario.evaluator,
+		workspace.ReserveProviderIntentRequest{
+			Intent: scenario.intent, OccurredAt: mustTime(t, "2026-07-21T11:07:01Z"),
+		},
+	)
+	if err != nil || retried.Status() != workspace.ProviderIntentReserved ||
+		record.EventType() != workspace.JournalEventProviderIntentReserved {
+		t.Fatalf("reconciled retry reservation = %#v record=%s err=%v", retried, record.EventType(), err)
+	}
+	scenario.clock.now = mustTime(t, "2026-07-21T11:08:00Z")
+	ticket, err = workspace.AuthorizeProviderIntentDispatch(
+		scenario.harness.journal, scenario.harness.definition, scenario.evaluator, scenario.intent.IntentID(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenario.adapter.pushErr = nil
+	scenario.adapter.pushResult, _ = workspace.NewProviderPushAdapterResult(
+		"retry-push", scenario.attempt.VerifiedHead(),
+	)
+	second, err := workspace.ExecuteProviderIntent(
+		context.Background(), scenario.harness.journal, scenario.harness.definition,
+		scenario.broker, ticket, mustTime(t, "2026-07-21T11:08:01Z"),
+	)
+	if err != nil || second.Result().Status() != workspace.ProviderIntentSucceeded || scenario.adapter.pushCalls != 2 {
+		t.Fatalf("retried provider push = %#v calls=%d err=%v", second, scenario.adapter.pushCalls, err)
 	}
 }
 

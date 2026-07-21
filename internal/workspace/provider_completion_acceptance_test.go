@@ -156,6 +156,59 @@ func TestProviderMergeRequiresConfiguredExactHeadReviewReadiness(t *testing.T) {
 	}
 }
 
+func TestProviderMergeRequiresConfiguredCommitProtocolWithoutReviewToComplete(t *testing.T) {
+	fixture := newDefinitionFixture(t)
+	configuration := string(fixture.sources.ExecutionConfig.Bytes)
+	configuration = strings.Replace(
+		configuration,
+		"      max_review_fixes: 2\n  - plan_id: alpha-plan\n    merge_unit_id: unit-two",
+		`      max_review_fixes: 2
+    commit_protocol:
+      steps:
+        - id: implementation
+          subject: Implement provider lifecycle
+          body_policy: required
+          allowed_paths:
+            - src/**
+          frozen_paths: []
+          checks: []
+  - plan_id: alpha-plan
+    merge_unit_id: unit-two`,
+		1,
+	)
+	fixture.sources.ExecutionConfig.Bytes = []byte(configuration)
+	definition := mustDefinition(t, fixture.sources)
+	workspaceDirectory := t.TempDir()
+	if _, err := workspace.InitializeWorkspaceV2(
+		workspaceDirectory, definition, mustTime(t, "2026-07-21T10:00:00Z"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := workspace.OpenWorkspaceJournal(workspaceDirectory, workspace.JournalReadWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	goal, _ := workspace.NewGoalBinding(workspace.MustID("implementation-goal"), workspace.GoalScopeMergeUnit)
+	harness := attemptHarness{
+		definition: definition, journal: journal, workspace: workspaceDirectory,
+		git: &fakeAttemptGit{}, base: mustProviderGitObject(t, workspace.GitHashSHA1, 'a'),
+		unit: mustMergeUnitReference(t, "alpha-plan", "unit-one"), goal: goal, worktrees: t.TempDir(),
+	}
+	scenario := newProviderOpenScenarioWithHarness(t, harness, "13", workspace.GitHashSHA1, 171)
+	merge := scenario.mergeIntent(t, scenario.pull)
+	scenario.clock.now = mustTime(t, "2026-07-21T13:07:00Z")
+	if _, _, err := workspace.ReserveProviderIntent(
+		scenario.harness.journal, scenario.harness.definition, scenario.evaluator,
+		workspace.ReserveProviderIntentRequest{Intent: merge, OccurredAt: mustTime(t, "2026-07-21T13:07:01Z")},
+	); err == nil || !strings.Contains(err.Error(), "configured commit protocol") {
+		t.Fatalf("merge before configured commit protocol completion error = %v", err)
+	}
+	if scenario.adapter.mergeCalls != 0 {
+		t.Fatalf("provider merge invoked before commit protocol completion: %d", scenario.adapter.mergeCalls)
+	}
+}
+
 func (scenario *providerOpenScenario) mergeIntent(t *testing.T, pull workspace.PullRequestIdentity) workspace.ProviderIntent {
 	t.Helper()
 	intent, err := workspace.NewProviderMergeIntent(workspace.ProviderMergeIntentOptions{
@@ -183,6 +236,12 @@ func (scenario *providerOpenScenario) executeMerge(
 		workspace.ReserveProviderIntentRequest{
 			Intent: intent, OccurredAt: mustTime(t, "2026-07-21T"+scenario.hour+":07:01Z"),
 		},
+	); err != nil {
+		return intent, workspace.ProviderExecutionResult{}, err
+	}
+	if _, _, err := workspace.RecordProviderMergePreflight(
+		context.Background(), scenario.harness.journal, scenario.harness.definition,
+		scenario.broker, intent.IntentID(), mustTime(t, "2026-07-21T"+scenario.hour+":07:02Z"),
 	); err != nil {
 		return intent, workspace.ProviderExecutionResult{}, err
 	}
@@ -251,11 +310,8 @@ func newProviderCompletedScenario(
 		providerOpenScenario: opened, mergeIntent: mergeIntent, mergeCommit: mergeCommit,
 		git: git, providerState: providerState,
 		request: workspace.ProviderCompletionRequest{
-			AttemptID: opened.attempt.AttemptID(), RequiredChecks: []workspace.ID{workspace.MustID("ci")},
-			RequiredReviews:       []workspace.ID{workspace.MustID("owners")},
-			CheckEvidenceDigests:  []workspace.Digest{workspace.DigestBytes([]byte("local-check-evidence"))},
-			ReviewEvidenceDigests: []workspace.Digest{workspace.DigestBytes([]byte("local-review-evidence"))},
-			OccurredAt:            mustTime(t, "2026-07-21T"+hour+":09:00Z"),
+			AttemptID:  opened.attempt.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-21T"+hour+":09:00Z"),
 		},
 	}
 }
@@ -353,7 +409,7 @@ func TestProviderMergePreflightRejectsWrongIdentityHeadAndTreeBeforeEffect(t *te
 		t.Run(test.name, func(t *testing.T) {
 			scenario := newProviderOpenScenario(t, "13", workspace.GitHashSHA1, 171)
 			_, execution, err := scenario.executeMerge(t, test.state(t, &scenario), mustProviderGitObject(t, workspace.GitHashSHA1, 'c'))
-			if err == nil || execution.Result().Status() != workspace.ProviderIntentFailedBeforeEffect || scenario.adapter.mergeCalls != 0 {
+			if err == nil || !execution.Result().Digest().IsZero() || scenario.adapter.mergeCalls != 0 {
 				t.Fatalf("merge preflight outcome = %#v calls=%d err=%v", execution, scenario.adapter.mergeCalls, err)
 			}
 		})
@@ -366,10 +422,88 @@ func TestProviderMergePreflightRejectsWrongIdentityHeadAndTreeBeforeEffect(t *te
 			workspace.GitObjectID{}, false,
 		)
 		_, execution, err := scenario.executeMerge(t, wrong, mustProviderGitObject(t, workspace.GitHashSHA1, 'c'))
-		if err == nil || execution.Result().Status() != workspace.ProviderIntentFailedBeforeEffect || scenario.adapter.mergeCalls != 0 {
+		if err == nil || !execution.Result().Digest().IsZero() || scenario.adapter.mergeCalls != 0 {
 			t.Fatalf("wrong-identity preflight = %#v calls=%d err=%v", execution, scenario.adapter.mergeCalls, err)
 		}
 	})
+}
+
+func TestProviderFailedBeforeEffectCanRetryExactMergeIntent(t *testing.T) {
+	scenario := newProviderOpenScenario(t, "13", workspace.GitHashSHA1, 171)
+	valid := providerPRState(
+		t, scenario.harness, scenario.attempt, scenario.pull, scenario.head, scenario.tree, scenario.base,
+		workspace.GitObjectID{}, false,
+	)
+	scenario.adapter.pullRequestState = valid
+	intent := scenario.mergeIntent(t, scenario.pull)
+	scenario.clock.now = mustTime(t, "2026-07-21T13:07:00Z")
+	if _, _, err := workspace.ReserveProviderIntent(
+		scenario.harness.journal, scenario.harness.definition, scenario.evaluator,
+		workspace.ReserveProviderIntentRequest{Intent: intent, OccurredAt: mustTime(t, "2026-07-21T13:07:01Z")},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := workspace.RecordProviderMergePreflight(
+		context.Background(), scenario.harness.journal, scenario.harness.definition,
+		scenario.broker, intent.IntentID(), mustTime(t, "2026-07-21T13:07:02Z"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	scenario.clock.now = mustTime(t, "2026-07-21T13:08:00Z")
+	ticket, err := workspace.AuthorizeProviderIntentDispatch(
+		scenario.harness.journal, scenario.harness.definition, scenario.evaluator, intent.IntentID(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongTree := mustProviderGitObject(t, workspace.GitHashSHA1, 'd')
+	scenario.adapter.pullRequestState = providerUnmergedState(
+		t, &scenario, scenario.pull, scenario.harness.definition.Workspace().BaseRef(), scenario.attempt.Branch(),
+		scenario.head, wrongTree, scenario.head, scenario.base,
+		workspace.ProviderCheckPassed, workspace.ProviderReviewApproved,
+	)
+	first, err := workspace.ExecuteProviderIntent(
+		context.Background(), scenario.harness.journal, scenario.harness.definition, scenario.broker, ticket,
+		mustTime(t, "2026-07-21T13:08:01Z"),
+	)
+	if err == nil || first.Result().Status() != workspace.ProviderIntentFailedBeforeEffect || scenario.adapter.mergeCalls != 0 {
+		t.Fatalf("first merge dispatch = %#v calls=%d err=%v", first, scenario.adapter.mergeCalls, err)
+	}
+	scenario.adapter.pullRequestState = valid
+	scenario.clock.now = mustTime(t, "2026-07-21T13:09:00Z")
+	retried, record, err := workspace.ReserveProviderIntent(
+		scenario.harness.journal, scenario.harness.definition, scenario.evaluator,
+		workspace.ReserveProviderIntentRequest{Intent: intent, OccurredAt: mustTime(t, "2026-07-21T13:09:01Z")},
+	)
+	if err != nil || retried.Status() != workspace.ProviderIntentReserved ||
+		record.EventType() != workspace.JournalEventProviderIntentReserved {
+		t.Fatalf("retry reservation = %#v record=%s err=%v", retried, record.EventType(), err)
+	}
+	if _, exists := retried.MergePreflight(); exists {
+		t.Fatal("retry reservation retained stale merge preflight")
+	}
+	if _, _, err := workspace.RecordProviderMergePreflight(
+		context.Background(), scenario.harness.journal, scenario.harness.definition,
+		scenario.broker, intent.IntentID(), mustTime(t, "2026-07-21T13:09:02Z"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	scenario.clock.now = mustTime(t, "2026-07-21T13:10:00Z")
+	ticket, err = workspace.AuthorizeProviderIntentDispatch(
+		scenario.harness.journal, scenario.harness.definition, scenario.evaluator, intent.IntentID(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mergeCommit := mustProviderGitObject(t, workspace.GitHashSHA1, 'c')
+	scenario.adapter.mergeResult, _ = workspace.NewProviderMergeAdapterResult("retry-merge", mergeCommit, mergeCommit)
+	second, err := workspace.ExecuteProviderIntent(
+		context.Background(), scenario.harness.journal, scenario.harness.definition, scenario.broker, ticket,
+		mustTime(t, "2026-07-21T13:10:01Z"),
+	)
+	if err != nil || second.Result().Status() != workspace.ProviderIntentSucceeded || scenario.adapter.mergeCalls != 1 {
+		t.Fatalf("retried merge dispatch = %#v calls=%d err=%v", second, scenario.adapter.mergeCalls, err)
+	}
 }
 
 func TestProviderIntentAfterOpenPRMustBindSoleDerivedIdentity(t *testing.T) {

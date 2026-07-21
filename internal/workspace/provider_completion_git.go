@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 )
 
@@ -29,6 +30,92 @@ func NewLocalProviderCompletionGitAdapter(
 func DefaultLocalProviderCompletionGitAdapter() LocalProviderCompletionGitAdapter {
 	adapter, _ := NewLocalProviderCompletionGitAdapter("git", nil)
 	return adapter
+}
+
+func (adapter LocalProviderCompletionGitAdapter) InspectRemoteTopology(
+	ctx context.Context,
+	repositoryRoot, remote, branch, baseRef string,
+	expectedHead, expectedMerge, expectedBase GitObjectID,
+) (ProviderCompletionGitInspection, error) {
+	if expectedHead.IsZero() || expectedMerge.IsZero() || expectedBase.IsZero() ||
+		expectedHead.Algorithm() != expectedMerge.Algorithm() ||
+		expectedHead.Algorithm() != expectedBase.Algorithm() {
+		return ProviderCompletionGitInspection{}, fmt.Errorf("provider completion topology requires matching expected Git identities")
+	}
+	remoteBranch, err := adapter.InspectRemoteBranch(ctx, repositoryRoot, remote, branch)
+	if err != nil {
+		return ProviderCompletionGitInspection{}, err
+	}
+	remoteBase, err := adapter.InspectRemoteBase(ctx, repositoryRoot, remote, baseRef)
+	if err != nil {
+		return ProviderCompletionGitInspection{}, err
+	}
+	if remoteBranch != expectedHead || remoteBase != expectedMerge {
+		return ProviderCompletionGitInspection{}, fmt.Errorf("provider remote refs do not match the expected reviewed head and merge")
+	}
+	algorithm, err := adapter.git.objectFormat(ctx, repositoryRoot)
+	if err != nil {
+		return ProviderCompletionGitInspection{}, err
+	}
+	if algorithm != expectedHead.Algorithm() {
+		return ProviderCompletionGitInspection{}, fmt.Errorf("provider completion objects use a different repository object format")
+	}
+	remoteURL, err := adapter.credentialFreeRemoteURL(ctx, repositoryRoot, remote)
+	if err != nil {
+		return ProviderCompletionGitInspection{}, err
+	}
+	objectStore, err := os.MkdirTemp("", "feature-provider-completion-")
+	if err != nil {
+		return ProviderCompletionGitInspection{}, fmt.Errorf("create isolated provider object store: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(objectStore) }()
+	_, exitCode, err := adapter.git.run(
+		ctx, objectStore, "init", "--bare", "--object-format="+string(algorithm),
+	)
+	if err != nil || exitCode != 0 {
+		return ProviderCompletionGitInspection{}, gitExitError("initialize isolated provider object store", exitCode, err)
+	}
+	_, exitCode, err = adapter.git.run(
+		ctx, objectStore, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--force", "--",
+		remoteURL, "refs/heads/"+branch, "refs/heads/"+baseRef,
+	)
+	if err != nil || exitCode != 0 {
+		return ProviderCompletionGitInspection{}, gitExitError("fetch isolated provider completion objects", exitCode, err)
+	}
+	refs, exitCode, err := adapter.git.run(ctx, objectStore, "for-each-ref", "--format=%(refname)")
+	if err != nil || exitCode != 0 {
+		return ProviderCompletionGitInspection{}, gitExitError("inspect isolated provider refs", exitCode, err)
+	}
+	if strings.TrimSpace(string(refs)) != "" {
+		return ProviderCompletionGitInspection{}, fmt.Errorf("isolated provider fetch unexpectedly moved a ref")
+	}
+	remoteBranchAfter, err := adapter.InspectRemoteBranch(ctx, repositoryRoot, remote, branch)
+	if err != nil || remoteBranchAfter != remoteBranch {
+		return ProviderCompletionGitInspection{}, fmt.Errorf("provider remote branch changed during isolated inspection")
+	}
+	remoteBaseAfter, err := adapter.InspectRemoteBase(ctx, repositoryRoot, remote, baseRef)
+	if err != nil || remoteBaseAfter != remoteBase {
+		return ProviderCompletionGitInspection{}, fmt.Errorf("provider remote base changed during isolated inspection")
+	}
+	headCommit, err := adapter.InspectCommit(ctx, objectStore, expectedHead)
+	if err != nil {
+		return ProviderCompletionGitInspection{}, err
+	}
+	mergeCommit, err := adapter.InspectCommit(ctx, objectStore, expectedMerge)
+	if err != nil {
+		return ProviderCompletionGitInspection{}, err
+	}
+	baseAncestor, err := adapter.IsAncestor(ctx, objectStore, expectedBase, expectedMerge)
+	if err != nil {
+		return ProviderCompletionGitInspection{}, err
+	}
+	headAncestor, err := adapter.IsAncestor(ctx, objectStore, expectedHead, expectedMerge)
+	if err != nil {
+		return ProviderCompletionGitInspection{}, err
+	}
+	return NewProviderCompletionGitInspection(
+		remoteBranch, remoteBase, headCommit, mergeCommit, baseAncestor, headAncestor,
+	)
 }
 
 func (adapter LocalProviderCompletionGitAdapter) InspectRemoteBranch(
@@ -120,6 +207,24 @@ func (adapter LocalProviderCompletionGitAdapter) validateCredentialFreeRemote(
 		}
 	}
 	return nil
+}
+
+func (adapter LocalProviderCompletionGitAdapter) credentialFreeRemoteURL(
+	ctx context.Context,
+	repositoryRoot, remote string,
+) (string, error) {
+	if err := adapter.validateCredentialFreeRemote(ctx, repositoryRoot, remote); err != nil {
+		return "", err
+	}
+	output, exitCode, err := adapter.git.run(ctx, repositoryRoot, "remote", "get-url", remote)
+	if err != nil || exitCode != 0 {
+		return "", gitExitError("inspect provider fetch URL", exitCode, err)
+	}
+	remoteURL := strings.TrimSpace(string(output))
+	if remoteURL == "" || strings.ContainsAny(remoteURL, "\r\n") {
+		return "", fmt.Errorf("provider completion remote has no single fetch URL")
+	}
+	return remoteURL, nil
 }
 
 func (adapter LocalProviderCompletionGitAdapter) InspectCommit(

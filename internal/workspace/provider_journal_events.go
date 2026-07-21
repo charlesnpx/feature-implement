@@ -52,6 +52,81 @@ func (event ProviderIntentReservedJournalEvent) validate() error {
 
 func (event ProviderIntentReservedJournalEvent) Intent() ProviderIntent { return event.intent }
 
+type ProviderIntentAbandonedJournalEvent struct {
+	workspaceID  ID
+	generation   Digest
+	intentID     ID
+	intentDigest Digest
+}
+
+func NewProviderIntentAbandonedJournalEvent(
+	workspaceID ID,
+	generation Digest,
+	intent ProviderIntent,
+) (ProviderIntentAbandonedJournalEvent, error) {
+	event := ProviderIntentAbandonedJournalEvent{
+		workspaceID: workspaceID, generation: generation,
+		intentID: intent.intentID, intentDigest: intent.digest,
+	}
+	if err := event.validate(); err != nil {
+		return ProviderIntentAbandonedJournalEvent{}, err
+	}
+	return event, nil
+}
+
+func (ProviderIntentAbandonedJournalEvent) isWorkspaceJournalEvent() {}
+func (ProviderIntentAbandonedJournalEvent) eventType() JournalEventType {
+	return JournalEventProviderIntentAbandoned
+}
+func (event ProviderIntentAbandonedJournalEvent) boundGeneration() Digest { return event.generation }
+func (event ProviderIntentAbandonedJournalEvent) validate() error {
+	if event.workspaceID.IsZero() || event.generation.IsZero() ||
+		event.intentID.IsZero() || event.intentDigest.IsZero() {
+		return fmt.Errorf("provider intent abandonment requires exact workspace, generation, and intent")
+	}
+	return nil
+}
+
+type ProviderMergePreflightRecordedJournalEvent struct {
+	workspaceID ID
+	generation  Digest
+	preflight   ProviderMergePreflight
+}
+
+func NewProviderMergePreflightRecordedJournalEvent(
+	workspaceID ID,
+	generation Digest,
+	preflight ProviderMergePreflight,
+) (ProviderMergePreflightRecordedJournalEvent, error) {
+	event := ProviderMergePreflightRecordedJournalEvent{
+		workspaceID: workspaceID, generation: generation, preflight: preflight,
+	}
+	if err := event.validate(); err != nil {
+		return ProviderMergePreflightRecordedJournalEvent{}, err
+	}
+	return event, nil
+}
+
+func (ProviderMergePreflightRecordedJournalEvent) isWorkspaceJournalEvent() {}
+func (ProviderMergePreflightRecordedJournalEvent) eventType() JournalEventType {
+	return JournalEventProviderMergePreflightRecorded
+}
+func (event ProviderMergePreflightRecordedJournalEvent) boundGeneration() Digest {
+	return event.generation
+}
+func (event ProviderMergePreflightRecordedJournalEvent) validate() error {
+	canonical, err := canonicalProviderMergePreflight(event.preflight)
+	if event.workspaceID.IsZero() || event.generation.IsZero() || err != nil ||
+		event.preflight.digest.IsZero() || DigestBytes(canonical) != event.preflight.digest {
+		return fmt.Errorf("provider merge preflight event requires canonical generation-bound evidence")
+	}
+	return nil
+}
+
+func (event ProviderMergePreflightRecordedJournalEvent) Preflight() ProviderMergePreflight {
+	return event.preflight
+}
+
 type ProviderIntentDispatchedJournalEvent struct {
 	workspaceID  ID
 	generation   Digest
@@ -190,7 +265,8 @@ func (event ProviderResultRecordedJournalEvent) validate() error {
 		event.result.intentDigest.IsZero() || event.result.digest.IsZero() ||
 		event.authorizationRequest.IsZero() ||
 		event.result.status == ProviderIntentReserved || event.result.status == ProviderIntentDispatched ||
-		event.result.status == ProviderIntentReconciled || event.dispatchEpoch == 0 {
+		event.result.status == ProviderIntentReconciled || event.result.status == ProviderIntentAbandoned ||
+		event.dispatchEpoch == 0 {
 		return fmt.Errorf("provider result event requires canonical dispatched outcome and epoch")
 	}
 	canonical, err := canonicalProviderResult(event.result)
@@ -384,7 +460,8 @@ func (event ProviderCompletionVerifiedJournalEvent) validate() error {
 
 func isProviderJournalEvent(event WorkspaceJournalEvent) bool {
 	switch event.(type) {
-	case ProviderIntentReservedJournalEvent, ProviderIntentDispatchedJournalEvent,
+	case ProviderIntentReservedJournalEvent, ProviderIntentAbandonedJournalEvent,
+		ProviderMergePreflightRecordedJournalEvent, ProviderIntentDispatchedJournalEvent,
 		ProviderResultRecordedJournalEvent, ProviderIntentReconciledJournalEvent,
 		ProviderCompletionVerifiedJournalEvent:
 		return true
@@ -423,6 +500,22 @@ func providerJournalEventResources(event WorkspaceJournalEvent) ([]JournalResour
 			ProviderIntentJournalResource(event.intent.intentID),
 		}
 		return reads, []JournalResource{ProviderIntentJournalResource(event.intent.intentID)}, true
+	case ProviderIntentAbandonedJournalEvent:
+		resources := []JournalResource{
+			WorkspaceJournalResource(event.workspaceID), GenerationJournalResource(event.generation),
+			ProviderIntentJournalResource(event.intentID),
+		}
+		return resources, []JournalResource{ProviderIntentJournalResource(event.intentID)}, true
+	case ProviderMergePreflightRecordedJournalEvent:
+		resources := []JournalResource{
+			WorkspaceJournalResource(event.workspaceID), GenerationJournalResource(event.generation),
+			ProviderIntentJournalResource(event.preflight.intentID),
+			ProviderResultJournalResource(event.preflight.digest),
+		}
+		return resources, []JournalResource{
+			ProviderIntentJournalResource(event.preflight.intentID),
+			ProviderResultJournalResource(event.preflight.digest),
+		}, true
 	case ProviderIntentDispatchedJournalEvent:
 		reads := []JournalResource{
 			WorkspaceJournalResource(event.workspaceID), GenerationJournalResource(event.generation),
@@ -478,6 +571,12 @@ func providerJournalEventResources(event WorkspaceJournalEvent) ([]JournalResour
 func cloneProviderJournalEvent(event WorkspaceJournalEvent) WorkspaceJournalEvent {
 	switch value := event.(type) {
 	case ProviderIntentReservedJournalEvent:
+		return value
+	case ProviderIntentAbandonedJournalEvent:
+		return value
+	case ProviderMergePreflightRecordedJournalEvent:
+		value.preflight.requiredChecks = append([]ProviderCheckState(nil), value.preflight.requiredChecks...)
+		value.preflight.requiredReviews = append([]ProviderReviewState(nil), value.preflight.requiredReviews...)
 		return value
 	case ProviderIntentDispatchedJournalEvent:
 		return value

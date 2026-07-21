@@ -14,6 +14,8 @@ type ProviderIntentProjection struct {
 	dispatchRecordHash   Digest
 	dispatchEpoch        uint64
 	grantID              Digest
+	preflight            ProviderMergePreflight
+	preflightRecord      uint64
 	result               ProviderResult
 	resultRecord         uint64
 	reconciliation       ProviderReconciliation
@@ -31,6 +33,12 @@ func (projection ProviderIntentProjection) DispatchRecordHash() Digest {
 }
 func (projection ProviderIntentProjection) DispatchEpoch() uint64 { return projection.dispatchEpoch }
 func (projection ProviderIntentProjection) GrantID() Digest       { return projection.grantID }
+func (projection ProviderIntentProjection) MergePreflight() (ProviderMergePreflight, bool) {
+	preflight := projection.preflight
+	preflight.requiredChecks = append([]ProviderCheckState(nil), preflight.requiredChecks...)
+	preflight.requiredReviews = append([]ProviderReviewState(nil), preflight.requiredReviews...)
+	return preflight, !preflight.digest.IsZero()
+}
 func (projection ProviderIntentProjection) Result() (ProviderResult, bool) {
 	return projection.result, !projection.result.digest.IsZero()
 }
@@ -218,18 +226,50 @@ func reduceProviderRuntime(
 		if err := validateProviderAuthorizationRevision(record, event.workspaceID, event.reservation); err != nil {
 			return ProviderRuntimeProjection{}, err
 		}
-		if _, exists := current.Intent(event.intent.intentID); exists {
-			return ProviderRuntimeProjection{}, fmt.Errorf("provider intent %s is already reserved", event.intent.intentID)
+		if existing, exists := current.Intent(event.intent.intentID); exists {
+			index := providerIntentIndex(current.intents, event.intent.intentID)
+			retryable := existing.status == ProviderIntentFailedBeforeEffect ||
+				existing.status == ProviderIntentReconciled && !existing.reconciliation.effectApplied
+			if !retryable || existing.intent.digest != event.intent.digest {
+				return ProviderRuntimeProjection{}, fmt.Errorf("provider intent %s cannot be re-reserved", event.intent.intentID)
+			}
+			next.intents[index] = ProviderIntentProjection{
+				intent: event.intent, status: ProviderIntentReserved, reservationRecord: record.sequence,
+				grantID: event.reservation.grantID,
+			}
+			break
 		}
 		next.intents = append(next.intents, ProviderIntentProjection{
 			intent: event.intent, status: ProviderIntentReserved, reservationRecord: record.sequence,
 			grantID: event.reservation.grantID,
 		})
+	case ProviderIntentAbandonedJournalEvent:
+		index := providerIntentIndex(current.intents, event.intentID)
+		if index < 0 || current.intents[index].status != ProviderIntentReserved ||
+			current.intents[index].intent.digest != event.intentDigest {
+			return ProviderRuntimeProjection{}, fmt.Errorf("provider abandonment requires the exact reserved intent")
+		}
+		next.intents[index].status = ProviderIntentAbandoned
+	case ProviderMergePreflightRecordedJournalEvent:
+		preflight := event.preflight
+		index := providerIntentIndex(current.intents, preflight.intentID)
+		if index < 0 || current.intents[index].status != ProviderIntentReserved ||
+			current.intents[index].intent.kind != ProviderIntentMerge ||
+			current.intents[index].intent.digest != preflight.intentDigest {
+			return ProviderRuntimeProjection{}, fmt.Errorf("provider merge preflight requires the exact reserved merge intent")
+		}
+		next.intents[index].preflight = preflight
+		next.intents[index].preflight.requiredChecks = append([]ProviderCheckState(nil), preflight.requiredChecks...)
+		next.intents[index].preflight.requiredReviews = append([]ProviderReviewState(nil), preflight.requiredReviews...)
+		next.intents[index].preflightRecord = record.sequence
 	case ProviderIntentDispatchedJournalEvent:
 		index := providerIntentIndex(current.intents, event.intentID)
 		if index < 0 || current.intents[index].status != ProviderIntentReserved ||
 			current.intents[index].intent.digest != event.intentDigest {
 			return ProviderRuntimeProjection{}, fmt.Errorf("provider dispatch requires matching reserved intent")
+		}
+		if current.intents[index].intent.kind == ProviderIntentMerge && current.intents[index].preflight.digest.IsZero() {
+			return ProviderRuntimeProjection{}, fmt.Errorf("provider merge dispatch requires durable preflight evidence")
 		}
 		if event.effect.capability.snapshot.journalHead != record.previousHash {
 			return ProviderRuntimeProjection{}, fmt.Errorf("provider dispatch authorization is bound to a stale journal head")
@@ -434,6 +474,14 @@ func providerAppliedOpenIntentForAttempt(
 
 func cloneProviderRuntime(projection ProviderRuntimeProjection) ProviderRuntimeProjection {
 	projection.intents = append([]ProviderIntentProjection(nil), projection.intents...)
+	for index := range projection.intents {
+		projection.intents[index].preflight.requiredChecks = append(
+			[]ProviderCheckState(nil), projection.intents[index].preflight.requiredChecks...,
+		)
+		projection.intents[index].preflight.requiredReviews = append(
+			[]ProviderReviewState(nil), projection.intents[index].preflight.requiredReviews...,
+		)
+	}
 	projection.completionReceipts = append([]ProviderCompletionReceipt(nil), projection.completionReceipts...)
 	for index := range projection.completionReceipts {
 		projection.completionReceipts[index] = cloneProviderCompletionReceipt(projection.completionReceipts[index])
@@ -443,17 +491,19 @@ func cloneProviderRuntime(projection ProviderRuntimeProjection) ProviderRuntimeP
 
 func canonicalProviderRuntime(projection ProviderRuntimeProjection) ([]byte, error) {
 	type intentJSON struct {
-		IntentID       string               `json:"intent_id"`
-		IntentDigest   string               `json:"intent_digest"`
-		Generation     string               `json:"generation"`
-		Status         ProviderIntentStatus `json:"status"`
-		Reservation    uint64               `json:"reservation_record"`
-		Dispatch       uint64               `json:"dispatch_record,omitempty"`
-		DispatchHash   string               `json:"dispatch_record_hash,omitempty"`
-		DispatchEpoch  uint64               `json:"dispatch_epoch,omitempty"`
-		GrantID        string               `json:"grant_id"`
-		Result         string               `json:"result_digest,omitempty"`
-		Reconciliation string               `json:"reconciliation_digest,omitempty"`
+		IntentID        string               `json:"intent_id"`
+		IntentDigest    string               `json:"intent_digest"`
+		Generation      string               `json:"generation"`
+		Status          ProviderIntentStatus `json:"status"`
+		Reservation     uint64               `json:"reservation_record"`
+		Dispatch        uint64               `json:"dispatch_record,omitempty"`
+		DispatchHash    string               `json:"dispatch_record_hash,omitempty"`
+		DispatchEpoch   uint64               `json:"dispatch_epoch,omitempty"`
+		GrantID         string               `json:"grant_id"`
+		Preflight       string               `json:"merge_preflight_digest,omitempty"`
+		PreflightRecord uint64               `json:"merge_preflight_record,omitempty"`
+		Result          string               `json:"result_digest,omitempty"`
+		Reconciliation  string               `json:"reconciliation_digest,omitempty"`
 	}
 	type attemptPullRequestJSON struct {
 		AttemptID   string                      `json:"attempt_id"`
@@ -507,6 +557,7 @@ func canonicalProviderRuntime(projection ProviderRuntimeProjection) ([]byte, err
 			Reservation: intent.reservationRecord, Dispatch: intent.dispatchRecord,
 			DispatchHash: intent.dispatchRecordHash.String(), DispatchEpoch: intent.dispatchEpoch,
 			GrantID: intent.grantID.String(), Result: intent.result.digest.String(),
+			Preflight: intent.preflight.digest.String(), PreflightRecord: intent.preflightRecord,
 			Reconciliation: intent.reconciliation.digest.String(),
 		})
 	}

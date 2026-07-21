@@ -19,6 +19,36 @@ type providerIntentReservedPayloadWire struct {
 	Reservation authorizationCapabilityWire `json:"reservation"`
 }
 
+type providerIntentAbandonedPayloadWire struct {
+	WorkspaceID  string `json:"workspace_id"`
+	Generation   string `json:"generation"`
+	IntentID     string `json:"intent_id"`
+	IntentDigest string `json:"intent_digest"`
+}
+
+type providerMergePreflightWire struct {
+	IntentID        string                      `json:"intent_id"`
+	IntentDigest    string                      `json:"intent_digest"`
+	Repository      string                      `json:"repository"`
+	PullRequest     controlPlanePullRequestWire `json:"pull_request"`
+	BaseRef         string                      `json:"base_ref"`
+	Branch          string                      `json:"branch"`
+	BaseHead        string                      `json:"base_head"`
+	Head            string                      `json:"head"`
+	HeadTree        string                      `json:"head_tree"`
+	RemoteHead      string                      `json:"remote_head"`
+	RequiredChecks  []providerCheckStateWire    `json:"required_checks"`
+	RequiredReviews []providerReviewStateWire   `json:"required_reviews"`
+	Observation     string                      `json:"provider_observation_digest"`
+	Digest          string                      `json:"digest"`
+}
+
+type providerMergePreflightPayloadWire struct {
+	WorkspaceID string                     `json:"workspace_id"`
+	Generation  string                     `json:"generation"`
+	Preflight   providerMergePreflightWire `json:"preflight"`
+}
+
 type providerIntentDispatchedPayloadWire struct {
 	WorkspaceID    string                      `json:"workspace_id"`
 	Generation     string                      `json:"generation"`
@@ -104,6 +134,16 @@ func marshalProviderJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, 
 			Intent: providerIntentToWire(event.intent), Planning: authorizationCapabilityToWire(event.planning),
 			Reservation: authorizationCapabilityToWire(event.reservation),
 		}
+	case ProviderIntentAbandonedJournalEvent:
+		value = providerIntentAbandonedPayloadWire{
+			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
+			IntentID: event.intentID.String(), IntentDigest: event.intentDigest.String(),
+		}
+	case ProviderMergePreflightRecordedJournalEvent:
+		value = providerMergePreflightPayloadWire{
+			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
+			Preflight: providerMergePreflightToWire(event.preflight),
+		}
 	case ProviderIntentDispatchedJournalEvent:
 		value = providerIntentDispatchedPayloadWire{
 			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
@@ -164,6 +204,43 @@ func decodeProviderJournalEvent(
 			return nil, true, err
 		}
 		event, err := NewProviderIntentReservedJournalEvent(workspaceID, generation, intent, planning, reservation)
+		return event, true, err
+	case JournalEventProviderIntentAbandoned:
+		var wire providerIntentAbandonedPayloadWire
+		if err := decodeStrictJSON(payload, &wire); err != nil {
+			return nil, true, fmt.Errorf("decode provider intent abandonment: %w", err)
+		}
+		workspaceID, generation, err := parseProviderEnvelope(wire.WorkspaceID, wire.Generation)
+		if err != nil {
+			return nil, true, err
+		}
+		intentID, err := NewID(wire.IntentID)
+		if err != nil {
+			return nil, true, err
+		}
+		intentDigest, err := ParseDigest(wire.IntentDigest)
+		if err != nil {
+			return nil, true, err
+		}
+		event := ProviderIntentAbandonedJournalEvent{
+			workspaceID: workspaceID, generation: generation,
+			intentID: intentID, intentDigest: intentDigest,
+		}
+		return event, true, event.validate()
+	case JournalEventProviderMergePreflightRecorded:
+		var wire providerMergePreflightPayloadWire
+		if err := decodeStrictJSON(payload, &wire); err != nil {
+			return nil, true, fmt.Errorf("decode provider merge preflight: %w", err)
+		}
+		workspaceID, generation, err := parseProviderEnvelope(wire.WorkspaceID, wire.Generation)
+		if err != nil {
+			return nil, true, err
+		}
+		preflight, err := providerMergePreflightFromWire(wire.Preflight)
+		if err != nil {
+			return nil, true, err
+		}
+		event, err := NewProviderMergePreflightRecordedJournalEvent(workspaceID, generation, preflight)
 		return event, true, err
 	case JournalEventProviderIntentDispatched:
 		var wire providerIntentDispatchedPayloadWire
@@ -431,6 +508,133 @@ func providerIntentFromWire(wire providerIntentWire) (ProviderIntent, error) {
 		return ProviderIntent{}, fmt.Errorf("provider intent canonical identity mismatch")
 	}
 	return intent, nil
+}
+
+func providerMergePreflightToWire(preflight ProviderMergePreflight) providerMergePreflightWire {
+	wire := providerMergePreflightWire{
+		IntentID: preflight.intentID.String(), IntentDigest: preflight.intentDigest.String(),
+		Repository: preflight.repository.String(), PullRequest: controlPlanePullRequestWire{
+			Provider: preflight.pullRequest.provider.String(), Repository: preflight.pullRequest.repository.String(),
+			Number: preflight.pullRequest.number,
+		},
+		BaseRef: preflight.baseRef, Branch: preflight.branch, BaseHead: preflight.baseHead.String(),
+		Head: preflight.head.String(), HeadTree: preflight.headTree.String(), RemoteHead: preflight.remoteHead.String(),
+		RequiredChecks:  make([]providerCheckStateWire, 0, len(preflight.requiredChecks)),
+		RequiredReviews: make([]providerReviewStateWire, 0, len(preflight.requiredReviews)),
+		Observation:     preflight.observation.String(), Digest: preflight.digest.String(),
+	}
+	for _, check := range preflight.requiredChecks {
+		wire.RequiredChecks = append(wire.RequiredChecks, providerCheckStateWire{
+			ID: check.id.String(), Required: check.required, Conclusion: check.conclusion, Evidence: check.evidence.String(),
+		})
+	}
+	for _, review := range preflight.requiredReviews {
+		wire.RequiredReviews = append(wire.RequiredReviews, providerReviewStateWire{
+			ID: review.id.String(), Required: review.required, Conclusion: review.conclusion, Evidence: review.evidence.String(),
+		})
+	}
+	return wire
+}
+
+func providerMergePreflightFromWire(wire providerMergePreflightWire) (ProviderMergePreflight, error) {
+	intentID, err := NewID(wire.IntentID)
+	if err != nil {
+		return ProviderMergePreflight{}, err
+	}
+	intentDigest, err := ParseDigest(wire.IntentDigest)
+	if err != nil {
+		return ProviderMergePreflight{}, err
+	}
+	repository, err := NewRepositoryIdentity(wire.Repository)
+	if err != nil {
+		return ProviderMergePreflight{}, err
+	}
+	provider, err := NewID(wire.PullRequest.Provider)
+	if err != nil {
+		return ProviderMergePreflight{}, err
+	}
+	pullRepository, err := NewRepositoryIdentity(wire.PullRequest.Repository)
+	if err != nil {
+		return ProviderMergePreflight{}, err
+	}
+	pullRequest, err := newPullRequestIdentity(provider, pullRepository, wire.PullRequest.Number)
+	if err != nil {
+		return ProviderMergePreflight{}, err
+	}
+	baseHead, err := ParseGitObjectID(wire.BaseHead)
+	if err != nil {
+		return ProviderMergePreflight{}, err
+	}
+	head, err := ParseGitObjectID(wire.Head)
+	if err != nil {
+		return ProviderMergePreflight{}, err
+	}
+	headTree, err := ParseGitObjectID(wire.HeadTree)
+	if err != nil {
+		return ProviderMergePreflight{}, err
+	}
+	remoteHead, err := ParseGitObjectID(wire.RemoteHead)
+	if err != nil {
+		return ProviderMergePreflight{}, err
+	}
+	observation, err := ParseDigest(wire.Observation)
+	if err != nil {
+		return ProviderMergePreflight{}, err
+	}
+	checks := make([]ProviderCheckState, 0, len(wire.RequiredChecks))
+	for _, value := range wire.RequiredChecks {
+		id, parseErr := NewID(value.ID)
+		if parseErr != nil {
+			return ProviderMergePreflight{}, parseErr
+		}
+		evidence, parseErr := ParseDigest(value.Evidence)
+		if parseErr != nil {
+			return ProviderMergePreflight{}, parseErr
+		}
+		check, parseErr := NewProviderCheckState(id, value.Required, value.Conclusion, evidence)
+		if parseErr != nil {
+			return ProviderMergePreflight{}, parseErr
+		}
+		checks = append(checks, check)
+	}
+	if err := normalizeProviderChecks(&checks); err != nil {
+		return ProviderMergePreflight{}, err
+	}
+	reviews := make([]ProviderReviewState, 0, len(wire.RequiredReviews))
+	for _, value := range wire.RequiredReviews {
+		id, parseErr := NewID(value.ID)
+		if parseErr != nil {
+			return ProviderMergePreflight{}, parseErr
+		}
+		evidence, parseErr := ParseDigest(value.Evidence)
+		if parseErr != nil {
+			return ProviderMergePreflight{}, parseErr
+		}
+		review, parseErr := NewProviderReviewState(id, value.Required, value.Conclusion, evidence)
+		if parseErr != nil {
+			return ProviderMergePreflight{}, parseErr
+		}
+		reviews = append(reviews, review)
+	}
+	if err := normalizeProviderReviews(&reviews); err != nil {
+		return ProviderMergePreflight{}, err
+	}
+	preflight := ProviderMergePreflight{
+		intentID: intentID, intentDigest: intentDigest, repository: repository,
+		pullRequest: pullRequest, baseRef: wire.BaseRef, branch: wire.Branch,
+		baseHead: baseHead, head: head, headTree: headTree, remoteHead: remoteHead,
+		requiredChecks: checks, requiredReviews: reviews, observation: observation,
+	}
+	canonical, err := canonicalProviderMergePreflight(preflight)
+	if err != nil {
+		return ProviderMergePreflight{}, err
+	}
+	preflight.digest = DigestBytes(canonical)
+	digest, err := ParseDigest(wire.Digest)
+	if err != nil || digest != preflight.digest {
+		return ProviderMergePreflight{}, fmt.Errorf("provider merge preflight digest mismatch")
+	}
+	return preflight, nil
 }
 
 func providerResultToWire(result ProviderResult) providerResultWire {

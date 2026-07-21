@@ -357,13 +357,14 @@ const (
 	ProviderIntentFailedAfterEffect  ProviderIntentStatus = "failed_after_effect"
 	ProviderIntentAmbiguous          ProviderIntentStatus = "ambiguous"
 	ProviderIntentReconciled         ProviderIntentStatus = "reconciled"
+	ProviderIntentAbandoned          ProviderIntentStatus = "abandoned"
 )
 
 func (status ProviderIntentStatus) valid() bool {
 	switch status {
 	case ProviderIntentReserved, ProviderIntentDispatched, ProviderIntentSucceeded,
 		ProviderIntentFailedBeforeEffect, ProviderIntentFailedAfterEffect,
-		ProviderIntentAmbiguous, ProviderIntentReconciled:
+		ProviderIntentAmbiguous, ProviderIntentReconciled, ProviderIntentAbandoned:
 		return true
 	default:
 		return false
@@ -371,7 +372,8 @@ func (status ProviderIntentStatus) valid() bool {
 }
 
 func (status ProviderIntentStatus) terminal() bool {
-	return status == ProviderIntentSucceeded || status == ProviderIntentFailedBeforeEffect || status == ProviderIntentReconciled
+	return status == ProviderIntentSucceeded || status == ProviderIntentFailedBeforeEffect ||
+		status == ProviderIntentReconciled || status == ProviderIntentAbandoned
 }
 
 func (status ProviderIntentStatus) needsReconciliation() bool {
@@ -402,6 +404,7 @@ func newProviderResult(result ProviderResult) (ProviderResult, error) {
 	if result.intentID.IsZero() || result.intentDigest.IsZero() || !result.kind.valid() ||
 		!result.status.valid() || result.status == ProviderIntentReserved ||
 		result.status == ProviderIntentDispatched || result.status == ProviderIntentReconciled ||
+		result.status == ProviderIntentAbandoned ||
 		result.idempotencyKey.IsZero() || result.provider.IsZero() {
 		return ProviderResult{}, fmt.Errorf("provider result requires dispatched intent, provider, idempotency, and non-reconciled outcome")
 	}
