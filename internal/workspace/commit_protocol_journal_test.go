@@ -18,6 +18,7 @@ type journalCommitGit struct {
 	staged       workspace.StagedCommitInspection
 	commit       workspace.GitCommitInspection
 	rangeCommits []workspace.GitCommitInspection
+	beforeRange  func() error
 	rangeCalls   int
 	createCalls  int
 	publishes    int
@@ -127,6 +128,13 @@ func (git *journalCommitGit) InspectFirstParentRange(
 	context.Context, string, workspace.GitObjectID, workspace.GitObjectID,
 ) ([]workspace.GitCommitInspection, error) {
 	git.rangeCalls++
+	if git.beforeRange != nil {
+		hook := git.beforeRange
+		git.beforeRange = nil
+		if err := hook(); err != nil {
+			return nil, err
+		}
+	}
 	if git.rangeCommits != nil {
 		return append([]workspace.GitCommitInspection(nil), git.rangeCommits...), nil
 	}

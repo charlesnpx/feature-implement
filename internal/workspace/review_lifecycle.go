@@ -953,7 +953,7 @@ func ConfirmReviewMergeReadiness(
 }
 
 func validateAttemptReviewRebase(
-	journal *WorkspaceJournal,
+	snapshot JournalSnapshot,
 	definition EffectiveWorkspaceDefinition,
 	unit UnitExecution,
 	attempt RuntimeAttemptProjection,
@@ -962,10 +962,6 @@ func validateAttemptReviewRebase(
 	loop, configured := unit.ReviewLoop()
 	if !configured || newHead == attempt.verifiedHead {
 		return nil
-	}
-	snapshot, err := journal.ReadSnapshot()
-	if err != nil {
-		return err
 	}
 	projection, err := RebuildReviewRuntime(snapshot, definition)
 	if err != nil {
