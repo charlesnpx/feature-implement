@@ -167,6 +167,48 @@ func TestLocalCommitShellRerunsEachRebasedStepCheckFromFinalHead(t *testing.T) {
 	}
 }
 
+func TestLocalCommitShellRemapsBaseOnlyRebaseBeforeFirstStep(t *testing.T) {
+	repository, branch, base := newProtocolRepository(t)
+	step, _ := protocolTestStep(t, "implementation", "Implement protocol")
+	protocol, _ := workspace.NewCommitProtocol([]workspace.CommitStep{step})
+	state, _ := workspace.NewCommitProtocolState(workspace.DigestBytes([]byte("generation")), base, protocol)
+	shell, _ := workspace.NewCommitProtocolShell(
+		workspace.DefaultLocalCommitGitAdapter(),
+		&protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())},
+	)
+
+	runGitSetup(t, repository, "switch", "-c", "upstream", rawGitObject(base))
+	if err := os.WriteFile(filepath.Join(repository, "README.md"), []byte("upstream\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitSetup(t, repository, "add", "README.md")
+	runGitSetup(t, repository, "commit", "-m", "Upstream change")
+	newBase := parseGitHead(t, repository)
+	runGitSetup(t, repository, "switch", branch)
+	runGitSetup(t, repository, "reset", "--hard", rawGitObject(newBase))
+	if err := os.WriteFile(filepath.Join(repository, "unexpected.txt"), []byte("unexpected\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitSetup(t, repository, "add", "unexpected.txt")
+	runGitSetup(t, repository, "commit", "-m", "Unexpected commit")
+	unrecordedHead := parseGitHead(t, repository)
+	if _, err := shell.RemapAfterRebase(
+		context.Background(), state, branch, repository, newBase, unrecordedHead,
+	); err == nil || !strings.Contains(err.Error(), "base-only commit rebase must end at the new base") {
+		t.Fatalf("base-only remap with an unrecorded commit error=%v", err)
+	}
+	runGitSetup(t, repository, "reset", "--hard", rawGitObject(newBase))
+
+	state, err := shell.RemapAfterRebase(context.Background(), state, branch, repository, newBase, newBase)
+	if err != nil {
+		t.Fatalf("base-only RemapAfterRebase: %v", err)
+	}
+	if state.Phase() != workspace.CommitProtocolReady || state.Base() != newBase || state.Head() != newBase ||
+		state.RebaseEpoch() != 1 || len(state.CompletedSteps()) != 0 {
+		t.Fatalf("base-only remapped state=%#v", state)
+	}
+}
+
 func TestLocalCommitShellSupportsSHA256Repositories(t *testing.T) {
 	repository := t.TempDir()
 	branch := "protocol"

@@ -434,12 +434,15 @@ func TestTimeout(t *testing.T) {
 			name: "passing marker log",
 			source: `package fixture
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestMarkerLog(t *testing.T) {
-	t.Log("panic: test timed out after 50ms")
-	t.Log("signal: killed")
-	t.Log("exit status 2")
+	fmt.Println("panic: test timed out after 50ms")
+	fmt.Println("signal: killed")
+	fmt.Println("exit status 2")
 }
 `,
 			timeout: "5s", exitCode: 0, want: workspace.CheckOutcomePassed,
@@ -448,13 +451,16 @@ func TestMarkerLog(t *testing.T) {
 			name: "failing marker log",
 			source: `package fixture
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestMarkerLog(t *testing.T) {
-	t.Log("panic: test timed out after 50ms")
-	t.Log("fatal error: synthetic")
-	t.Log("signal: killed")
-	t.Log("exit status 2")
+	fmt.Println("panic: test timed out after 50ms")
+	fmt.Println("fatal error: synthetic")
+	fmt.Println("signal: killed")
+	fmt.Println("exit status 2")
 	t.Error("expected assertion failure")
 }
 `,

@@ -81,6 +81,11 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 		signaled       bool
 		crashed        bool
 	}
+	type goTestAbnormalState struct {
+		timedOut bool
+		signaled bool
+		crashed  bool
+	}
 	type goTestBuildState struct {
 		failed bool
 	}
@@ -89,10 +94,25 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 	failures := make(map[string]struct{})
 	testTerminalActions := make(map[string]string)
 	activeTestRuns := make(map[string]map[string]struct{})
+	testAbnormalExits := make(map[string]goTestAbnormalState)
 	namedFailurePackages := make(map[string]struct{})
 	packageFailures := make(map[string]struct{})
 	packages := make(map[string]goTestPackageState)
 	builds := make(map[string]goTestBuildState)
+	packageAbnormalExit := func(packageName string, packageState goTestPackageState) goTestAbnormalState {
+		abnormal := goTestAbnormalState{
+			timedOut: packageState.timedOut,
+			signaled: packageState.signaled,
+			crashed:  packageState.crashed,
+		}
+		for testIdentity := range activeTestRuns[packageName] {
+			testAbnormal := testAbnormalExits[testIdentity]
+			abnormal.timedOut = abnormal.timedOut || testAbnormal.timedOut
+			abnormal.signaled = abnormal.signaled || testAbnormal.signaled
+			abnormal.crashed = abnormal.crashed || testAbnormal.crashed
+		}
+		return abnormal
+	}
 	structured := 0
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
@@ -146,6 +166,7 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 					return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 				}
 				delete(testTerminalActions, testIdentity)
+				delete(testAbnormalExits, testIdentity)
 				active[testIdentity] = struct{}{}
 			}
 		}
@@ -155,9 +176,17 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 		case "output":
 			text := strings.ToLower(event.Output)
 			outputTimedOut, outputSignaled, outputCrashed := goTestPackageAbnormalExit(text)
-			packageState.timedOut = packageState.timedOut || outputTimedOut
-			packageState.signaled = packageState.signaled || outputSignaled
-			packageState.crashed = packageState.crashed || outputCrashed
+			if event.Test == "" {
+				packageState.timedOut = packageState.timedOut || outputTimedOut
+				packageState.signaled = packageState.signaled || outputSignaled
+				packageState.crashed = packageState.crashed || outputCrashed
+			} else {
+				testAbnormal := testAbnormalExits[testIdentity]
+				testAbnormal.timedOut = testAbnormal.timedOut || outputTimedOut
+				testAbnormal.signaled = testAbnormal.signaled || outputSignaled
+				testAbnormal.crashed = testAbnormal.crashed || outputCrashed
+				testAbnormalExits[testIdentity] = testAbnormal
+			}
 		case "pass", "skip":
 			if event.Test != "" {
 				if testTerminalActions[testIdentity] != "" {
@@ -165,6 +194,7 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 				}
 				testTerminalActions[testIdentity] = event.Action
 				delete(activeTestRuns[event.Package], testIdentity)
+				delete(testAbnormalExits, testIdentity)
 			} else {
 				if len(activeTestRuns[event.Package]) != 0 {
 					return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
@@ -181,12 +211,14 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 				}
 				testTerminalActions[testIdentity] = event.Action
 				delete(activeTestRuns[event.Package], testIdentity)
+				delete(testAbnormalExits, testIdentity)
 				failures[testIdentity] = struct{}{}
 				namedFailurePackages[event.Package] = struct{}{}
 				packageState.namedFailure = true
 			} else {
+				abnormal := packageAbnormalExit(event.Package, packageState)
 				if len(activeTestRuns[event.Package]) != 0 &&
-					(result.exitCode == 0 || !packageState.timedOut && !packageState.signaled && !packageState.crashed) {
+					(result.exitCode == 0 || !abnormal.timedOut && !abnormal.signaled && !abnormal.crashed) {
 					return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 				}
 				packageFailures[event.Package] = struct{}{}
@@ -211,8 +243,9 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 	}
 	for packageName, tests := range activeTestRuns {
 		packageState, exists := packages[packageName]
+		abnormal := packageAbnormalExit(packageName, packageState)
 		if len(tests) != 0 && (result.exitCode == 0 || !exists || packageState.terminalAction != "fail" ||
-			!packageState.timedOut && !packageState.signaled && !packageState.crashed) {
+			!abnormal.timedOut && !abnormal.signaled && !abnormal.crashed) {
 			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 		}
 	}
@@ -247,13 +280,14 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 	}
 	timedOut, signaled, crashed := false, false, false
 	if result.exitCode != 0 {
-		for _, packageState := range packages {
+		for packageName, packageState := range packages {
 			if packageState.terminalAction != "fail" {
 				continue
 			}
-			timedOut = timedOut || packageState.timedOut
-			signaled = signaled || packageState.signaled
-			crashed = crashed || packageState.crashed
+			abnormal := packageAbnormalExit(packageName, packageState)
+			timedOut = timedOut || abnormal.timedOut
+			signaled = signaled || abnormal.signaled
+			crashed = crashed || abnormal.crashed
 		}
 	}
 	if timedOut {

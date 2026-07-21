@@ -198,9 +198,17 @@ func (shell CommitProtocolShell) RemapAfterRebase(
 	if err := shell.git.VerifyCleanWorktree(ctx, worktree, branch, newHead); err != nil {
 		return CommitProtocolState{}, fmt.Errorf("verify rebased worktree: %w", err)
 	}
-	inspections, err := shell.git.InspectFirstParentRange(ctx, worktree, newBase, newHead)
-	if err != nil {
-		return CommitProtocolState{}, err
+	var inspections []GitCommitInspection
+	if len(state.steps) == 0 {
+		if newHead != newBase {
+			return CommitProtocolState{}, fmt.Errorf("base-only commit rebase must end at the new base")
+		}
+	} else {
+		var err error
+		inspections, err = shell.git.InspectFirstParentRange(ctx, worktree, newBase, newHead)
+		if err != nil {
+			return CommitProtocolState{}, err
+		}
 	}
 	if len(inspections) != len(state.steps) {
 		return CommitProtocolState{}, fmt.Errorf("rebased first-parent range has %d commits, expected %d", len(inspections), len(state.steps))
