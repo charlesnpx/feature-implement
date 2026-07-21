@@ -360,13 +360,32 @@ func RecordAttemptBoundary(
 	if attempt.phase != AttemptActive {
 		return AttemptBoundaryResult{}, fmt.Errorf("attempt %s must be active to reach a boundary", attempt.attemptID)
 	}
+	unitExecution, err := executionForMergeUnit(definition.execution, attempt.mergeUnit)
+	if err != nil {
+		return AttemptBoundaryResult{}, err
+	}
+	var configuredProtocolHead GitObjectID
+	if configured, required := unitExecution.CommitProtocol(); required {
+		if attempt.commitProtocol == nil || attempt.commitProtocol.protocol.digest != configured.digest ||
+			attempt.commitProtocol.phase != CommitProtocolComplete {
+			return AttemptBoundaryResult{}, fmt.Errorf("attempt %s cannot reach a boundary before its configured commit protocol completes", attempt.attemptID)
+		}
+		configuredProtocolHead = attempt.commitProtocol.Head()
+		if attempt.verifiedHead != configuredProtocolHead {
+			return AttemptBoundaryResult{}, fmt.Errorf("attempt %s commit protocol head does not match its verified head", attempt.attemptID)
+		}
+	}
 	inspection, err := git.InspectAttemptWorktree(
 		ctx, definition.workspace.repositoryRoot, attempt.branch, attempt.worktree,
 	)
 	if err != nil {
 		return AttemptBoundaryResult{}, err
 	}
-	if err := verifyAttemptGitInspection(attempt, inspection, inspection.worktreeHead); err != nil {
+	expectedHead := inspection.worktreeHead
+	if !configuredProtocolHead.IsZero() {
+		expectedHead = configuredProtocolHead
+	}
+	if err := verifyAttemptGitInspection(attempt, inspection, expectedHead); err != nil {
 		return AttemptBoundaryResult{}, err
 	}
 	event, err := NewAttemptBoundaryReachedJournalEvent(

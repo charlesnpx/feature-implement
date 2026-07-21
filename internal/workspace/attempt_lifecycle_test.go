@@ -132,6 +132,7 @@ func (git *fakeAttemptGit) setHead(t *testing.T, branch string, head workspace.G
 type attemptHarness struct {
 	definition workspace.EffectiveWorkspaceDefinition
 	journal    *workspace.WorkspaceJournal
+	workspace  string
 	git        *fakeAttemptGit
 	base       workspace.GitObjectID
 	unit       workspace.MergeUnitReference
@@ -161,7 +162,7 @@ func newAttemptHarness(t *testing.T, unitID string) attemptHarness {
 		t.Fatal(err)
 	}
 	return attemptHarness{
-		definition: definition, journal: journal, git: &fakeAttemptGit{}, base: base,
+		definition: definition, journal: journal, workspace: workspaceDir, git: &fakeAttemptGit{}, base: base,
 		unit: mustMergeUnitReference(t, "alpha-plan", unitID), goal: goal, worktrees: t.TempDir(),
 	}
 }
@@ -632,6 +633,8 @@ func TestPauseOnlyBoundaryAtomicallyPausesAndResumesSameGoal(t *testing.T) {
 	harness := newAttemptHarness(t, "unit-one")
 	attempt := harness.reserve(t, "2026-07-21T11:01:00Z")
 	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T11:02:00Z")
+	unconstrainedHead := mustGitObject(t, 'b')
+	harness.git.setHead(t, attempt.Branch(), unconstrainedHead, true)
 	lease, authorization := attempt.LeaseID(), attempt.AuthorizationID()
 	evidence := boundaryEvidence(t, "pause-only")
 	result, err := workspace.RecordAttemptBoundary(
@@ -650,7 +653,7 @@ func TestPauseOnlyBoundaryAtomicallyPausesAndResumesSameGoal(t *testing.T) {
 	}
 	boundary := result.Boundary()
 	if boundary.LeaseID() != lease || boundary.AuthorizationID() != authorization || boundary.EvidenceDigest().IsZero() ||
-		!boundary.AuthorizationClosed() || !boundary.LeaseFencedAndReleased() {
+		boundary.Head() != unconstrainedHead || !boundary.AuthorizationClosed() || !boundary.LeaseFencedAndReleased() {
 		t.Fatalf("boundary did not checkpoint closed bindings: %#v", boundary)
 	}
 	snapshot, err := harness.journal.ReadSnapshot()

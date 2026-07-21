@@ -270,11 +270,16 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 			discardDigest: event.discardDigest, resultingHead: event.resultingHead,
 		})
 	default:
-		if !isAttemptJournalEvent(record.event) {
+		if isAttemptJournalEvent(record.event) {
+			if err := reduceAttemptRuntime(current, &next, record); err != nil {
+				return WorkspaceRuntimeProjection{}, err
+			}
+		} else if isCommitJournalEvent(record.event) {
+			if err := reduceCommitRuntime(current, &next, record); err != nil {
+				return WorkspaceRuntimeProjection{}, err
+			}
+		} else {
 			return WorkspaceRuntimeProjection{}, fmt.Errorf("unsupported runtime event %T", record.event)
-		}
-		if err := reduceAttemptRuntime(current, &next, record); err != nil {
-			return WorkspaceRuntimeProjection{}, err
 		}
 	}
 	return next, nil

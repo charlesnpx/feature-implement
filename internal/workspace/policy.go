@@ -113,11 +113,13 @@ func (profile ExecutionProfile) Runner() ID              { return profile.runner
 func (profile ExecutionProfile) Policy() ExecutionPolicy { return profile.policy }
 
 type UnitExecution struct {
-	planID      ID
-	mergeUnitID ID
-	profileID   ID
-	policy      ExecutionPolicy
-	boundary    AttemptBoundaryPolicy
+	planID            ID
+	mergeUnitID       ID
+	profileID         ID
+	policy            ExecutionPolicy
+	boundary          AttemptBoundaryPolicy
+	commitProtocol    *CommitProtocol
+	reviewFixProtocol *ReviewFixProtocol
 }
 
 func (unit UnitExecution) PlanID() ID              { return unit.planID }
@@ -126,6 +128,18 @@ func (unit UnitExecution) ProfileID() ID           { return unit.profileID }
 func (unit UnitExecution) Policy() ExecutionPolicy { return unit.policy }
 func (unit UnitExecution) Boundary() AttemptBoundaryPolicy {
 	return unit.boundary
+}
+func (unit UnitExecution) CommitProtocol() (CommitProtocol, bool) {
+	if unit.commitProtocol == nil {
+		return CommitProtocol{}, false
+	}
+	return *cloneCommitProtocol(unit.commitProtocol), true
+}
+func (unit UnitExecution) ReviewFixProtocol() (ReviewFixProtocol, bool) {
+	if unit.reviewFixProtocol == nil {
+		return ReviewFixProtocol{}, false
+	}
+	return *cloneReviewFixProtocol(unit.reviewFixProtocol), true
 }
 
 // ExecutionConfig is the one policy authority for all workspace merge units.
@@ -208,6 +222,18 @@ func normalizeExecutionConfig(wire executionConfigWire) (ExecutionConfig, error)
 		if err != nil {
 			return ExecutionConfig{}, err
 		}
+		commitProtocol, err := normalizeCommitProtocol(
+			item.CommitProtocol, profile.runner, fmt.Sprintf("merge unit %s/%s commit_protocol", planID, mergeUnitID),
+		)
+		if err != nil {
+			return ExecutionConfig{}, err
+		}
+		reviewFixProtocol, err := normalizeReviewFixProtocol(
+			item.ReviewFixProtocol, profile.runner, fmt.Sprintf("merge unit %s/%s review_fix_protocol", planID, mergeUnitID),
+		)
+		if err != nil {
+			return ExecutionConfig{}, err
+		}
 		key := planID.String() + "\x00" + mergeUnitID.String()
 		if _, exists := unitKeys[key]; exists {
 			return ExecutionConfig{}, fmt.Errorf("duplicate execution policy for merge unit %s/%s", planID, mergeUnitID)
@@ -216,6 +242,7 @@ func normalizeExecutionConfig(wire executionConfigWire) (ExecutionConfig, error)
 		units = append(units, UnitExecution{
 			planID: planID, mergeUnitID: mergeUnitID, profileID: profileID,
 			policy: unitPolicy, boundary: boundary,
+			commitProtocol: commitProtocol, reviewFixProtocol: reviewFixProtocol,
 		})
 	}
 	sort.Slice(units, func(i, j int) bool {
@@ -232,5 +259,10 @@ func (config ExecutionConfig) Profiles() []ExecutionProfile {
 	return append([]ExecutionProfile(nil), config.profiles...)
 }
 func (config ExecutionConfig) MergeUnits() []UnitExecution {
-	return append([]UnitExecution(nil), config.mergeUnits...)
+	result := append([]UnitExecution(nil), config.mergeUnits...)
+	for index := range result {
+		result[index].commitProtocol = cloneCommitProtocol(result[index].commitProtocol)
+		result[index].reviewFixProtocol = cloneReviewFixProtocol(result[index].reviewFixProtocol)
+	}
+	return result
 }

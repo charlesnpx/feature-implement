@@ -27,6 +27,9 @@ const (
 	JournalResourceBudget         JournalResourceKind = "budget"
 	JournalResourceApproval       JournalResourceKind = "approval"
 	JournalResourceEvidence       JournalResourceKind = "evidence"
+	JournalResourceCommitProtocol JournalResourceKind = "commit_protocol"
+	JournalResourceCommitStep     JournalResourceKind = "commit_step"
+	JournalResourceCheck          JournalResourceKind = "check"
 )
 
 func (kind JournalResourceKind) valid() bool {
@@ -35,7 +38,8 @@ func (kind JournalResourceKind) valid() bool {
 		JournalResourceAttempt, JournalResourceMergeUnit, JournalResourceLease,
 		JournalResourceAuthorization, JournalResourceOrchestration, JournalResourceGoal,
 		JournalResourceSerialSegment, JournalResourceProviderIntent, JournalResourceQueueEntry,
-		JournalResourceBudget, JournalResourceApproval, JournalResourceEvidence:
+		JournalResourceBudget, JournalResourceApproval, JournalResourceEvidence,
+		JournalResourceCommitProtocol, JournalResourceCommitStep, JournalResourceCheck:
 		return true
 	default:
 		return false
@@ -114,6 +118,11 @@ const (
 	JournalEventOrchestrationAck               JournalEventType = "attempt.orchestration_acknowledged.v2"
 	JournalEventOwnerResponse                  JournalEventType = "attempt.owner_response_recorded.v2"
 	JournalEventAttemptResumed                 JournalEventType = "attempt.resumed.v2"
+	JournalEventCommitProtocolStarted          JournalEventType = "commit.protocol_started.v2"
+	JournalEventCommitStepIntended             JournalEventType = "commit.step_intended.v2"
+	JournalEventCommitStepRecorded             JournalEventType = "commit.step_recorded.v2"
+	JournalEventCommitCheckRecorded            JournalEventType = "commit.check_recorded.v2"
+	JournalEventCommitProtocolRebased          JournalEventType = "commit.protocol_rebased.v2"
 )
 
 type WorkspaceJournalEvent interface {
@@ -363,6 +372,10 @@ func newJournalAppend(
 			return JournalAppend{}, fmt.Errorf("attempt start must use the Git-verified materialization workflow")
 		case AttemptBoundaryReachedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("attempt boundary must use the atomic boundary workflow")
+		case CommitProtocolStartedJournalEvent, CommitStepIntendedJournalEvent,
+			CommitStepRecordedJournalEvent, CommitCheckRecordedJournalEvent,
+			CommitProtocolRebasedJournalEvent:
+			return JournalAppend{}, fmt.Errorf("commit protocol events must use the Git-verified commit workflow")
 		}
 	}
 	if occurredAt.IsZero() {
@@ -400,7 +413,7 @@ func supportedWorkspaceJournalEvent(event WorkspaceJournalEvent) bool {
 		GenerationActivatedJournalEvent, JournalTailRecoveredEvent:
 		return true
 	default:
-		return isAttemptJournalEvent(event)
+		return isAttemptJournalEvent(event) || isCommitJournalEvent(event)
 	}
 }
 
@@ -439,7 +452,10 @@ func validateJournalEventResources(
 		var ok bool
 		expectedReads, expectedWrites, ok = attemptJournalEventResources(event)
 		if !ok {
-			return fmt.Errorf("unsupported workspace journal event %T", event)
+			expectedReads, expectedWrites, ok = commitJournalEventResources(event)
+			if !ok {
+				return fmt.Errorf("unsupported workspace journal event %T", event)
+			}
 		}
 	}
 	expectedWrites, _ = normalizeJournalWriteSet(expectedWrites)
@@ -558,6 +574,9 @@ func cloneWorkspaceJournalEvent(event WorkspaceJournalEvent) WorkspaceJournalEve
 	case JournalTailRecoveredEvent:
 		return value
 	default:
-		return cloneAttemptJournalEvent(event)
+		if cloned := cloneAttemptJournalEvent(event); cloned != nil {
+			return cloned
+		}
+		return cloneCommitJournalEvent(event)
 	}
 }
