@@ -95,6 +95,8 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 	testTerminalActions := make(map[string]string)
 	activeTestRuns := make(map[string]map[string]struct{})
 	testAbnormalExits := make(map[string]goTestAbnormalState)
+	testFailureBanners := make(map[string]struct{})
+	confirmedTestCrashes := make(map[string]struct{})
 	namedFailurePackages := make(map[string]struct{})
 	packageFailures := make(map[string]struct{})
 	packages := make(map[string]goTestPackageState)
@@ -167,6 +169,8 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 				}
 				delete(testTerminalActions, testIdentity)
 				delete(testAbnormalExits, testIdentity)
+				delete(testFailureBanners, testIdentity)
+				delete(confirmedTestCrashes, testIdentity)
 				active[testIdentity] = struct{}{}
 			}
 		}
@@ -181,20 +185,32 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 				packageState.signaled = packageState.signaled || outputSignaled
 				packageState.crashed = packageState.crashed || outputCrashed
 			} else {
+				if goTestFailureBanner(event.Output, event.Test) {
+					testFailureBanners[testIdentity] = struct{}{}
+				}
 				testAbnormal := testAbnormalExits[testIdentity]
 				testAbnormal.timedOut = testAbnormal.timedOut || outputTimedOut
 				testAbnormal.signaled = testAbnormal.signaled || outputSignaled
 				testAbnormal.crashed = testAbnormal.crashed || outputCrashed
 				testAbnormalExits[testIdentity] = testAbnormal
+				_, sawFailureBanner := testFailureBanners[testIdentity]
+				if sawFailureBanner && outputCrashed && goTestRecoveredPanic(event.Output) {
+					confirmedTestCrashes[testIdentity] = struct{}{}
+				}
 			}
 		case "pass", "skip":
 			if event.Test != "" {
 				if testTerminalActions[testIdentity] != "" {
 					return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 				}
+				if _, crashed := confirmedTestCrashes[testIdentity]; crashed {
+					return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+				}
 				testTerminalActions[testIdentity] = event.Action
 				delete(activeTestRuns[event.Package], testIdentity)
 				delete(testAbnormalExits, testIdentity)
+				delete(testFailureBanners, testIdentity)
+				delete(confirmedTestCrashes, testIdentity)
 			} else {
 				if len(activeTestRuns[event.Package]) != 0 {
 					return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
@@ -209,9 +225,17 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 				if testTerminalActions[testIdentity] != "" {
 					return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 				}
+				if _, crashed := confirmedTestCrashes[testIdentity]; crashed {
+					testAbnormal := testAbnormalExits[testIdentity]
+					packageState.timedOut = packageState.timedOut || testAbnormal.timedOut
+					packageState.signaled = packageState.signaled || testAbnormal.signaled
+					packageState.crashed = true
+				}
 				testTerminalActions[testIdentity] = event.Action
 				delete(activeTestRuns[event.Package], testIdentity)
 				delete(testAbnormalExits, testIdentity)
+				delete(testFailureBanners, testIdentity)
+				delete(confirmedTestCrashes, testIdentity)
 				failures[testIdentity] = struct{}{}
 				namedFailurePackages[event.Package] = struct{}{}
 				packageState.namedFailure = true
@@ -361,6 +385,27 @@ func goTestPackageAbnormalExit(output string) (timedOut, signaled, crashed bool)
 		}
 	}
 	return timedOut, signaled, crashed
+}
+
+func goTestFailureBanner(output, testName string) bool {
+	prefix := "--- FAIL: " + testName
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == prefix || strings.HasPrefix(line, prefix+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+func goTestRecoveredPanic(output string) bool {
+	for _, line := range strings.Split(strings.ToLower(output), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "panic:") && strings.Contains(line, "[recovered") {
+			return true
+		}
+	}
+	return false
 }
 
 type structuredResultItem struct {

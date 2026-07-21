@@ -466,6 +466,18 @@ func TestMarkerLog(t *testing.T) {
 `,
 			timeout: "5s", exitCode: 1, want: workspace.CheckOutcomeAssertionFailed,
 		},
+		{
+			name: "real panic",
+			source: `package fixture
+
+import "testing"
+
+func TestPanic(t *testing.T) {
+	panic("boom")
+}
+`,
+			timeout: "5s", exitCode: 1, want: workspace.CheckOutcomeCrashed,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
