@@ -126,7 +126,7 @@ func (journal *WorkspaceJournal) completeJournalRecovery(intent journalRecoveryI
 		return JournalRecoveryReport{}, err
 	}
 	if tail == nil && journalRecoveryAlreadyRecorded(snapshot, intent) {
-		if err := syncJournalFileAndDirectory(journal.journalPath, journal.stateDir); err != nil {
+		if err := syncFileAndDirectory(journal.journalPath, journal.stateDir); err != nil {
 			return JournalRecoveryReport{}, err
 		}
 		if err := removeSynchronized(workspaceJournalRecoveryPath(journal.workspaceDir)); err != nil {
@@ -297,6 +297,9 @@ func loadJournalRecoveryIntent(workspaceDir string) (journalRecoveryIntent, bool
 	if intent.discardOffset < 0 || intent.discardSize <= 0 {
 		return journalRecoveryIntent{}, false, fmt.Errorf("pending journal recovery has invalid discarded range")
 	}
+	if err := syncFileAndDirectory(path, filepath.Dir(path)); err != nil {
+		return journalRecoveryIntent{}, false, fmt.Errorf("synchronize pending journal recovery: %w", err)
+	}
 	return intent, true, nil
 }
 
@@ -321,21 +324,6 @@ func truncateJournalSynchronously(path string, size int64, stateDir string) erro
 	}
 	if err := file.Truncate(size); err != nil {
 		_ = file.Close()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	return syncDirectory(stateDir)
-}
-
-func syncJournalFileAndDirectory(path, stateDir string) error {
-	file, err := os.OpenFile(path, os.O_RDWR, 0)
-	if err != nil {
 		return err
 	}
 	if err := file.Sync(); err != nil {

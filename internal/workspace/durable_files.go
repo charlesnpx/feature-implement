@@ -54,3 +54,18 @@ func removeSynchronized(path string) error {
 	}
 	return syncDirectory(filepath.Dir(path))
 }
+
+func syncFileAndDirectory(path, directory string) error {
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return syncDirectory(directory)
+}

@@ -390,8 +390,8 @@ func DryRunReconciliation(
 	if runtime.workspaceID != active.workspace.id || runtime.workspaceID != candidate.workspace.id || runtime.activeGeneration != active.generation {
 		return ReconciliationPlan{}, fmt.Errorf("definitions do not match the active journal workspace and generation")
 	}
-	if !runtime.HasCandidate(candidate.generation) {
-		return ReconciliationPlan{}, fmt.Errorf("candidate generation %s is not durably staged", candidate.generation)
+	if !runtime.HasActivatableCandidate(candidate.generation) {
+		return ReconciliationPlan{}, fmt.Errorf("candidate generation %s is not durably staged and pending activation", candidate.generation)
 	}
 	if err := validateReconciliationSafety(state, runtime); err != nil {
 		return ReconciliationPlan{}, err
@@ -441,6 +441,9 @@ func DryRunReconciliation(
 	}
 	attemptedUnits := make(map[string]AttemptGenerationBinding, len(state.attempts))
 	for _, attempt := range state.attempts {
+		if _, exists := activeUnits[attempt.mergeUnit.key()]; !exists {
+			return ReconciliationPlan{}, fmt.Errorf("attempt %s references unknown merge unit %s", attempt.attemptID, attempt.mergeUnit)
+		}
 		attemptedUnits[attempt.mergeUnit.key()] = attempt
 	}
 	for _, reference := range changed {
@@ -546,7 +549,7 @@ func ActivateCandidateGeneration(
 	if err != nil {
 		return JournalRecord{}, err
 	}
-	if runtime.workspaceID != plan.workspaceID || runtime.activeGeneration != plan.activeGeneration || !runtime.HasCandidate(plan.candidateGeneration) {
+	if runtime.workspaceID != plan.workspaceID || runtime.activeGeneration != plan.activeGeneration || !runtime.HasActivatableCandidate(plan.candidateGeneration) {
 		return JournalRecord{}, fmt.Errorf("stale reconciliation token: generation state changed")
 	}
 	recomputed, err := DryRunReconciliation(active, candidate, snapshot, state)
@@ -555,6 +558,13 @@ func ActivateCandidateGeneration(
 	}
 	if recomputed.comparisonDigest != plan.comparisonDigest {
 		return JournalRecord{}, fmt.Errorf("reconciliation token does not match the current definition comparison")
+	}
+	storedActive, err := store.Load(plan.activeGeneration)
+	if err != nil {
+		return JournalRecord{}, fmt.Errorf("load active generation: %w", err)
+	}
+	if storedActive.workspaceID != plan.workspaceID {
+		return JournalRecord{}, fmt.Errorf("active generation belongs to workspace %s", storedActive.workspaceID)
 	}
 	storedCandidate, err := store.Load(plan.candidateGeneration)
 	if err != nil {
@@ -742,8 +752,9 @@ func canonicalReconciliationState(state ReconciliationState) ([]byte, error) {
 
 func canonicalDefinitionStructure(definition EffectiveWorkspaceDefinition) ([]byte, error) {
 	type authorityJSON struct {
-		ID   string        `json:"id"`
-		Kind AuthorityKind `json:"kind"`
+		ID       string        `json:"id"`
+		Kind     AuthorityKind `json:"kind"`
+		Location string        `json:"location"`
 	}
 	type storyJSON struct {
 		ID           string   `json:"id"`
@@ -812,7 +823,9 @@ func canonicalDefinitionStructure(definition EffectiveWorkspaceDefinition) ([]by
 		})
 	}
 	for _, authority := range definition.workspace.authoritySources {
-		value.Authorities = append(value.Authorities, authorityJSON{ID: authority.id.String(), Kind: authority.kind})
+		value.Authorities = append(value.Authorities, authorityJSON{
+			ID: authority.id.String(), Kind: authority.kind, Location: authority.location,
+		})
 	}
 	return json.Marshal(value)
 }

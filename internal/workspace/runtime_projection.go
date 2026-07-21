@@ -156,6 +156,15 @@ func (projection WorkspaceRuntimeProjection) HasCandidate(generation Digest) boo
 	return false
 }
 
+func (projection WorkspaceRuntimeProjection) HasActivatableCandidate(generation Digest) bool {
+	for _, candidate := range projection.candidates {
+		if candidate.generation == generation && !candidate.activated {
+			return true
+		}
+	}
+	return false
+}
+
 func RebuildWorkspaceRuntime(snapshot JournalSnapshot) (WorkspaceRuntimeProjection, error) {
 	return RebuildProjection(snapshot, WorkspaceRuntimeProjection{}, reduceWorkspaceRuntime)
 }

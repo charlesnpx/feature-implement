@@ -160,9 +160,9 @@ func OpenWorkspaceJournalWithOptions(workspaceDir string, mode JournalMode, opti
 	}
 	lockPath := WorkspaceJournalLockPath(workspaceDir)
 	lockExisted := pathExists(lockPath)
-	flags := os.O_RDWR
+	flags := os.O_RDONLY
 	if mode == JournalReadWrite {
-		flags |= os.O_CREATE
+		flags = os.O_RDWR | os.O_CREATE
 	}
 	lockFile, err := os.OpenFile(lockPath, flags, 0o644)
 	if err != nil {
@@ -184,6 +184,13 @@ func OpenWorkspaceJournalWithOptions(workspaceDir string, mode JournalMode, opti
 			_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 			_ = lockFile.Close()
 			return nil, err
+		}
+	}
+	if mode == JournalReadWrite && pathExists(WorkspaceJournalPath(workspaceDir)) {
+		if err := syncFileAndDirectory(WorkspaceJournalPath(workspaceDir), stateDir); err != nil {
+			_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+			_ = lockFile.Close()
+			return nil, fmt.Errorf("synchronize existing workspace journal: %w", err)
 		}
 	}
 	return &WorkspaceJournal{
@@ -223,6 +230,11 @@ func (journal *WorkspaceJournal) ReadSnapshot() (JournalSnapshot, error) {
 	}
 	if recoveryPending {
 		return JournalSnapshot{}, fmt.Errorf("journal recovery is pending; ordinary readers cannot repair state")
+	}
+	if journal.mode == JournalReadWrite && pathExists(journal.journalPath) {
+		if err := syncFileAndDirectory(journal.journalPath, journal.stateDir); err != nil {
+			return JournalSnapshot{}, fmt.Errorf("synchronize workspace journal before writer reconciliation: %w", err)
+		}
 	}
 	snapshot, tail, err := journal.readSnapshotAllowTail()
 	if err != nil {
@@ -309,7 +321,6 @@ func (journal *WorkspaceJournal) appendToSnapshot(snapshot JournalSnapshot, requ
 	if snapshot.byteLength+int64(len(encoded)) > MaxJournalBytes {
 		return JournalRecord{}, fmt.Errorf("journal exceeds %d bytes", MaxJournalBytes)
 	}
-	created := !pathExists(journal.journalPath)
 	file, err := os.OpenFile(journal.journalPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
 	if err != nil {
 		return JournalRecord{}, err
@@ -335,7 +346,7 @@ func (journal *WorkspaceJournal) appendToSnapshot(snapshot JournalSnapshot, requ
 		return JournalRecord{}, closeWith(err)
 	}
 	if err := writeAll(file, encoded[prefix:]); err != nil {
-		return JournalRecord{}, closeWith(err)
+		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: closeWith(err)}
 	}
 	if err := journal.inject(JournalFaultAfterAppend); err != nil {
 		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: closeWith(err)}
@@ -352,16 +363,14 @@ func (journal *WorkspaceJournal) appendToSnapshot(snapshot JournalSnapshot, requ
 	if err := closeWith(nil); err != nil {
 		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: err}
 	}
-	if created {
-		if err := journal.inject(JournalFaultBeforeDirectorySync); err != nil {
-			return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: err}
-		}
-		if err := syncDirectory(journal.stateDir); err != nil {
-			return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: err}
-		}
-		if err := journal.inject(JournalFaultAfterDirectorySync); err != nil {
-			return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: err}
-		}
+	if err := journal.inject(JournalFaultBeforeDirectorySync); err != nil {
+		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: err}
+	}
+	if err := syncDirectory(journal.stateDir); err != nil {
+		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: err}
+	}
+	if err := journal.inject(JournalFaultAfterDirectorySync); err != nil {
+		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: err}
 	}
 	return record, nil
 }

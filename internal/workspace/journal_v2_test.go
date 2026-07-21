@@ -244,6 +244,38 @@ func TestWorkspaceJournalUsesProcessLifetimeAdvisoryLocks(t *testing.T) {
 	}
 }
 
+func TestWorkspaceJournalReadOnlyLockDoesNotRequireWritePermission(t *testing.T) {
+	fixture := newDefinitionFixture(t)
+	definition := mustDefinition(t, fixture.sources)
+	workspaceDir := t.TempDir()
+	if _, err := workspace.InitializeWorkspaceV2(
+		workspaceDir, definition, mustTime(t, "2026-07-21T01:00:00Z"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := workspace.WorkspaceJournalLockPath(workspaceDir)
+	if err := os.Chmod(lockPath, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(lockPath, 0o644) }()
+
+	reader, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadOnly)
+	if err != nil {
+		t.Fatalf("open read-only journal with read-only lock file: %v", err)
+	}
+	snapshot, readErr := reader.ReadSnapshot()
+	closeErr := reader.Close()
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if len(snapshot.Records()) != 1 || snapshot.Records()[0].EventType() != workspace.JournalEventWorkspaceInitialized {
+		t.Fatalf("read-only snapshot = %#v", snapshot.Records())
+	}
+}
+
 func TestWorkspaceJournalLockSubprocess(t *testing.T) {
 	workspaceDir := os.Getenv("WORKSPACE_JOURNAL_LOCK_HELPER")
 	if workspaceDir == "" {
@@ -697,6 +729,8 @@ func TestJournalRecoveryResumesAcrossCrashBoundaries(t *testing.T) {
 		workspace.JournalFaultAfterAppendPrefix,
 		workspace.JournalFaultBeforeFileSync,
 		workspace.JournalFaultAfterFileSync,
+		workspace.JournalFaultBeforeDirectorySync,
+		workspace.JournalFaultAfterDirectorySync,
 	} {
 		t.Run(string(faultPoint), func(t *testing.T) {
 			fixture := newDefinitionFixture(t)
@@ -769,6 +803,8 @@ func TestJournalSubprocessCrashesAroundAppendAndFsync(t *testing.T) {
 		workspace.JournalFaultAfterAppendPrefix,
 		workspace.JournalFaultBeforeFileSync,
 		workspace.JournalFaultAfterFileSync,
+		workspace.JournalFaultBeforeDirectorySync,
+		workspace.JournalFaultAfterDirectorySync,
 	} {
 		t.Run(string(faultPoint), func(t *testing.T) {
 			fixture := newDefinitionFixture(t)
@@ -811,6 +847,96 @@ func TestJournalSubprocessCrashesAroundAppendAndFsync(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestJournalSubprocessCrashesAroundInitialAppendDirectorySync(t *testing.T) {
+	for _, faultPoint := range []workspace.JournalFaultPoint{
+		workspace.JournalFaultBeforeDirectorySync,
+		workspace.JournalFaultAfterDirectorySync,
+	} {
+		t.Run(string(faultPoint), func(t *testing.T) {
+			workspaceDir := t.TempDir()
+			generation := workspace.DigestBytes([]byte("initial-generation"))
+			definitionDigest := workspace.DigestBytes([]byte("initial-definition"))
+			command := exec.Command(os.Args[0], "-test.run=^TestWorkspaceJournalInitialAppendCrashSubprocess$")
+			command.Env = append(
+				os.Environ(),
+				"WORKSPACE_JOURNAL_INITIAL_CRASH_HELPER="+workspaceDir,
+				"WORKSPACE_JOURNAL_CRASH_POINT="+string(faultPoint),
+				"WORKSPACE_JOURNAL_CRASH_ACTIVE="+generation.String(),
+				"WORKSPACE_JOURNAL_CRASH_DEFINITION="+definitionDigest.String(),
+			)
+			err := command.Run()
+			var exitError *exec.ExitError
+			if !errors.As(err, &exitError) || exitError.ExitCode() != 73 {
+				t.Fatalf("initial append crash subprocess exit = %v", err)
+			}
+
+			writer, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
+			if err != nil {
+				t.Fatalf("reopen after ambiguous initial append: %v", err)
+			}
+			snapshot, readErr := writer.ReadSnapshot()
+			closeErr := writer.Close()
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if closeErr != nil {
+				t.Fatal(closeErr)
+			}
+			if len(snapshot.Records()) != 1 || snapshot.Records()[0].EventType() != workspace.JournalEventWorkspaceInitialized {
+				t.Fatalf("reconciled initial append = %#v", snapshot.Records())
+			}
+		})
+	}
+}
+
+func TestWorkspaceJournalInitialAppendCrashSubprocess(t *testing.T) {
+	workspaceDir := os.Getenv("WORKSPACE_JOURNAL_INITIAL_CRASH_HELPER")
+	if workspaceDir == "" {
+		t.Skip("subprocess helper")
+	}
+	generation, err := workspace.ParseDigest(os.Getenv("WORKSPACE_JOURNAL_CRASH_ACTIVE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	definitionDigest, err := workspace.ParseDigest(os.Getenv("WORKSPACE_JOURNAL_CRASH_DEFINITION"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	faultPoint := workspace.JournalFaultPoint(os.Getenv("WORKSPACE_JOURNAL_CRASH_POINT"))
+	journal, err := workspace.OpenWorkspaceJournalWithOptions(workspaceDir, workspace.JournalReadWrite, workspace.JournalOptions{
+		FaultInjector: func(point workspace.JournalFaultPoint) error {
+			if point == faultPoint {
+				os.Exit(73)
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := workspace.NewWorkspaceInitializedJournalEvent(
+		workspace.MustID("example-workspace"), generation, definitionDigest,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceResource := workspace.WorkspaceJournalResource(workspace.MustID("example-workspace"))
+	generationResource := workspace.GenerationJournalResource(generation)
+	workspaceRevision, _ := workspace.NewJournalResourceRevision(workspaceResource, 0)
+	generationRevision, _ := workspace.NewJournalResourceRevision(generationResource, 0)
+	request, err := workspace.NewJournalAppend(
+		event,
+		mustTime(t, "2026-07-21T01:00:00Z"),
+		[]workspace.JournalResourceRevision{workspaceRevision, generationRevision},
+		[]workspace.JournalResource{workspaceResource, generationResource},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = journal.Append(request)
+	t.Fatal("initial append crash failpoint was not reached")
 }
 
 func TestWorkspaceJournalCrashSubprocess(t *testing.T) {

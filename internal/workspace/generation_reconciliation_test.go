@@ -194,6 +194,91 @@ func TestProspectiveReconciliationActivatesCandidateWithOwnerCAS(t *testing.T) {
 	}
 }
 
+func TestActivatedCandidateCannotBeReactivated(t *testing.T) {
+	fixture := newDefinitionFixture(t)
+	first := mustDefinition(t, fixture.sources)
+	second := mustProspectiveCandidate(t, fixture)
+	thirdSources := cloneDefinitionSources(fixture.sources)
+	thirdSources.Plans[0].Bytes = []byte(strings.Replace(
+		string(thirdSources.Plans[0].Bytes),
+		"The dependent contract is explicit.",
+		"The dependent contract is explicit and independently versioned.",
+		1,
+	))
+	third := mustDefinition(t, thirdSources)
+	workspaceDir := t.TempDir()
+	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, first, mustTime(t, "2026-07-21T02:00:00Z")); err != nil {
+		t.Fatal(err)
+	}
+	store, err := workspace.OpenGenerationStore(workspaceDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+
+	activate := func(active, candidate workspace.EffectiveWorkspaceDefinition, stagedAt, activatedAt, nonce string) {
+		t.Helper()
+		if _, err := store.StageCandidate(journal, candidate, mustTime(t, stagedAt)); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, err := journal.ReadSnapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		state, err := workspace.NewReconciliationState(
+			snapshot, nil, nil, nil, nil, workspace.EmptyRuntimeHistoryBinding(),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan, err := workspace.DryRunReconciliation(active, candidate, snapshot, state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		receipt, err := workspace.NewReceipt(
+			workspace.MustID("owner-key"), workspace.DigestBytes([]byte("activate-"+nonce)), nonce,
+			mustTime(t, activatedAt), []byte("signature-"+nonce),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		verifier := &activationVerifier{
+			workspaceID: active.Workspace().ID(), generation: candidate.Generation(), request: plan.ComparisonDigest(),
+		}
+		if _, err := workspace.ActivateCandidateGeneration(
+			context.Background(), journal, store, active, candidate, plan, state, receipt, verifier,
+			mustTime(t, activatedAt),
+		); err != nil {
+			t.Fatal(err)
+		}
+		if verifier.calls != 1 {
+			t.Fatalf("activation verifier calls = %d", verifier.calls)
+		}
+	}
+
+	activate(first, second, "2026-07-21T02:01:00Z", "2026-07-21T02:02:00Z", "second")
+	activate(second, third, "2026-07-21T02:03:00Z", "2026-07-21T02:04:00Z", "third")
+
+	snapshot, err := journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := workspace.NewReconciliationState(
+		snapshot, nil, nil, nil, nil, workspace.EmptyRuntimeHistoryBinding(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.DryRunReconciliation(third, second, snapshot, state); err == nil ||
+		!strings.Contains(err.Error(), "pending activation") {
+		t.Fatalf("reactivated candidate dry-run error = %v", err)
+	}
+}
+
 func TestReconciliationSafetyMatrixRejectsUnsafeRuntimeAndRetrospectiveChanges(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	active := mustDefinition(t, fixture.sources)
@@ -285,6 +370,49 @@ func TestReconciliationSafetyMatrixRejectsUnsafeRuntimeAndRetrospectiveChanges(t
 			t.Fatalf("retrospective attempt change error = %v", err)
 		}
 	})
+	t.Run("unknown-terminal-attempt", func(t *testing.T) {
+		unknownUnit := mustMergeUnitReference(t, "alpha-plan", "unit-typo")
+		attempt, err := workspace.NewAttemptGenerationBinding(
+			workspace.MustID("attempt-unknown-unit"), unknownUnit, active.Generation(), workspace.AttemptCompleted,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		state, err := workspace.NewReconciliationState(
+			snapshot, nil, []workspace.AttemptGenerationBinding{attempt}, nil, nil, history,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := workspace.DryRunReconciliation(active, candidate, snapshot, state); err == nil ||
+			!strings.Contains(err.Error(), "references unknown merge unit") {
+			t.Fatalf("unknown attempt merge unit error = %v", err)
+		}
+	})
+
+	authoritySources := cloneDefinitionSources(fixture.sources)
+	authoritySources.Workspace.Bytes = []byte(strings.Replace(
+		string(authoritySources.Workspace.Bytes),
+		"location: policy/owner.yaml",
+		"location: policy/owner-v2.yaml",
+		1,
+	))
+	authorityStructural := mustDefinition(t, authoritySources)
+	if _, err := store.StageCandidate(journal, authorityStructural, mustTime(t, "2026-07-21T02:02:00Z")); err != nil {
+		t.Fatal(err)
+	}
+	authoritySnapshot, err := journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorityState, err := workspace.NewReconciliationState(authoritySnapshot, nil, nil, nil, nil, history)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.DryRunReconciliation(active, authorityStructural, authoritySnapshot, authorityState); err == nil ||
+		!strings.Contains(err.Error(), "structural changes") {
+		t.Fatalf("authority location structural change error = %v", err)
+	}
 
 	structuralSources := cloneDefinitionSources(fixture.sources)
 	structuralSources.Plans[0].Bytes = []byte(strings.Replace(
@@ -294,7 +422,7 @@ func TestReconciliationSafetyMatrixRejectsUnsafeRuntimeAndRetrospectiveChanges(t
 		1,
 	))
 	structural := mustDefinition(t, structuralSources)
-	if _, err := store.StageCandidate(journal, structural, mustTime(t, "2026-07-21T02:02:00Z")); err != nil {
+	if _, err := store.StageCandidate(journal, structural, mustTime(t, "2026-07-21T02:03:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	structuralSnapshot, _ := journal.ReadSnapshot()
@@ -318,7 +446,7 @@ func TestReconciliationSafetyMatrixRejectsUnsafeRuntimeAndRetrospectiveChanges(t
 	}
 	if _, err := workspace.ActivateCandidateGeneration(
 		context.Background(), journal, store, active, structural, forgedPlan, structuralState, receipt, verifier,
-		mustTime(t, "2026-07-21T02:03:00Z"),
+		mustTime(t, "2026-07-21T02:04:00Z"),
 	); err == nil || !strings.Contains(err.Error(), "structural changes") {
 		t.Fatalf("forged structural activation error = %v", err)
 	}

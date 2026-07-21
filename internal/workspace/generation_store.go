@@ -92,6 +92,9 @@ func (store *GenerationStore) Store(definition EffectiveWorkspaceDefinition) (St
 		if !bytes.Equal(existing, canonical) {
 			return StoredGeneration{}, fmt.Errorf("generation %s already exists with different canonical bytes", definition.generation)
 		}
+		if err := syncFileAndDirectory(path, store.generationsDir); err != nil {
+			return StoredGeneration{}, fmt.Errorf("synchronize existing generation %s: %w", definition.generation, err)
+		}
 		return parseStoredGeneration(existing, definition.generation)
 	} else if !os.IsNotExist(err) {
 		return StoredGeneration{}, err
