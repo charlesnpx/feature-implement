@@ -18,6 +18,7 @@ type journalCommitGit struct {
 	staged       workspace.StagedCommitInspection
 	commit       workspace.GitCommitInspection
 	rangeCommits []workspace.GitCommitInspection
+	rangeCalls   int
 	createCalls  int
 	publishes    int
 }
@@ -125,6 +126,7 @@ func (git *journalCommitGit) InspectCommit(context.Context, string, workspace.Gi
 func (git *journalCommitGit) InspectFirstParentRange(
 	context.Context, string, workspace.GitObjectID, workspace.GitObjectID,
 ) ([]workspace.GitCommitInspection, error) {
+	git.rangeCalls++
 	if git.rangeCommits != nil {
 		return append([]workspace.GitCommitInspection(nil), git.rangeCommits...), nil
 	}
@@ -270,6 +272,112 @@ func TestJournaledCommitProtocolRecoversCommitAndCheckCrashWindows(t *testing.T)
 	)
 	if err != nil || boundary.Attempt().Phase() != workspace.AttemptPaused {
 		t.Fatalf("boundary after protocol = %#v err=%v", boundary, err)
+	}
+}
+
+func TestJournaledCommitProtocolRecoversBaseOnlyRebaseAfterStartCrash(t *testing.T) {
+	scenario := newJournalCommitScenario(t)
+	request := scenario.request
+	request.Fault = commitFailOnce(workspace.CommitFaultAfterProtocolStart)
+	result, err := workspace.ExecuteAttemptCommitStep(
+		context.Background(), scenario.harness.journal, scenario.harness.definition,
+		scenario.shell, request,
+	)
+	if err == nil || !strings.Contains(err.Error(), string(workspace.CommitFaultAfterProtocolStart)) {
+		t.Fatalf("protocol-start fault error = %v", err)
+	}
+	state, configured := result.Protocol()
+	if !configured || state.Phase() != workspace.CommitProtocolReady || len(state.CompletedSteps()) != 0 ||
+		state.Base() != scenario.harness.base || scenario.git.createCalls != 0 {
+		t.Fatalf("protocol state after start crash=%#v configured=%v creates=%d", state, configured, scenario.git.createCalls)
+	}
+
+	step := configuredProtocolStep(t, scenario.harness.definition)
+	newBase, newTree, newCommit := mustGitObject(t, '5'), mustGitObject(t, '6'), mustGitObject(t, '7')
+	diff := scenario.git.staged.Diff()
+	scenario.git.head = newBase
+	scenario.git.staged, err = workspace.NewStagedCommitInspection(newBase, newTree, diff, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenario.git.commit, err = workspace.NewGitCommitInspection(
+		newCommit, []workspace.GitObjectID{newBase}, newTree, step.Message().Subject(), "", diff,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenario.git.head = newCommit
+	if _, err := workspace.RecordAttemptCommitRebase(
+		context.Background(), scenario.harness.journal, scenario.harness.definition, scenario.shell,
+		scenario.attempt.AttemptID(), newBase, newCommit, mustTime(t, "2026-07-21T12:02:05Z"), nil,
+	); err == nil || !strings.Contains(err.Error(), "base-only commit rebase must end at the new base") {
+		t.Fatalf("base-only rebase with an unrecorded commit error = %v", err)
+	}
+	scenario.git.head = newBase
+
+	result, err = workspace.RecordAttemptCommitRebase(
+		context.Background(), scenario.harness.journal, scenario.harness.definition, scenario.shell,
+		scenario.attempt.AttemptID(), newBase, newBase, mustTime(t, "2026-07-21T12:02:10Z"),
+		commitFailOnce(workspace.CommitFaultAfterRebaseRecord),
+	)
+	if err == nil || !strings.Contains(err.Error(), string(workspace.CommitFaultAfterRebaseRecord)) {
+		t.Fatalf("base-only rebase fault error = %v", err)
+	}
+	state, _ = result.Protocol()
+	if state.Phase() != workspace.CommitProtocolReady || state.Base() != newBase || state.Head() != newBase ||
+		state.RebaseEpoch() != 1 || result.Attempt().VerifiedHead() != newBase || scenario.git.rangeCalls != 0 {
+		t.Fatalf(
+			"base-only rebase state=%#v attempt=%#v range calls=%d",
+			state, result.Attempt(), scenario.git.rangeCalls,
+		)
+	}
+
+	result, err = workspace.RecordAttemptCommitRebase(
+		context.Background(), scenario.harness.journal, scenario.harness.definition, scenario.shell,
+		scenario.attempt.AttemptID(), newBase, newBase, mustTime(t, "2026-07-21T12:02:20Z"), nil,
+	)
+	if err != nil || scenario.git.rangeCalls != 0 {
+		t.Fatalf("retry base-only rebase result=%#v err=%v range calls=%d", result, err, scenario.git.rangeCalls)
+	}
+
+	request.OccurredAt = mustTime(t, "2026-07-21T12:02:30Z")
+	request.Fault = nil
+	result, err = workspace.ExecuteAttemptCommitStep(
+		context.Background(), scenario.harness.journal, scenario.harness.definition,
+		scenario.shell, request,
+	)
+	if err != nil {
+		t.Fatalf("resume protocol after base-only rebase: %v", err)
+	}
+	state, _ = result.Protocol()
+	if state.Phase() != workspace.CommitProtocolComplete || state.Base() != newBase || state.Head() != newCommit ||
+		state.RebaseEpoch() != 1 || result.Attempt().VerifiedHead() != newCommit ||
+		scenario.git.publishes != 1 || runnerCallCount(scenario.runner) != 1 {
+		t.Fatalf(
+			"completed rebased protocol state=%#v attempt=%#v publishes=%d checks=%d",
+			state, result.Attempt(), scenario.git.publishes, runnerCallCount(scenario.runner),
+		)
+	}
+
+	if err := scenario.harness.journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := workspace.ReadWorkspaceJournalSnapshot(scenario.harness.workspace)
+	if err != nil {
+		t.Fatalf("decode base-only rebase journal: %v", err)
+	}
+	replayed, err := workspace.RebuildWorkspaceRuntime(snapshot)
+	if err != nil {
+		t.Fatalf("replay base-only rebase journal: %v", err)
+	}
+	replayedAttempt, exists := replayed.Attempt(scenario.attempt.AttemptID())
+	replayedState, hasProtocol := replayedAttempt.CommitProtocol()
+	if !exists || !hasProtocol || replayedState.Base() != newBase || replayedState.Head() != newCommit ||
+		replayedState.RebaseEpoch() != 1 || replayedAttempt.VerifiedHead() != newCommit {
+		t.Fatalf(
+			"replayed base-only rebase attempt=%#v exists=%v state=%#v configured=%v",
+			replayedAttempt, exists, replayedState, hasProtocol,
+		)
 	}
 }
 

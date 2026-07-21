@@ -324,10 +324,6 @@ func recordAttemptProtocolChainRebase(
 	if err := shell.git.VerifyCleanWorktree(ctx, attempt.worktree, attempt.branch, newHead); err != nil {
 		return attempt, err
 	}
-	inspections, err := shell.git.InspectFirstParentRange(ctx, attempt.worktree, newBase, newHead)
-	if err != nil {
-		return attempt, err
-	}
 	implementationCount, reviewCount := 0, 0
 	if attempt.commitProtocol != nil {
 		implementationCount = len(attempt.commitProtocol.steps)
@@ -335,10 +331,22 @@ func recordAttemptProtocolChainRebase(
 	if attempt.reviewFixes != nil {
 		reviewCount = len(attempt.reviewFixes.fixes)
 	}
-	if implementationCount+reviewCount == 0 || len(inspections) != implementationCount+reviewCount {
+	recordedCount := implementationCount + reviewCount
+	var inspections []GitCommitInspection
+	if recordedCount == 0 {
+		if newHead != newBase {
+			return attempt, fmt.Errorf("base-only commit rebase must end at the new base")
+		}
+	} else {
+		inspections, err = shell.git.InspectFirstParentRange(ctx, attempt.worktree, newBase, newHead)
+		if err != nil {
+			return attempt, err
+		}
+	}
+	if len(inspections) != recordedCount {
 		return attempt, fmt.Errorf(
 			"rebased commit count %d does not match recorded count %d",
-			len(inspections), implementationCount+reviewCount,
+			len(inspections), recordedCount,
 		)
 	}
 	implementationCommits := make([]CommitObjectEvidence, 0, implementationCount)
@@ -427,12 +435,6 @@ func verifyRecordedAttemptProtocolRebase(
 	); err != nil {
 		return fmt.Errorf("verify recorded commit rebase worktree: %w", err)
 	}
-	inspections, err := shell.git.InspectFirstParentRange(
-		ctx, attempt.worktree, newBase, newHead,
-	)
-	if err != nil {
-		return fmt.Errorf("verify recorded commit rebase range: %w", err)
-	}
 	implementationCount, reviewCount := 0, 0
 	if attempt.commitProtocol != nil {
 		implementationCount = len(attempt.commitProtocol.steps)
@@ -440,10 +442,25 @@ func verifyRecordedAttemptProtocolRebase(
 	if attempt.reviewFixes != nil {
 		reviewCount = len(attempt.reviewFixes.fixes)
 	}
-	if len(inspections) != implementationCount+reviewCount {
+	recordedCount := implementationCount + reviewCount
+	var inspections []GitCommitInspection
+	if recordedCount == 0 {
+		if newHead != newBase {
+			return fmt.Errorf("recorded base-only commit rebase does not end at its base")
+		}
+	} else {
+		var err error
+		inspections, err = shell.git.InspectFirstParentRange(
+			ctx, attempt.worktree, newBase, newHead,
+		)
+		if err != nil {
+			return fmt.Errorf("verify recorded commit rebase range: %w", err)
+		}
+	}
+	if len(inspections) != recordedCount {
 		return fmt.Errorf(
 			"recorded rebased commit count %d no longer matches %d",
-			len(inspections), implementationCount+reviewCount,
+			len(inspections), recordedCount,
 		)
 	}
 	for index := 0; index < implementationCount; index++ {

@@ -77,6 +77,9 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 		terminalAction string
 		namedFailure   bool
 		failedBuild    string
+		timedOut       bool
+		signaled       bool
+		crashed        bool
 	}
 	type goTestBuildState struct {
 		failed bool
@@ -91,7 +94,6 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 	packages := make(map[string]goTestPackageState)
 	builds := make(map[string]goTestBuildState)
 	structured := 0
-	crashed, signaled, timedOut := false, false, false
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 {
@@ -152,18 +154,10 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 		case "start", "run", "pause", "cont", "bench":
 		case "output":
 			text := strings.ToLower(event.Output)
-			if strings.Contains(text, "test timed out after") || strings.Contains(text, "panic: test timed out") {
-				timedOut = true
-			}
-			if strings.Contains(text, "panic:") || strings.Contains(text, "fatal error:") ||
-				strings.Contains(text, "signal: aborted") || strings.Contains(text, "signal: segmentation fault") {
-				crashed = true
-			}
-			if event.Test == "" {
-				outputSignaled, outputCrashed := goTestPackageAbnormalExit(text)
-				signaled = signaled || outputSignaled
-				crashed = crashed || outputCrashed
-			}
+			outputTimedOut, outputSignaled, outputCrashed := goTestPackageAbnormalExit(text)
+			packageState.timedOut = packageState.timedOut || outputTimedOut
+			packageState.signaled = packageState.signaled || outputSignaled
+			packageState.crashed = packageState.crashed || outputCrashed
 		case "pass", "skip":
 			if event.Test != "" {
 				if testTerminalActions[testIdentity] != "" {
@@ -191,7 +185,8 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 				namedFailurePackages[event.Package] = struct{}{}
 				packageState.namedFailure = true
 			} else {
-				if len(activeTestRuns[event.Package]) != 0 {
+				if len(activeTestRuns[event.Package]) != 0 &&
+					(result.exitCode == 0 || !packageState.timedOut && !packageState.signaled && !packageState.crashed) {
 					return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 				}
 				packageFailures[event.Package] = struct{}{}
@@ -211,8 +206,15 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 		}
 		packages[event.Package] = packageState
 	}
-	if err := scanner.Err(); err != nil || structured == 0 || len(packages) == 0 || hasActiveGoTestRuns(activeTestRuns) {
+	if err := scanner.Err(); err != nil || structured == 0 || len(packages) == 0 {
 		return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+	}
+	for packageName, tests := range activeTestRuns {
+		packageState, exists := packages[packageName]
+		if len(tests) != 0 && (result.exitCode == 0 || !exists || packageState.terminalAction != "fail" ||
+			!packageState.timedOut && !packageState.signaled && !packageState.crashed) {
+			return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
+		}
 	}
 	for _, packageState := range packages {
 		if packageState.terminalAction == "" {
@@ -241,6 +243,17 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 			if _, referenced := referencedBuilds[importPath]; !referenced {
 				return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 			}
+		}
+	}
+	timedOut, signaled, crashed := false, false, false
+	if result.exitCode != 0 {
+		for _, packageState := range packages {
+			if packageState.terminalAction != "fail" {
+				continue
+			}
+			timedOut = timedOut || packageState.timedOut
+			signaled = signaled || packageState.signaled
+			crashed = crashed || packageState.crashed
 		}
 	}
 	if timedOut {
@@ -288,18 +301,18 @@ func parseGoTestJSON(result CheckProcessResult) (ParsedCheckOutcome, error) {
 	return NewParsedCheckOutcome(CheckOutcomeMalformedOutput, nil)
 }
 
-func hasActiveGoTestRuns(active map[string]map[string]struct{}) bool {
-	for _, tests := range active {
-		if len(tests) != 0 {
-			return true
-		}
-	}
-	return false
-}
-
-func goTestPackageAbnormalExit(output string) (signaled, crashed bool) {
+func goTestPackageAbnormalExit(output string) (timedOut, signaled, crashed bool) {
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "panic: test timed out after") {
+			timedOut = true
+			crashed = true
+			continue
+		}
+		if strings.HasPrefix(line, "panic:") || strings.HasPrefix(line, "fatal error:") {
+			crashed = true
+			continue
+		}
 		if strings.HasPrefix(line, "signal:") && len(strings.TrimSpace(strings.TrimPrefix(line, "signal:"))) != 0 {
 			signaled = true
 			continue
@@ -313,7 +326,7 @@ func goTestPackageAbnormalExit(output string) (signaled, crashed bool) {
 			crashed = true
 		}
 	}
-	return signaled, crashed
+	return timedOut, signaled, crashed
 }
 
 type structuredResultItem struct {

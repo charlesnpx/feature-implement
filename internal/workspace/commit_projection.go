@@ -143,14 +143,15 @@ func reduceCommitRuntime(
 		updated.commitProtocol = &state
 		return nil
 	case CommitProtocolRebasedJournalEvent:
-		if (attempt.commitProtocol != nil) != (len(event.commits) != 0) {
+		hasImplementation := !event.protocolDigest.IsZero()
+		if (attempt.commitProtocol != nil) != hasImplementation {
 			return fmt.Errorf("commit rebase mapping does not match the attempt implementation protocol")
 		}
-		if (attempt.reviewFixes != nil) != (len(event.reviewCommits) != 0) {
+		if (attempt.reviewFixes != nil) != !event.reviewProtocolDigest.IsZero() {
 			return fmt.Errorf("commit rebase mapping does not match the attempt review-fix chain")
 		}
 		chainHead := event.base
-		if len(event.commits) != 0 {
+		if hasImplementation {
 			state, err := requireAttemptCommitProtocol(attempt, event.protocolDigest)
 			if err != nil {
 				return err

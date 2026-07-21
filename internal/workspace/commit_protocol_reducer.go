@@ -145,8 +145,8 @@ type RemapRebasedCommits struct {
 }
 
 func NewRemapRebasedCommits(base GitObjectID, commits []CommitObjectEvidence) (RemapRebasedCommits, error) {
-	if base.IsZero() || len(commits) == 0 {
-		return RemapRebasedCommits{}, fmt.Errorf("rebase remapping requires a new base and commits")
+	if base.IsZero() {
+		return RemapRebasedCommits{}, fmt.Errorf("rebase remapping requires a new base")
 	}
 	copyCommits := make([]CommitObjectEvidence, len(commits))
 	for index, commit := range commits {

@@ -407,6 +407,99 @@ func TestGoTestParserRecognizesRealGo126CompilationFailure(t *testing.T) {
 	}
 }
 
+func TestGoTestParserRecognizesRealTimeoutAndIgnoresLoggedMarkersOnPass(t *testing.T) {
+	tests := []struct {
+		name     string
+		source   string
+		timeout  string
+		exitCode int
+		want     workspace.CheckOutcomeKind
+	}{
+		{
+			name: "timeout",
+			source: `package fixture
+
+import (
+	"testing"
+	"time"
+)
+
+func TestTimeout(t *testing.T) {
+	time.Sleep(time.Second)
+}
+`,
+			timeout: "50ms", exitCode: 1, want: workspace.CheckOutcomeTimedOut,
+		},
+		{
+			name: "passing marker log",
+			source: `package fixture
+
+import "testing"
+
+func TestMarkerLog(t *testing.T) {
+	t.Log("panic: test timed out after 50ms")
+	t.Log("signal: killed")
+	t.Log("exit status 2")
+}
+`,
+			timeout: "5s", exitCode: 0, want: workspace.CheckOutcomePassed,
+		},
+		{
+			name: "failing marker log",
+			source: `package fixture
+
+import "testing"
+
+func TestMarkerLog(t *testing.T) {
+	t.Log("panic: test timed out after 50ms")
+	t.Log("fatal error: synthetic")
+	t.Log("signal: killed")
+	t.Log("exit status 2")
+	t.Error("expected assertion failure")
+}
+`,
+			timeout: "5s", exitCode: 1, want: workspace.CheckOutcomeAssertionFailed,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(
+				filepath.Join(root, "go.mod"), []byte("module example.com/parserfixture\n\ngo 1.26\n"), 0o644,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "fixture_test.go"), []byte(test.source), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			command := exec.Command("go", "test", "-json", "-timeout="+test.timeout, "./...")
+			command.Dir = root
+			command.Env = append(os.Environ(), "GOFLAGS=", "GOWORK=off", "GOTOOLCHAIN=local")
+			var stdout, stderr bytes.Buffer
+			command.Stdout, command.Stderr = &stdout, &stderr
+			err := command.Run()
+			if command.ProcessState == nil || command.ProcessState.ExitCode() != test.exitCode ||
+				test.exitCode == 0 && err != nil || test.exitCode != 0 && err == nil {
+				t.Fatalf(
+					"go test err=%v exit=%v stdout=%s stderr=%s",
+					err, command.ProcessState, stdout.String(), stderr.String(),
+				)
+			}
+			result := mustCheckResult(
+				t, workspace.CheckExited, test.exitCode, "", stdout.Bytes(), stderr.Bytes(),
+				workspace.StrictCheckIsolationProof(),
+			)
+			outcome, err := workspace.ParseCheckOutcome(workspace.CheckParserGoTestJSON, result)
+			if err != nil || outcome.Kind() != test.want {
+				t.Fatalf(
+					"outcome=%#v err=%v want=%s stdout=%s stderr=%s",
+					outcome, err, test.want, stdout.String(), stderr.String(),
+				)
+			}
+		})
+	}
+}
+
 func TestGoTestParserAllowsRepeatedTestRunsWithDistinctTerminals(t *testing.T) {
 	output := []byte(strings.Join([]string{
 		`{"Action":"run","Package":"example/pkg","Test":"TestRepeated"}`,

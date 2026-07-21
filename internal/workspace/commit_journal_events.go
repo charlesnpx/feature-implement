@@ -371,11 +371,11 @@ func (event CommitProtocolRebasedJournalEvent) validate() error {
 		event.base.IsZero() || event.mappingDigest.IsZero() {
 		return fmt.Errorf("commit protocol rebase requires complete mapping bindings")
 	}
-	hasImplementation := !event.protocolDigest.IsZero() || len(event.commits) != 0
-	hasReviewFixes := !event.reviewProtocolDigest.IsZero() || len(event.reviewCommits) != 0
+	hasImplementation := !event.protocolDigest.IsZero()
+	hasReviewFixes := !event.reviewProtocolDigest.IsZero()
 	if !hasImplementation && !hasReviewFixes ||
-		hasImplementation && (event.protocolDigest.IsZero() || len(event.commits) == 0) ||
-		hasReviewFixes && (event.reviewProtocolDigest.IsZero() || len(event.reviewCommits) == 0) {
+		!hasImplementation && len(event.commits) != 0 ||
+		hasReviewFixes != (len(event.reviewCommits) != 0) {
 		return fmt.Errorf("commit protocol rebase requires complete implementation or review-fix mappings")
 	}
 	for _, commit := range event.commits {
@@ -412,12 +412,11 @@ func (event CommitProtocolRebasedJournalEvent) MappingDigest() Digest { return e
 
 func digestCommitRebaseMapping(event CommitProtocolRebasedJournalEvent) (Digest, error) {
 	if event.generation.IsZero() || event.base.IsZero() ||
-		(event.protocolDigest.IsZero() || len(event.commits) == 0) &&
-			(event.reviewProtocolDigest.IsZero() || len(event.reviewCommits) == 0) {
+		event.protocolDigest.IsZero() && (event.reviewProtocolDigest.IsZero() || len(event.reviewCommits) == 0) {
 		return Digest{}, fmt.Errorf("commit rebase mapping is incomplete")
 	}
 	var bindings []byte
-	if len(event.commits) != 0 {
+	if !event.protocolDigest.IsZero() {
 		bindings = []byte(fmt.Sprintf(
 			"commit_rebase_mapping_v2\ngeneration=%s\nprotocol=%s\nbase=%s\n",
 			event.generation, event.protocolDigest, event.base,
@@ -506,7 +505,7 @@ func commitJournalEventResources(event WorkspaceJournalEvent) ([]JournalResource
 	case CommitProtocolRebasedJournalEvent:
 		workspaceID, generation, attemptID = event.workspaceID, event.generation, event.attemptID
 		reads = []JournalResource{AttemptJournalResource(attemptID)}
-		if len(event.commits) != 0 {
+		if !event.protocolDigest.IsZero() {
 			reads = append(reads, CommitProtocolJournalResource(attemptID))
 		}
 		for _, commit := range event.commits {
