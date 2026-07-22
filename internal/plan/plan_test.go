@@ -6,10 +6,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/charlesnpx/feature-implement/internal/workspace"
 )
 
 func TestMaterializeAndValidateWritesLock(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalPlanTestTempDir(t)
 	manifestPath := filepath.Join(root, "feature.plan.yaml")
 	if err := os.WriteFile(manifestPath, []byte(sampleManifest()), 0o644); err != nil {
 		t.Fatal(err)
@@ -42,8 +44,107 @@ func TestMaterializeAndValidateWritesLock(t *testing.T) {
 	}
 }
 
+func TestMaterializeRejectsSymlinkedOutRoot(t *testing.T) {
+	sourceRoot := canonicalPlanTestTempDir(t)
+	manifestPath := filepath.Join(sourceRoot, "feature.plan.yaml")
+	if err := os.WriteFile(manifestPath, []byte(sampleManifest()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	external := canonicalPlanTestTempDir(t)
+	outRoot := filepath.Join(canonicalPlanTestTempDir(t), "out")
+	if err := os.Symlink(external, outRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Materialize(MaterializeOptions{ManifestPath: manifestPath, OutRoot: outRoot}); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Materialize symlinked OutRoot error = %v", err)
+	}
+	entries, err := os.ReadDir(external)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("symlinked OutRoot received materialized files: %v", entries)
+	}
+}
+
+func TestMaterializeRematerializesOwnedPlanOutputsAndPreservesUnownedFiles(t *testing.T) {
+	root := canonicalPlanTestTempDir(t)
+	manifestPath := filepath.Join(root, "source.plan.yaml")
+	if err := os.WriteFile(manifestPath, []byte(sampleManifest()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	first, err := Materialize(MaterializeOptions{ManifestPath: manifestPath, OutRoot: root})
+	if err != nil {
+		t.Fatalf("first Materialize: %v", err)
+	}
+	if first.InventoryPath != filepath.Join(first.PlanDir, workspace.MaterializationInventoryFileName) {
+		t.Fatalf("inventory path = %s", first.InventoryPath)
+	}
+	if _, err := Validate(ValidateOptions{PlanDir: first.PlanDir, WriteLock: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(first.PlanDir, "notes.txt"), []byte("user notes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	installedSkill := filepath.Join(first.PlanDir, "skills", "codex", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(installedSkill), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(installedSkill, []byte("user-installed skill\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldStory := filepath.Join(first.PlanDir, "001-epic-foundation", "001-feature-installer", "001-story-install-contract.md")
+	updatedManifest := strings.ReplaceAll(sampleManifest(), "name: Install Contract", "name: Revised Contract")
+	if err := os.WriteFile(manifestPath, []byte(updatedManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := Materialize(MaterializeOptions{ManifestPath: manifestPath, OutRoot: root})
+	if err != nil {
+		t.Fatalf("second Materialize: %v", err)
+	}
+	newStory := filepath.Join(second.PlanDir, "001-epic-foundation", "001-feature-installer", "001-story-revised-contract.md")
+	if _, err := os.Stat(newStory); err != nil {
+		t.Fatalf("new story was not materialized: %v", err)
+	}
+	if _, err := os.Stat(oldStory); !os.IsNotExist(err) {
+		t.Fatalf("stale owned story was not removed: %v", err)
+	}
+	for path, want := range map[string]string{
+		filepath.Join(second.PlanDir, "notes.txt"): "user notes\n",
+		installedSkill: "user-installed skill\n",
+	} {
+		content, err := os.ReadFile(path)
+		if err != nil || string(content) != want {
+			t.Fatalf("unowned path %s changed: content=%q err=%v", path, content, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(second.PlanDir, "feature.plan.lock.json")); err != nil {
+		t.Fatalf("unowned validation lock was removed: %v", err)
+	}
+
+	inventoryBytes, err := os.ReadFile(second.InventoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inventory struct {
+		Artifacts []struct {
+			Path string `json:"path"`
+		} `json:"artifacts"`
+	}
+	if err := json.Unmarshal(inventoryBytes, &inventory); err != nil {
+		t.Fatal(err)
+	}
+	for _, artifact := range inventory.Artifacts {
+		if artifact.Path == "feature.plan.lock.json" || strings.HasPrefix(artifact.Path, "skills/") || strings.Contains(artifact.Path, ".git") {
+			t.Fatalf("inventory claimed excluded path %s", artifact.Path)
+		}
+	}
+}
+
 func TestValidateRejectsBrokenDependency(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalPlanTestTempDir(t)
 	manifestPath := filepath.Join(root, "feature.plan.yaml")
 	broken := `schema_version: 1
 id: broken
@@ -203,7 +304,7 @@ func TestMaterializeRejectsSparseStories(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			root := t.TempDir()
+			root := canonicalPlanTestTempDir(t)
 			manifestPath := filepath.Join(root, "feature.plan.yaml")
 			manifest := `schema_version: 1
 id: sparse
@@ -231,7 +332,7 @@ epics:
 }
 
 func TestImplementRequiresLockAndExplicitWriteFlags(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalPlanTestTempDir(t)
 	if _, err := Implement(ImplementOptions{PlanDir: root, Action: "push"}); err == nil {
 		t.Fatalf("implement should require lock")
 	}
@@ -306,7 +407,7 @@ func TestValidateRejectsUnsafeStoryIDs(t *testing.T) {
 }
 
 func TestExampleManifestMaterializesAndValidates(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalPlanTestTempDir(t)
 	manifestPath := filepath.Join(root, "feature.plan.yaml")
 	if err := os.WriteFile(manifestPath, []byte(ExampleManifestYAML()), 0o644); err != nil {
 		t.Fatal(err)
@@ -371,6 +472,16 @@ func containsAny(values []any, want string) bool {
 		}
 	}
 	return false
+}
+
+func canonicalPlanTestTempDir(t *testing.T) string {
+	t.Helper()
+	directory := t.TempDir()
+	canonical, err := filepath.EvalSymlinks(directory)
+	if err != nil {
+		t.Fatalf("canonicalize temporary test directory: %v", err)
+	}
+	return canonical
 }
 
 func sampleManifest() string {

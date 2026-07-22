@@ -83,7 +83,7 @@ func TestPlanExampleAndSchemaCommands(t *testing.T) {
 }
 
 func TestDocumentedTrailingFlagsWork(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalFeatureTestTempDir(t)
 	example, stderr, err := runFeature(t, "plan", "example")
 	if err != nil {
 		t.Fatalf("feature plan example failed: %v\nstderr=%s", err, stderr)
@@ -123,7 +123,7 @@ func TestDocumentedTrailingFlagsWork(t *testing.T) {
 }
 
 func TestImplementLifecycleWriteStateCommands(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalFeatureTestTempDir(t)
 	example, stderr, err := runFeature(t, "plan", "example")
 	if err != nil {
 		t.Fatalf("feature plan example failed: %v\nstderr=%s", err, stderr)
@@ -186,6 +186,16 @@ func TestHelperProcess(t *testing.T) {
 	os.Args = append([]string{"feature"}, args...)
 	main()
 	os.Exit(0)
+}
+
+func canonicalFeatureTestTempDir(t *testing.T) string {
+	t.Helper()
+	directory := t.TempDir()
+	canonical, err := filepath.EvalSymlinks(directory)
+	if err != nil {
+		t.Fatalf("canonicalize temporary test directory: %v", err)
+	}
+	return canonical
 }
 
 func runFeature(t *testing.T, args ...string) (string, string, error) {

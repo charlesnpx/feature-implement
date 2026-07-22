@@ -11,7 +11,7 @@ import (
 )
 
 func TestWorkspaceV2StrictnessDoesNotChangeUnrelatedV1Planning(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalMaterializationTestTempDir(t)
 	manifest := `schema_version: 1
 id: legacy-planning
 title: Legacy Planning Still Works
