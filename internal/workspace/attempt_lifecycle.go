@@ -57,6 +57,12 @@ func ReserveAttempt(
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
+	if request.AttemptNumber > uint64(unitExecution.policy.maxAttempts) {
+		return RuntimeAttemptProjection{}, fmt.Errorf(
+			"attempt number %d exceeds max_attempts %d for merge unit %s",
+			request.AttemptNumber, unitExecution.policy.maxAttempts, request.MergeUnit,
+		)
+	}
 	identity, err := DeriveAttemptIdentity(manifest.repository, request.MergeUnit, request.AttemptNumber, request.Base)
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
@@ -80,6 +86,37 @@ func ReserveAttempt(
 		if attempt.mergeUnit == request.MergeUnit && attempt.attemptNumber == request.AttemptNumber {
 			return RuntimeAttemptProjection{}, fmt.Errorf("attempt number %d is already bound to %s", request.AttemptNumber, attempt.attemptID)
 		}
+	}
+	nextAttemptNumber := uint64(1)
+	for _, attempt := range runtime.attempts {
+		if attempt.mergeUnit == request.MergeUnit && attempt.attemptNumber >= nextAttemptNumber {
+			nextAttemptNumber = attempt.attemptNumber + 1
+		}
+	}
+	if request.AttemptNumber != nextAttemptNumber {
+		return RuntimeAttemptProjection{}, fmt.Errorf(
+			"attempt number %d is out of sequence for merge unit %s; next attempt is %d",
+			request.AttemptNumber, request.MergeUnit, nextAttemptNumber,
+		)
+	}
+	scheduler, err := RebuildSchedulerView(snapshot, definition)
+	if err != nil {
+		return RuntimeAttemptProjection{}, err
+	}
+	ready := false
+	status := SchedulerUnitStatus("")
+	var blockers []string
+	for _, unit := range scheduler.Units {
+		if unit.PlanID == request.MergeUnit.planID.String() && unit.MergeUnitID == request.MergeUnit.mergeUnitID.String() {
+			status, blockers = unit.Status, append([]string(nil), unit.Blockers...)
+			ready = unit.Status == SchedulerUnitReady
+			break
+		}
+	}
+	if !ready {
+		return RuntimeAttemptProjection{}, fmt.Errorf(
+			"merge unit %s is not scheduler-ready (status=%s blockers=%v)", request.MergeUnit, status, blockers,
+		)
 	}
 	if err := git.ValidateAttemptBranch(ctx, manifest.repositoryRoot, identity.branch); err != nil {
 		return RuntimeAttemptProjection{}, err
@@ -891,6 +928,15 @@ func ResumeAttempt(
 	attempt, exists := runtime.Attempt(request.AttemptID)
 	if !exists {
 		return RuntimeAttemptProjection{}, fmt.Errorf("attempt %s is not reserved", request.AttemptID)
+	}
+	providerRuntime, err := RebuildProviderRuntime(snapshot, definition)
+	if err != nil {
+		return RuntimeAttemptProjection{}, err
+	}
+	for _, receipt := range providerRuntime.CompletionReceipts() {
+		if receipt.AttemptID() == attempt.attemptID {
+			return RuntimeAttemptProjection{}, fmt.Errorf("completed attempt %s cannot resume", attempt.attemptID)
+		}
 	}
 	if attempt.phase == AttemptActive && len(attempt.boundaries) > 0 && attempt.boundaries[len(attempt.boundaries)-1].resumedRecord != 0 {
 		return attempt, nil

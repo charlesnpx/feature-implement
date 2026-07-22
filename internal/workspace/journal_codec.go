@@ -489,6 +489,9 @@ func parseWorkspaceGenerationBindings(workspace, generation, definition string) 
 }
 
 func decodeStrictJSON(source []byte, target any) error {
+	if err := rejectDuplicateJSONObjectKeys(source); err != nil {
+		return err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(source))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
@@ -502,6 +505,12 @@ func decodeStrictJSON(source []byte, target any) error {
 		return err
 	}
 	return nil
+}
+
+// DecodeStrictJSON exposes the shared bounded-command decoding contract to
+// composition roots without exposing wire DTOs from the domain package.
+func DecodeStrictJSON(source []byte, target any) error {
+	return decodeStrictJSON(source, target)
 }
 
 func equalJournalReadSets(left, right []JournalResourceRevision) bool {

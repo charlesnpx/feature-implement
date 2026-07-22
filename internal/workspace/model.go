@@ -134,6 +134,18 @@ func normalizeWorkspace(wire workspaceWire) (WorkspaceManifest, error) {
 	if err != nil {
 		return WorkspaceManifest{}, err
 	}
+	if provider.repository == "local-only" {
+		return WorkspaceManifest{}, fmt.Errorf("workspace v2 does not support local-only execution")
+	}
+	if provider.kind.String() != "github" {
+		return WorkspaceManifest{}, fmt.Errorf("provider.kind %q is unsupported; workspace v2 supports github", provider.kind)
+	}
+	providerRepositoryParts := strings.Split(provider.repository, "/")
+	if len(providerRepositoryParts) != 2 ||
+		!validGitHubRepositoryComponent(providerRepositoryParts[0]) ||
+		!validGitHubRepositoryComponent(providerRepositoryParts[1]) {
+		return WorkspaceManifest{}, fmt.Errorf("provider.repository must be GitHub owner/repository")
+	}
 	baseRef, err := normalizeToken("base_ref", wire.BaseRef, 1024)
 	if err != nil {
 		return WorkspaceManifest{}, err
@@ -141,6 +153,9 @@ func normalizeWorkspace(wire workspaceWire) (WorkspaceManifest, error) {
 	remote, err := normalizeToken("remote", wire.Remote, 512)
 	if err != nil {
 		return WorkspaceManifest{}, err
+	}
+	if remote == "local-only" {
+		return WorkspaceManifest{}, fmt.Errorf("workspace v2 does not support local-only execution")
 	}
 	executionConfig, err := normalizeSourcePath(wire.ExecutionConfig)
 	if err != nil {
@@ -243,6 +258,20 @@ func normalizeWorkspace(wire workspaceWire) (WorkspaceManifest, error) {
 		baseRef: baseRef, remote: remote, executionConfig: executionConfig,
 		plans: plans, dependencies: dependencies, authoritySources: authorities,
 	}, nil
+}
+
+func validGitHubRepositoryComponent(value string) bool {
+	if value == "" || value == "." || value == ".." {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || character == '-' || character == '_' || character == '.' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func (manifest WorkspaceManifest) ID() ID                         { return manifest.id }

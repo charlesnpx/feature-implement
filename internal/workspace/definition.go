@@ -21,6 +21,7 @@ type DefinitionSources struct {
 type ArtifactKind string
 
 const (
+	ArtifactWorkspaceBundle ArtifactKind = "workspace_bundle"
 	ArtifactWorkspace       ArtifactKind = "workspace"
 	ArtifactPlan            ArtifactKind = "plan"
 	ArtifactExecutionConfig ArtifactKind = "execution_config"
@@ -613,7 +614,10 @@ type canonicalAuthorityIdentity struct {
 }
 
 func canonicalGenerationBytes(workspaceID ID, artifacts []NormalizedArtifact, authorities []AuthoritySnapshot) ([]byte, error) {
-	value := canonicalGeneration{SchemaVersion: 2, WorkspaceID: workspaceID.String()}
+	value := canonicalGeneration{
+		SchemaVersion: 2, WorkspaceID: workspaceID.String(),
+		Artifacts: []canonicalArtifactIdentity{}, Authorities: []canonicalAuthorityIdentity{},
+	}
 	for _, artifact := range artifacts {
 		value.Artifacts = append(value.Artifacts, canonicalArtifactIdentity{
 			Kind: artifact.kind, ID: artifact.id.String(), Path: artifact.path,

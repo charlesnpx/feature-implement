@@ -67,6 +67,31 @@ func TestStrictWorkspaceDecoderRejectsNonV2AndAmbiguousYAML(t *testing.T) {
 			wantErr: "root.remote must be a string",
 		},
 		{
+			name:    "local-only remote sentinel",
+			source:  strings.Replace(valid, "remote: origin", "remote: local-only", 1),
+			wantErr: "does not support local-only execution",
+		},
+		{
+			name:    "local-only provider sentinel",
+			source:  strings.Replace(valid, "repository: example/project", "repository: local-only", 1),
+			wantErr: "does not support local-only execution",
+		},
+		{
+			name:    "unsupported provider",
+			source:  strings.Replace(valid, "kind: github", "kind: gitlab", 1),
+			wantErr: "workspace v2 supports github",
+		},
+		{
+			name:    "malformed github repository",
+			source:  strings.Replace(valid, "repository: example/project", "repository: example/project/extra", 1),
+			wantErr: "must be GitHub owner/repository",
+		},
+		{
+			name:    "unsafe github repository",
+			source:  strings.Replace(valid, "repository: example/project", "repository: example/project%2Fother", 1),
+			wantErr: "must be GitHub owner/repository",
+		},
+		{
 			name:    "noncanonical integer",
 			source:  strings.Replace(valid, "schema_version: 2", "schema_version: 02", 1),
 			wantErr: "must use unsigned decimal form",

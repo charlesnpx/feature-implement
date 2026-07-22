@@ -393,7 +393,22 @@ func DryRunReconciliation(
 	if !runtime.HasActivatableCandidate(candidate.generation) {
 		return ReconciliationPlan{}, fmt.Errorf("candidate generation %s is not durably staged and pending activation", candidate.generation)
 	}
-	if err := validateReconciliationSafety(state, runtime); err != nil {
+	scheduler, err := RebuildSchedulerView(snapshot, active)
+	if err != nil {
+		return ReconciliationPlan{}, err
+	}
+	completedAttempts := make(map[ID]struct{}, len(scheduler.Units))
+	for _, unit := range scheduler.Units {
+		if unit.Status != SchedulerUnitCompleted {
+			continue
+		}
+		attemptID, parseErr := NewID(unit.AttemptID)
+		if parseErr != nil {
+			return ReconciliationPlan{}, fmt.Errorf("completed scheduler attempt: %w", parseErr)
+		}
+		completedAttempts[attemptID] = struct{}{}
+	}
+	if err := validateReconciliationSafety(state, runtime, completedAttempts); err != nil {
 		return ReconciliationPlan{}, err
 	}
 	activeStructure, err := canonicalDefinitionStructure(active)
@@ -689,7 +704,11 @@ func normalizeReconciliationState(state *ReconciliationState) error {
 	return nil
 }
 
-func validateReconciliationSafety(state ReconciliationState, runtime WorkspaceRuntimeProjection) error {
+func validateReconciliationSafety(
+	state ReconciliationState,
+	runtime WorkspaceRuntimeProjection,
+	completedAttempts map[ID]struct{},
+) error {
 	knownGenerations := runtime.generationHistory
 	for _, unit := range state.mergeUnits {
 		if unit.disposition != MergeUnitFuture && !containsDigest(knownGenerations, unit.generation) {
@@ -713,6 +732,9 @@ func validateReconciliationSafety(state ReconciliationState, runtime WorkspaceRu
 			return fmt.Errorf("journal attempt %s is bound to unknown generation %s", attempt.attemptID, attempt.generation)
 		}
 		if attempt.phase.nonterminal() {
+			if _, completed := completedAttempts[attempt.attemptID]; completed {
+				continue
+			}
 			return fmt.Errorf("reconciliation is blocked by journal-projected nonterminal attempt %s in state %s", attempt.attemptID, attempt.phase)
 		}
 	}

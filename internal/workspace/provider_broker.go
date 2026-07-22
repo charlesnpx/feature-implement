@@ -195,6 +195,13 @@ func (disposition ProviderReconciliationDisposition) valid() bool {
 // it cannot be redirected to a different action or repository.
 type ProviderIntentQuery struct{ intent ProviderIntent }
 
+func NewProviderIntentQuery(intent ProviderIntent) (ProviderIntentQuery, error) {
+	if intent.intentID.IsZero() || intent.digest.IsZero() || !intent.kind.valid() {
+		return ProviderIntentQuery{}, fmt.Errorf("provider intent query requires a canonical typed intent")
+	}
+	return ProviderIntentQuery{intent: intent}, nil
+}
+
 func (query ProviderIntentQuery) Kind() ProviderIntentKind { return query.intent.kind }
 func (query ProviderIntentQuery) Repository() RepositoryIdentity {
 	return query.intent.scope.repository
@@ -202,6 +209,23 @@ func (query ProviderIntentQuery) Repository() RepositoryIdentity {
 func (query ProviderIntentQuery) Remote() string         { return query.intent.scope.remote }
 func (query ProviderIntentQuery) IdempotencyKey() Digest { return query.intent.idempotencyKey }
 func (query ProviderIntentQuery) IntentDigest() Digest   { return query.intent.digest }
+func (query ProviderIntentQuery) Branch() string         { return query.intent.branch }
+func (query ProviderIntentQuery) Head() GitObjectID      { return query.intent.head }
+func (query ProviderIntentQuery) Tree() GitObjectID      { return query.intent.tree }
+func (query ProviderIntentQuery) ExpectedRemoteHead() (GitObjectID, bool) {
+	return query.intent.expectedRemote, !query.intent.expectedRemote.IsZero()
+}
+func (query ProviderIntentQuery) ExpectsRemoteAbsent() bool { return query.intent.expectAbsent }
+func (query ProviderIntentQuery) BaseRef() string           { return query.intent.baseRef }
+func (query ProviderIntentQuery) IntegrationBaseHead() GitObjectID {
+	return query.intent.integrationBase
+}
+func (query ProviderIntentQuery) PullRequest() (PullRequestIdentity, bool) {
+	return query.intent.pullRequest, !query.intent.pullRequest.IsZero()
+}
+func (query ProviderIntentQuery) MergeStrategy() ProviderMergeStrategy {
+	return query.intent.mergeStrategy
+}
 
 type ProviderReconciliationObservation struct {
 	disposition       ProviderReconciliationDisposition

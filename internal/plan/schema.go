@@ -100,7 +100,6 @@ func ManifestSchema() map[string]any {
 				"additionalProperties": false,
 				"properties": map[string]any{
 					"auto_merge_allowed":     map[string]any{"type": "boolean"},
-					"delete_branch_allowed":  map[string]any{"type": "boolean"},
 					"require_passing_checks": map[string]any{"type": "boolean"},
 				},
 			},
