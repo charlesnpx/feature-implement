@@ -146,6 +146,15 @@ func TestMaterializationBootstrapsAbsentOrEmptyDestinationWithV2Inventory(t *tes
 			}
 			assertFileContent(t, filepath.Join(root, "feature.plan.yaml"), "manifest\n")
 			assertFileContent(t, filepath.Join(root, "001-epic", "001-feature", "001-story-a.md"), "story\n")
+			for _, directory := range []string{"001-epic", "001-epic/001-feature"} {
+				info, err := os.Stat(filepath.Join(root, filepath.FromSlash(directory)))
+				if err != nil {
+					t.Fatalf("stat generated directory %s: %v", directory, err)
+				}
+				if got := info.Mode().Perm(); got != 0o755 {
+					t.Fatalf("generated directory %s mode = %#o, want 0755", directory, got)
+				}
+			}
 
 			inventory := readInventoryFixture(t, root)
 			if inventory.SchemaVersion != 2 || inventory.GeneratorVersion != testGeneratorVersion {

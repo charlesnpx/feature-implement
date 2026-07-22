@@ -2074,7 +2074,7 @@ func applyPendingDirectoryCreate(
 	}
 	createdPreparation := false
 	if !preparationExists {
-		created, err := adapter.makeDirectory(directory.PreparationPath, 0o700)
+		created, err := adapter.makeDirectory(directory.PreparationPath, 0o755)
 		if err != nil {
 			return materializationApplyConflict("", directory.Path, MaterializationConflictUnsafePath, err.Error())
 		}
