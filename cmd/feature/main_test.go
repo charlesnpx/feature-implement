@@ -9,7 +9,29 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/charlesnpx/feature-implement/internal/workspacecmd"
 )
+
+func TestWorkspaceInputIsBoundedBeforeStrictDecode(t *testing.T) {
+	exact := bytes.Repeat([]byte{'x'}, workspacecmd.MaxCommandInputBytes)
+	content, err := readBoundedWorkspaceInput(bytes.NewReader(exact))
+	if err != nil || len(content) != len(exact) {
+		t.Fatalf("exact-size input = %d bytes, %v", len(content), err)
+	}
+	oversized := bytes.Repeat([]byte{'x'}, workspacecmd.MaxCommandInputBytes+1)
+	if _, err := readBoundedWorkspaceInput(bytes.NewReader(oversized)); err == nil ||
+		!strings.Contains(err.Error(), "input exceeds") {
+		t.Fatalf("oversized stream error = %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "oversized.json")
+	if err := os.WriteFile(path, oversized, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readWorkspaceInput(path); err == nil || !strings.Contains(err.Error(), "input exceeds") {
+		t.Fatalf("oversized file error = %v", err)
+	}
+}
 
 func TestHelpCommandsExitSuccessfully(t *testing.T) {
 	tests := [][]string{

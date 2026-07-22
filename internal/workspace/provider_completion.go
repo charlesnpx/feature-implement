@@ -34,6 +34,17 @@ func (conclusion ProviderReviewConclusion) valid() bool {
 	return conclusion == ProviderReviewApproved || conclusion == ProviderReviewChangesRequested || conclusion == ProviderReviewPending
 }
 
+type ProviderPullRequestLifecycle string
+
+const (
+	ProviderPullRequestOpen   ProviderPullRequestLifecycle = "open"
+	ProviderPullRequestClosed ProviderPullRequestLifecycle = "closed"
+)
+
+func (lifecycle ProviderPullRequestLifecycle) valid() bool {
+	return lifecycle == ProviderPullRequestOpen || lifecycle == ProviderPullRequestClosed
+}
+
 type ProviderCheckState struct {
 	id         ID
 	required   bool
@@ -93,6 +104,7 @@ type ProviderPullRequestStateOptions struct {
 	BaseHeadBeforeMerge GitObjectID
 	Checks              []ProviderCheckState
 	Reviews             []ProviderReviewState
+	Lifecycle           ProviderPullRequestLifecycle
 	Merged              bool
 	MergeStrategy       ProviderMergeStrategy
 	MergeCommit         GitObjectID
@@ -114,6 +126,7 @@ type ProviderPullRequestState struct {
 	baseHeadBeforeMerge GitObjectID
 	checks              []ProviderCheckState
 	reviews             []ProviderReviewState
+	lifecycle           ProviderPullRequestLifecycle
 	merged              bool
 	mergeStrategy       ProviderMergeStrategy
 	mergeCommit         GitObjectID
@@ -130,7 +143,7 @@ func NewProviderPullRequestState(options ProviderPullRequestStateOptions) (Provi
 		baseHeadBeforeMerge: options.BaseHeadBeforeMerge,
 		checks:              append([]ProviderCheckState(nil), options.Checks...),
 		reviews:             append([]ProviderReviewState(nil), options.Reviews...),
-		merged:              options.Merged, mergeStrategy: options.MergeStrategy,
+		lifecycle:           options.Lifecycle, merged: options.Merged, mergeStrategy: options.MergeStrategy,
 		mergeCommit: options.MergeCommit, finalBaseHead: options.FinalBaseHead,
 		requestMarker: strings.TrimSpace(options.RequestMarker),
 	}
@@ -163,6 +176,9 @@ func normalizeProviderPullRequestState(state *ProviderPullRequestState) error {
 	if err := validateProviderAdapterMarker(state.requestMarker); err != nil {
 		return err
 	}
+	if !state.lifecycle.valid() {
+		return fmt.Errorf("provider pull request state requires open or closed lifecycle")
+	}
 	algorithm := state.head.Algorithm()
 	for _, object := range []GitObjectID{state.headTree, state.remoteBranchHead, state.baseHeadBeforeMerge} {
 		if object.Algorithm() != algorithm {
@@ -170,7 +186,7 @@ func normalizeProviderPullRequestState(state *ProviderPullRequestState) error {
 		}
 	}
 	if state.merged {
-		if state.mergeStrategy != ProviderMergeCommit || state.mergeCommit.IsZero() ||
+		if state.lifecycle != ProviderPullRequestClosed || state.mergeStrategy != ProviderMergeCommit || state.mergeCommit.IsZero() ||
 			state.finalBaseHead.IsZero() || state.mergeCommit.Algorithm() != algorithm ||
 			state.finalBaseHead.Algorithm() != algorithm {
 			return fmt.Errorf("merged pull request state requires merge-commit strategy and exact merge/final base objects")
@@ -241,6 +257,9 @@ func (state ProviderPullRequestState) Checks() []ProviderCheckState {
 func (state ProviderPullRequestState) Reviews() []ProviderReviewState {
 	return append([]ProviderReviewState(nil), state.reviews...)
 }
+func (state ProviderPullRequestState) Lifecycle() ProviderPullRequestLifecycle {
+	return state.lifecycle
+}
 func (state ProviderPullRequestState) Merged() bool { return state.merged }
 func (state ProviderPullRequestState) MergeStrategy() ProviderMergeStrategy {
 	return state.mergeStrategy
@@ -264,22 +283,23 @@ type providerReviewStateWire struct {
 }
 
 type providerPullRequestStateCanonical struct {
-	SchemaVersion       int                         `json:"schema_version"`
-	Repository          string                      `json:"repository"`
-	PullRequest         controlPlanePullRequestWire `json:"pull_request"`
-	BaseRef             string                      `json:"base_ref"`
-	Branch              string                      `json:"branch"`
-	Head                string                      `json:"head"`
-	HeadTree            string                      `json:"head_tree"`
-	RemoteBranchHead    string                      `json:"remote_branch_head"`
-	BaseHeadBeforeMerge string                      `json:"base_head_before_merge"`
-	Checks              []providerCheckStateWire    `json:"checks"`
-	Reviews             []providerReviewStateWire   `json:"reviews"`
-	Merged              bool                        `json:"merged"`
-	MergeStrategy       ProviderMergeStrategy       `json:"merge_strategy,omitempty"`
-	MergeCommit         string                      `json:"merge_commit,omitempty"`
-	FinalBaseHead       string                      `json:"final_base_head,omitempty"`
-	RequestMarker       string                      `json:"request_marker"`
+	SchemaVersion       int                          `json:"schema_version"`
+	Repository          string                       `json:"repository"`
+	PullRequest         controlPlanePullRequestWire  `json:"pull_request"`
+	BaseRef             string                       `json:"base_ref"`
+	Branch              string                       `json:"branch"`
+	Head                string                       `json:"head"`
+	HeadTree            string                       `json:"head_tree"`
+	RemoteBranchHead    string                       `json:"remote_branch_head"`
+	BaseHeadBeforeMerge string                       `json:"base_head_before_merge"`
+	Checks              []providerCheckStateWire     `json:"checks"`
+	Reviews             []providerReviewStateWire    `json:"reviews"`
+	Lifecycle           ProviderPullRequestLifecycle `json:"lifecycle"`
+	Merged              bool                         `json:"merged"`
+	MergeStrategy       ProviderMergeStrategy        `json:"merge_strategy,omitempty"`
+	MergeCommit         string                       `json:"merge_commit,omitempty"`
+	FinalBaseHead       string                       `json:"final_base_head,omitempty"`
+	RequestMarker       string                       `json:"request_marker"`
 }
 
 func canonicalProviderPullRequestState(state ProviderPullRequestState) ([]byte, error) {
@@ -291,9 +311,9 @@ func canonicalProviderPullRequestState(state ProviderPullRequestState) ([]byte, 
 		},
 		BaseRef: state.baseRef, Branch: state.branch, Head: state.head.String(), HeadTree: state.headTree.String(),
 		RemoteBranchHead: state.remoteBranchHead.String(), BaseHeadBeforeMerge: state.baseHeadBeforeMerge.String(),
-		Checks:  make([]providerCheckStateWire, 0, len(state.checks)),
-		Reviews: make([]providerReviewStateWire, 0, len(state.reviews)),
-		Merged:  state.merged, MergeStrategy: state.mergeStrategy,
+		Checks:    make([]providerCheckStateWire, 0, len(state.checks)),
+		Reviews:   make([]providerReviewStateWire, 0, len(state.reviews)),
+		Lifecycle: state.lifecycle, Merged: state.merged, MergeStrategy: state.mergeStrategy,
 		MergeCommit: state.mergeCommit.String(), FinalBaseHead: state.finalBaseHead.String(),
 		RequestMarker: state.requestMarker,
 	}
@@ -343,7 +363,8 @@ func newProviderMergePreflight(
 	if state.repository != intent.scope.repository || state.pullRequest != intent.pullRequest ||
 		state.baseRef != intent.baseRef || state.branch != intent.branch ||
 		state.baseHeadBeforeMerge != intent.integrationBase || state.head != intent.head ||
-		state.headTree != intent.tree || state.remoteBranchHead != intent.head || state.merged {
+		state.headTree != intent.tree || state.remoteBranchHead != intent.head ||
+		state.lifecycle != ProviderPullRequestOpen || state.merged {
 		return ProviderMergePreflight{}, fmt.Errorf("provider merge preflight does not match the exact unmerged intent topology")
 	}
 	preflight := ProviderMergePreflight{
@@ -1059,7 +1080,8 @@ func VerifyAndRecordProviderCompletion(
 		providerState.head != mergeIntent.intent.head || providerState.headTree != mergeIntent.intent.tree ||
 		providerState.remoteBranchHead != mergeIntent.intent.head ||
 		providerState.baseHeadBeforeMerge != mergeIntent.intent.integrationBase ||
-		!providerState.merged || providerState.mergeStrategy != ProviderMergeCommit ||
+		providerState.lifecycle != ProviderPullRequestClosed || !providerState.merged ||
+		providerState.mergeStrategy != ProviderMergeCommit ||
 		providerState.mergeCommit.IsZero() || providerState.finalBaseHead != providerState.mergeCommit {
 		return ProviderCompletionReceipt{}, JournalRecord{}, fmt.Errorf("provider completion observation has wrong branch, head/tree, base, strategy, or merge state")
 	}

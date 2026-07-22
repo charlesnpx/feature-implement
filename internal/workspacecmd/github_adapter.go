@@ -3,6 +3,7 @@ package workspacecmd
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -74,7 +75,7 @@ func (adapter *githubProviderAdapter) Push(ctx context.Context, request workspac
 	if hasExpected {
 		lease += gitObjectHex(expected)
 	}
-	_, err = adapter.runGitProviderWrite(ctx, "push", "--porcelain", lease, remoteURL, gitObjectHex(request.Head())+":"+ref)
+	_, err = adapter.runGitProviderWrite(ctx, remoteURL, "push", "--porcelain", lease, remoteURL, gitObjectHex(request.Head())+":"+ref)
 	if err != nil {
 		return workspace.ProviderPushAdapterResult{}, providerAdapterFailure(workspace.ProviderAdapterAmbiguous, marker, err)
 	}
@@ -136,6 +137,9 @@ func (adapter *githubProviderAdapter) Merge(ctx context.Context, request workspa
 	if request.Strategy() != workspace.ProviderMergeCommit {
 		return workspace.ProviderMergeAdapterResult{}, providerAdapterFailure(workspace.ProviderAdapterFailedBeforeEffect, marker, fmt.Errorf("only merge_commit is supported"))
 	}
+	if request.Branch() == request.BaseRef() {
+		return workspace.ProviderMergeAdapterResult{}, providerAdapterFailure(workspace.ProviderAdapterFailedBeforeEffect, marker, fmt.Errorf("merge head and base refs must be distinct"))
+	}
 	baseHead, exists, err := adapter.remoteRef(ctx, "refs/heads/"+request.BaseRef(), request.Head().Algorithm())
 	if err != nil || !exists || baseHead != request.ExpectedBaseHead() {
 		if err == nil {
@@ -153,9 +157,11 @@ func (adapter *githubProviderAdapter) Merge(ctx context.Context, request workspa
 	if err != nil {
 		return workspace.ProviderMergeAdapterResult{}, providerAdapterFailure(workspace.ProviderAdapterFailedBeforeEffect, marker, err)
 	}
-	ref := "refs/heads/" + request.BaseRef()
-	if _, err := adapter.runGitProviderWrite(ctx, providerMergePushArguments(
-		ref, request.ExpectedBaseHead(), mergeCommit, remoteURL,
+	baseRef := "refs/heads/" + request.BaseRef()
+	headRef := "refs/heads/" + request.Branch()
+	if _, err := adapter.runGitProviderWrite(ctx, remoteURL, providerMergePushArguments(
+		baseRef, request.ExpectedBaseHead(), mergeCommit,
+		headRef, request.Head(), remoteURL,
 	)...); err != nil {
 		return workspace.ProviderMergeAdapterResult{}, providerAdapterFailure(workspace.ProviderAdapterAmbiguous, marker, err)
 	}
@@ -186,11 +192,11 @@ func (adapter *githubProviderAdapter) createProviderMergeCommit(
 		return workspace.GitObjectID{}, err
 	}
 	if _, err := adapter.runGit(
-		ctx, false, "merge-base", "--is-ancestor", gitObjectHex(base), gitObjectHex(head),
+		ctx, "merge-base", "--is-ancestor", gitObjectHex(base), gitObjectHex(head),
 	); err != nil {
 		return workspace.GitObjectID{}, fmt.Errorf("provider merge head does not descend from approved base: %w", err)
 	}
-	output, err := adapter.runGitProviderWrite(
+	output, err := adapter.runGitLocalWrite(
 		ctx,
 		"-c", "user.name=feature-implement",
 		"-c", "user.email=feature-implement@users.noreply.github.com",
@@ -217,12 +223,19 @@ func (adapter *githubProviderAdapter) createProviderMergeCommit(
 }
 
 func providerMergePushArguments(
-	ref string,
+	baseRef string,
 	expectedBase, mergeCommit workspace.GitObjectID,
+	headRef string,
+	expectedHead workspace.GitObjectID,
 	remoteURL string,
 ) []string {
-	lease := "--force-with-lease=" + ref + ":" + gitObjectHex(expectedBase)
-	return []string{"push", "--porcelain", lease, remoteURL, gitObjectHex(mergeCommit) + ":" + ref}
+	baseLease := "--force-with-lease=" + baseRef + ":" + gitObjectHex(expectedBase)
+	headLease := "--force-with-lease=" + headRef + ":" + gitObjectHex(expectedHead)
+	return []string{
+		"push", "--porcelain", "--atomic", baseLease, headLease, remoteURL,
+		gitObjectHex(mergeCommit) + ":" + baseRef,
+		gitObjectHex(expectedHead) + ":" + headRef,
+	}
 }
 
 func (adapter *githubProviderAdapter) QueryIntent(ctx context.Context, query workspace.ProviderIntentQuery) (workspace.ProviderReconciliationObservation, error) {
@@ -349,6 +362,10 @@ func (adapter *githubProviderAdapter) QueryPullRequest(ctx context.Context, quer
 		return workspace.ProviderPullRequestState{}, err
 	}
 	merged := pullRequest.Merged || pullRequest.MergedAt != ""
+	lifecycle, err := parseGitHubPullRequestLifecycle(pullRequest.State)
+	if err != nil {
+		return workspace.ProviderPullRequestState{}, err
+	}
 	mergeCommit := workspace.GitObjectID{}
 	finalBase := workspace.GitObjectID{}
 	strategy := workspace.ProviderMergeStrategy("")
@@ -368,8 +385,20 @@ func (adapter *githubProviderAdapter) QueryPullRequest(ctx context.Context, quer
 		Repository: adapter.repositoryIdentity, PullRequest: query.PullRequest(), BaseRef: pullRequest.Base.Ref,
 		Branch: pullRequest.Head.Ref, Head: head, HeadTree: headTree, RemoteBranchHead: remoteBranch,
 		BaseHeadBeforeMerge: baseBefore, Checks: checks, Reviews: reviews, Merged: merged,
+		Lifecycle:     lifecycle,
 		MergeStrategy: strategy, MergeCommit: mergeCommit, FinalBaseHead: finalBase, RequestMarker: marker,
 	})
+}
+
+func parseGitHubPullRequestLifecycle(value string) (workspace.ProviderPullRequestLifecycle, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "open":
+		return workspace.ProviderPullRequestOpen, nil
+	case "closed":
+		return workspace.ProviderPullRequestClosed, nil
+	default:
+		return "", fmt.Errorf("unsupported GitHub pull request state %q", value)
+	}
 }
 
 type githubPullRequest struct {
@@ -729,7 +758,7 @@ func (adapter *githubProviderAdapter) remoteRefURL(
 	remoteURL, ref string,
 	algorithm workspace.GitHashAlgorithm,
 ) (workspace.GitObjectID, bool, error) {
-	output, err := adapter.runGitRemoteRead(ctx, "ls-remote", "--refs", remoteURL, ref)
+	output, err := adapter.runGitRemoteRead(ctx, remoteURL, "ls-remote", "--refs", remoteURL, ref)
 	if err != nil {
 		return workspace.GitObjectID{}, false, err
 	}
@@ -746,7 +775,7 @@ func (adapter *githubProviderAdapter) remoteRefURL(
 }
 
 func (adapter *githubProviderAdapter) configuredRemoteURL(ctx context.Context) (string, error) {
-	output, err := adapter.runGit(ctx, false, "remote", "get-url", "--push", adapter.remote)
+	output, err := adapter.runGit(ctx, "remote", "get-url", "--push", adapter.remote)
 	if err != nil {
 		return "", fmt.Errorf("resolve configured remote %s: %w", adapter.remote, err)
 	}
@@ -761,7 +790,11 @@ func (adapter *githubProviderAdapter) configuredRemoteURL(ctx context.Context) (
 	if !strings.EqualFold(repository, adapter.providerRepository) {
 		return "", fmt.Errorf("configured remote %s targets %s, not github provider repository %s", adapter.remote, repository, adapter.providerRepository)
 	}
-	return remoteURL, nil
+	return canonicalGitHubRemoteURL(adapter.providerRepository), nil
+}
+
+func canonicalGitHubRemoteURL(repository string) string {
+	return "https://github.com/" + repository + ".git"
 }
 
 func githubRepositoryFromRemoteURL(value string) (string, error) {
@@ -801,7 +834,7 @@ func githubRepositoryFromRemoteURL(value string) (string, error) {
 }
 
 func (adapter *githubProviderAdapter) objectFormat(ctx context.Context) (workspace.GitHashAlgorithm, error) {
-	output, err := adapter.runGit(ctx, false, "rev-parse", "--show-object-format")
+	output, err := adapter.runGit(ctx, "rev-parse", "--show-object-format")
 	if err != nil {
 		return "", err
 	}
@@ -817,57 +850,189 @@ func (adapter *githubProviderAdapter) objectFormat(ctx context.Context) (workspa
 }
 
 func (adapter *githubProviderAdapter) commitTree(ctx context.Context, commit workspace.GitObjectID) (workspace.GitObjectID, error) {
-	output, err := adapter.runGit(ctx, false, "rev-parse", gitObjectHex(commit)+"^{tree}")
+	output, err := adapter.runGit(ctx, "rev-parse", gitObjectHex(commit)+"^{tree}")
 	if err != nil {
 		return workspace.GitObjectID{}, err
 	}
 	return parseGitHubObject(strings.TrimSpace(string(output)), commit.Algorithm())
 }
 
-func (adapter *githubProviderAdapter) runGit(ctx context.Context, credentials bool, arguments ...string) ([]byte, error) {
+func (adapter *githubProviderAdapter) runGit(ctx context.Context, arguments ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, adapter.gitExecutable, arguments...)
 	command.Dir = adapter.repositoryRoot
-	environment := append([]string{}, os.Environ()...)
-	environment = append(environment,
-		"GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0",
-		"GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=core.hooksPath", "GIT_CONFIG_VALUE_0=/dev/null",
-		"GIT_CONFIG_KEY_1=http.extraHeader", "GIT_CONFIG_VALUE_1=",
-	)
-	if !credentials {
-		environment = append(environment, "GIT_ASKPASS=", "SSH_ASKPASS=")
-	}
-	command.Env = environment
-	output, err := command.CombinedOutput()
+	command.Env = providerLocalGitProcessEnvironment(os.Environ())
+	var stdout, stderr bytes.Buffer
+	command.Stdout, command.Stderr = &stdout, &stderr
+	err := command.Run()
 	if err != nil {
-		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(arguments, " "), err, strings.TrimSpace(string(output)))
+		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(arguments, " "), err, strings.TrimSpace(stderr.String()))
 	}
-	return output, nil
+	return stdout.Bytes(), nil
 }
 
 func (adapter *githubProviderAdapter) runGitRemoteRead(
 	ctx context.Context,
+	remoteURL string,
 	arguments ...string,
 ) ([]byte, error) {
-	output, err := adapter.runGit(ctx, false, arguments...)
+	output, err := adapter.runGitProviderNetwork(ctx, remoteURL, "", arguments...)
+	if err == nil {
+		return output, nil
+	}
+	authorization, authErr := adapter.githubGitAuthorization(ctx)
+	if authErr != nil {
+		return nil, fmt.Errorf("git provider read from configured remote %s failed authentication", adapter.remote)
+	}
+	output, err = adapter.runGitProviderNetwork(ctx, remoteURL, authorization, arguments...)
 	if err != nil {
 		return nil, fmt.Errorf("git provider read from configured remote %s failed", adapter.remote)
 	}
 	return output, nil
 }
 
-func (adapter *githubProviderAdapter) runGitProviderWrite(ctx context.Context, arguments ...string) ([]byte, error) {
+func (adapter *githubProviderAdapter) runGitLocalWrite(ctx context.Context, arguments ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, adapter.gitExecutable, arguments...)
 	command.Dir = adapter.repositoryRoot
-	command.Env = append(os.Environ(),
-		"GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0",
-		"GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=core.hooksPath", "GIT_CONFIG_VALUE_0=/dev/null",
-		"GIT_CONFIG_KEY_1=http.extraHeader", "GIT_CONFIG_VALUE_1=",
-	)
-	output, err := command.CombinedOutput()
+	command.Env = providerLocalGitProcessEnvironment(os.Environ())
+	var stdout, stderr bytes.Buffer
+	command.Stdout, command.Stderr = &stdout, &stderr
+	err := command.Run()
 	if err != nil {
-		return nil, fmt.Errorf("git provider write to configured remote %s: %w: %s", adapter.remote, err, strings.TrimSpace(string(output)))
+		return nil, fmt.Errorf("git provider local write: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.Bytes(), nil
+}
+
+func (adapter *githubProviderAdapter) runGitProviderWrite(
+	ctx context.Context,
+	remoteURL string,
+	arguments ...string,
+) ([]byte, error) {
+	authorization, err := adapter.githubGitAuthorization(ctx)
+	if err != nil {
+		return nil, err
+	}
+	output, err := adapter.runGitProviderNetwork(ctx, remoteURL, authorization, arguments...)
+	if err != nil {
+		return nil, fmt.Errorf("git provider write to configured remote %s: %w", adapter.remote, err)
 	}
 	return output, nil
+}
+
+func (adapter *githubProviderAdapter) runGitProviderNetwork(
+	ctx context.Context,
+	remoteURL, authorization string,
+	arguments ...string,
+) ([]byte, error) {
+	if remoteURL != canonicalGitHubRemoteURL(adapter.providerRepository) {
+		return nil, fmt.Errorf("provider Git transport requires canonical GitHub HTTPS URL")
+	}
+	command := exec.CommandContext(ctx, adapter.gitExecutable, arguments...)
+	command.Dir = adapter.repositoryRoot
+	command.Env = providerGitProcessEnvironment(os.Environ(), remoteURL, authorization)
+	var stdout, stderr bytes.Buffer
+	command.Stdout, command.Stderr = &stdout, &stderr
+	err := command.Run()
+	if err != nil {
+		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(arguments, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.Bytes(), nil
+}
+
+func (adapter *githubProviderAdapter) githubGitAuthorization(ctx context.Context) (string, error) {
+	output, err := adapter.runGH(ctx, "auth", "token", "--hostname", "github.com")
+	if err != nil {
+		return "", fmt.Errorf("resolve pinned GitHub credential: %w", err)
+	}
+	token := strings.TrimSpace(string(output))
+	if token == "" || len(token) > 16*1024 || strings.ContainsAny(token, "\x00\r\n\t ") {
+		return "", fmt.Errorf("pinned GitHub credential is empty or malformed")
+	}
+	encoded := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+	return "Authorization: Basic " + encoded, nil
+}
+
+type providerGitConfigEntry struct {
+	key   string
+	value string
+}
+
+func providerLocalGitProcessEnvironment(base []string) []string {
+	return providerGitEnvironment(base, "", "")
+}
+
+func providerGitProcessEnvironment(base []string, remoteURL, authorization string) []string {
+	return providerGitEnvironment(base, remoteURL, authorization)
+}
+
+func providerGitEnvironment(base []string, remoteURL, authorization string) []string {
+	values := make(map[string]string)
+	for _, entry := range base {
+		name, value, found := strings.Cut(entry, "=")
+		if !found {
+			continue
+		}
+		switch strings.ToUpper(strings.TrimSpace(name)) {
+		case "PATH", "TMPDIR", "TMP", "TEMP", "TZ", "LANG", "LC_ALL", "LC_CTYPE",
+			"SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT":
+			values[strings.ToUpper(strings.TrimSpace(name))] = value
+		}
+	}
+	values["HOME"] = os.DevNull
+	values["XDG_CONFIG_HOME"] = os.DevNull
+	values["GIT_CONFIG_NOSYSTEM"] = "1"
+	values["GIT_CONFIG_GLOBAL"] = os.DevNull
+	values["GIT_CONFIG_SYSTEM"] = os.DevNull
+	values["GIT_TERMINAL_PROMPT"] = "0"
+	values["GCM_INTERACTIVE"] = "Never"
+	values["GIT_ASKPASS"] = os.DevNull
+	values["SSH_ASKPASS"] = os.DevNull
+	values["GIT_SSH_COMMAND"] = os.DevNull
+	values["GIT_NO_REPLACE_OBJECTS"] = "1"
+	values["GIT_GRAFT_FILE"] = os.DevNull
+	values["GIT_OPTIONAL_LOCKS"] = "0"
+	values["GIT_PROTOCOL_FROM_USER"] = "0"
+
+	config := []providerGitConfigEntry{
+		{key: "core.hooksPath", value: os.DevNull},
+		{key: "http.extraHeader", value: ""},
+		{key: "credential.helper", value: ""},
+		{key: "advice.graftFileDeprecated", value: "false"},
+	}
+	if remoteURL != "" {
+		values["GIT_ALLOW_PROTOCOL"] = "https"
+		httpScope := "http." + remoteURL + "."
+		config = append(config,
+			providerGitConfigEntry{key: "url." + remoteURL + ".insteadOf", value: remoteURL},
+			providerGitConfigEntry{key: "url." + remoteURL + ".pushInsteadOf", value: remoteURL},
+			providerGitConfigEntry{key: httpScope + "proxy", value: ""},
+			providerGitConfigEntry{key: httpScope + "sslVerify", value: "true"},
+			providerGitConfigEntry{key: httpScope + "followRedirects", value: "false"},
+			providerGitConfigEntry{key: httpScope + "cookieFile", value: ""},
+			providerGitConfigEntry{key: httpScope + "saveCookies", value: "false"},
+			providerGitConfigEntry{key: httpScope + "curloptResolve", value: ""},
+			providerGitConfigEntry{key: httpScope + "extraHeader", value: ""},
+		)
+		if authorization != "" {
+			config = append(config, providerGitConfigEntry{key: httpScope + "extraHeader", value: authorization})
+		}
+	}
+	values["GIT_CONFIG_COUNT"] = fmt.Sprintf("%d", len(config))
+	for index, entry := range config {
+		values[fmt.Sprintf("GIT_CONFIG_KEY_%d", index)] = entry.key
+		values[fmt.Sprintf("GIT_CONFIG_VALUE_%d", index)] = entry.value
+	}
+
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	result := make([]string, 0, len(names))
+	for _, name := range names {
+		result = append(result, name+"="+values[name])
+	}
+	return result
 }
 
 func (adapter *githubProviderAdapter) runGH(ctx context.Context, arguments ...string) ([]byte, error) {

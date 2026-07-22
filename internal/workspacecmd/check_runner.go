@@ -218,7 +218,11 @@ func sandboxedCheckCommand(
 		if err != nil {
 			return nil, fmt.Errorf("configured checks require sandbox-exec on darwin")
 		}
-		profile := darwinCheckSandboxProfile(scratch, moduleCache)
+		readableRoots := darwinCheckReadableRoots(scratch, moduleCache)
+		if err := validateIsolatedSourceWorktree(sourceWorktree, readableRoots); err != nil {
+			return nil, err
+		}
+		profile := darwinCheckSandboxProfile(scratch, readableRoots)
 		arguments := append([]string{"-p", profile, "--"}, argv...)
 		return exec.CommandContext(ctx, sandbox, arguments...), nil
 	case "linux":
@@ -245,10 +249,14 @@ func linuxCheckSandboxArguments(
 	if !filepath.IsAbs(scratch) || !filepath.IsAbs(repository) || !pathWithin(scratch, repository) || len(argv) == 0 {
 		return nil, fmt.Errorf("linux check sandbox requires absolute scratch, contained repository, and argv")
 	}
-	if filepath.IsAbs(sourceWorktree) && pathWithin(scratch, filepath.Clean(sourceWorktree)) {
-		return nil, fmt.Errorf("source worktree must remain outside the isolated check scratch")
-	}
 	systemRoots := existingLinuxCheckSystemRoots()
+	readableRoots := append(append([]string(nil), systemRoots...), scratch)
+	if moduleCache != "" {
+		readableRoots = append(readableRoots, moduleCache)
+	}
+	if err := validateIsolatedSourceWorktree(sourceWorktree, readableRoots); err != nil {
+		return nil, err
+	}
 	resolvedExecutable := filepath.Clean(argv[0])
 	if !filepath.IsAbs(resolvedExecutable) {
 		return nil, fmt.Errorf("linux check sandbox requires a resolved absolute executable")
@@ -325,11 +333,39 @@ func isolatedMountAncestors(path string, mountedRoots []string) ([]string, error
 	return parents, nil
 }
 
-func darwinCheckSandboxProfile(scratch, moduleCache string) string {
+func darwinCheckReadableRoots(scratch, moduleCache string) []string {
 	readRoots := []string{"/System", "/usr", "/bin", "/sbin", "/Library", "/opt", "/private/etc", scratch}
 	if moduleCache != "" {
 		readRoots = append(readRoots, moduleCache)
 	}
+	return readRoots
+}
+
+func validateIsolatedSourceWorktree(sourceWorktree string, readableRoots []string) error {
+	sourceWorktree = filepath.Clean(sourceWorktree)
+	if !filepath.IsAbs(sourceWorktree) {
+		return fmt.Errorf("configured check source worktree must be absolute")
+	}
+	canonicalSource, err := filepath.EvalSymlinks(sourceWorktree)
+	if err != nil {
+		return fmt.Errorf("resolve configured check source worktree: %w", err)
+	}
+	for _, rawRoot := range readableRoots {
+		root := filepath.Clean(rawRoot)
+		if !filepath.IsAbs(root) {
+			return fmt.Errorf("configured check readable root must be absolute")
+		}
+		if canonical, resolveErr := filepath.EvalSymlinks(root); resolveErr == nil {
+			root = canonical
+		}
+		if pathWithin(root, canonicalSource) || pathWithin(canonicalSource, root) {
+			return fmt.Errorf("configured check source worktree %s overlaps readable host root %s", canonicalSource, root)
+		}
+	}
+	return nil
+}
+
+func darwinCheckSandboxProfile(scratch string, readRoots []string) string {
 	var profile strings.Builder
 	profile.WriteString("(version 1)\n(deny default)\n(import \"system.sb\")\n(deny network*)\n(allow process*)\n(allow sysctl-read)\n")
 	profile.WriteString("(allow mach-lookup (global-name \"com.apple.system.opendirectoryd.libinfo\"))\n")

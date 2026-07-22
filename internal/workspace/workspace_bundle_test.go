@@ -87,6 +87,37 @@ func TestWorkspaceBundleRejectsHiddenDuplicateAndAmbiguousSources(t *testing.T) 
 		}
 	})
 
+	t.Run("null required authorities", func(t *testing.T) {
+		root := writeDefinitionBundle(t, fixture, map[string]any{"authorities": nil})
+		if _, err := workspace.LoadWorkspaceBundle(root); err == nil || !strings.Contains(err.Error(), "required JSON field") {
+			t.Fatalf("null authorities error = %v", err)
+		}
+	})
+
+	t.Run("omitted required authorities", func(t *testing.T) {
+		root := writeDefinitionBundle(t, fixture, nil)
+		descriptor := filepath.Join(root, workspace.WorkspaceBundleFileName)
+		content, err := os.ReadFile(descriptor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var document map[string]any
+		if err := json.Unmarshal(content, &document); err != nil {
+			t.Fatal(err)
+		}
+		delete(document, "authorities")
+		content, err = json.Marshal(document)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(descriptor, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := workspace.LoadWorkspaceBundle(root); err == nil || !strings.Contains(err.Error(), "required JSON field") {
+			t.Fatalf("omitted authorities error = %v", err)
+		}
+	})
+
 	t.Run("duplicate descriptor key", func(t *testing.T) {
 		root := writeDefinitionBundle(t, fixture, nil)
 		descriptor := filepath.Join(root, workspace.WorkspaceBundleFileName)

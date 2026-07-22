@@ -78,7 +78,7 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 		return WorkspaceBundle{}, fmt.Errorf("read %s: %w", WorkspaceBundleFileName, err)
 	}
 	var wire workspaceBundleWire
-	if err := decodeStrictJSON(descriptor, &wire); err != nil {
+	if err := decodeStrictJSONRequired(descriptor, &wire); err != nil {
 		return WorkspaceBundle{}, fmt.Errorf("decode %s: %w", WorkspaceBundleFileName, err)
 	}
 	if wire.SchemaVersion != WorkspaceBundleSchemaVersion {

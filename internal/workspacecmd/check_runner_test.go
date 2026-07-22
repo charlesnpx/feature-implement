@@ -168,7 +168,7 @@ func TestLinuxCheckSandboxHasNoHostRootRuntimeOrSourceMount(t *testing.T) {
 	if err != nil {
 		t.Skip("standard absolute executable is unavailable")
 	}
-	source := filepath.Join(filepath.Dir(scratch), "source-worktree")
+	source := canonicalWorkspaceCommandTempDir(t)
 	arguments, err := linuxCheckSandboxArguments(scratch, repository, source, "", []string{executable})
 	if err != nil {
 		t.Fatal(err)
@@ -189,6 +189,27 @@ func TestLinuxCheckSandboxHasNoHostRootRuntimeOrSourceMount(t *testing.T) {
 		if strings.Contains(joined, forbidden) {
 			t.Fatalf("linux sandbox exposes forbidden host path %q: %#v", forbidden, arguments)
 		}
+	}
+	if _, err := linuxCheckSandboxArguments(
+		scratch, repository, filepath.Dir(executable), "", []string{executable},
+	); err == nil || !strings.Contains(err.Error(), "overlaps readable host root") {
+		t.Fatalf("source beneath readable system root was accepted: %v", err)
+	}
+}
+
+func TestCheckIsolationRejectsCanonicalSourceOverlap(t *testing.T) {
+	readableRoot := canonicalWorkspaceCommandTempDir(t)
+	source := filepath.Join(readableRoot, "source")
+	if err := os.MkdirAll(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateIsolatedSourceWorktree(source, []string{readableRoot}); err == nil ||
+		!strings.Contains(err.Error(), "overlaps readable host root") {
+		t.Fatalf("readable source overlap error = %v", err)
+	}
+	isolated := canonicalWorkspaceCommandTempDir(t)
+	if err := validateIsolatedSourceWorktree(isolated, []string{readableRoot}); err != nil {
+		t.Fatalf("isolated source was rejected: %v", err)
 	}
 }
 

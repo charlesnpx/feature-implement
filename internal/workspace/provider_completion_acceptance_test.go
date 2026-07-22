@@ -175,10 +175,14 @@ func TestProviderOpenPullRequestRequiresExactTopologyBeforeSuccess(t *testing.T)
 		}},
 		{name: "already merged", mutate: func(t *testing.T, options *workspace.ProviderPullRequestStateOptions) {
 			merge := mustGitObject(t, 'd')
+			options.Lifecycle = workspace.ProviderPullRequestClosed
 			options.Merged = true
 			options.MergeStrategy = workspace.ProviderMergeCommit
 			options.MergeCommit = merge
 			options.FinalBaseHead = merge
+		}},
+		{name: "closed without merge", mutate: func(_ *testing.T, options *workspace.ProviderPullRequestStateOptions) {
+			options.Lifecycle = workspace.ProviderPullRequestClosed
 		}},
 	}
 	for _, test := range tests {
@@ -219,7 +223,7 @@ func TestProviderOpenPullRequestRequiresExactTopologyBeforeSuccess(t *testing.T)
 				Repository: harness.definition.Workspace().Repository(), PullRequest: identitySeed.PullRequest(),
 				BaseRef: harness.definition.Workspace().BaseRef(), Branch: attempt.Branch(),
 				BaseHeadBeforeMerge: base, Head: head, HeadTree: tree, RemoteBranchHead: head,
-				RequestMarker: "open-topology-postflight",
+				Lifecycle: workspace.ProviderPullRequestOpen, RequestMarker: "open-topology-postflight",
 			}
 			test.mutate(t, &options)
 			state, err := workspace.NewProviderPullRequestState(options)
@@ -511,6 +515,16 @@ func TestProviderMergePreflightRejectsWrongIdentityHeadAndTreeBeforeEffect(t *te
 					t, scenario, scenario.pull, "feature/other-base", scenario.attempt.Branch(),
 					scenario.head, scenario.tree, scenario.head, scenario.base,
 					workspace.ProviderCheckPassed, workspace.ProviderReviewApproved,
+				)
+			},
+		},
+		{
+			name: "closed without merge",
+			state: func(t *testing.T, scenario *providerOpenScenario) workspace.ProviderPullRequestState {
+				return providerUnmergedStateWithLifecycle(
+					t, scenario, scenario.pull, scenario.harness.definition.Workspace().BaseRef(),
+					scenario.attempt.Branch(), scenario.head, scenario.tree, scenario.head, scenario.base,
+					workspace.ProviderCheckPassed, workspace.ProviderReviewApproved, workspace.ProviderPullRequestClosed,
 				)
 			},
 		},
@@ -1109,7 +1123,7 @@ func TestProviderCompletionRejectsRequiredCheckAndReviewFailures(t *testing.T) {
 				BaseRef: scenario.harness.definition.Workspace().BaseRef(), Branch: scenario.attempt.Branch(),
 				Head: scenario.head, HeadTree: scenario.tree, RemoteBranchHead: scenario.head,
 				BaseHeadBeforeMerge: scenario.base, Checks: []workspace.ProviderCheckState{check},
-				Reviews: []workspace.ProviderReviewState{review}, Merged: true,
+				Reviews: []workspace.ProviderReviewState{review}, Lifecycle: workspace.ProviderPullRequestClosed, Merged: true,
 				MergeStrategy: workspace.ProviderMergeCommit, MergeCommit: scenario.mergeCommit,
 				FinalBaseHead: scenario.mergeCommit, RequestMarker: "provider-required-evidence",
 			})
@@ -1200,6 +1214,22 @@ func providerUnmergedState(
 	checkConclusion workspace.ProviderCheckConclusion,
 	reviewConclusion workspace.ProviderReviewConclusion,
 ) workspace.ProviderPullRequestState {
+	return providerUnmergedStateWithLifecycle(
+		t, scenario, pull, baseRef, branch, head, tree, remoteHead, base,
+		checkConclusion, reviewConclusion, workspace.ProviderPullRequestOpen,
+	)
+}
+
+func providerUnmergedStateWithLifecycle(
+	t *testing.T,
+	scenario *providerOpenScenario,
+	pull workspace.PullRequestIdentity,
+	baseRef, branch string,
+	head, tree, remoteHead, base workspace.GitObjectID,
+	checkConclusion workspace.ProviderCheckConclusion,
+	reviewConclusion workspace.ProviderReviewConclusion,
+	lifecycle workspace.ProviderPullRequestLifecycle,
+) workspace.ProviderPullRequestState {
 	t.Helper()
 	check, _ := workspace.NewProviderCheckState(
 		workspace.MustID("ci"), true, checkConclusion, workspace.DigestBytes([]byte("ci-evidence")),
@@ -1212,7 +1242,7 @@ func providerUnmergedState(
 		BaseRef: baseRef, Branch: branch, Head: head, HeadTree: tree,
 		RemoteBranchHead: remoteHead, BaseHeadBeforeMerge: base,
 		Checks: []workspace.ProviderCheckState{check}, Reviews: []workspace.ProviderReviewState{review},
-		RequestMarker: "provider-merge-preflight",
+		Lifecycle: lifecycle, RequestMarker: "provider-merge-preflight",
 	})
 	if err != nil {
 		t.Fatal(err)

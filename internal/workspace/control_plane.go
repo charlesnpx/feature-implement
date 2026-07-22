@@ -110,7 +110,7 @@ func newProviderPullRequestTopologyObservation(
 	if err := state.validate(); err != nil {
 		return ProviderPullRequestObservation{}, err
 	}
-	if state.merged || state.baseRef == "" || state.branch == "" || state.baseHeadBeforeMerge.IsZero() ||
+	if state.lifecycle != ProviderPullRequestOpen || state.merged || state.baseRef == "" || state.branch == "" || state.baseHeadBeforeMerge.IsZero() ||
 		state.headTree.IsZero() || state.remoteBranchHead.IsZero() || resultDigest.IsZero() {
 		return ProviderPullRequestObservation{}, fmt.Errorf("provider pull request authorization requires exact unmerged topology")
 	}

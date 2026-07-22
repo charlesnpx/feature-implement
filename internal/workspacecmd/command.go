@@ -12,6 +12,10 @@ import (
 
 const requestSchemaVersion = 2
 
+// MaxCommandInputBytes is the allocation boundary enforced by the CLI before
+// a workspace request reaches strict decoding.
+const MaxCommandInputBytes = workspace.MaxArtifactBytes
+
 type Options struct {
 	Action             string
 	Subaction          string

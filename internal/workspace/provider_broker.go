@@ -678,7 +678,7 @@ func (broker *ProviderBroker) dispatchClaimed(
 		if observeErr != nil {
 			return broker.failureResult(intent, ProviderAdapterFailedBeforeEffect, "merge-preflight-query-failed", observeErr)
 		}
-		if observed.merged || !providerRequiredEvidenceReady(observed) ||
+		if observed.lifecycle != ProviderPullRequestOpen || observed.merged || !providerRequiredEvidenceReady(observed) ||
 			validateProviderStateAgainstMergePreflight(preflight, observed) != nil {
 			return broker.failureResult(intent, ProviderAdapterFailedBeforeEffect, "merge-preflight-drift", fmt.Errorf("pull request head, tree, identity, or merge state drifted"))
 		}
@@ -714,7 +714,8 @@ func validateProviderOpenPullRequestTopology(
 	if state.repository != intent.scope.repository || state.pullRequest != identity ||
 		state.baseRef != intent.baseRef || state.branch != intent.branch ||
 		state.baseHeadBeforeMerge != intent.scope.frontier.base || state.head != intent.head ||
-		state.headTree != intent.tree || state.remoteBranchHead != intent.head || state.merged {
+		state.headTree != intent.tree || state.remoteBranchHead != intent.head ||
+		state.lifecycle != ProviderPullRequestOpen || state.merged {
 		return fmt.Errorf("provider pull request does not match repository, base, branch, head/tree, remote head, and unmerged state")
 	}
 	return nil
@@ -881,7 +882,7 @@ func (broker *ProviderBroker) VerifyProviderPullRequest(
 	if state.baseRef != observation.baseRef || state.branch != observation.branch ||
 		state.baseHeadBeforeMerge != observation.baseHead || state.head != observation.head ||
 		state.headTree != observation.headTree || state.remoteBranchHead != observation.remoteHead ||
-		state.merged != observation.merged {
+		state.lifecycle != ProviderPullRequestOpen || state.merged != observation.merged {
 		return fmt.Errorf("provider pull request topology drifted from the recorded observation")
 	}
 	return nil

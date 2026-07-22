@@ -8,6 +8,32 @@ import (
 	"github.com/charlesnpx/feature-implement/internal/workspace"
 )
 
+func TestStrictJSONRequiresPresentNonNullFields(t *testing.T) {
+	type item struct {
+		Enabled bool `json:"enabled"`
+	}
+	type document struct {
+		SchemaVersion int    `json:"schema_version"`
+		Items         []item `json:"items"`
+		Note          string `json:"note,omitempty"`
+	}
+	var decoded document
+	if err := workspace.DecodeStrictJSON([]byte(`{"schema_version":2,"items":[{"enabled":false}]}`), &decoded); err != nil {
+		t.Fatalf("present false boolean was rejected: %v", err)
+	}
+	for _, source := range []string{
+		`{"items":[]}`,
+		`{"schema_version":2}`,
+		`{"schema_version":2,"items":null}`,
+		`{"schema_version":2,"items":[{}]}`,
+	} {
+		if err := workspace.DecodeStrictJSON([]byte(source), &decoded); err == nil ||
+			!strings.Contains(err.Error(), "required JSON field") {
+			t.Fatalf("missing or null required field %s error = %v", source, err)
+		}
+	}
+}
+
 func TestStrictWorkspaceDecoderRejectsNonV2AndAmbiguousYAML(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	valid := string(fixture.sources.Workspace.Bytes)

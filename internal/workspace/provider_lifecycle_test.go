@@ -265,7 +265,8 @@ func TestProviderLifecycleDispatchesThroughSingleUseBrokerAndRecordsCanonicalCom
 	wrongTopology, err := workspace.NewProviderPullRequestState(workspace.ProviderPullRequestStateOptions{
 		Repository: harness.definition.Workspace().Repository(), PullRequest: pullRequest,
 		BaseRef: "feature/wrong-base", Branch: attempt.Branch(), BaseHeadBeforeMerge: base,
-		Head: head, HeadTree: tree, RemoteBranchHead: head, RequestMarker: "wrong-open-authorization-topology",
+		Head: head, HeadTree: tree, RemoteBranchHead: head, Lifecycle: workspace.ProviderPullRequestOpen,
+		RequestMarker: "wrong-open-authorization-topology",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -587,9 +588,10 @@ func providerPRState(
 		BaseRef: harness.definition.Workspace().BaseRef(), Branch: attempt.Branch(),
 		Head: head, HeadTree: tree, RemoteBranchHead: head, BaseHeadBeforeMerge: base,
 		Checks: []workspace.ProviderCheckState{check}, Reviews: []workspace.ProviderReviewState{review},
-		Merged: merged, RequestMarker: "query-pr-state",
+		Lifecycle: workspace.ProviderPullRequestOpen, Merged: merged, RequestMarker: "query-pr-state",
 	}
 	if merged {
+		options.Lifecycle = workspace.ProviderPullRequestClosed
 		options.MergeStrategy = workspace.ProviderMergeCommit
 		options.MergeCommit = mergeCommit
 		options.FinalBaseHead = mergeCommit

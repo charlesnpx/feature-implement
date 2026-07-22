@@ -22,7 +22,7 @@ func TestGitHubAdapterReconcilesPushFromExactImmutableIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("FAKE_GIT_LS_REMOTE", gitObjectHex(head)+"\trefs/heads/mu-test\n")
+	setFakeGitState(t, adapter, "ls-remote", gitObjectHex(head)+"\trefs/heads/mu-test\n")
 	observation, err := adapter.QueryIntent(context.Background(), query)
 	if err != nil {
 		t.Fatalf("QueryIntent applied push: %v", err)
@@ -31,7 +31,7 @@ func TestGitHubAdapterReconcilesPushFromExactImmutableIntent(t *testing.T) {
 		t.Fatalf("applied push observation = %#v", observation)
 	}
 
-	t.Setenv("FAKE_GIT_LS_REMOTE", "")
+	setFakeGitState(t, adapter, "ls-remote", "")
 	observation, err = adapter.QueryIntent(context.Background(), query)
 	if err != nil {
 		t.Fatalf("QueryIntent absent push: %v", err)
@@ -41,7 +41,7 @@ func TestGitHubAdapterReconcilesPushFromExactImmutableIntent(t *testing.T) {
 	}
 
 	drift := testGitObject(t, "3")
-	t.Setenv("FAKE_GIT_LS_REMOTE", gitObjectHex(drift)+"\trefs/heads/mu-test\n")
+	setFakeGitState(t, adapter, "ls-remote", gitObjectHex(drift)+"\trefs/heads/mu-test\n")
 	observation, err = adapter.QueryIntent(context.Background(), query)
 	if err != nil {
 		t.Fatalf("QueryIntent drifted push: %v", err)
@@ -50,7 +50,7 @@ func TestGitHubAdapterReconcilesPushFromExactImmutableIntent(t *testing.T) {
 		t.Fatalf("drifted push disposition = %s", observation.Disposition())
 	}
 
-	t.Setenv("FAKE_GIT_REMOTE_URL", "https://github.com/example/other.git")
+	setFakeGitState(t, adapter, "remote-url", "https://github.com/example/other.git\n")
 	if _, err := adapter.QueryIntent(context.Background(), query); err == nil || !strings.Contains(err.Error(), "not github provider repository") {
 		t.Fatalf("mismatched configured remote error = %v", err)
 	}
@@ -108,7 +108,77 @@ printf '%s\n%s\n' "$GH_HOST" "$GH_REPO"
 	}
 }
 
-func TestProviderMergeCommitUsesExactTopologyAndBaseLease(t *testing.T) {
+func TestProviderGitEnvironmentPinsTransportAndCredentialBoundary(t *testing.T) {
+	remote := canonicalGitHubRemoteURL("example/project")
+	environment := providerGitProcessEnvironment([]string{
+		"PATH=/usr/bin", "HOME=/ambient/home", "GH_TOKEN=ambient-token",
+		"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=url.https://example.invalid/.insteadOf",
+		"GIT_CONFIG_VALUE_0=https://github.com/example/project.git",
+		"GIT_SSH_COMMAND=redirect-ssh", "HTTPS_PROXY=https://proxy.invalid",
+		"GIT_SSL_NO_VERIFY=1", "CURL_CA_BUNDLE=/tmp/attacker.pem",
+	}, remote, "Authorization: Basic test-credential")
+	joined := "\x00" + strings.Join(environment, "\x00") + "\x00"
+	for _, forbidden := range []string{
+		"ambient-token", "example.invalid", "redirect-ssh", "proxy.invalid", "attacker.pem",
+		"GIT_SSL_NO_VERIFY=", "HTTPS_PROXY=", "GH_TOKEN=",
+	} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("provider Git environment retained %q: %#v", forbidden, environment)
+		}
+	}
+	for _, required := range []string{
+		"\x00HOME=" + os.DevNull + "\x00",
+		"\x00GIT_CONFIG_GLOBAL=" + os.DevNull + "\x00",
+		"\x00GIT_CONFIG_SYSTEM=" + os.DevNull + "\x00",
+		"\x00GIT_ALLOW_PROTOCOL=https\x00",
+		"\x00GIT_SSH_COMMAND=" + os.DevNull + "\x00",
+		"url." + remote + ".insteadOf",
+		"http." + remote + ".sslVerify",
+		"Authorization: Basic test-credential",
+	} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("provider Git environment omitted %q: %#v", required, environment)
+		}
+	}
+}
+
+func TestProviderGitAuthorizationUsesPinnedGitHubCredential(t *testing.T) {
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "fake-gh")
+	script := `#!/bin/sh
+if [ "$*" != "auth token --hostname github.com" ]; then exit 97; fi
+printf '%s\n' 'test-token'
+`
+	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &githubProviderAdapter{
+		repositoryRoot: directory, providerRepository: "example/project", ghExecutable: executable,
+	}
+	authorization, err := adapter.githubGitAuthorization(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(authorization, "Authorization: Basic ") || strings.Contains(authorization, "test-token") {
+		t.Fatalf("GitHub authorization was not encoded: %q", authorization)
+	}
+}
+
+func TestGitHubPullRequestLifecycleIsExplicit(t *testing.T) {
+	for input, expected := range map[string]workspace.ProviderPullRequestLifecycle{
+		"open": workspace.ProviderPullRequestOpen, "CLOSED": workspace.ProviderPullRequestClosed,
+	} {
+		actual, err := parseGitHubPullRequestLifecycle(input)
+		if err != nil || actual != expected {
+			t.Fatalf("lifecycle %q = %q, %v", input, actual, err)
+		}
+	}
+	if _, err := parseGitHubPullRequestLifecycle(""); err == nil {
+		t.Fatal("missing GitHub pull request lifecycle was accepted")
+	}
+}
+
+func TestProviderMergeCommitUsesExactTopologyAndAtomicRefLeases(t *testing.T) {
 	repository := canonicalWorkspaceCommandTempDir(t)
 	runGitTest(t, repository, "init", "-b", "main")
 	runGitTest(t, repository, "config", "user.name", "Feature Test")
@@ -141,9 +211,6 @@ func TestProviderMergeCommitUsesExactTopologyAndBaseLease(t *testing.T) {
 		t.Fatalf("provider merge topology = tree:%s parents:%v", inspection.Tree(), parents)
 	}
 
-	remote := filepath.Join(t.TempDir(), "remote.git")
-	runGitTest(t, repository, "init", "--bare", remote)
-	runGitTest(t, repository, "push", remote, gitObjectHex(base)+":refs/heads/main")
 	runGitTest(t, repository, "checkout", "-b", "drift", gitObjectHex(base))
 	if err := os.WriteFile(tracked, []byte("drift\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -151,18 +218,63 @@ func TestProviderMergeCommitUsesExactTopologyAndBaseLease(t *testing.T) {
 	runGitTest(t, repository, "add", "tracked.txt")
 	runGitTest(t, repository, "commit", "-m", "Competing base update")
 	drift := parseWorkspaceCommandGitObject(t, strings.TrimSpace(runGitTest(t, repository, "rev-parse", "HEAD")))
-	runGitTest(t, repository, "push", remote, gitObjectHex(drift)+":refs/heads/main")
 
-	arguments := providerMergePushArguments("refs/heads/main", base, mergeCommit, remote)
-	command := exec.Command("git", arguments...)
-	command.Dir = repository
-	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0")
-	if output, err := command.CombinedOutput(); err == nil {
-		t.Fatalf("drifted base lease unexpectedly updated remote: %s", output)
+	newRemote := func(t *testing.T) string {
+		t.Helper()
+		remote := filepath.Join(t.TempDir(), "remote.git")
+		runGitTest(t, repository, "init", "--bare", remote)
+		runGitTest(t, repository, "push", remote,
+			gitObjectHex(base)+":refs/heads/main", gitObjectHex(head)+":refs/heads/feature")
+		return remote
 	}
-	remoteLine := strings.TrimSpace(runGitTest(t, repository, "ls-remote", remote, "refs/heads/main"))
-	if !strings.HasPrefix(remoteLine, gitObjectHex(drift)+"\t") {
-		t.Fatalf("drifted base changed despite rejected lease: %q", remoteLine)
+	push := func(remote string) ([]byte, error) {
+		arguments := providerMergePushArguments(
+			"refs/heads/main", base, mergeCommit,
+			"refs/heads/feature", head, remote,
+		)
+		command := exec.Command("git", arguments...)
+		command.Dir = repository
+		command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0")
+		return command.CombinedOutput()
+	}
+
+	t.Run("success", func(t *testing.T) {
+		remote := newRemote(t)
+		if output, err := push(remote); err != nil {
+			t.Fatalf("atomic merge push: %v: %s", err, output)
+		}
+		assertRemoteRef(t, repository, remote, "refs/heads/main", mergeCommit)
+		assertRemoteRef(t, repository, remote, "refs/heads/feature", head)
+	})
+	t.Run("base drift", func(t *testing.T) {
+		remote := newRemote(t)
+		runGitTest(t, repository, "push", remote, gitObjectHex(drift)+":refs/heads/main")
+		if output, err := push(remote); err == nil {
+			t.Fatalf("drifted base lease unexpectedly updated remote: %s", output)
+		}
+		assertRemoteRef(t, repository, remote, "refs/heads/main", drift)
+		assertRemoteRef(t, repository, remote, "refs/heads/feature", head)
+	})
+	t.Run("head drift", func(t *testing.T) {
+		remote := newRemote(t)
+		runGitTest(t, repository, "--git-dir", remote, "update-ref", "refs/heads/feature", gitObjectHex(base), gitObjectHex(head))
+		if output, err := push(remote); err == nil {
+			t.Fatalf("drifted head lease unexpectedly updated remote: %s", output)
+		}
+		assertRemoteRef(t, repository, remote, "refs/heads/main", base)
+		assertRemoteRef(t, repository, remote, "refs/heads/feature", base)
+	})
+}
+
+func assertRemoteRef(
+	t *testing.T,
+	repository, remote, ref string,
+	expected workspace.GitObjectID,
+) {
+	t.Helper()
+	line := strings.TrimSpace(runGitTest(t, repository, "ls-remote", remote, ref))
+	if !strings.HasPrefix(line, gitObjectHex(expected)+"\t") {
+		t.Fatalf("remote %s = %q, want %s", ref, line, expected)
 	}
 }
 
@@ -312,10 +424,12 @@ func newFakeGitHubAdapter(t *testing.T) *githubProviderAdapter {
 	ghExecutable := filepath.Join(directory, "fake-gh")
 	gitScript := `#!/bin/sh
 case "$1" in
-  remote) printf '%s\n' "${FAKE_GIT_REMOTE_URL:-https://github.com/example/project.git}" ;;
-  ls-remote) printf '%s' "$FAKE_GIT_LS_REMOTE" ;;
+  remote)
+    if [ -f fake-git-remote-url ]; then cat fake-git-remote-url; else printf '%s\n' 'https://github.com/example/project.git'; fi ;;
+  ls-remote)
+    if [ -f fake-git-ls-remote ]; then cat fake-git-ls-remote; fi ;;
   rev-parse)
-    if [ "$2" = "--show-object-format" ]; then printf 'sha1\n'; else printf '%s\n' "$FAKE_GIT_TREE"; fi ;;
+    if [ "$2" = "--show-object-format" ]; then printf 'sha1\n'; elif [ -f fake-git-tree ]; then cat fake-git-tree; fi ;;
   *) printf 'unsupported fake git invocation: %s\n' "$*" >&2; exit 97 ;;
 esac
 `
@@ -337,6 +451,13 @@ esac
 	return &githubProviderAdapter{
 		repositoryRoot: directory, repositoryIdentity: repository, providerRepository: "example/project", remote: "origin",
 		gitExecutable: gitExecutable, ghExecutable: ghExecutable,
+	}
+}
+
+func setFakeGitState(t *testing.T, adapter *githubProviderAdapter, name, value string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(adapter.repositoryRoot, "fake-git-"+name), []byte(value), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

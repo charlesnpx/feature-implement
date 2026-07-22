@@ -11,7 +11,7 @@ type commitNextInput struct {
 	SchemaVersion int    `json:"schema_version"`
 	OccurredAt    string `json:"occurred_at"`
 	AttemptID     string `json:"attempt_id"`
-	Body          string `json:"body"`
+	Body          string `json:"body,omitempty"`
 }
 
 type commitRebaseInput struct {

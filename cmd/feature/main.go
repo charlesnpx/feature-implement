@@ -277,14 +277,31 @@ func readWorkspaceInput(path string) ([]byte, error) {
 	case "":
 		return nil, nil
 	case "-":
-		return io.ReadAll(os.Stdin)
+		return readBoundedWorkspaceInput(os.Stdin)
 	default:
-		content, err := os.ReadFile(path)
+		file, err := os.Open(path)
 		if err != nil {
 			return nil, fmt.Errorf("read workspace input: %w", err)
 		}
-		return content, nil
+		defer file.Close()
+		if info, statErr := file.Stat(); statErr != nil {
+			return nil, fmt.Errorf("read workspace input: %w", statErr)
+		} else if info.Size() > workspacecmd.MaxCommandInputBytes {
+			return nil, fmt.Errorf("workspace command input exceeds %d bytes", workspacecmd.MaxCommandInputBytes)
+		}
+		return readBoundedWorkspaceInput(file)
 	}
+}
+
+func readBoundedWorkspaceInput(reader io.Reader) ([]byte, error) {
+	content, err := io.ReadAll(io.LimitReader(reader, int64(workspacecmd.MaxCommandInputBytes)+1))
+	if err != nil {
+		return nil, fmt.Errorf("read workspace input: %w", err)
+	}
+	if len(content) > workspacecmd.MaxCommandInputBytes {
+		return nil, fmt.Errorf("workspace command input exceeds %d bytes", workspacecmd.MaxCommandInputBytes)
+	}
+	return content, nil
 }
 
 func writeJSON(value any) error {
