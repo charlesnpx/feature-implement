@@ -60,7 +60,7 @@ func (request ProviderMergeRequest) PullRequest() PullRequestIdentity {
 	return request.intent.pullRequest
 }
 func (request ProviderMergeRequest) ExpectedBaseHead() GitObjectID {
-	return request.intent.scope.frontier.base
+	return request.intent.integrationBase
 }
 func (request ProviderMergeRequest) Head() GitObjectID { return request.intent.head }
 func (request ProviderMergeRequest) Tree() GitObjectID { return request.intent.tree }
@@ -632,6 +632,15 @@ func (broker *ProviderBroker) dispatchClaimed(
 		if identityErr != nil {
 			return ProviderResult{}, identityErr
 		}
+		observed, observeErr := broker.adapter.QueryPullRequest(ctx, ProviderPullRequestQuery{
+			repository: intent.scope.repository, pullRequest: identity,
+		})
+		if observeErr != nil || validateProviderOpenPullRequestTopology(intent, identity, observed) != nil {
+			if observeErr == nil {
+				observeErr = fmt.Errorf("provider pull request did not match the exact opened topology")
+			}
+			return broker.failureResult(intent, ProviderAdapterAmbiguous, "open-pr-postflight-topology", observeErr)
+		}
 		return newProviderResult(ProviderResult{
 			intentID: intent.intentID, intentDigest: intent.digest, kind: intent.kind,
 			status: ProviderIntentSucceeded, idempotencyKey: intent.idempotencyKey,
@@ -665,6 +674,26 @@ func (broker *ProviderBroker) dispatchClaimed(
 	default:
 		return ProviderResult{}, fmt.Errorf("unsupported provider intent kind %q", intent.kind)
 	}
+}
+
+func validateProviderOpenPullRequestTopology(
+	intent ProviderIntent,
+	identity PullRequestIdentity,
+	state ProviderPullRequestState,
+) error {
+	if intent.kind != ProviderIntentOpenPullRequest || identity.IsZero() {
+		return fmt.Errorf("open-pull-request topology requires exact intent and provider identity")
+	}
+	if err := state.validate(); err != nil {
+		return err
+	}
+	if state.repository != intent.scope.repository || state.pullRequest != identity ||
+		state.baseRef != intent.baseRef || state.branch != intent.branch ||
+		state.baseHeadBeforeMerge != intent.scope.frontier.base || state.head != intent.head ||
+		state.headTree != intent.tree || state.remoteBranchHead != intent.head || state.merged {
+		return fmt.Errorf("provider pull request does not match repository, base, branch, head/tree, remote head, and unmerged state")
+	}
+	return nil
 }
 
 func providerRequiredEvidenceReady(state ProviderPullRequestState) bool {
@@ -786,13 +815,36 @@ func (broker *ProviderBroker) observePullRequest(
 	return state, nil
 }
 
+// ObservePullRequestForAuthorization captures a complete, credential-bearing
+// provider observation for the protected PR-grant derivation workflow. The
+// returned value is opaque to callers and is re-queried by the broker before
+// it can authorize a grant.
+func (broker *ProviderBroker) ObservePullRequestForAuthorization(
+	ctx context.Context,
+	query ProviderPullRequestQuery,
+	evidence Digest,
+) (ProviderPullRequestObservation, error) {
+	if evidence.IsZero() {
+		return ProviderPullRequestObservation{}, fmt.Errorf("provider pull request authorization observation requires durable evidence")
+	}
+	state, err := broker.observePullRequest(ctx, query)
+	if err != nil {
+		return ProviderPullRequestObservation{}, err
+	}
+	return newProviderPullRequestTopologyObservation(state, evidence)
+}
+
 func (broker *ProviderBroker) VerifyProviderPullRequest(
 	ctx context.Context,
 	verification ProviderPullRequestVerification,
 	observation ProviderPullRequestObservation,
 ) error {
-	if !broker.available() || observation.digest.IsZero() || observation.identity.provider != broker.provider.kind ||
+	if !broker.available() || observation.digest.IsZero() || !observation.hasExactUnmergedTopology() ||
+		observation.identity.provider != broker.provider.kind ||
 		verification.repository != observation.identity.repository || verification.observedHead != observation.head ||
+		verification.baseRef != observation.baseRef || verification.branch != observation.branch ||
+		verification.baseHead != observation.baseHead || verification.headTree != observation.headTree ||
+		verification.remoteHead != observation.remoteHead || verification.merged != observation.merged ||
 		verification.observation != observation.digest {
 		return fmt.Errorf("provider pull request verification does not match broker and observation bindings")
 	}
@@ -802,8 +854,11 @@ func (broker *ProviderBroker) VerifyProviderPullRequest(
 	if err != nil {
 		return err
 	}
-	if state.head != observation.head {
-		return fmt.Errorf("provider pull request head drifted from the recorded observation")
+	if state.baseRef != observation.baseRef || state.branch != observation.branch ||
+		state.baseHeadBeforeMerge != observation.baseHead || state.head != observation.head ||
+		state.headTree != observation.headTree || state.remoteBranchHead != observation.remoteHead ||
+		state.merged != observation.merged {
+		return fmt.Errorf("provider pull request topology drifted from the recorded observation")
 	}
 	return nil
 }

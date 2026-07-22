@@ -167,6 +167,9 @@ func validateProviderIntentAgainstRuntime(
 		if !hasPullRequest || intent.pullRequest != durablePullRequest {
 			return fmt.Errorf("provider merge must bind the attempt's sole provider-derived pull request identity")
 		}
+		if intent.integrationBase != attempt.base {
+			return fmt.Errorf("provider merge integration base does not match the durable attempt base")
+		}
 		open, found, openErr := providerAppliedOpenIntentForAttempt(providerProjection, intent.scope.attemptID)
 		if openErr != nil {
 			return openErr
@@ -655,16 +658,26 @@ func RecordProviderPullRequestAuthorization(
 	if !exists || projected.intent.kind != ProviderIntentOpenPullRequest || !providerProjectionEffectApplied(projected) {
 		return StandingGrant{}, JournalRecord{}, fmt.Errorf("provider intent %s has no applied pull request result", intentID)
 	}
-	var observation ProviderPullRequestObservation
+	var pullRequest PullRequestIdentity
+	var evidence Digest
 	if projected.status == ProviderIntentSucceeded {
-		observation, err = projected.result.pullRequestObservation()
+		pullRequest = projected.result.pullRequest
+		evidence = projected.result.digest
 	} else {
 		reconciliation := projected.reconciliation
-		observation, err = NewProviderPullRequestObservation(
-			reconciliation.pullRequest.provider, reconciliation.pullRequest.repository,
-			reconciliation.pullRequest.number, reconciliation.pullRequestHead, reconciliation.digest,
-		)
+		pullRequest = reconciliation.pullRequest
+		evidence = reconciliation.digest
 	}
+	state, err := broker.observePullRequest(ctx, ProviderPullRequestQuery{
+		repository: projected.intent.scope.repository, pullRequest: pullRequest,
+	})
+	if err != nil {
+		return StandingGrant{}, JournalRecord{}, fmt.Errorf("observe provider pull request authorization: %w", err)
+	}
+	if err := validateProviderOpenPullRequestTopology(projected.intent, pullRequest, state); err != nil {
+		return StandingGrant{}, JournalRecord{}, fmt.Errorf("verify provider pull request authorization topology: %w", err)
+	}
+	observation, err := newProviderPullRequestTopologyObservation(state, evidence)
 	if err != nil {
 		return StandingGrant{}, JournalRecord{}, err
 	}

@@ -100,7 +100,7 @@ func TestProviderPreflightAndAbandonmentCodecsRoundTripCanonicalEvidence(t *test
 			SerialSegment: MustID("codec-segment"), Frontier: frontier, PullRequest: pullRequest, Epoch: 1,
 		},
 		Branch: "mu/provider-codec-a1-0123456789ab", BaseRef: "feature/provider-codec",
-		Head: head, Tree: tree, Strategy: ProviderMergeCommit,
+		IntegrationBaseHead: base, Head: head, Tree: tree, Strategy: ProviderMergeCommit,
 	})
 	if err != nil {
 		t.Fatal(err)

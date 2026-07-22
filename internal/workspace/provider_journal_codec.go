@@ -368,8 +368,8 @@ func providerIntentToWire(intent ProviderIntent) providerIntentWire {
 		Base: intent.scope.frontier.base.String(), AuthorizedHead: intent.scope.frontier.head.String(),
 		AuthorizationEpoch: intent.scope.epoch, Authorization: intent.authorization.digest.String(),
 		Branch: intent.branch, ExpectedRemoteHead: intent.expectedRemote.String(), ExpectRemoteAbsent: intent.expectAbsent,
-		BaseRef: intent.baseRef,
-		Head:    intent.head.String(), Tree: intent.tree.String(), Title: intent.title, Body: intent.body,
+		BaseRef: intent.baseRef, IntegrationBaseHead: intent.integrationBase.String(),
+		Head: intent.head.String(), Tree: intent.tree.String(), Title: intent.title, Body: intent.body,
 		MergeStrategy: intent.mergeStrategy,
 	}
 	if !intent.pullRequest.IsZero() {
@@ -466,6 +466,10 @@ func providerIntentFromWire(wire providerIntentWire) (ProviderIntent, error) {
 	if err != nil {
 		return ProviderIntent{}, err
 	}
+	integrationBase, err := parseOptionalObject(wire.IntegrationBaseHead)
+	if err != nil {
+		return ProviderIntent{}, err
+	}
 	var intent ProviderIntent
 	switch wire.Kind {
 	case ProviderIntentPush:
@@ -481,7 +485,7 @@ func providerIntentFromWire(wire providerIntentWire) (ProviderIntent, error) {
 	case ProviderIntentMerge:
 		intent, err = NewProviderMergeIntent(ProviderMergeIntentOptions{
 			Scope: scope, Branch: wire.Branch, BaseRef: wire.BaseRef,
-			Head: head, Tree: tree, Strategy: wire.MergeStrategy,
+			IntegrationBaseHead: integrationBase, Head: head, Tree: tree, Strategy: wire.MergeStrategy,
 		})
 	default:
 		return ProviderIntent{}, fmt.Errorf("unsupported provider intent kind %q", wire.Kind)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -75,7 +76,7 @@ func (adapter LocalProviderCompletionGitAdapter) InspectRemoteTopology(
 	if err != nil || exitCode != 0 {
 		return ProviderCompletionGitInspection{}, gitExitError("initialize isolated provider object store", exitCode, err)
 	}
-	_, exitCode, err = adapter.git.run(
+	_, exitCode, err = adapter.runCredentialFreeRemoteGit(
 		ctx, objectStore, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--force", "--",
 		remoteURL, "refs/heads/"+branch, "refs/heads/"+baseRef,
 	)
@@ -161,12 +162,22 @@ func (adapter LocalProviderCompletionGitAdapter) inspectRemoteRef(
 	if err != nil {
 		return GitObjectID{}, err
 	}
-	if err := adapter.validateCredentialFreeRemote(ctx, repositoryRoot, remote); err != nil {
+	remoteURL, err := adapter.credentialFreeRemoteURL(ctx, repositoryRoot, remote)
+	if err != nil {
 		return GitObjectID{}, err
 	}
 	expectedRef := "refs/heads/" + ref
-	output, exitCode, err := adapter.git.run(
-		ctx, repositoryRoot, "ls-remote", "--exit-code", "--heads", "--refs", "--", remote, expectedRef,
+	isolatedRepository, err := os.MkdirTemp("", "feature-provider-remote-")
+	if err != nil {
+		return GitObjectID{}, fmt.Errorf("create isolated provider remote inspection: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(isolatedRepository) }()
+	_, exitCode, err := adapter.git.run(ctx, isolatedRepository, "init", "--bare", "--object-format="+string(algorithm))
+	if err != nil || exitCode != 0 {
+		return GitObjectID{}, gitExitError("initialize isolated provider remote inspection", exitCode, err)
+	}
+	output, exitCode, err := adapter.runCredentialFreeRemoteGit(
+		ctx, isolatedRepository, "ls-remote", "--exit-code", "--heads", "--refs", "--", remoteURL, expectedRef,
 	)
 	if err != nil || exitCode != 0 {
 		return GitObjectID{}, gitExitError("inspect provider remote ref", exitCode, err)
@@ -182,49 +193,69 @@ func (adapter LocalProviderCompletionGitAdapter) inspectRemoteRef(
 	return qualifyGitObjectID(algorithm, objectText)
 }
 
-func (adapter LocalProviderCompletionGitAdapter) validateCredentialFreeRemote(
-	ctx context.Context,
-	repositoryRoot, remote string,
-) error {
-	output, exitCode, err := adapter.git.run(ctx, repositoryRoot, "remote", "get-url", "--all", remote)
-	if err != nil || exitCode != 0 {
-		return gitExitError("inspect provider remote URL", exitCode, err)
-	}
-	urls := strings.Split(strings.TrimSpace(string(output)), "\n")
-	if len(urls) == 0 || urls[0] == "" {
-		return fmt.Errorf("provider completion remote has no URL")
-	}
-	for _, remoteURL := range urls {
-		if !strings.Contains(remoteURL, "://") {
-			continue
-		}
-		parsed, parseErr := url.Parse(remoteURL)
-		if parseErr != nil {
-			return fmt.Errorf("parse provider remote URL: %w", parseErr)
-		}
-		if parsed.User != nil {
-			return fmt.Errorf("provider completion remote URL cannot contain embedded credentials")
-		}
-	}
-	return nil
-}
-
 func (adapter LocalProviderCompletionGitAdapter) credentialFreeRemoteURL(
 	ctx context.Context,
 	repositoryRoot, remote string,
 ) (string, error) {
-	if err := adapter.validateCredentialFreeRemote(ctx, repositoryRoot, remote); err != nil {
-		return "", err
-	}
-	output, exitCode, err := adapter.git.run(ctx, repositoryRoot, "remote", "get-url", remote)
+	output, exitCode, err := adapter.git.run(ctx, repositoryRoot, "remote", "get-url", "--all", remote)
 	if err != nil || exitCode != 0 {
 		return "", gitExitError("inspect provider fetch URL", exitCode, err)
 	}
-	remoteURL := strings.TrimSpace(string(output))
-	if remoteURL == "" || strings.ContainsAny(remoteURL, "\r\n") {
-		return "", fmt.Errorf("provider completion remote has no single fetch URL")
+	urls := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(urls) != 1 || strings.TrimSpace(urls[0]) == "" {
+		return "", fmt.Errorf("provider completion remote must resolve to exactly one fetch URL")
 	}
-	return remoteURL, nil
+	return sanitizeProviderCompletionRemoteURL(strings.TrimSpace(urls[0]))
+}
+
+func sanitizeProviderCompletionRemoteURL(remoteURL string) (string, error) {
+	if remoteURL == "" || strings.ContainsAny(remoteURL, "\r\n\x00") {
+		return "", fmt.Errorf("provider completion remote URL is empty or malformed")
+	}
+	if !strings.Contains(remoteURL, "://") {
+		if !filepath.IsAbs(remoteURL) {
+			return "", fmt.Errorf("provider completion remote URL must use an explicit allowed protocol or absolute local path")
+		}
+		clean := filepath.Clean(remoteURL)
+		return (&url.URL{Scheme: "file", Path: filepath.ToSlash(clean)}).String(), nil
+	}
+	parsed, err := url.Parse(remoteURL)
+	if err != nil {
+		return "", fmt.Errorf("parse provider remote URL: %w", err)
+	}
+	if parsed.Opaque != "" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return "", fmt.Errorf("provider completion remote URL cannot be opaque or contain embedded credentials, query, or fragment data")
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "https":
+		if parsed.Hostname() == "" {
+			return "", fmt.Errorf("provider completion HTTPS remote requires a host")
+		}
+	case "file":
+		if (parsed.Host != "" && !strings.EqualFold(parsed.Host, "localhost")) || !filepath.IsAbs(filepath.FromSlash(parsed.Path)) {
+			return "", fmt.Errorf("provider completion file remote must be an absolute local path")
+		}
+	default:
+		return "", fmt.Errorf("provider completion remote protocol %q is not allowed", parsed.Scheme)
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	return parsed.String(), nil
+}
+
+func (adapter LocalProviderCompletionGitAdapter) runCredentialFreeRemoteGit(
+	ctx context.Context,
+	repositoryRoot string,
+	arguments ...string,
+) ([]byte, int, error) {
+	protocols := []string{
+		"-c", "protocol.ext.allow=never",
+		"-c", "protocol.file.allow=always",
+		"-c", "protocol.https.allow=always",
+		"-c", "protocol.http.allow=never",
+		"-c", "protocol.ssh.allow=never",
+		"-c", "protocol.git.allow=never",
+	}
+	return adapter.git.run(ctx, repositoryRoot, append(protocols, arguments...)...)
 }
 
 func (adapter LocalProviderCompletionGitAdapter) InspectCommit(

@@ -26,6 +26,8 @@ type providerLifecycleAdapter struct {
 	mergeCalls        int
 	queryIntentCalls  int
 	queryPRCalls      int
+	lastPush          workspace.ProviderPushRequest
+	lastMerge         workspace.ProviderMergeRequest
 	pushStarted       chan struct{}
 	pushRelease       <-chan struct{}
 }
@@ -61,9 +63,10 @@ func (adapter *leaseEnforcingProviderAdapter) Push(
 
 func (adapter *providerLifecycleAdapter) Push(
 	_ context.Context,
-	_ workspace.ProviderPushRequest,
+	request workspace.ProviderPushRequest,
 ) (workspace.ProviderPushAdapterResult, error) {
 	adapter.pushCalls++
+	adapter.lastPush = request
 	if adapter.pushStarted != nil {
 		close(adapter.pushStarted)
 	}
@@ -83,9 +86,10 @@ func (adapter *providerLifecycleAdapter) OpenPullRequest(
 
 func (adapter *providerLifecycleAdapter) Merge(
 	_ context.Context,
-	_ workspace.ProviderMergeRequest,
+	request workspace.ProviderMergeRequest,
 ) (workspace.ProviderMergeAdapterResult, error) {
 	adapter.mergeCalls++
+	adapter.lastMerge = request
 	return adapter.mergeResult, adapter.mergeErr
 }
 
@@ -212,7 +216,16 @@ func TestProviderLifecycleDispatchesThroughSingleUseBrokerAndRecordsCanonicalCom
 		t.Fatalf("reserve open PR = %#v, %v", reserved, err)
 	}
 	openAdapterResult, _ := workspace.NewProviderOpenPullRequestAdapterResult("request-open-1", 71, head)
-	adapter := &providerLifecycleAdapter{openResult: openAdapterResult}
+	identitySeed, _ := workspace.NewProviderPullRequestObservation(
+		harness.definition.Workspace().Provider().Kind(), harness.definition.Workspace().Repository(),
+		71, head, workspace.DigestBytes([]byte("open-postflight-identity")),
+	)
+	adapter := &providerLifecycleAdapter{
+		openResult: openAdapterResult,
+		pullRequestState: providerPRState(
+			t, harness, attempt, identitySeed.PullRequest(), head, tree, base, workspace.GitObjectID{}, false,
+		),
+	}
 	broker, err := workspace.NewProviderBroker(harness.definition.Workspace().Provider(), adapter)
 	if err != nil {
 		t.Fatal(err)
@@ -249,6 +262,21 @@ func TestProviderLifecycleDispatchesThroughSingleUseBrokerAndRecordsCanonicalCom
 	if !ok {
 		t.Fatal("successful open PR did not return provider-derived identity")
 	}
+	wrongTopology, err := workspace.NewProviderPullRequestState(workspace.ProviderPullRequestStateOptions{
+		Repository: harness.definition.Workspace().Repository(), PullRequest: pullRequest,
+		BaseRef: "feature/wrong-base", Branch: attempt.Branch(), BaseHeadBeforeMerge: base,
+		Head: head, HeadTree: tree, RemoteBranchHead: head, RequestMarker: "wrong-open-authorization-topology",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.pullRequestState = wrongTopology
+	if _, _, err := workspace.RecordProviderPullRequestAuthorization(
+		context.Background(), harness.journal, harness.definition, broker, openIntent.IntentID(),
+		mustTime(t, "2026-07-21T10:05:30Z"),
+	); err == nil || !strings.Contains(err.Error(), "authorization topology") {
+		t.Fatalf("wrong open-PR authorization topology error = %v", err)
+	}
 	adapter.pullRequestState = providerPRState(
 		t, harness, attempt, pullRequest, head, tree, base,
 		workspace.GitObjectID{}, false,
@@ -266,7 +294,7 @@ func TestProviderLifecycleDispatchesThroughSingleUseBrokerAndRecordsCanonicalCom
 	mergeIntent, err := workspace.NewProviderMergeIntent(workspace.ProviderMergeIntentOptions{
 		Scope:  providerIntentScope(harness, attempt, frontier, pullRequest),
 		Branch: attempt.Branch(), BaseRef: harness.definition.Workspace().BaseRef(),
-		Head: head, Tree: tree, Strategy: workspace.ProviderMergeCommit,
+		IntegrationBaseHead: attempt.Base(), Head: head, Tree: tree, Strategy: workspace.ProviderMergeCommit,
 	})
 	if err != nil {
 		t.Fatal(err)

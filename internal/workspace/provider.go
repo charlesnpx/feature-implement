@@ -102,22 +102,23 @@ func newProviderIntentScope(options ProviderIntentScopeOptions) (providerIntentS
 // executable, command rendering, arbitrary action label, or remote-delete
 // representation.
 type ProviderIntent struct {
-	intentID       ID
-	idempotencyKey Digest
-	digest         Digest
-	kind           ProviderIntentKind
-	scope          providerIntentScope
-	authorization  AuthorizationRequest
-	branch         string
-	expectedRemote GitObjectID
-	expectAbsent   bool
-	baseRef        string
-	head           GitObjectID
-	tree           GitObjectID
-	title          string
-	body           string
-	pullRequest    PullRequestIdentity
-	mergeStrategy  ProviderMergeStrategy
+	intentID        ID
+	idempotencyKey  Digest
+	digest          Digest
+	kind            ProviderIntentKind
+	scope           providerIntentScope
+	authorization   AuthorizationRequest
+	branch          string
+	expectedRemote  GitObjectID
+	expectAbsent    bool
+	baseRef         string
+	integrationBase GitObjectID
+	head            GitObjectID
+	tree            GitObjectID
+	title           string
+	body            string
+	pullRequest     PullRequestIdentity
+	mergeStrategy   ProviderMergeStrategy
 }
 
 type ProviderPushIntentOptions struct {
@@ -193,12 +194,13 @@ func NewProviderOpenPullRequestIntent(options ProviderOpenPullRequestIntentOptio
 }
 
 type ProviderMergeIntentOptions struct {
-	Scope    ProviderIntentScopeOptions
-	Branch   string
-	BaseRef  string
-	Head     GitObjectID
-	Tree     GitObjectID
-	Strategy ProviderMergeStrategy
+	Scope               ProviderIntentScopeOptions
+	Branch              string
+	BaseRef             string
+	IntegrationBaseHead GitObjectID
+	Head                GitObjectID
+	Tree                GitObjectID
+	Strategy            ProviderMergeStrategy
 }
 
 func NewProviderMergeIntent(options ProviderMergeIntentOptions) (ProviderIntent, error) {
@@ -206,14 +208,15 @@ func NewProviderMergeIntent(options ProviderMergeIntentOptions) (ProviderIntent,
 	if err != nil {
 		return ProviderIntent{}, err
 	}
-	if scope.pullRequest.IsZero() || options.Head.IsZero() || options.Tree.IsZero() ||
+	if scope.pullRequest.IsZero() || options.IntegrationBaseHead.IsZero() || options.Head.IsZero() || options.Tree.IsZero() ||
 		options.Head != scope.frontier.head || options.Head.Algorithm() != options.Tree.Algorithm() ||
+		options.IntegrationBaseHead.Algorithm() != options.Head.Algorithm() ||
 		!options.Strategy.valid() {
-		return ProviderIntent{}, fmt.Errorf("merge intent requires provider-derived pull request, exact authorized head and tree, and merge-commit strategy")
+		return ProviderIntent{}, fmt.Errorf("merge intent requires provider-derived pull request, independent integration base, exact authorized head and tree, and merge-commit strategy")
 	}
 	return newProviderIntent(ProviderIntent{
 		kind: ProviderIntentMerge, scope: scope, branch: options.Branch, baseRef: options.BaseRef,
-		head: options.Head, tree: options.Tree,
+		integrationBase: options.IntegrationBaseHead, head: options.Head, tree: options.Tree,
 		pullRequest: scope.pullRequest, mergeStrategy: options.Strategy,
 	})
 }
@@ -276,31 +279,32 @@ func newProviderIntent(intent ProviderIntent) (ProviderIntent, error) {
 }
 
 type providerIntentCanonical struct {
-	SchemaVersion      int                          `json:"schema_version"`
-	IntentID           string                       `json:"intent_id,omitempty"`
-	Kind               ProviderIntentKind           `json:"kind"`
-	WorkspaceID        string                       `json:"workspace_id"`
-	Generation         string                       `json:"generation"`
-	AttemptID          string                       `json:"attempt_id"`
-	PlanID             string                       `json:"plan_id"`
-	MergeUnitID        string                       `json:"merge_unit_id"`
-	Repository         string                       `json:"repository"`
-	Remote             string                       `json:"remote"`
-	SerialSegment      string                       `json:"serial_segment"`
-	Base               string                       `json:"base"`
-	AuthorizedHead     string                       `json:"authorized_head"`
-	AuthorizationEpoch uint64                       `json:"authorization_epoch"`
-	Authorization      string                       `json:"authorization_request_digest"`
-	Branch             string                       `json:"branch,omitempty"`
-	ExpectedRemoteHead string                       `json:"expected_remote_head,omitempty"`
-	ExpectRemoteAbsent bool                         `json:"expect_remote_absent,omitempty"`
-	BaseRef            string                       `json:"base_ref,omitempty"`
-	Head               string                       `json:"head"`
-	Tree               string                       `json:"tree,omitempty"`
-	Title              string                       `json:"title,omitempty"`
-	Body               string                       `json:"body,omitempty"`
-	PullRequest        *controlPlanePullRequestWire `json:"pull_request,omitempty"`
-	MergeStrategy      ProviderMergeStrategy        `json:"merge_strategy,omitempty"`
+	SchemaVersion       int                          `json:"schema_version"`
+	IntentID            string                       `json:"intent_id,omitempty"`
+	Kind                ProviderIntentKind           `json:"kind"`
+	WorkspaceID         string                       `json:"workspace_id"`
+	Generation          string                       `json:"generation"`
+	AttemptID           string                       `json:"attempt_id"`
+	PlanID              string                       `json:"plan_id"`
+	MergeUnitID         string                       `json:"merge_unit_id"`
+	Repository          string                       `json:"repository"`
+	Remote              string                       `json:"remote"`
+	SerialSegment       string                       `json:"serial_segment"`
+	Base                string                       `json:"base"`
+	AuthorizedHead      string                       `json:"authorized_head"`
+	AuthorizationEpoch  uint64                       `json:"authorization_epoch"`
+	Authorization       string                       `json:"authorization_request_digest"`
+	Branch              string                       `json:"branch,omitempty"`
+	ExpectedRemoteHead  string                       `json:"expected_remote_head,omitempty"`
+	ExpectRemoteAbsent  bool                         `json:"expect_remote_absent,omitempty"`
+	BaseRef             string                       `json:"base_ref,omitempty"`
+	IntegrationBaseHead string                       `json:"integration_base_head,omitempty"`
+	Head                string                       `json:"head"`
+	Tree                string                       `json:"tree,omitempty"`
+	Title               string                       `json:"title,omitempty"`
+	Body                string                       `json:"body,omitempty"`
+	PullRequest         *controlPlanePullRequestWire `json:"pull_request,omitempty"`
+	MergeStrategy       ProviderMergeStrategy        `json:"merge_strategy,omitempty"`
 }
 
 func canonicalProviderIntent(intent ProviderIntent, includeIdentity bool) ([]byte, error) {
@@ -320,8 +324,8 @@ func canonicalProviderIntent(intent ProviderIntent, includeIdentity bool) ([]byt
 		Base: intent.scope.frontier.base.String(), AuthorizedHead: intent.scope.frontier.head.String(),
 		AuthorizationEpoch: intent.scope.epoch, Authorization: intent.authorization.digest.String(),
 		Branch: intent.branch, ExpectedRemoteHead: intent.expectedRemote.String(), ExpectRemoteAbsent: intent.expectAbsent,
-		BaseRef: intent.baseRef,
-		Head:    intent.head.String(), Tree: intent.tree.String(), Title: intent.title, Body: intent.body,
+		BaseRef: intent.baseRef, IntegrationBaseHead: intent.integrationBase.String(),
+		Head: intent.head.String(), Tree: intent.tree.String(), Title: intent.title, Body: intent.body,
 		MergeStrategy: intent.mergeStrategy,
 	}
 	if includeIdentity {
@@ -353,12 +357,13 @@ func (intent ProviderIntent) Branch() string                             { retur
 func (intent ProviderIntent) ExpectedRemoteHead() (GitObjectID, bool) {
 	return intent.expectedRemote, !intent.expectedRemote.IsZero()
 }
-func (intent ProviderIntent) ExpectsRemoteAbsent() bool { return intent.expectAbsent }
-func (intent ProviderIntent) BaseRef() string           { return intent.baseRef }
-func (intent ProviderIntent) Head() GitObjectID         { return intent.head }
-func (intent ProviderIntent) Tree() GitObjectID         { return intent.tree }
-func (intent ProviderIntent) Title() string             { return intent.title }
-func (intent ProviderIntent) Body() string              { return intent.body }
+func (intent ProviderIntent) ExpectsRemoteAbsent() bool        { return intent.expectAbsent }
+func (intent ProviderIntent) BaseRef() string                  { return intent.baseRef }
+func (intent ProviderIntent) IntegrationBaseHead() GitObjectID { return intent.integrationBase }
+func (intent ProviderIntent) Head() GitObjectID                { return intent.head }
+func (intent ProviderIntent) Tree() GitObjectID                { return intent.tree }
+func (intent ProviderIntent) Title() string                    { return intent.title }
+func (intent ProviderIntent) Body() string                     { return intent.body }
 func (intent ProviderIntent) PullRequest() (PullRequestIdentity, bool) {
 	return intent.pullRequest, !intent.pullRequest.IsZero()
 }

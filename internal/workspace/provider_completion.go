@@ -342,7 +342,7 @@ func newProviderMergePreflight(
 	}
 	if state.repository != intent.scope.repository || state.pullRequest != intent.pullRequest ||
 		state.baseRef != intent.baseRef || state.branch != intent.branch ||
-		state.baseHeadBeforeMerge != intent.scope.frontier.base || state.head != intent.head ||
+		state.baseHeadBeforeMerge != intent.integrationBase || state.head != intent.head ||
 		state.headTree != intent.tree || state.remoteBranchHead != intent.head || state.merged {
 		return ProviderMergePreflight{}, fmt.Errorf("provider merge preflight does not match the exact unmerged intent topology")
 	}
@@ -993,22 +993,14 @@ func VerifyAndRecordProviderCompletion(
 		return ProviderCompletionReceipt{}, JournalRecord{}, fmt.Errorf("provider completion attempt does not match the active definition")
 	}
 	var openIntent, mergeIntent ProviderIntentProjection
-	providerResults := make([]Digest, 0)
+	providerIntentIDs := make(map[ID]struct{})
 	for _, projected := range providerProjection.intents {
 		if projected.intent.scope.attemptID != request.AttemptID {
 			continue
 		}
+		providerIntentIDs[projected.intent.intentID] = struct{}{}
 		if !projected.status.terminal() {
 			return ProviderCompletionReceipt{}, JournalRecord{}, fmt.Errorf("provider intent %s remains unresolved", projected.intent.intentID)
-		}
-		if !projected.result.digest.IsZero() {
-			providerResults = append(providerResults, projected.result.digest)
-		}
-		if !projected.reconciliation.digest.IsZero() {
-			providerResults = append(providerResults, projected.reconciliation.digest)
-		}
-		if !projected.preflight.digest.IsZero() {
-			providerResults = append(providerResults, projected.preflight.digest)
 		}
 		if !providerProjectionEffectApplied(projected) {
 			continue
@@ -1026,6 +1018,7 @@ func VerifyAndRecordProviderCompletion(
 			mergeIntent = projected
 		}
 	}
+	providerResults := providerCompletionProviderEvidence(snapshot, providerIntentIDs)
 	pullRequest, hasPullRequest, err := providerPullRequestForAttempt(providerProjection, request.AttemptID)
 	if err != nil {
 		return ProviderCompletionReceipt{}, JournalRecord{}, err
@@ -1065,7 +1058,7 @@ func VerifyAndRecordProviderCompletion(
 	if providerState.baseRef != definition.workspace.baseRef || providerState.branch != openIntent.intent.branch ||
 		providerState.head != mergeIntent.intent.head || providerState.headTree != mergeIntent.intent.tree ||
 		providerState.remoteBranchHead != mergeIntent.intent.head ||
-		providerState.baseHeadBeforeMerge != mergeIntent.intent.scope.frontier.base ||
+		providerState.baseHeadBeforeMerge != mergeIntent.intent.integrationBase ||
 		!providerState.merged || providerState.mergeStrategy != ProviderMergeCommit ||
 		providerState.mergeCommit.IsZero() || providerState.finalBaseHead != providerState.mergeCommit {
 		return ProviderCompletionReceipt{}, JournalRecord{}, fmt.Errorf("provider completion observation has wrong branch, head/tree, base, strategy, or merge state")
@@ -1139,6 +1132,41 @@ func VerifyAndRecordProviderCompletion(
 		return ProviderCompletionReceipt{}, JournalRecord{}, err
 	}
 	return receipt, record, nil
+}
+
+func providerCompletionProviderEvidence(
+	snapshot JournalSnapshot,
+	intentIDs map[ID]struct{},
+) []Digest {
+	evidence := make([]Digest, 0)
+	seen := make(map[Digest]struct{})
+	appendEvidence := func(digest Digest) {
+		if digest.IsZero() {
+			return
+		}
+		if _, exists := seen[digest]; exists {
+			return
+		}
+		seen[digest] = struct{}{}
+		evidence = append(evidence, digest)
+	}
+	for _, record := range snapshot.Records() {
+		switch event := record.Event().(type) {
+		case ProviderMergePreflightRecordedJournalEvent:
+			if _, exists := intentIDs[event.preflight.intentID]; exists {
+				appendEvidence(event.preflight.digest)
+			}
+		case ProviderResultRecordedJournalEvent:
+			if _, exists := intentIDs[event.result.intentID]; exists {
+				appendEvidence(event.result.digest)
+			}
+		case ProviderIntentReconciledJournalEvent:
+			if _, exists := intentIDs[event.reconciliation.intentID]; exists {
+				appendEvidence(event.reconciliation.digest)
+			}
+		}
+	}
+	return evidence
 }
 
 func providerCompletionLocalEvidence(

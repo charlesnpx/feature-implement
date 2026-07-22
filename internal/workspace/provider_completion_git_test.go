@@ -82,6 +82,23 @@ func TestLocalProviderCompletionGitAdapterIndependentlyVerifiesRemoteAndMergeTop
 		!strings.Contains(err.Error(), "embedded credentials") {
 		t.Fatalf("local completion Git accepted credential-bearing remote URL: %v", err)
 	}
+	marker := filepath.Join(root, "remote-helper-executed")
+	runGitSetup(t, repository, "config", "protocol.ext.allow", "always")
+	runGitSetup(t, repository, "remote", "set-url", "origin", "ext::touch "+marker)
+	if _, err := adapter.InspectRemoteTopology(
+		context.Background(), repository, "origin", branch, baseRef, head, merge, base,
+	); err == nil || !strings.Contains(err.Error(), "explicit allowed protocol") {
+		t.Fatalf("local completion Git accepted repository-configured remote helper: %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("repository-configured remote helper executed: %v", err)
+	}
+	runGitSetup(t, repository, "remote", "set-url", "origin", "https://example.invalid/repository.git?access_token=secret")
+	if _, err := adapter.InspectRemoteTopology(
+		context.Background(), repository, "origin", branch, baseRef, head, merge, base,
+	); err == nil || !strings.Contains(err.Error(), "query") {
+		t.Fatalf("local completion Git accepted query-bearing remote URL: %v", err)
+	}
 }
 
 func providerGitRevision(t *testing.T, repository, revision string) workspace.GitObjectID {

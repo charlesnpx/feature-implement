@@ -19,6 +19,8 @@ type providerOpenScenario struct {
 	broker    *workspace.ProviderBroker
 	open      workspace.ProviderIntent
 	pull      workspace.PullRequestIdentity
+	parent    workspace.StandingGrant
+	derived   workspace.StandingGrant
 	base      workspace.GitObjectID
 	head      workspace.GitObjectID
 	tree      workspace.GitObjectID
@@ -49,13 +51,25 @@ func newProviderOpenScenarioWithHarness(
 	}
 	attempt := harness.reserve(t, "2026-07-21T"+hour+":01:00Z")
 	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T"+hour+":02:00Z")
+	return newProviderOpenScenarioForAttempt(t, harness, attempt, hour, algorithm, pullRequestNumber)
+}
+
+func newProviderOpenScenarioForAttempt(
+	t *testing.T,
+	harness attemptHarness,
+	attempt workspace.RuntimeAttemptProjection,
+	hour string,
+	algorithm workspace.GitHashAlgorithm,
+	pullRequestNumber uint64,
+) providerOpenScenario {
+	t.Helper()
 	base, head := attempt.Base(), attempt.VerifiedHead()
 	tree := mustProviderGitObject(t, algorithm, 'b')
 	frontier, err := workspace.NewAuthorizationFrontier(base, head)
 	if err != nil {
 		t.Fatal(err)
 	}
-	recordProviderLifecycleGrant(
+	parent := recordProviderLifecycleGrant(
 		t, harness, attempt, frontier,
 		[]workspace.StandingAuthorizationAction{
 			workspace.StandingAuthorizationPush,
@@ -86,7 +100,16 @@ func newProviderOpenScenarioWithHarness(
 	openResult, _ := workspace.NewProviderOpenPullRequestAdapterResult(
 		"open-provider-topology", pullRequestNumber, head,
 	)
-	adapter := &providerLifecycleAdapter{openResult: openResult}
+	identitySeed, _ := workspace.NewProviderPullRequestObservation(
+		harness.definition.Workspace().Provider().Kind(), harness.definition.Workspace().Repository(),
+		pullRequestNumber, head, workspace.DigestBytes([]byte("open-postflight-identity")),
+	)
+	adapter := &providerLifecycleAdapter{
+		openResult: openResult,
+		pullRequestState: providerPRState(
+			t, harness, attempt, identitySeed.PullRequest(), head, tree, base, workspace.GitObjectID{}, false,
+		),
+	}
 	broker, err := workspace.NewProviderBroker(harness.definition.Workspace().Provider(), adapter)
 	if err != nil {
 		t.Fatal(err)
@@ -112,15 +135,119 @@ func newProviderOpenScenarioWithHarness(
 	adapter.pullRequestState = providerPRState(
 		t, harness, attempt, pull, head, tree, base, workspace.GitObjectID{}, false,
 	)
-	if _, _, err := workspace.RecordProviderPullRequestAuthorization(
+	derived, _, err := workspace.RecordProviderPullRequestAuthorization(
 		context.Background(), harness.journal, harness.definition, broker, open.IntentID(),
 		mustTime(t, "2026-07-21T"+hour+":06:00Z"),
-	); err != nil {
+	)
+	if err != nil {
 		t.Fatal(err)
 	}
 	return providerOpenScenario{
 		harness: harness, attempt: attempt, frontier: frontier, clock: clock, evaluator: evaluator,
-		adapter: adapter, broker: broker, open: open, pull: pull, base: base, head: head, tree: tree, hour: hour,
+		adapter: adapter, broker: broker, open: open, pull: pull, parent: parent, derived: derived,
+		base: base, head: head, tree: tree, hour: hour,
+	}
+}
+
+func TestProviderOpenPullRequestRequiresExactTopologyBeforeSuccess(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, *workspace.ProviderPullRequestStateOptions)
+	}{
+		{name: "wrong base ref", mutate: func(_ *testing.T, options *workspace.ProviderPullRequestStateOptions) {
+			options.BaseRef = "feature/other-base"
+		}},
+		{name: "wrong branch", mutate: func(_ *testing.T, options *workspace.ProviderPullRequestStateOptions) {
+			options.Branch = "mu/other-provider-a1-0123456789ab"
+		}},
+		{name: "wrong base head", mutate: func(t *testing.T, options *workspace.ProviderPullRequestStateOptions) {
+			options.BaseHeadBeforeMerge = mustGitObject(t, 'd')
+		}},
+		{name: "wrong head", mutate: func(t *testing.T, options *workspace.ProviderPullRequestStateOptions) {
+			options.Head = mustGitObject(t, 'd')
+			options.RemoteBranchHead = options.Head
+		}},
+		{name: "wrong tree", mutate: func(t *testing.T, options *workspace.ProviderPullRequestStateOptions) {
+			options.HeadTree = mustGitObject(t, 'd')
+		}},
+		{name: "remote head drift", mutate: func(t *testing.T, options *workspace.ProviderPullRequestStateOptions) {
+			options.RemoteBranchHead = mustGitObject(t, 'd')
+		}},
+		{name: "already merged", mutate: func(t *testing.T, options *workspace.ProviderPullRequestStateOptions) {
+			merge := mustGitObject(t, 'd')
+			options.Merged = true
+			options.MergeStrategy = workspace.ProviderMergeCommit
+			options.MergeCommit = merge
+			options.FinalBaseHead = merge
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			harness := newAttemptHarness(t, "unit-one")
+			attempt := harness.reserve(t, "2026-07-21T12:01:00Z")
+			attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T12:02:00Z")
+			base, head, tree := attempt.Base(), attempt.VerifiedHead(), mustGitObject(t, 'b')
+			frontier, _ := workspace.NewAuthorizationFrontier(base, head)
+			recordProviderLifecycleGrant(
+				t, harness, attempt, frontier,
+				[]workspace.StandingAuthorizationAction{
+					workspace.StandingAuthorizationOpenPullRequest, workspace.StandingAuthorizationMerge,
+				},
+				"2026-07-21T12:03:00Z",
+			)
+			clock := &authorizationTestClock{now: mustTime(t, "2026-07-21T12:04:00Z")}
+			evaluator, _ := workspace.NewAuthorizationEvaluator(clock)
+			intent, err := workspace.NewProviderOpenPullRequestIntent(workspace.ProviderOpenPullRequestIntentOptions{
+				Scope:  providerIntentScope(harness, attempt, frontier, workspace.PullRequestIdentity{}),
+				Branch: attempt.Branch(), BaseRef: harness.definition.Workspace().BaseRef(),
+				Head: head, Tree: tree, Title: "Topology postflight", Body: "Require exact provider state.",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := workspace.ReserveProviderIntent(
+				harness.journal, harness.definition, evaluator,
+				workspace.ReserveProviderIntentRequest{Intent: intent, OccurredAt: mustTime(t, "2026-07-21T12:04:01Z")},
+			); err != nil {
+				t.Fatal(err)
+			}
+			identitySeed, _ := workspace.NewProviderPullRequestObservation(
+				harness.definition.Workspace().Provider().Kind(), harness.definition.Workspace().Repository(),
+				171, head, workspace.DigestBytes([]byte("open-topology-test")),
+			)
+			options := workspace.ProviderPullRequestStateOptions{
+				Repository: harness.definition.Workspace().Repository(), PullRequest: identitySeed.PullRequest(),
+				BaseRef: harness.definition.Workspace().BaseRef(), Branch: attempt.Branch(),
+				BaseHeadBeforeMerge: base, Head: head, HeadTree: tree, RemoteBranchHead: head,
+				RequestMarker: "open-topology-postflight",
+			}
+			test.mutate(t, &options)
+			state, err := workspace.NewProviderPullRequestState(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			openResult, _ := workspace.NewProviderOpenPullRequestAdapterResult("open-topology", 171, head)
+			adapter := &providerLifecycleAdapter{openResult: openResult, pullRequestState: state}
+			broker, _ := workspace.NewProviderBroker(harness.definition.Workspace().Provider(), adapter)
+			clock.now = mustTime(t, "2026-07-21T12:05:00Z")
+			ticket, err := workspace.AuthorizeProviderIntentDispatch(
+				harness.journal, harness.definition, evaluator, broker, intent.IntentID(),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			execution, err := workspace.ExecuteProviderIntent(
+				context.Background(), harness.journal, harness.definition, broker, ticket,
+				mustTime(t, "2026-07-21T12:05:01Z"),
+			)
+			if err == nil || execution.Result().Status() != workspace.ProviderIntentAmbiguous ||
+				adapter.openCalls != 1 || adapter.queryPRCalls != 1 {
+				t.Fatalf("wrong open-PR topology execution = %#v open=%d query=%d err=%v", execution, adapter.openCalls, adapter.queryPRCalls, err)
+			}
+			if _, ok := execution.Result().PullRequest(); ok {
+				t.Fatal("ambiguous open-PR postflight established authorization identity")
+			}
+		})
 	}
 }
 
@@ -216,7 +343,8 @@ func (scenario *providerOpenScenario) mergeIntent(t *testing.T, pull workspace.P
 	intent, err := workspace.NewProviderMergeIntent(workspace.ProviderMergeIntentOptions{
 		Scope:  providerIntentScope(scenario.harness, scenario.attempt, scenario.frontier, pull),
 		Branch: scenario.attempt.Branch(), BaseRef: scenario.harness.definition.Workspace().BaseRef(),
-		Head: scenario.head, Tree: scenario.tree, Strategy: workspace.ProviderMergeCommit,
+		IntegrationBaseHead: scenario.attempt.Base(), Head: scenario.head, Tree: scenario.tree,
+		Strategy: workspace.ProviderMergeCommit,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -471,6 +599,7 @@ func TestProviderFailedBeforeEffectCanRetryExactMergeIntent(t *testing.T) {
 	if err == nil || first.Result().Status() != workspace.ProviderIntentFailedBeforeEffect || scenario.adapter.mergeCalls != 0 {
 		t.Fatalf("first merge dispatch = %#v calls=%d err=%v", first, scenario.adapter.mergeCalls, err)
 	}
+	failedDigest := first.Result().Digest()
 	scenario.adapter.pullRequestState = valid
 	scenario.clock.now = mustTime(t, "2026-07-21T13:09:00Z")
 	retried, record, err := workspace.ReserveProviderIntent(
@@ -505,6 +634,314 @@ func TestProviderFailedBeforeEffectCanRetryExactMergeIntent(t *testing.T) {
 	)
 	if err != nil || second.Result().Status() != workspace.ProviderIntentSucceeded || scenario.adapter.mergeCalls != 1 {
 		t.Fatalf("retried merge dispatch = %#v calls=%d err=%v", second, scenario.adapter.mergeCalls, err)
+	}
+	succeededDigest := second.Result().Digest()
+	scenario.adapter.pullRequestState = providerPRState(
+		t, scenario.harness, scenario.attempt, scenario.pull, scenario.head, scenario.tree, scenario.base,
+		mergeCommit, true,
+	)
+	headCommit, _ := workspace.NewProviderGitCommit(scenario.head, scenario.tree, []workspace.GitObjectID{scenario.base})
+	mergeObject, _ := workspace.NewProviderGitCommit(
+		mergeCommit, scenario.tree, []workspace.GitObjectID{scenario.base, scenario.head},
+	)
+	git := &providerCompletionGit{
+		remoteBranch: scenario.head, remoteBase: mergeCommit,
+		commits: map[string]workspace.ProviderGitCommit{
+			scenario.head.String(): headCommit, mergeCommit.String(): mergeObject,
+		},
+		ancestors: map[string]bool{
+			scenario.base.String() + "\x00" + mergeCommit.String(): true,
+			scenario.head.String() + "\x00" + mergeCommit.String(): true,
+		},
+	}
+	receipt, _, err := workspace.VerifyAndRecordProviderCompletion(
+		context.Background(), scenario.harness.journal, scenario.harness.definition, scenario.broker, git,
+		workspace.ProviderCompletionRequest{
+			AttemptID: scenario.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T13:11:00Z"),
+		},
+	)
+	if err != nil {
+		t.Fatalf("verify completion after retry: %v", err)
+	}
+	encoded, err := receipt.MarshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var evidence struct {
+		ProviderResults []string `json:"provider_result_digests"`
+	}
+	if err := json.Unmarshal(encoded, &evidence); err != nil {
+		t.Fatal(err)
+	}
+	found := make(map[string]bool, len(evidence.ProviderResults))
+	for _, digest := range evidence.ProviderResults {
+		found[digest] = true
+	}
+	if !found[failedDigest.String()] || !found[succeededDigest.String()] {
+		t.Fatalf("retry receipt evidence = %#v; want failed %s and succeeded %s", evidence.ProviderResults, failedDigest, succeededDigest)
+	}
+}
+
+func TestProviderReviewFixPushAndMergeKeepIntegrationBaseIndependent(t *testing.T) {
+	harness := newReviewHarness(t)
+	initialHead := mustGitObject(t, 'c')
+	initialTree := mustGitObject(t, 'b')
+	harness.repository.snapshot, _ = workspace.NewReviewRepositorySnapshot(initialHead, initialTree, true)
+	firstRound, err := workspace.StartAttemptReviewRound(
+		context.Background(), harness.journal, harness.definition, harness.repository,
+		workspace.StartAttemptReviewRoundRequest{
+			AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T11:20:00Z"),
+		},
+	)
+	if err != nil || firstRound.Request().Head() != initialHead {
+		t.Fatalf("start initial review = %#v err=%v", firstRound, err)
+	}
+	medium := mustReviewFinding(t, workspace.ReviewSeverityMedium, "provider review fix")
+	security := reviewSubmission(
+		t, firstRound.Request(), workspace.MustID("security-provider-one"), workspace.ReviewResultCompleted,
+		[]workspace.ReviewFinding{medium}, workspace.Digest{},
+	)
+	harness.record(t, firstRound.Request(), security, "2026-07-21T11:20:01Z")
+	reviewState := mustReviewState(t, harness.journal, harness.definition, harness.attempt.AttemptID())
+	correctnessRequest, _, _ := reviewState.NextRequest()
+	correctness := reviewSubmission(
+		t, correctnessRequest, workspace.MustID("correctness-provider-one"),
+		workspace.ReviewResultCompleted, nil, workspace.Digest{},
+	)
+	harness.record(t, correctnessRequest, correctness, "2026-07-21T11:20:02Z")
+	if _, err := workspace.ConfirmReviewMergeReadiness(
+		context.Background(), harness.journal, harness.definition, harness.repository, harness.attempt.AttemptID(),
+	); err != nil {
+		t.Fatalf("confirm initial review readiness: %v", err)
+	}
+	snapshot, err := harness.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := workspace.RebuildWorkspaceRuntime(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adopted, exists := runtime.Attempt(harness.attempt.AttemptID())
+	if !exists || adopted.Base() == adopted.VerifiedHead() || adopted.VerifiedHead() != initialHead {
+		t.Fatalf("adopted implementation attempt = %#v exists=%v", adopted, exists)
+	}
+	opened := newProviderOpenScenarioForAttempt(
+		t, harness.attemptHarness, adopted, "13", workspace.GitHashSHA1, 171,
+	)
+
+	protocol := configuredReviewFixProtocol(t, harness.definition)
+	step, err := protocol.Step(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixTree, fixHead, changed := mustGitObject(t, 'd'), mustGitObject(t, 'e'), mustGitObject(t, 'f')
+	diff := addedDiff(t, "src/provider_fix.go", changed)
+	staged, err := workspace.NewStagedCommitInspection(initialHead, fixTree, diff, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit, err := workspace.NewGitCommitInspection(
+		fixHead, []workspace.GitObjectID{initialHead}, fixTree,
+		step.Message().Subject(), "apply provider review fix", diff,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitGit := &journalCommitGit{
+		branch: adopted.Branch(), head: initialHead, staged: staged, commit: commit,
+	}
+	checkRunner := &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())}
+	shell, err := workspace.NewCommitProtocolShell(commitGit, checkRunner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixResult, err := workspace.ExecuteAttemptReviewFix(
+		context.Background(), harness.journal, harness.definition, shell,
+		workspace.ExecuteAttemptReviewFixRequest{
+			AttemptID: adopted.AttemptID(), Ordinal: 1, Body: "apply provider review fix",
+			AcceptedFindingIDs: []workspace.Digest{medium.ID()},
+			OccurredAt:         mustTime(t, "2026-07-21T14:00:00Z"),
+		},
+	)
+	if err != nil || fixResult.Attempt().VerifiedHead() != fixHead {
+		t.Fatalf("execute provider review fix = %#v err=%v", fixResult, err)
+	}
+	harness.git.setHead(t, adopted.Branch(), fixHead, true)
+	harness.repository.snapshot, _ = workspace.NewReviewRepositorySnapshot(fixHead, fixTree, true)
+	if _, _, err := workspace.RecordReviewFixApplication(
+		harness.journal, harness.definition, workspace.RecordReviewFixApplicationRequest{
+			AttemptID: adopted.AttemptID(), Ordinal: 1, AcceptedFindingIDs: []workspace.Digest{medium.ID()},
+			OccurredAt: mustTime(t, "2026-07-21T14:00:01Z"),
+		},
+	); err != nil {
+		t.Fatalf("record provider review fix: %v", err)
+	}
+	secondRound, err := workspace.StartAttemptReviewRound(
+		context.Background(), harness.journal, harness.definition, harness.repository,
+		workspace.StartAttemptReviewRoundRequest{
+			AttemptID: adopted.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T14:00:02Z"),
+		},
+	)
+	if err != nil || secondRound.Request().Head() != fixHead || secondRound.Request().Tree() != fixTree {
+		t.Fatalf("start post-fix review = %#v err=%v", secondRound, err)
+	}
+	cleanSecurity := reviewSubmission(
+		t, secondRound.Request(), workspace.MustID("security-provider-one"),
+		workspace.ReviewResultCompleted, nil, workspace.Digest{},
+	)
+	harness.record(t, secondRound.Request(), cleanSecurity, "2026-07-21T14:00:03Z")
+	reviewState = mustReviewState(t, harness.journal, harness.definition, adopted.AttemptID())
+	cleanCorrectnessRequest, _, _ := reviewState.NextRequest()
+	cleanCorrectness := reviewSubmission(
+		t, cleanCorrectnessRequest, workspace.MustID("correctness-provider-two"),
+		workspace.ReviewResultCompleted, nil, workspace.Digest{},
+	)
+	harness.record(t, cleanCorrectnessRequest, cleanCorrectness, "2026-07-21T14:00:04Z")
+	if readiness, err := workspace.ConfirmReviewMergeReadiness(
+		context.Background(), harness.journal, harness.definition, harness.repository, adopted.AttemptID(),
+	); err != nil || readiness.Head() != fixHead || readiness.Tree() != fixTree {
+		t.Fatalf("confirm post-fix readiness = %#v err=%v", readiness, err)
+	}
+	updatedAttempt := fixResult.Attempt()
+	fixFrontier, _ := workspace.NewAuthorizationFrontier(initialHead, fixHead)
+	fixScope, err := workspace.NewStandingGrantScope(workspace.StandingGrantScopeOptions{
+		WorkspaceID: harness.definition.Workspace().ID(), Repository: harness.definition.Workspace().Repository(),
+		Remote: harness.definition.Workspace().Remote(), Generation: harness.definition.Generation(),
+		SerialSegment: updatedAttempt.SerialSegment(), Frontier: fixFrontier,
+		Actions: []workspace.StandingAuthorizationAction{
+			workspace.StandingAuthorizationPush, workspace.StandingAuthorizationMerge,
+		},
+		ExpiresAt: mustTime(t, "2026-07-21T20:00:00Z"), Epoch: 1, RequiresProviderPullRequest: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixBinding, _ := workspace.StandingGrantControlPlaneBinding(fixScope)
+	fixParent, _, err := workspace.RecordStandingGrant(
+		context.Background(), harness.journal, harness.definition,
+		&boundaryVerifier{expectedRequest: fixScope.Digest()}, fixScope,
+		controlPlaneReceipt(t, fixBinding, "provider-review-fix-grant"),
+		mustTime(t, "2026-07-21T15:00:00Z"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query, _ := workspace.NewProviderPullRequestQuery(harness.definition.Workspace().Repository(), opened.pull)
+	currentPR, err := opened.broker.ObservePullRequestForAuthorization(
+		context.Background(), query, workspace.DigestBytes([]byte("provider-review-fix-observation")),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := workspace.RecordPullRequestStandingGrantFrontierAdvance(
+		context.Background(), harness.journal, harness.definition, opened.broker,
+		fixParent.GrantID(), opened.derived.GrantID(), currentPR, mustTime(t, "2026-07-21T15:00:01Z"),
+	); err != nil {
+		t.Fatalf("record review-fix frontier advance: %v", err)
+	}
+
+	opened.attempt = updatedAttempt
+	opened.frontier = fixFrontier
+	opened.head = fixHead
+	opened.tree = fixTree
+	opened.adapter.pullRequestState = providerPRState(
+		t, opened.harness, updatedAttempt, opened.pull, fixHead, fixTree, opened.base,
+		workspace.GitObjectID{}, false,
+	)
+	opened.adapter.pushResult, _ = workspace.NewProviderPushAdapterResult("review-fix-push", fixHead)
+	push, err := workspace.NewProviderPushIntent(workspace.ProviderPushIntentOptions{
+		Scope:  providerIntentScope(opened.harness, updatedAttempt, fixFrontier, opened.pull),
+		Branch: updatedAttempt.Branch(), ExpectedRemoteHead: initialHead, Head: fixHead, Tree: fixTree,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened.clock.now = mustTime(t, "2026-07-21T16:00:00Z")
+	if _, _, err := workspace.ReserveProviderIntent(
+		opened.harness.journal, opened.harness.definition, opened.evaluator,
+		workspace.ReserveProviderIntentRequest{Intent: push, OccurredAt: mustTime(t, "2026-07-21T16:00:01Z")},
+	); err != nil {
+		t.Fatalf("reserve review-fix push: %v", err)
+	}
+	opened.clock.now = mustTime(t, "2026-07-21T16:00:02Z")
+	pushTicket, err := workspace.AuthorizeProviderIntentDispatch(
+		opened.harness.journal, opened.harness.definition, opened.evaluator, opened.broker, push.IntentID(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution, err := workspace.ExecuteProviderIntent(
+		context.Background(), opened.harness.journal, opened.harness.definition, opened.broker, pushTicket,
+		mustTime(t, "2026-07-21T16:00:03Z"),
+	); err != nil || execution.Result().Status() != workspace.ProviderIntentSucceeded {
+		t.Fatalf("execute review-fix push = %#v err=%v", execution, err)
+	}
+	if expected, ok := opened.adapter.lastPush.ExpectedRemoteHead(); !ok || expected != initialHead {
+		t.Fatalf("review-fix push lease = %s, %v; want prior PR head %s", expected, ok, initialHead)
+	}
+
+	merge := opened.mergeIntent(t, opened.pull)
+	if merge.IntegrationBaseHead() != opened.base || merge.Frontier().Base() != initialHead {
+		t.Fatalf("merge bases = integration %s authorization %s", merge.IntegrationBaseHead(), merge.Frontier().Base())
+	}
+	opened.clock.now = mustTime(t, "2026-07-21T16:01:00Z")
+	if _, _, err := workspace.ReserveProviderIntent(
+		opened.harness.journal, opened.harness.definition, opened.evaluator,
+		workspace.ReserveProviderIntentRequest{Intent: merge, OccurredAt: mustTime(t, "2026-07-21T16:01:01Z")},
+	); err != nil {
+		t.Fatalf("reserve review-fix merge: %v", err)
+	}
+	if _, _, err := workspace.RecordProviderMergePreflight(
+		context.Background(), opened.harness.journal, opened.harness.definition, opened.broker,
+		merge.IntentID(), mustTime(t, "2026-07-21T16:01:02Z"),
+	); err != nil {
+		t.Fatalf("record review-fix merge preflight: %v", err)
+	}
+	opened.clock.now = mustTime(t, "2026-07-21T16:02:00Z")
+	mergeTicket, err := workspace.AuthorizeProviderIntentDispatch(
+		opened.harness.journal, opened.harness.definition, opened.evaluator, opened.broker, merge.IntentID(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mergeCommit := mustGitObject(t, '1')
+	opened.adapter.mergeResult, _ = workspace.NewProviderMergeAdapterResult("review-fix-merge", mergeCommit, mergeCommit)
+	if execution, err := workspace.ExecuteProviderIntent(
+		context.Background(), opened.harness.journal, opened.harness.definition, opened.broker, mergeTicket,
+		mustTime(t, "2026-07-21T16:02:01Z"),
+	); err != nil || execution.Result().Status() != workspace.ProviderIntentSucceeded {
+		t.Fatalf("execute review-fix merge = %#v err=%v", execution, err)
+	}
+	if opened.adapter.lastMerge.ExpectedBaseHead() != opened.base {
+		t.Fatalf("provider merge expected base = %s, want durable integration base %s", opened.adapter.lastMerge.ExpectedBaseHead(), opened.base)
+	}
+
+	opened.adapter.pullRequestState = providerPRState(
+		t, opened.harness, updatedAttempt, opened.pull, fixHead, fixTree, opened.base, mergeCommit, true,
+	)
+	headCommit, _ := workspace.NewProviderGitCommit(fixHead, fixTree, []workspace.GitObjectID{initialHead})
+	mergeObject, _ := workspace.NewProviderGitCommit(
+		mergeCommit, fixTree, []workspace.GitObjectID{opened.base, fixHead},
+	)
+	git := &providerCompletionGit{
+		remoteBranch: fixHead, remoteBase: mergeCommit,
+		commits: map[string]workspace.ProviderGitCommit{
+			fixHead.String(): headCommit, mergeCommit.String(): mergeObject,
+		},
+		ancestors: map[string]bool{
+			opened.base.String() + "\x00" + mergeCommit.String(): true,
+			fixHead.String() + "\x00" + mergeCommit.String():     true,
+		},
+	}
+	receipt, _, err := workspace.VerifyAndRecordProviderCompletion(
+		context.Background(), opened.harness.journal, opened.harness.definition, opened.broker, git,
+		workspace.ProviderCompletionRequest{
+			AttemptID: updatedAttempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T16:03:00Z"),
+		},
+	)
+	if err != nil || receipt.BaseHead() != opened.base || receipt.Head() != fixHead {
+		t.Fatalf("review-fix completion receipt = %#v err=%v", receipt, err)
 	}
 }
 
