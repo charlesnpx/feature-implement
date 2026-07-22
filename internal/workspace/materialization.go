@@ -18,6 +18,9 @@ const (
 	MaterializationStateFileName                = "feature.materialization.state.v2.json"
 	MaterializationPendingFileName              = "feature.materialization.pending.v2.json"
 	MaterializationStagingDirectoryName         = "feature.materialization.staging.v2"
+	MaterializationOwnershipDirectoryName       = "feature.materialization.ownership.v2"
+	MaterializationOwnershipProofFileName       = "feature.materialization.ownership.v2.proof"
+	MaterializationDirectoryClaimFileName       = "feature.materialization.directory.v2.claim"
 	MaterializationInventorySchemaVersion       = 2
 	MaxMaterializationArtifactBytes       int64 = 16 << 20
 	MaxMaterializationTotalBytes          int64 = 64 << 20
@@ -26,6 +29,7 @@ const (
 	maxMaterializationPathBytes                 = 4096
 	maxMaterializationComponentBytes            = 200
 	materializationTransactionPathPrefix        = "feature.materialization.txn-"
+	materializationOwnershipRootClaimName       = "root.claim"
 )
 
 var materializationControlPaths = []string{
@@ -33,6 +37,8 @@ var materializationControlPaths = []string{
 	MaterializationStateFileName,
 	MaterializationPendingFileName,
 	MaterializationStagingDirectoryName,
+	MaterializationOwnershipDirectoryName,
+	MaterializationOwnershipProofFileName,
 }
 
 type MaterializationArtifact struct {
@@ -455,8 +461,10 @@ func normalizeMaterializationPath(value string) (string, error) {
 
 func materializationPathUsesTransactionNamespace(relative string) bool {
 	prefixKey := materializationCollisionKey(materializationTransactionPathPrefix)
+	directoryClaimKey := materializationCollisionKey(MaterializationDirectoryClaimFileName)
 	for _, component := range strings.Split(relative, "/") {
-		if strings.HasPrefix(materializationCollisionKey(component), prefixKey) {
+		componentKey := materializationCollisionKey(component)
+		if strings.HasPrefix(componentKey, prefixKey) || componentKey == directoryClaimKey {
 			return true
 		}
 	}

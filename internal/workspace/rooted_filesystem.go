@@ -201,6 +201,9 @@ func readRootDirectoryEntries(directory *os.Root) ([]rootedDirectoryEntry, error
 	for _, entry := range entries {
 		info, err := directory.Lstat(entry.Name())
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			return nil, fmt.Errorf("inspect rooted directory entry %s: %w", entry.Name(), err)
 		}
 		result = append(result, rootedDirectoryEntry{name: entry.Name(), info: info})
@@ -442,37 +445,6 @@ func (adapter *RootedFilesystemAdapter) writeFileExclusive(relative string, cont
 	return syncRootHandle(directory)
 }
 
-// replaceFileFromTemporary atomically activates a deterministic sibling
-// temporary that was durably recorded by the materialization transaction.
-func (adapter *RootedFilesystemAdapter) replaceFileFromTemporary(relative, temporary string) error {
-	if path.Dir(relative) != path.Dir(temporary) {
-		return fmt.Errorf("rooted replacement requires sibling paths")
-	}
-	directory, err := adapter.openDirectoryExact(path.Dir(relative))
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	temporaryBase := path.Base(temporary)
-	targetBase := path.Base(relative)
-	temporaryInfo, exists, err := inspectRootEntryExact(directory, temporaryBase)
-	if err != nil || !exists || !temporaryInfo.Mode().IsRegular() {
-		if err == nil {
-			err = fmt.Errorf("temporary file is missing or invalid")
-		}
-		return fmt.Errorf("activate rooted file %s: %w", relative, err)
-	}
-	if targetInfo, exists, err := inspectRootEntryExact(directory, targetBase); err != nil {
-		return err
-	} else if exists && (targetInfo.Mode()&os.ModeSymlink != 0 || !targetInfo.Mode().IsRegular()) {
-		return fmt.Errorf("rooted path %s cannot be replaced because it is not a regular file", relative)
-	}
-	if err := directory.Rename(temporaryBase, targetBase); err != nil {
-		return fmt.Errorf("activate rooted file %s: %w", relative, err)
-	}
-	return syncRootHandle(directory)
-}
-
 func (adapter *RootedFilesystemAdapter) renameFileNoReplace(source, destination string) error {
 	return adapter.renamePathNoReplace(source, destination, false)
 }
@@ -482,17 +454,19 @@ func (adapter *RootedFilesystemAdapter) renameDirectoryNoReplace(source, destina
 }
 
 func (adapter *RootedFilesystemAdapter) renamePathNoReplace(source, destination string, directorySource bool) error {
-	if path.Dir(source) != path.Dir(destination) {
-		return fmt.Errorf("rooted quarantine rename requires sibling paths")
-	}
-	directory, err := adapter.openDirectoryExact(path.Dir(source))
+	sourceDirectory, err := adapter.openDirectoryExact(path.Dir(source))
 	if err != nil {
 		return err
 	}
-	defer directory.Close()
+	defer sourceDirectory.Close()
+	destinationDirectory, err := adapter.openDirectoryExact(path.Dir(destination))
+	if err != nil {
+		return err
+	}
+	defer destinationDirectory.Close()
 	sourceBase := path.Base(source)
 	destinationBase := path.Base(destination)
-	info, exists, err := inspectRootEntryExact(directory, sourceBase)
+	info, exists, err := inspectRootEntryExact(sourceDirectory, sourceBase)
 	validSource := exists && info.Mode()&os.ModeSymlink == 0
 	if directorySource {
 		validSource = validSource && info.IsDir()
@@ -505,72 +479,233 @@ func (adapter *RootedFilesystemAdapter) renamePathNoReplace(source, destination 
 		}
 		return fmt.Errorf("quarantine rooted file %s: %w", source, err)
 	}
-	if _, exists, err := inspectRootEntryExact(directory, destinationBase); err != nil {
+	openedSourceDirectory, err := sourceDirectory.Open(".")
+	if err != nil {
+		return fmt.Errorf("open rooted quarantine parent: %w", err)
+	}
+	defer openedSourceDirectory.Close()
+	openedSource, err := openFileDescriptorNoFollow(openedSourceDirectory, sourceBase, directorySource)
+	if err != nil {
+		return fmt.Errorf("open rooted quarantine source %s without following links: %w", source, err)
+	}
+	defer openedSource.Close()
+	openedInfo, err := openedSource.Stat()
+	if err != nil || !os.SameFile(info, openedInfo) {
+		if err == nil {
+			err = fmt.Errorf("source identity changed")
+		}
+		return fmt.Errorf("verify rooted quarantine source %s: %w", source, err)
+	}
+	if _, exists, err := inspectRootEntryExact(destinationDirectory, destinationBase); err != nil {
 		return err
 	} else if exists {
 		return fmt.Errorf("rooted quarantine path %s already exists", destination)
 	}
-	opened, err := directory.Open(".")
+	openedDestinationDirectory, err := destinationDirectory.Open(".")
 	if err != nil {
-		return fmt.Errorf("open rooted quarantine parent: %w", err)
+		return fmt.Errorf("open rooted quarantine destination parent: %w", err)
 	}
-	defer opened.Close()
-	if err := renameFileDescriptorNoReplace(opened, sourceBase, destinationBase); err != nil {
+	defer openedDestinationDirectory.Close()
+	if err := renameFileDescriptorNoReplace(
+		openedSourceDirectory, sourceBase,
+		openedDestinationDirectory, destinationBase,
+	); err != nil {
 		return fmt.Errorf("quarantine rooted file %s: %w", source, err)
 	}
-	return syncRootHandle(directory)
+	movedInfo, movedExists, verifyErr := inspectRootEntryExact(destinationDirectory, destinationBase)
+	if verifyErr != nil || !movedExists || !os.SameFile(openedInfo, movedInfo) {
+		if verifyErr == nil {
+			verifyErr = fmt.Errorf("quarantined identity changed")
+		}
+		restoreErr := restoreRootedPathNoReplace(
+			openedDestinationDirectory, destinationBase,
+			openedSourceDirectory, sourceBase,
+		)
+		if restoreErr != nil {
+			return fmt.Errorf("verify quarantined rooted path %s: %w; restore moved path: %v", destination, verifyErr, restoreErr)
+		}
+		return fmt.Errorf("verify quarantined rooted path %s: %w", destination, verifyErr)
+	}
+	if err := syncRootHandle(sourceDirectory); err != nil {
+		return err
+	}
+	if path.Dir(source) != path.Dir(destination) {
+		return syncRootHandle(destinationDirectory)
+	}
+	return nil
 }
 
 func (adapter *RootedFilesystemAdapter) linkFileNoReplace(source, destination string) error {
-	if path.Dir(source) != path.Dir(destination) {
-		return fmt.Errorf("rooted activation link requires sibling paths")
-	}
-	directory, err := adapter.openDirectoryExact(path.Dir(source))
+	return adapter.linkFileNoReplaceVerified(source, "", destination)
+}
+
+func (adapter *RootedFilesystemAdapter) linkFileNoReplaceVerified(source, proof, destination string) error {
+	sourceDirectory, err := adapter.openDirectoryExact(path.Dir(source))
 	if err != nil {
 		return err
 	}
-	defer directory.Close()
+	defer sourceDirectory.Close()
+	destinationDirectory, err := adapter.openDirectoryExact(path.Dir(destination))
+	if err != nil {
+		return err
+	}
+	defer destinationDirectory.Close()
 	sourceBase := path.Base(source)
 	destinationBase := path.Base(destination)
-	info, exists, err := inspectRootEntryExact(directory, sourceBase)
+	info, exists, err := inspectRootEntryExact(sourceDirectory, sourceBase)
 	if err != nil || !exists || !info.Mode().IsRegular() {
 		if err == nil {
 			err = fmt.Errorf("activation source is missing or invalid")
 		}
 		return err
 	}
-	if _, exists, err := inspectRootEntryExact(directory, destinationBase); err != nil {
+	openedSourceDirectory, err := sourceDirectory.Open(".")
+	if err != nil {
+		return fmt.Errorf("open rooted link source parent: %w", err)
+	}
+	defer openedSourceDirectory.Close()
+	openedSource, err := openFileDescriptorNoFollow(openedSourceDirectory, sourceBase, false)
+	if err != nil {
+		return fmt.Errorf("open rooted link source %s without following links: %w", source, err)
+	}
+	defer openedSource.Close()
+	openedInfo, err := openedSource.Stat()
+	if err != nil || !os.SameFile(info, openedInfo) {
+		if err == nil {
+			err = fmt.Errorf("source identity changed")
+		}
+		return fmt.Errorf("verify rooted link source %s: %w", source, err)
+	}
+	if proof != "" {
+		proofDirectory, err := adapter.openDirectoryExact(path.Dir(proof))
+		if err != nil {
+			return err
+		}
+		defer proofDirectory.Close()
+		proofInfo, proofExists, err := inspectRootEntryExact(proofDirectory, path.Base(proof))
+		if err != nil || !proofExists || !proofInfo.Mode().IsRegular() {
+			if err == nil {
+				err = fmt.Errorf("identity proof is missing or invalid")
+			}
+			return fmt.Errorf("inspect rooted link proof %s: %w", proof, err)
+		}
+		openedProofDirectory, err := proofDirectory.Open(".")
+		if err != nil {
+			return fmt.Errorf("open rooted link proof parent: %w", err)
+		}
+		defer openedProofDirectory.Close()
+		openedProof, err := openFileDescriptorNoFollow(openedProofDirectory, path.Base(proof), false)
+		if err != nil {
+			return fmt.Errorf("open rooted link proof %s without following links: %w", proof, err)
+		}
+		defer openedProof.Close()
+		openedProofInfo, err := openedProof.Stat()
+		if err != nil || !os.SameFile(proofInfo, openedProofInfo) || !os.SameFile(openedInfo, openedProofInfo) {
+			if err == nil {
+				err = fmt.Errorf("link source does not match its identity proof")
+			}
+			return fmt.Errorf("verify rooted link proof %s: %w", proof, err)
+		}
+	}
+	if _, exists, err := inspectRootEntryExact(destinationDirectory, destinationBase); err != nil {
 		return err
 	} else if exists {
 		return fmt.Errorf("rooted activation target %s already exists", destination)
 	}
-	if err := directory.Link(sourceBase, destinationBase); err != nil {
+	openedDestinationDirectory, err := destinationDirectory.Open(".")
+	if err != nil {
+		return fmt.Errorf("open rooted link destination parent: %w", err)
+	}
+	defer openedDestinationDirectory.Close()
+	if err := linkFileDescriptorNoReplace(
+		openedSourceDirectory, sourceBase,
+		openedDestinationDirectory, destinationBase,
+	); err != nil {
 		return fmt.Errorf("link rooted activation %s: %w", destination, err)
 	}
-	return syncRootHandle(directory)
+	linkedInfo, linkedExists, verifyErr := inspectRootEntryExact(destinationDirectory, destinationBase)
+	if verifyErr != nil || !linkedExists || !os.SameFile(openedInfo, linkedInfo) {
+		if verifyErr == nil {
+			verifyErr = fmt.Errorf("linked identity changed")
+		}
+		if removeErr := destinationDirectory.Remove(destinationBase); removeErr != nil {
+			return fmt.Errorf("verify rooted activation link %s: %w; remove invalid link: %v", destination, verifyErr, removeErr)
+		}
+		return fmt.Errorf("verify rooted activation link %s: %w", destination, verifyErr)
+	}
+	return syncRootHandle(destinationDirectory)
 }
 
 func (adapter *RootedFilesystemAdapter) sameFile(left, right string) (bool, error) {
-	if path.Dir(left) != path.Dir(right) {
-		return false, fmt.Errorf("rooted identity comparison requires sibling paths")
-	}
-	directory, err := adapter.openDirectoryExact(path.Dir(left))
+	leftDirectory, err := adapter.openDirectoryExact(path.Dir(left))
 	if err != nil {
 		return false, err
 	}
-	defer directory.Close()
-	leftInfo, leftExists, err := inspectRootEntryExact(directory, path.Base(left))
+	defer leftDirectory.Close()
+	rightDirectory, err := adapter.openDirectoryExact(path.Dir(right))
+	if err != nil {
+		return false, err
+	}
+	defer rightDirectory.Close()
+	leftInfo, leftExists, err := inspectRootEntryExact(leftDirectory, path.Base(left))
 	if err != nil || !leftExists {
 		return false, err
 	}
-	rightInfo, rightExists, err := inspectRootEntryExact(directory, path.Base(right))
+	rightInfo, rightExists, err := inspectRootEntryExact(rightDirectory, path.Base(right))
 	if err != nil || !rightExists {
 		return false, err
 	}
 	if leftInfo.Mode()&os.ModeSymlink != 0 || rightInfo.Mode()&os.ModeSymlink != 0 {
 		return false, fmt.Errorf("rooted identity comparison rejects symlinks")
 	}
-	return os.SameFile(leftInfo, rightInfo), nil
+	if (!leftInfo.Mode().IsRegular() && !leftInfo.IsDir()) ||
+		(!rightInfo.Mode().IsRegular() && !rightInfo.IsDir()) {
+		return false, fmt.Errorf("rooted identity comparison requires regular files or directories")
+	}
+	openedLeftDirectory, err := leftDirectory.Open(".")
+	if err != nil {
+		return false, err
+	}
+	defer openedLeftDirectory.Close()
+	openedLeft, err := openFileDescriptorNoFollow(openedLeftDirectory, path.Base(left), leftInfo.IsDir())
+	if err != nil {
+		return false, err
+	}
+	defer openedLeft.Close()
+	openedLeftInfo, err := openedLeft.Stat()
+	if err != nil || !os.SameFile(leftInfo, openedLeftInfo) {
+		if err == nil {
+			err = fmt.Errorf("left identity changed")
+		}
+		return false, err
+	}
+	openedRightDirectory, err := rightDirectory.Open(".")
+	if err != nil {
+		return false, err
+	}
+	defer openedRightDirectory.Close()
+	openedRight, err := openFileDescriptorNoFollow(openedRightDirectory, path.Base(right), rightInfo.IsDir())
+	if err != nil {
+		return false, err
+	}
+	defer openedRight.Close()
+	openedRightInfo, err := openedRight.Stat()
+	if err != nil || !os.SameFile(rightInfo, openedRightInfo) {
+		if err == nil {
+			err = fmt.Errorf("right identity changed")
+		}
+		return false, err
+	}
+	return os.SameFile(openedLeftInfo, openedRightInfo), nil
+}
+
+func restoreRootedPathNoReplace(
+	sourceDirectory *os.File,
+	source string,
+	destinationDirectory *os.File,
+	destination string,
+) error {
+	return renameFileDescriptorNoReplace(sourceDirectory, source, destinationDirectory, destination)
 }
 
 func (adapter *RootedFilesystemAdapter) removeFile(relative string) error {
