@@ -195,7 +195,7 @@ func SynchronizeMaterialization(
 	if err := applyPendingMaterialization(adapter, pending, control, nextBytes, nextHash, options); err != nil {
 		return MaterializationResult{}, err
 	}
-	if err := cleanupPendingMaterialization(adapter, pending); err != nil {
+	if err := cleanupPendingMaterialization(adapter, pending, options); err != nil {
 		return MaterializationResult{}, err
 	}
 
@@ -226,45 +226,130 @@ func loadMaterializationControl(
 	desired desiredMaterialization,
 	options MaterializationOptions,
 ) (materializationControlState, bool, error) {
+	pendingExists, err := rootedPathExists(adapter, MaterializationPendingFileName)
+	if err != nil {
+		return materializationControlState{}, false, newMaterializationCorruption("inspect pending transaction: %v", err)
+	}
+	cleanupExists, err := rootedPathExists(adapter, MaterializationCleanupFileName)
+	if err != nil {
+		return materializationControlState{}, false, newMaterializationCorruption("inspect pending cleanup transaction: %v", err)
+	}
 	stateExists, err := rootedPathExists(adapter, MaterializationStateFileName)
 	if err != nil {
 		return materializationControlState{}, false, newMaterializationCorruption("inspect state file: %v", err)
 	}
-	if !stateExists {
-		entries, err := adapter.readDirectory(".")
+	if cleanupExists {
+		if !stateExists {
+			return materializationControlState{}, false, newMaterializationCorruption(
+				"pending cleanup exists without an active state file",
+			)
+		}
+		if err := verifyMaterializationOwnershipNamespace(adapter); err != nil {
+			return materializationControlState{}, false, err
+		}
+		pending, err := readCleanupPendingMaterialization(adapter)
 		if err != nil {
 			return materializationControlState{}, false, err
 		}
-		if len(entries) != 0 {
-			for _, entry := range entries {
-				for _, control := range materializationControlPaths {
-					if materializationCollisionKey(entry.name) == materializationCollisionKey(control) {
-						return materializationControlState{}, false, newMaterializationCorruption(
-							"reserved control path %s exists without %s", entry.name, MaterializationStateFileName,
-						)
+		if err := verifyPendingCleanupAuthority(adapter, pending); err != nil {
+			return materializationControlState{}, false, err
+		}
+		if err := cleanupPendingMaterialization(adapter, pending, MaterializationOptions{}); err != nil {
+			return materializationControlState{}, false, err
+		}
+		state, stateBytes, err := readMaterializationStateWithBytes(adapter)
+		if err != nil {
+			return materializationControlState{}, false, err
+		}
+		control, err := readActiveMaterializationControl(adapter, state, stateBytes)
+		if err != nil {
+			return materializationControlState{}, false, err
+		}
+		if err := rejectOrphanMaterializationControls(adapter, control); err != nil {
+			return materializationControlState{}, false, err
+		}
+		return control, true, nil
+	}
+
+	var pending pendingMaterializationWire
+	var pendingLoaded bool
+	var nextInventoryBytes []byte
+	var nextInventoryHash Digest
+	var activeStateBytes []byte
+	loadPending := func() error {
+		if pendingLoaded {
+			return nil
+		}
+		var loadErr error
+		pending, loadErr = readPendingMaterialization(adapter)
+		if loadErr != nil {
+			return loadErr
+		}
+		nextInventoryBytes, nextInventoryHash, activeStateBytes, loadErr = pendingMaterializationRecoveryPayload(pending)
+		if loadErr != nil {
+			return loadErr
+		}
+		pendingLoaded = true
+		return nil
+	}
+	if !stateExists {
+		if pendingExists {
+			if err := verifyMaterializationOwnershipNamespace(adapter); err != nil {
+				return materializationControlState{}, false, err
+			}
+			if err := loadPending(); err != nil {
+				return materializationControlState{}, false, err
+			}
+			if err := verifyActivatedPendingControl(adapter, pending.InventoryControl, nextInventoryBytes); err != nil {
+				return materializationControlState{}, false, newMaterializationCorruption(
+					"state is missing before the pending inventory is active: %v", err,
+				)
+			}
+			if err := verifyPendingMaterialization(adapter, pending); err != nil {
+				return materializationControlState{}, false, err
+			}
+			if err := activatePendingControlFile(
+				adapter, pending.StateControl, activeStateBytes, MaterializationOptions{},
+			); err != nil {
+				return materializationControlState{}, false, fmt.Errorf("recover missing materialization state: %w", err)
+			}
+			stateExists = true
+		} else {
+			entries, err := adapter.readDirectory(".")
+			if err != nil {
+				return materializationControlState{}, false, err
+			}
+			if len(entries) != 0 {
+				for _, entry := range entries {
+					for _, control := range materializationControlPaths {
+						if materializationCollisionKey(entry.name) == materializationCollisionKey(control) {
+							return materializationControlState{}, false, newMaterializationCorruption(
+								"reserved control path %s exists without %s", entry.name, MaterializationStateFileName,
+							)
+						}
 					}
 				}
+				conflicts := make([]MaterializationConflict, 0, len(entries))
+				for _, entry := range entries {
+					conflicts = append(conflicts, MaterializationConflict{
+						kind: MaterializationConflictUnownedDestination, path: entry.name,
+						detail: "destination is nonempty and has no ownership inventory",
+					})
+				}
+				sortMaterializationConflicts(conflicts)
+				return materializationControlState{}, false, MaterializationConflictError{conflicts: conflicts}
 			}
-			conflicts := make([]MaterializationConflict, 0, len(entries))
-			for _, entry := range entries {
-				conflicts = append(conflicts, MaterializationConflict{
-					kind: MaterializationConflictUnownedDestination, path: entry.name,
-					detail: "destination is nonempty and has no ownership inventory",
-				})
+			state := materializationStateWire{
+				SchemaVersion:       MaterializationInventorySchemaVersion,
+				Phase:               materializationPhaseBootstrap,
+				ActiveInventoryHash: "",
 			}
-			sortMaterializationConflicts(conflicts)
-			return materializationControlState{}, false, MaterializationConflictError{conflicts: conflicts}
-		}
-		state := materializationStateWire{
-			SchemaVersion:       MaterializationInventorySchemaVersion,
-			Phase:               materializationPhaseBootstrap,
-			ActiveInventoryHash: "",
-		}
-		if err := createBootstrapMaterializationState(adapter, state); err != nil {
-			return materializationControlState{}, false, err
-		}
-		if err := injectMaterialization(options, MaterializationFaultAfterBootstrapState); err != nil {
-			return materializationControlState{}, false, err
+			if err := createBootstrapMaterializationState(adapter, state); err != nil {
+				return materializationControlState{}, false, err
+			}
+			if err := injectMaterialization(options, MaterializationFaultAfterBootstrapState); err != nil {
+				return materializationControlState{}, false, err
+			}
 		}
 	}
 
@@ -275,38 +360,45 @@ func loadMaterializationControl(
 	if err := verifyMaterializationOwnershipNamespace(adapter); err != nil {
 		return materializationControlState{}, false, err
 	}
+	if pendingExists {
+		if err := loadPending(); err != nil {
+			return materializationControlState{}, false, err
+		}
+		inventoryExists, err := rootedPathExists(adapter, MaterializationInventoryFileName)
+		if err != nil {
+			return materializationControlState{}, false, err
+		}
+		if !inventoryExists && pending.InventoryControl.Expected == "hash" {
+			if DigestBytes(stateBytes).String() != pending.PreviousStateHash {
+				return materializationControlState{}, false, newMaterializationCorruption(
+					"inventory is missing after the active state changed",
+				)
+			}
+			if err := verifyPendingMaterialization(adapter, pending); err != nil {
+				return materializationControlState{}, false, err
+			}
+			if err := activatePendingControlFile(
+				adapter, pending.InventoryControl, nextInventoryBytes, MaterializationOptions{},
+			); err != nil {
+				return materializationControlState{}, false, fmt.Errorf("recover missing materialization inventory: %w", err)
+			}
+		}
+	}
 	control, err := readActiveMaterializationControl(adapter, state, stateBytes)
 	if err != nil {
 		return materializationControlState{}, false, err
 	}
-	pendingExists, err := rootedPathExists(adapter, MaterializationPendingFileName)
-	if err != nil {
-		return materializationControlState{}, false, newMaterializationCorruption("inspect pending transaction: %v", err)
-	}
 	recovered := false
 	if pendingExists {
-		pending, err := readPendingMaterialization(adapter)
-		if err != nil {
-			return materializationControlState{}, false, err
-		}
-		nextInventory, err := normalizeMaterializationInventoryWire(pending.NextInventory)
-		if err != nil {
-			return materializationControlState{}, false, err
-		}
-		nextBytes, nextHash, err := marshalMaterializationInventory(nextInventory)
-		if err != nil {
-			return materializationControlState{}, false, err
-		}
-		if nextHash.String() != pending.NextInventoryHash {
-			return materializationControlState{}, false, newMaterializationCorruption("pending next-inventory hash does not match its canonical bytes")
-		}
 		if err := validatePendingStage(adapter, pending); err != nil {
 			return materializationControlState{}, false, fmt.Errorf("recover pending materialization staging: %w", err)
 		}
-		if err := applyPendingMaterialization(adapter, pending, control, nextBytes, nextHash, MaterializationOptions{}); err != nil {
+		if err := applyPendingMaterialization(
+			adapter, pending, control, nextInventoryBytes, nextInventoryHash, MaterializationOptions{},
+		); err != nil {
 			return materializationControlState{}, false, fmt.Errorf("recover pending materialization: %w", err)
 		}
-		if err := cleanupPendingMaterialization(adapter, pending); err != nil {
+		if err := cleanupPendingMaterialization(adapter, pending, MaterializationOptions{}); err != nil {
 			return materializationControlState{}, false, err
 		}
 		recovered = true
@@ -338,6 +430,38 @@ func loadMaterializationControl(
 		}
 	}
 	return control, recovered, nil
+}
+
+func pendingMaterializationRecoveryPayload(
+	pending pendingMaterializationWire,
+) ([]byte, Digest, []byte, error) {
+	nextInventory, err := normalizeMaterializationInventoryWire(pending.NextInventory)
+	if err != nil {
+		return nil, Digest{}, nil, err
+	}
+	nextBytes, nextHash, err := marshalMaterializationInventory(nextInventory)
+	if err != nil {
+		return nil, Digest{}, nil, err
+	}
+	if nextHash.String() != pending.NextInventoryHash {
+		return nil, Digest{}, nil, newMaterializationCorruption(
+			"pending next-inventory hash does not match its canonical bytes",
+		)
+	}
+	activeStateBytes, err := marshalMaterializationState(materializationStateWire{
+		SchemaVersion:       MaterializationInventorySchemaVersion,
+		Phase:               materializationPhaseActive,
+		ActiveInventoryHash: pending.NextInventoryHash,
+	})
+	if err != nil {
+		return nil, Digest{}, nil, err
+	}
+	if DigestBytes(activeStateBytes).String() != pending.StateControl.NewHash {
+		return nil, Digest{}, nil, newMaterializationCorruption(
+			"pending active-state hash does not match its canonical bytes",
+		)
+	}
+	return nextBytes, nextHash, activeStateBytes, nil
 }
 
 func readActiveMaterializationControl(
@@ -1062,6 +1186,7 @@ func preflightPendingMaterializationPaths(
 ) error {
 	paths := []string{
 		MaterializationPendingFileName,
+		MaterializationCleanupFileName,
 		pending.PendingTemporaryPath,
 		pending.PendingProofPath,
 	}
@@ -1120,6 +1245,66 @@ func readPendingMaterialization(adapter *RootedFilesystemAdapter) (pendingMateri
 	if err != nil {
 		return pendingMaterializationWire{}, newMaterializationCorruption("read pending transaction: %v", err)
 	}
+	pending, err := decodePendingMaterialization(content)
+	if err != nil {
+		return pendingMaterializationWire{}, err
+	}
+	same, err := adapter.sameFile(MaterializationPendingFileName, pending.PendingProofPath)
+	if err != nil || !same {
+		if err == nil {
+			err = fmt.Errorf("pending transaction identity does not match its proof")
+		}
+		return pendingMaterializationWire{}, newMaterializationCorruption("verify pending transaction identity: %v", err)
+	}
+	return pending, nil
+}
+
+func readCleanupPendingMaterialization(adapter *RootedFilesystemAdapter) (pendingMaterializationWire, error) {
+	content, err := adapter.readBounded(MaterializationCleanupFileName, MaxMaterializationControlBytes)
+	if err != nil {
+		return pendingMaterializationWire{}, newMaterializationCorruption("read pending cleanup transaction: %v", err)
+	}
+	pending, err := decodePendingMaterialization(content)
+	if err != nil {
+		return pendingMaterializationWire{}, err
+	}
+	canonical, err := marshalPendingMaterialization(pending)
+	if err != nil {
+		return pendingMaterializationWire{}, err
+	}
+	if string(content) != string(canonical) {
+		return pendingMaterializationWire{}, newMaterializationCorruption("pending cleanup transaction is not canonical")
+	}
+	pendingExists, err := rootedPathExists(adapter, MaterializationPendingFileName)
+	if err != nil {
+		return pendingMaterializationWire{}, err
+	}
+	proofExists, err := rootedPathExists(adapter, pending.PendingProofPath)
+	if err != nil {
+		return pendingMaterializationWire{}, err
+	}
+	for _, candidate := range []struct {
+		path   string
+		exists bool
+	}{
+		{path: MaterializationPendingFileName, exists: pendingExists},
+		{path: pending.PendingProofPath, exists: proofExists},
+	} {
+		if !candidate.exists {
+			continue
+		}
+		same, err := adapter.sameFile(MaterializationCleanupFileName, candidate.path)
+		if err != nil || !same {
+			if err == nil {
+				err = fmt.Errorf("cleanup record does not match %s", candidate.path)
+			}
+			return pendingMaterializationWire{}, newMaterializationCorruption("verify pending cleanup identity: %v", err)
+		}
+	}
+	return pending, nil
+}
+
+func decodePendingMaterialization(content []byte) (pendingMaterializationWire, error) {
 	if err := rejectDuplicateJSONObjectKeys(content); err != nil {
 		return pendingMaterializationWire{}, newMaterializationCorruption("pending transaction JSON: %v", err)
 	}
@@ -1129,13 +1314,6 @@ func readPendingMaterialization(adapter *RootedFilesystemAdapter) (pendingMateri
 	}
 	if err := validatePendingMaterialization(pending); err != nil {
 		return pendingMaterializationWire{}, err
-	}
-	same, err := adapter.sameFile(MaterializationPendingFileName, pending.PendingProofPath)
-	if err != nil || !same {
-		if err == nil {
-			err = fmt.Errorf("pending transaction identity does not match its proof")
-		}
-		return pendingMaterializationWire{}, newMaterializationCorruption("verify pending transaction identity: %v", err)
 	}
 	return pending, nil
 }
@@ -2429,13 +2607,13 @@ func verifyPendingMaterialization(adapter *RootedFilesystemAdapter, pending pend
 func cleanupPendingMaterialization(
 	adapter *RootedFilesystemAdapter,
 	pending pendingMaterializationWire,
+	options MaterializationOptions,
 ) error {
-	state, err := readMaterializationState(adapter)
-	if err != nil {
+	if err := ensurePendingCleanupMarker(adapter, pending, options); err != nil {
 		return err
 	}
-	if state.Phase != materializationPhaseActive || state.ActiveInventoryHash != pending.NextInventoryHash {
-		return newMaterializationCorruption("pending cleanup requires the next inventory to be active")
+	if err := verifyPendingCleanupAuthority(adapter, pending); err != nil {
+		return err
 	}
 
 	for _, write := range pending.Writes {
@@ -2443,25 +2621,27 @@ func cleanupPendingMaterialization(
 			continue
 		}
 		if err := cleanupPendingQuarantine(
-			adapter, write.ArtifactID, write.Path, write.SourceProofPath, write.QuarantinePath, write.ExpectedHash, write.StageProofPath,
+			adapter, write.ArtifactID, write.Path, write.SourceProofPath, write.QuarantinePath,
+			write.ExpectedHash, write.StageProofPath, options,
 		); err != nil {
 			return err
 		}
 	}
 	for _, deletion := range pending.Deletes {
 		if err := cleanupPendingQuarantine(
-			adapter, deletion.ArtifactID, deletion.Path, deletion.SourceProofPath, deletion.QuarantinePath, deletion.ExpectedHash, "",
+			adapter, deletion.ArtifactID, deletion.Path, deletion.SourceProofPath, deletion.QuarantinePath,
+			deletion.ExpectedHash, "", options,
 		); err != nil {
 			return err
 		}
 	}
 	for _, directory := range pending.RemoveDirectories {
-		if err := cleanupPendingDirectoryRemoval(adapter, directory); err != nil {
+		if err := cleanupPendingDirectoryRemoval(adapter, directory, options); err != nil {
 			return err
 		}
 	}
 	for _, write := range pending.Writes {
-		if err := cleanupPendingActivation(adapter, write); err != nil {
+		if err := cleanupPendingActivation(adapter, write, options); err != nil {
 			return err
 		}
 	}
@@ -2471,11 +2651,15 @@ func cleanupPendingMaterialization(
 		); err != nil {
 			return newMaterializationCorruption("preserve directory proof for %s: %v", directory.Path, err)
 		}
-		same, err := adapter.sameFile(directory.ClaimAnchorPath, directory.ClaimProofPath)
-		if err != nil || !same {
-			return newMaterializationCorruption("preserve directory transaction proof for %s because its identity changed", directory.Path)
+		removed, err := adapter.removeFileExact(
+			directory.ClaimProofPath, directory.ClaimAnchorPath, cleanupBeforeUnlink(options),
+		)
+		if err != nil {
+			return newMaterializationCorruption(
+				"preserve directory transaction proof for %s: %v", directory.Path, err,
+			)
 		}
-		if err := adapter.removeFile(directory.ClaimProofPath); err != nil {
+		if err := recordPendingCleanupStep(options, removed); err != nil {
 			return err
 		}
 	}
@@ -2496,28 +2680,124 @@ func cleanupPendingMaterialization(
 	if err != nil {
 		return err
 	}
-	if err := cleanupPendingControl(adapter, pending.InventoryControl, nextInventoryBytes); err != nil {
+	if err := cleanupPendingControl(adapter, pending.InventoryControl, nextInventoryBytes, options); err != nil {
 		return err
 	}
-	if err := cleanupPendingControl(adapter, pending.StateControl, activeStateBytes); err != nil {
+	if err := cleanupPendingControl(adapter, pending.StateControl, activeStateBytes, options); err != nil {
 		return err
 	}
-	if err := cleanupPendingStaging(adapter, pending); err != nil {
+	if err := cleanupPendingStaging(adapter, pending, options); err != nil {
 		return err
-	}
-	same, err := adapter.sameFile(MaterializationPendingFileName, pending.PendingProofPath)
-	if err != nil || !same {
-		return newMaterializationCorruption("preserve completed pending transaction because its identity changed")
 	}
 	pendingBytes, err := marshalPendingMaterialization(pending)
 	if err != nil {
 		return err
 	}
-	if err := removePendingFileWithContent(adapter, MaterializationPendingFileName, pendingBytes, MaxMaterializationControlBytes); err != nil {
+	removed, err := adapter.removeFileExact(
+		MaterializationPendingFileName, MaterializationCleanupFileName, cleanupBeforeUnlink(options),
+	)
+	if err != nil {
 		return fmt.Errorf("remove completed pending transaction: %w", err)
 	}
-	if err := adapter.removeFile(pending.PendingProofPath); err != nil {
+	if err := recordPendingCleanupStep(options, removed); err != nil {
+		return err
+	}
+	removed, err = adapter.removeFileExact(
+		pending.PendingProofPath, MaterializationCleanupFileName, cleanupBeforeUnlink(options),
+	)
+	if err != nil {
 		return fmt.Errorf("remove completed pending transaction proof: %w", err)
+	}
+	if err := recordPendingCleanupStep(options, removed); err != nil {
+		return err
+	}
+	if err := verifyPendingCleanupPathsRemoved(adapter, pending); err != nil {
+		return err
+	}
+	removed, err = adapter.removeFileContentExact(
+		MaterializationCleanupFileName, pendingBytes, MaxMaterializationControlBytes,
+		cleanupBeforeUnlink(options),
+	)
+	if err != nil {
+		return fmt.Errorf("remove completed cleanup transaction: %w", err)
+	}
+	if !removed {
+		return newMaterializationCorruption("pending cleanup record disappeared before cleanup completed")
+	}
+	if err := recordPendingCleanupStep(options, true); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ensurePendingCleanupMarker(
+	adapter *RootedFilesystemAdapter,
+	pending pendingMaterializationWire,
+	options MaterializationOptions,
+) error {
+	pendingBytes, err := marshalPendingMaterialization(pending)
+	if err != nil {
+		return err
+	}
+	_, markerExists, err := adapter.inspectExact(MaterializationCleanupFileName)
+	if err != nil {
+		return err
+	}
+	if markerExists {
+		loaded, err := readCleanupPendingMaterialization(adapter)
+		if err != nil {
+			return err
+		}
+		loadedBytes, err := marshalPendingMaterialization(loaded)
+		if err != nil {
+			return err
+		}
+		if string(loadedBytes) != string(pendingBytes) {
+			return newMaterializationCorruption("pending cleanup record belongs to another transaction")
+		}
+		return nil
+	}
+	same, err := adapter.sameFile(MaterializationPendingFileName, pending.PendingProofPath)
+	if err != nil || !same {
+		if err == nil {
+			err = fmt.Errorf("pending transaction identity changed")
+		}
+		return newMaterializationCorruption("create pending cleanup record: %v", err)
+	}
+	if err := adapter.linkFileNoReplaceVerified(
+		MaterializationPendingFileName, pending.PendingProofPath, MaterializationCleanupFileName,
+	); err != nil {
+		return fmt.Errorf("create pending cleanup record: %w", err)
+	}
+	if err := recordPendingCleanupStep(options, true); err != nil {
+		return err
+	}
+	return nil
+}
+
+func verifyPendingCleanupAuthority(
+	adapter *RootedFilesystemAdapter,
+	pending pendingMaterializationWire,
+) error {
+	nextInventoryBytes, nextInventoryHash, activeStateBytes, err := pendingMaterializationRecoveryPayload(pending)
+	if err != nil {
+		return err
+	}
+	state, stateBytes, err := readMaterializationStateWithBytes(adapter)
+	if err != nil {
+		return err
+	}
+	if state.Phase != materializationPhaseActive || state.ActiveInventoryHash != pending.NextInventoryHash ||
+		DigestBytes(stateBytes).String() != pending.StateControl.NewHash ||
+		string(stateBytes) != string(activeStateBytes) {
+		return newMaterializationCorruption("pending cleanup requires the exact next state to be active")
+	}
+	inventoryBytes, err := adapter.readBounded(MaterializationInventoryFileName, MaxMaterializationControlBytes)
+	if err != nil {
+		return newMaterializationCorruption("read pending cleanup inventory: %v", err)
+	}
+	if DigestBytes(inventoryBytes) != nextInventoryHash || string(inventoryBytes) != string(nextInventoryBytes) {
+		return newMaterializationCorruption("pending cleanup requires the exact next inventory to be active")
 	}
 	return nil
 }
@@ -2526,108 +2806,195 @@ func cleanupPendingQuarantine(
 	adapter *RootedFilesystemAdapter,
 	artifactID, target, sourceProof, quarantine, expectedHash string,
 	activation string,
+	options MaterializationOptions,
 ) error {
-	_, exists, err := adapter.inspectExact(quarantine)
-	if err != nil || !exists {
-		return err
-	}
-	if err := verifyPendingQuarantineHash(adapter, artifactID, target, quarantine, expectedHash); err != nil {
-		return err
-	}
-	same, err := adapter.sameFile(quarantine, sourceProof)
-	if err != nil || !same {
-		return newMaterializationCorruption("quarantine for %s lost its source identity before cleanup", target)
-	}
-	_, targetExists, err := adapter.inspectExact(target)
+	_, quarantineExists, err := adapter.inspectExact(quarantine)
 	if err != nil {
 		return err
 	}
-	if activation == "" && targetExists {
-		return newMaterializationCorruption("target %s changed while its quarantine awaited cleanup", target)
-	}
-	if activation != "" {
-		if !targetExists {
-			return newMaterializationCorruption("updated target %s disappeared while its quarantine awaited cleanup", target)
-		}
-		same, err := adapter.sameFile(target, activation)
-		if err != nil || !same {
-			return newMaterializationCorruption("updated target %s lost its activation identity before quarantine cleanup", target)
-		}
-	}
-	if err := adapter.removeFile(quarantine); err != nil {
+	_, sourceProofExists, err := adapter.inspectExact(sourceProof)
+	if err != nil {
 		return err
 	}
-	return adapter.removeFile(sourceProof)
+	if quarantineExists {
+		if !sourceProofExists {
+			return newMaterializationCorruption("quarantine for %s remains without its source identity", target)
+		}
+		if err := verifyPendingQuarantineHash(adapter, artifactID, target, quarantine, expectedHash); err != nil {
+			return err
+		}
+		_, targetExists, err := adapter.inspectExact(target)
+		if err != nil {
+			return err
+		}
+		if activation == "" && targetExists {
+			return newMaterializationCorruption("target %s changed while its quarantine awaited cleanup", target)
+		}
+		if activation != "" {
+			if !targetExists {
+				return newMaterializationCorruption("updated target %s disappeared while its quarantine awaited cleanup", target)
+			}
+			same, err := adapter.sameFile(target, activation)
+			if err != nil || !same {
+				return newMaterializationCorruption("updated target %s lost its activation identity before quarantine cleanup", target)
+			}
+		}
+		removed, err := adapter.removeFileExact(quarantine, sourceProof, cleanupBeforeUnlink(options))
+		if err != nil {
+			return newMaterializationCorruption("preserve quarantine for %s: %v", target, err)
+		}
+		if err := recordPendingCleanupStep(options, removed); err != nil {
+			return err
+		}
+	}
+	if sourceProofExists {
+		removed, err := adapter.removeFileHashExact(
+			sourceProof, expectedHash, MaxMaterializationArtifactBytes, cleanupBeforeUnlink(options),
+		)
+		if err != nil {
+			return newMaterializationCorruption("preserve source proof for %s: %v", target, err)
+		}
+		if err := recordPendingCleanupStep(options, removed); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func cleanupPendingDirectoryRemoval(
 	adapter *RootedFilesystemAdapter,
 	directory pendingMaterializationDirectoryDeleteWire,
+	options MaterializationOptions,
 ) error {
-	if _, exists, err := adapter.inspectExact(directory.DirectoryQuarantinePath); err != nil {
+	_, directoryQuarantineExists, err := adapter.inspectExact(directory.DirectoryQuarantinePath)
+	if err != nil {
 		return err
-	} else if exists {
-		if err := verifyPendingDirectoryQuarantine(adapter, directory); err != nil {
+	}
+	_, claimQuarantineExists, err := adapter.inspectExact(directory.ClaimQuarantinePath)
+	if err != nil {
+		return err
+	}
+	_, anchorExists, err := adapter.inspectExact(directory.ClaimAnchorPath)
+	if err != nil {
+		return err
+	}
+	if directoryQuarantineExists {
+		claim := path.Join(directory.DirectoryQuarantinePath, MaterializationDirectoryClaimFileName)
+		_, claimExists, err := adapter.inspectExact(claim)
+		if err != nil {
 			return err
 		}
-		claim := path.Join(directory.DirectoryQuarantinePath, MaterializationDirectoryClaimFileName)
-		if err := adapter.renameFileNoReplace(claim, directory.ClaimQuarantinePath); err != nil {
-			return fmt.Errorf("quarantine persistent claim for removed directory %s: %w", directory.Path, err)
-		}
-		same, err := adapter.sameFile(directory.ClaimQuarantinePath, directory.ClaimAnchorPath)
-		if err != nil || !same {
-			if restoreErr := adapter.renameFileNoReplace(directory.ClaimQuarantinePath, claim); restoreErr != nil {
-				return fmt.Errorf("verify removed directory claim: %v; restore: %v", err, restoreErr)
+		if claimExists {
+			if claimQuarantineExists || !anchorExists {
+				return newMaterializationCorruption("removed directory %s has ambiguous claim cleanup state", directory.Path)
 			}
-			return newMaterializationCorruption("removed directory %s claim identity changed", directory.Path)
+			if err := verifyPendingDirectoryQuarantine(adapter, directory); err != nil {
+				return err
+			}
+			if err := adapter.renameFileNoReplace(claim, directory.ClaimQuarantinePath); err != nil {
+				return fmt.Errorf("quarantine persistent claim for removed directory %s: %w", directory.Path, err)
+			}
+			same, err := adapter.sameFile(directory.ClaimQuarantinePath, directory.ClaimAnchorPath)
+			if err != nil || !same {
+				if restoreErr := adapter.renameFileNoReplace(directory.ClaimQuarantinePath, claim); restoreErr != nil {
+					return fmt.Errorf("verify removed directory claim: %v; restore: %v", err, restoreErr)
+				}
+				return newMaterializationCorruption("removed directory %s claim identity changed", directory.Path)
+			}
+			claimQuarantineExists = true
+			if err := recordPendingCleanupStep(options, true); err != nil {
+				return err
+			}
+		} else if !claimQuarantineExists || !anchorExists {
+			return newMaterializationCorruption("removed directory %s lost its claim during cleanup", directory.Path)
 		}
-		removed, err := adapter.removeEmptyDirectory(directory.DirectoryQuarantinePath)
+		removed, err := adapter.removeEmptyDirectoryExact(
+			directory.DirectoryQuarantinePath, cleanupBeforeUnlink(options),
+		)
 		if err != nil {
 			return err
 		}
 		if !removed {
 			return newMaterializationCorruption("removed directory quarantine %s is not empty", directory.Path)
 		}
+		if err := recordPendingCleanupStep(options, true); err != nil {
+			return err
+		}
 	}
-	same, err := adapter.sameFile(directory.ClaimQuarantinePath, directory.ClaimAnchorPath)
-	if err != nil || !same {
-		return newMaterializationCorruption("removed directory %s lost its durable claim before cleanup", directory.Path)
+	if claimQuarantineExists {
+		if !anchorExists {
+			return newMaterializationCorruption("removed directory %s lost its durable claim before cleanup", directory.Path)
+		}
+		removed, err := adapter.removeFileExact(
+			directory.ClaimQuarantinePath, directory.ClaimAnchorPath, cleanupBeforeUnlink(options),
+		)
+		if err != nil {
+			return newMaterializationCorruption("preserve removed directory claim %s: %v", directory.Path, err)
+		}
+		if err := recordPendingCleanupStep(options, removed); err != nil {
+			return err
+		}
 	}
-	content, err := adapter.readBounded(directory.ClaimQuarantinePath, 8*1024)
-	if err != nil || string(content) != string(materializationDirectoryClaimContent(directory.Path)) {
-		return newMaterializationCorruption("removed directory %s claim bytes changed before cleanup", directory.Path)
+	if anchorExists {
+		removed, err := adapter.removeFileContentExact(
+			directory.ClaimAnchorPath, materializationDirectoryClaimContent(directory.Path), 8*1024,
+			cleanupBeforeUnlink(options),
+		)
+		if err != nil {
+			return newMaterializationCorruption("preserve removed directory anchor %s: %v", directory.Path, err)
+		}
+		if err := recordPendingCleanupStep(options, removed); err != nil {
+			return err
+		}
 	}
-	if err := adapter.removeFile(directory.ClaimQuarantinePath); err != nil {
-		return err
-	}
-	return adapter.removeFile(directory.ClaimAnchorPath)
+	return nil
 }
 
 func cleanupPendingControl(
 	adapter *RootedFilesystemAdapter,
 	control pendingMaterializationControlWire,
 	content []byte,
+	options MaterializationOptions,
 ) error {
-	if err := verifyActivatedPendingControl(adapter, control, content); err != nil {
-		return err
-	}
 	if _, exists, err := adapter.inspectExact(control.TemporaryPath); err != nil {
 		return err
 	} else if exists {
 		return newMaterializationCorruption("control temporary %s reappeared after activation", control.TemporaryPath)
 	}
 	if control.Expected == "hash" {
-		matched, err := pendingControlIdentityMatches(
-			adapter, control.QuarantinePath, control.PreviousProofPath, control.ExpectedHash,
-		)
-		if err != nil || !matched {
-			return newMaterializationCorruption("prior control quarantine for %s lost its identity", control.TargetPath)
-		}
-		if err := adapter.removeFile(control.QuarantinePath); err != nil {
+		_, quarantineExists, err := adapter.inspectExact(control.QuarantinePath)
+		if err != nil {
 			return err
 		}
-		if err := adapter.removeFile(control.PreviousProofPath); err != nil {
+		_, proofExists, err := adapter.inspectExact(control.PreviousProofPath)
+		if err != nil {
 			return err
+		}
+		if quarantineExists {
+			if !proofExists {
+				return newMaterializationCorruption("prior control quarantine for %s remains without proof", control.TargetPath)
+			}
+			removed, err := adapter.removeFileExact(
+				control.QuarantinePath, control.PreviousProofPath, cleanupBeforeUnlink(options),
+			)
+			if err != nil {
+				return newMaterializationCorruption("preserve prior control quarantine for %s: %v", control.TargetPath, err)
+			}
+			if err := recordPendingCleanupStep(options, removed); err != nil {
+				return err
+			}
+		}
+		if proofExists {
+			removed, err := adapter.removeFileHashExact(
+				control.PreviousProofPath, control.ExpectedHash, MaxMaterializationControlBytes,
+				cleanupBeforeUnlink(options),
+			)
+			if err != nil {
+				return newMaterializationCorruption("preserve prior control proof for %s: %v", control.TargetPath, err)
+			}
+			if err := recordPendingCleanupStep(options, removed); err != nil {
+				return err
+			}
 		}
 	} else if _, exists, err := adapter.inspectExact(control.QuarantinePath); err != nil || exists {
 		if err == nil {
@@ -2635,12 +3002,29 @@ func cleanupPendingControl(
 		}
 		return err
 	}
-	return adapter.removeFile(control.TemporaryProofPath)
+	_, temporaryProofExists, err := adapter.inspectExact(control.TemporaryProofPath)
+	if err != nil {
+		return err
+	}
+	if !temporaryProofExists {
+		return nil
+	}
+	if err := verifyActivatedPendingControl(adapter, control, content); err != nil {
+		return err
+	}
+	removed, err := adapter.removeFileExact(
+		control.TemporaryProofPath, control.TargetPath, cleanupBeforeUnlink(options),
+	)
+	if err != nil {
+		return newMaterializationCorruption("preserve activated control proof for %s: %v", control.TargetPath, err)
+	}
+	return recordPendingCleanupStep(options, removed)
 }
 
 func cleanupPendingActivation(
 	adapter *RootedFilesystemAdapter,
 	write pendingMaterializationWriteWire,
+	options MaterializationOptions,
 ) error {
 	_, exists, err := adapter.inspectExact(write.ActivationPath)
 	if err != nil || !exists {
@@ -2657,66 +3041,164 @@ func cleanupPendingActivation(
 	if err != nil || !same {
 		return newMaterializationCorruption("preserve activation for %s because its staged identity changed", write.Path)
 	}
-	return adapter.removeFile(write.ActivationPath)
-}
-
-func removePendingFileWithContent(
-	adapter *RootedFilesystemAdapter,
-	relative string,
-	expected []byte,
-	maximum int64,
-) error {
-	_, exists, err := adapter.inspectExact(relative)
-	if err != nil || !exists {
-		return err
-	}
-	content, err := adapter.readBounded(relative, maximum)
+	removed, err := adapter.removeFileExact(
+		write.ActivationPath, write.StageProofPath, cleanupBeforeUnlink(options),
+	)
 	if err != nil {
-		return err
+		return newMaterializationCorruption("preserve activation for %s: %v", write.Path, err)
 	}
-	if string(content) != string(expected) {
-		return newMaterializationCorruption("preserve transaction file %s because its bytes changed", relative)
-	}
-	return adapter.removeFile(relative)
+	return recordPendingCleanupStep(options, removed)
 }
 
-func cleanupPendingStaging(adapter *RootedFilesystemAdapter, pending pendingMaterializationWire) error {
-	_, exists, err := adapter.inspectExact(MaterializationStagingDirectoryName)
-	if err != nil || !exists {
+func cleanupPendingStaging(
+	adapter *RootedFilesystemAdapter,
+	pending pendingMaterializationWire,
+	options MaterializationOptions,
+) error {
+	_, stagingExists, err := adapter.inspectExact(MaterializationStagingDirectoryName)
+	if err != nil {
 		return err
 	}
 	if len(pending.Writes) == 0 {
-		return newMaterializationCorruption("preserve staging directory not owned by this pending transaction")
-	}
-	if err := validatePendingStage(adapter, pending); err != nil {
-		return err
+		if stagingExists {
+			return newMaterializationCorruption("preserve staging directory not owned by this pending transaction")
+		}
+		return nil
 	}
 	for _, write := range pending.Writes {
-		if err := adapter.removeFile(write.StagePath); err != nil {
+		_, stageExists, err := adapter.inspectExact(write.StagePath)
+		if err != nil {
 			return err
 		}
-		if err := adapter.removeFile(write.StageProofPath); err != nil {
+		_, proofExists, err := adapter.inspectExact(write.StageProofPath)
+		if err != nil {
 			return err
 		}
+		if stageExists {
+			if !proofExists {
+				return newMaterializationCorruption("staged artifact %s remains without its proof", write.Path)
+			}
+			removed, err := adapter.removeFileExact(write.StagePath, write.StageProofPath, cleanupBeforeUnlink(options))
+			if err != nil {
+				return newMaterializationCorruption("preserve staged artifact %s: %v", write.Path, err)
+			}
+			if err := recordPendingCleanupStep(options, removed); err != nil {
+				return err
+			}
+		}
+		if proofExists {
+			removed, err := adapter.removeFileExact(write.StageProofPath, write.Path, cleanupBeforeUnlink(options))
+			if err != nil {
+				return newMaterializationCorruption("preserve staged proof for %s: %v", write.Path, err)
+			}
+			if err := recordPendingCleanupStep(options, removed); err != nil {
+				return err
+			}
+		}
 	}
-	same, err := adapter.sameFile(pending.StagingClaimPath, pending.StagingProofPath)
-	if err != nil || !same {
-		return newMaterializationCorruption("preserve staging identity because its proof changed")
-	}
-	if err := adapter.removeFile(pending.StagingClaimPath); err != nil {
-		return err
-	}
-	if err := adapter.removeFile(pending.StagingProofPath); err != nil {
-		return err
-	}
-	removed, err := adapter.removeEmptyDirectory(MaterializationStagingDirectoryName)
+	_, claimExists, err := adapter.inspectExact(pending.StagingClaimPath)
 	if err != nil {
 		return err
 	}
-	if !removed {
-		return newMaterializationCorruption("staging directory is not empty after transaction cleanup")
+	_, stagingProofExists, err := adapter.inspectExact(pending.StagingProofPath)
+	if err != nil {
+		return err
+	}
+	if claimExists {
+		if !stagingProofExists {
+			return newMaterializationCorruption("staging claim remains without its proof")
+		}
+		removed, err := adapter.removeFileExact(
+			pending.StagingClaimPath, pending.StagingProofPath, cleanupBeforeUnlink(options),
+		)
+		if err != nil {
+			return newMaterializationCorruption("preserve staging claim: %v", err)
+		}
+		if err := recordPendingCleanupStep(options, removed); err != nil {
+			return err
+		}
+	}
+	if stagingExists {
+		removed, err := adapter.removeEmptyDirectoryExact(
+			MaterializationStagingDirectoryName, cleanupBeforeUnlink(options),
+		)
+		if err != nil {
+			return err
+		}
+		if !removed {
+			return newMaterializationCorruption("staging directory is not empty after transaction cleanup")
+		}
+		if err := recordPendingCleanupStep(options, true); err != nil {
+			return err
+		}
+	}
+	if stagingProofExists {
+		proofContent := []byte("materialization-staging:" + pending.TransactionID + "\n")
+		removed, err := adapter.removeFileContentExact(
+			pending.StagingProofPath, proofContent, 8*1024, cleanupBeforeUnlink(options),
+		)
+		if err != nil {
+			return newMaterializationCorruption("preserve staging proof: %v", err)
+		}
+		if err := recordPendingCleanupStep(options, removed); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func verifyPendingCleanupPathsRemoved(
+	adapter *RootedFilesystemAdapter,
+	pending pendingMaterializationWire,
+) error {
+	paths := []string{
+		MaterializationPendingFileName,
+		pending.PendingTemporaryPath,
+		pending.PendingProofPath,
+		MaterializationStagingDirectoryName,
+		pending.StagingProofPath,
+	}
+	for _, control := range []pendingMaterializationControlWire{pending.InventoryControl, pending.StateControl} {
+		paths = append(paths, control.TemporaryPath, control.TemporaryProofPath, control.PreviousProofPath, control.QuarantinePath)
+	}
+	for _, directory := range pending.CreateDirectories {
+		paths = append(paths, directory.PreparationPath, directory.ClaimProofPath)
+	}
+	for _, write := range pending.Writes {
+		paths = append(paths, write.StagePath, write.StageProofPath, write.SourceProofPath, write.ActivationPath, write.QuarantinePath)
+	}
+	for _, deletion := range pending.Deletes {
+		paths = append(paths, deletion.SourceProofPath, deletion.QuarantinePath)
+	}
+	for _, directory := range pending.RemoveDirectories {
+		paths = append(paths, directory.ClaimQuarantinePath, directory.DirectoryQuarantinePath, directory.ClaimAnchorPath)
+	}
+	for _, relative := range paths {
+		if relative == "" {
+			continue
+		}
+		if _, exists, err := adapter.inspectExact(relative); err != nil {
+			return err
+		} else if exists {
+			return newMaterializationCorruption(
+				"pending cleanup path %s remains and will be preserved", relative,
+			)
+		}
+	}
+	return nil
+}
+
+func cleanupBeforeUnlink(options MaterializationOptions) func() error {
+	return func() error {
+		return injectMaterialization(options, MaterializationFaultBeforeCleanupUnlink)
+	}
+}
+
+func recordPendingCleanupStep(options MaterializationOptions, changed bool) error {
+	if !changed {
+		return nil
+	}
+	return injectMaterialization(options, MaterializationFaultAfterCleanupStep)
 }
 
 func rejectOrphanMaterializationControls(

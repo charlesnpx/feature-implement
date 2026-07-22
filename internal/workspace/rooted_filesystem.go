@@ -628,10 +628,7 @@ func (adapter *RootedFilesystemAdapter) linkFileNoReplaceVerified(source, proof,
 		if verifyErr == nil {
 			verifyErr = fmt.Errorf("linked identity changed")
 		}
-		if removeErr := destinationDirectory.Remove(destinationBase); removeErr != nil {
-			return fmt.Errorf("verify rooted activation link %s: %w; remove invalid link: %v", destination, verifyErr, removeErr)
-		}
-		return fmt.Errorf("verify rooted activation link %s: %w", destination, verifyErr)
+		return fmt.Errorf("verify rooted activation link %s and preserve the unmatched destination: %w", destination, verifyErr)
 	}
 	return syncRootHandle(destinationDirectory)
 }
@@ -708,34 +705,112 @@ func restoreRootedPathNoReplace(
 	return renameFileDescriptorNoReplace(sourceDirectory, source, destinationDirectory, destination)
 }
 
-func (adapter *RootedFilesystemAdapter) removeFile(relative string) error {
-	rooted, err := NewRootedPath(adapter.rootPath, relative)
-	if err != nil {
-		return err
-	}
-	directory, err := adapter.openDirectoryExact(path.Dir(rooted.Relative()))
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	base := path.Base(rooted.Relative())
-	info, exists, err := inspectRootEntryExact(directory, base)
-	if err != nil {
-		return err
-	}
-	if !exists {
+func (adapter *RootedFilesystemAdapter) removeFileExact(
+	relative string,
+	proof string,
+	beforeUnlink func() error,
+) (bool, error) {
+	return adapter.removeFileBound(relative, func(opened *os.File) error {
+		proofRoot, err := adapter.openDirectoryExact(path.Dir(proof))
+		if err != nil {
+			return err
+		}
+		defer proofRoot.Close()
+		proofBase := path.Base(proof)
+		proofInfo, proofExists, err := inspectRootEntryExact(proofRoot, proofBase)
+		if err != nil || !proofExists || !proofInfo.Mode().IsRegular() {
+			if err == nil {
+				err = fmt.Errorf("identity proof is missing or invalid")
+			}
+			return fmt.Errorf("inspect rooted removal proof %s: %w", proof, err)
+		}
+		openedProofRoot, err := proofRoot.Open(".")
+		if err != nil {
+			return fmt.Errorf("open rooted removal proof parent: %w", err)
+		}
+		defer openedProofRoot.Close()
+		openedProof, err := openFileDescriptorNoFollow(openedProofRoot, proofBase, false)
+		if err != nil {
+			return fmt.Errorf("open rooted removal proof %s without following links: %w", proof, err)
+		}
+		defer openedProof.Close()
+		openedInfo, err := opened.Stat()
+		if err != nil {
+			return err
+		}
+		openedProofInfo, err := openedProof.Stat()
+		if err != nil || !os.SameFile(proofInfo, openedProofInfo) || !os.SameFile(openedInfo, openedProofInfo) {
+			if err == nil {
+				err = fmt.Errorf("removal target does not match its identity proof")
+			}
+			return fmt.Errorf("verify rooted removal proof %s: %w", proof, err)
+		}
 		return nil
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return fmt.Errorf("rooted path %s cannot be removed because it is not a regular file", relative)
-	}
-	if err := directory.Remove(base); err != nil {
-		return fmt.Errorf("remove rooted file %s: %w", relative, err)
-	}
-	return syncRootHandle(directory)
+	}, beforeUnlink)
 }
 
-func (adapter *RootedFilesystemAdapter) removeEmptyDirectory(relative string) (bool, error) {
+func (adapter *RootedFilesystemAdapter) removeFileContentExact(
+	relative string,
+	expected []byte,
+	maximum int64,
+	beforeUnlink func() error,
+) (bool, error) {
+	return adapter.removeFileBound(relative, func(opened *os.File) error {
+		content, err := readOpenedFileBounded(opened, maximum)
+		if err != nil {
+			return err
+		}
+		if string(content) != string(expected) {
+			return fmt.Errorf("rooted removal target %s has unexpected content", relative)
+		}
+		return nil
+	}, beforeUnlink)
+}
+
+func (adapter *RootedFilesystemAdapter) removeFileHashExact(
+	relative string,
+	expectedHash string,
+	maximum int64,
+	beforeUnlink func() error,
+) (bool, error) {
+	return adapter.removeFileBound(relative, func(opened *os.File) error {
+		content, err := readOpenedFileBounded(opened, maximum)
+		if err != nil {
+			return err
+		}
+		if DigestBytes(content).String() != expectedHash {
+			return fmt.Errorf("rooted removal target %s has an unexpected hash", relative)
+		}
+		return nil
+	}, beforeUnlink)
+}
+
+func readOpenedFileBounded(opened *os.File, maximum int64) ([]byte, error) {
+	info, err := opened.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > maximum {
+		return nil, fmt.Errorf("opened rooted file exceeds its removal bound")
+	}
+	if _, err := opened.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	content, err := io.ReadAll(io.LimitReader(opened, maximum+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(content)) > maximum {
+		return nil, fmt.Errorf("opened rooted file exceeds its removal bound")
+	}
+	return content, nil
+}
+
+func (adapter *RootedFilesystemAdapter) removeFileBound(
+	relative string,
+	verify func(*os.File) error,
+	beforeUnlink func() error,
+) (bool, error) {
 	rooted, err := NewRootedPath(adapter.rootPath, relative)
 	if err != nil {
 		return false, err
@@ -743,7 +818,7 @@ func (adapter *RootedFilesystemAdapter) removeEmptyDirectory(relative string) (b
 	directory, err := adapter.openDirectoryExact(path.Dir(rooted.Relative()))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return true, nil
+			return false, nil
 		}
 		return false, err
 	}
@@ -754,10 +829,116 @@ func (adapter *RootedFilesystemAdapter) removeEmptyDirectory(relative string) (b
 		return false, err
 	}
 	if !exists {
-		return true, nil
+		return false, nil
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return false, fmt.Errorf("rooted path %s cannot be removed because it is not a regular file", relative)
+	}
+	openedDirectory, err := directory.Open(".")
+	if err != nil {
+		return false, fmt.Errorf("open rooted removal parent: %w", err)
+	}
+	defer openedDirectory.Close()
+	opened, err := openFileDescriptorNoFollow(openedDirectory, base, false)
+	if err != nil {
+		return false, fmt.Errorf("open rooted removal target %s without following links: %w", relative, err)
+	}
+	defer opened.Close()
+	openedInfo, err := opened.Stat()
+	if err != nil || !os.SameFile(info, openedInfo) {
+		if err == nil {
+			err = fmt.Errorf("removal target identity changed")
+		}
+		return false, fmt.Errorf("verify rooted removal target %s: %w", relative, err)
+	}
+	if verify != nil {
+		if err := verify(opened); err != nil {
+			return false, err
+		}
+	}
+	if beforeUnlink != nil {
+		if err := beforeUnlink(); err != nil {
+			return false, err
+		}
+	}
+	currentInfo, currentExists, err := inspectRootEntryExact(directory, base)
+	if err != nil || !currentExists || !os.SameFile(openedInfo, currentInfo) {
+		if err == nil {
+			err = fmt.Errorf("removal target was replaced and will be preserved")
+		}
+		return false, fmt.Errorf("revalidate rooted removal target %s: %w", relative, err)
+	}
+	if err := directory.Remove(base); err != nil {
+		return false, fmt.Errorf("remove rooted file %s: %w", relative, err)
+	}
+	if err := syncRootHandle(directory); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (adapter *RootedFilesystemAdapter) removeEmptyDirectoryExact(
+	relative string,
+	beforeRemove func() error,
+) (bool, error) {
+	rooted, err := NewRootedPath(adapter.rootPath, relative)
+	if err != nil {
+		return false, err
+	}
+	directory, err := adapter.openDirectoryExact(path.Dir(rooted.Relative()))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer directory.Close()
+	base := path.Base(rooted.Relative())
+	info, exists, err := inspectRootEntryExact(directory, base)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, nil
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return false, fmt.Errorf("rooted path %s is not a directory", relative)
+	}
+	openedDirectory, err := directory.Open(".")
+	if err != nil {
+		return false, fmt.Errorf("open rooted directory removal parent: %w", err)
+	}
+	defer openedDirectory.Close()
+	opened, err := openFileDescriptorNoFollow(openedDirectory, base, true)
+	if err != nil {
+		return false, fmt.Errorf("open rooted directory removal target %s without following links: %w", relative, err)
+	}
+	defer opened.Close()
+	openedInfo, err := opened.Stat()
+	if err != nil || !os.SameFile(info, openedInfo) {
+		if err == nil {
+			err = fmt.Errorf("directory removal target identity changed")
+		}
+		return false, fmt.Errorf("verify rooted directory removal target %s: %w", relative, err)
+	}
+	entries, readErr := opened.ReadDir(1)
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return false, fmt.Errorf("read rooted directory removal target %s: %w", relative, readErr)
+	}
+	if len(entries) != 0 {
+		return false, nil
+	}
+	if beforeRemove != nil {
+		if err := beforeRemove(); err != nil {
+			return false, err
+		}
+	}
+	currentInfo, currentExists, err := inspectRootEntryExact(directory, base)
+	if err != nil || !currentExists || !os.SameFile(openedInfo, currentInfo) {
+		if err == nil {
+			err = fmt.Errorf("directory removal target was replaced and will be preserved")
+		}
+		return false, fmt.Errorf("revalidate rooted directory removal target %s: %w", relative, err)
 	}
 	if err := directory.Remove(base); err != nil {
 		if errors.Is(err, os.ErrExist) || errors.Is(err, os.ErrInvalid) || errors.Is(err, syscall.ENOTEMPTY) {

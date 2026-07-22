@@ -17,6 +17,7 @@ const (
 	MaterializationInventoryFileName            = "feature.materialization.v2.json"
 	MaterializationStateFileName                = "feature.materialization.state.v2.json"
 	MaterializationPendingFileName              = "feature.materialization.pending.v2.json"
+	MaterializationCleanupFileName              = "feature.materialization.cleanup.v2.json"
 	MaterializationStagingDirectoryName         = "feature.materialization.staging.v2"
 	MaterializationOwnershipDirectoryName       = "feature.materialization.ownership.v2"
 	MaterializationOwnershipProofFileName       = "feature.materialization.ownership.v2.proof"
@@ -36,6 +37,7 @@ var materializationControlPaths = []string{
 	MaterializationInventoryFileName,
 	MaterializationStateFileName,
 	MaterializationPendingFileName,
+	MaterializationCleanupFileName,
 	MaterializationStagingDirectoryName,
 	MaterializationOwnershipDirectoryName,
 	MaterializationOwnershipProofFileName,
@@ -95,6 +97,8 @@ const (
 	MaterializationFaultAfterDirectoryCleanup    MaterializationFaultPoint = "after_directory_cleanup"
 	MaterializationFaultAfterInventoryActivation MaterializationFaultPoint = "after_inventory_activation"
 	MaterializationFaultAfterStateActivation     MaterializationFaultPoint = "after_state_activation"
+	MaterializationFaultBeforeCleanupUnlink      MaterializationFaultPoint = "before_cleanup_unlink"
+	MaterializationFaultAfterCleanupStep         MaterializationFaultPoint = "after_cleanup_step"
 )
 
 type MaterializationFaultInjector func(MaterializationFaultPoint) error

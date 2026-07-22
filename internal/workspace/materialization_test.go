@@ -795,6 +795,63 @@ func TestMaterializationControlActivationNeverOverwritesAppearingTargets(t *test
 	}
 }
 
+func TestMaterializationRecoversMissingControlTargetsAfterQuarantine(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		faultOrdinal int
+		target       string
+	}{
+		{name: "inventory", faultOrdinal: 1, target: workspace.MaterializationInventoryFileName},
+		{name: "state", faultOrdinal: 2, target: workspace.MaterializationStateFileName},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
+			artifacts := materializationArtifacts(t, artifactFixture{
+				id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n",
+			})
+			if _, err := workspace.SynchronizeMaterialization(
+				root, testGeneratorVersion, artifacts, workspace.MaterializationOptions{},
+			); err != nil {
+				t.Fatal(err)
+			}
+			observed := 0
+			fault := func(point workspace.MaterializationFaultPoint) error {
+				if point != workspace.MaterializationFaultAfterTemporarySync {
+					return nil
+				}
+				observed++
+				if observed == test.faultOrdinal {
+					return errors.New("simulated control activation crash")
+				}
+				return nil
+			}
+			if _, err := workspace.SynchronizeMaterialization(
+				root, testGeneratorVersion+"-next", artifacts,
+				workspace.MaterializationOptions{FaultInjector: fault},
+			); err == nil {
+				t.Fatal("control activation fault did not interrupt materialization")
+			}
+			if _, err := os.Stat(filepath.Join(root, test.target)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("control target was not in the expected missing-target crash state: %v", err)
+			}
+
+			result, err := workspace.SynchronizeMaterialization(
+				root, testGeneratorVersion+"-next", artifacts, workspace.MaterializationOptions{},
+			)
+			if err != nil {
+				t.Fatalf("recover missing %s control target: %v", test.name, err)
+			}
+			if !result.Recovered() {
+				t.Fatal("control target recovery was not reported")
+			}
+			if got := result.Inventory().GeneratorVersion(); got != testGeneratorVersion+"-next" {
+				t.Fatalf("generator version = %q", got)
+			}
+			assertNoMaterializationTransaction(t, root)
+		})
+	}
+}
+
 func TestMaterializationRecoveryPreservesAppearingDirectoryPreparation(t *testing.T) {
 	root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 	initial := materializationArtifacts(t, artifactFixture{
@@ -1117,6 +1174,118 @@ func TestMaterializationRecoversOwnedUpdatesAcrossTransactionFaults(t *testing.T
 	}
 }
 
+func TestMaterializationCleanupRecoversEveryPersistedPrefix(t *testing.T) {
+	run := func(t *testing.T, failOrdinal int) (string, int, error) {
+		t.Helper()
+		root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
+		initial := materializationArtifacts(t,
+			artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "v1\n"},
+			artifactFixture{id: "story/stale", path: "old/nested/stale.md", content: "stale\n"},
+		)
+		if _, err := workspace.SynchronizeMaterialization(
+			root, testGeneratorVersion, initial, workspace.MaterializationOptions{},
+		); err != nil {
+			t.Fatal(err)
+		}
+		desired := materializationArtifacts(t,
+			artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "v2\n"},
+			artifactFixture{id: "story/new", path: "new/nested/story.md", content: "story\n"},
+		)
+		observed := 0
+		fault := func(point workspace.MaterializationFaultPoint) error {
+			if point != workspace.MaterializationFaultAfterCleanupStep {
+				return nil
+			}
+			observed++
+			if failOrdinal != 0 && observed == failOrdinal {
+				return errors.New("simulated cleanup crash")
+			}
+			return nil
+		}
+		_, err := workspace.SynchronizeMaterialization(
+			root, testGeneratorVersion+"-next", desired,
+			workspace.MaterializationOptions{FaultInjector: fault},
+		)
+		return root, observed, err
+	}
+
+	_, cleanupSteps, err := run(t, 0)
+	if err != nil {
+		t.Fatalf("count cleanup steps: %v", err)
+	}
+	if cleanupSteps < 10 {
+		t.Fatalf("cleanup exercised only %d persisted steps", cleanupSteps)
+	}
+	for ordinal := 1; ordinal <= cleanupSteps; ordinal++ {
+		t.Run(fmt.Sprintf("step-%02d", ordinal), func(t *testing.T) {
+			root, observed, err := run(t, ordinal)
+			if err == nil || observed != ordinal {
+				t.Fatalf("cleanup fault %d observed=%d, err=%v", ordinal, observed, err)
+			}
+			desired := materializationArtifacts(t,
+				artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "v2\n"},
+				artifactFixture{id: "story/new", path: "new/nested/story.md", content: "story\n"},
+			)
+			if _, err := workspace.SynchronizeMaterialization(
+				root, testGeneratorVersion+"-next", desired, workspace.MaterializationOptions{},
+			); err != nil {
+				t.Fatalf("recover cleanup step %d: %v", ordinal, err)
+			}
+			assertFileContent(t, filepath.Join(root, "feature.plan.yaml"), "v2\n")
+			assertFileContent(t, filepath.Join(root, "new", "nested", "story.md"), "story\n")
+			if _, err := os.Stat(filepath.Join(root, "old")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("stale directory remains after cleanup recovery: %v", err)
+			}
+			assertNoMaterializationTransaction(t, root)
+		})
+	}
+}
+
+func TestMaterializationCleanupPreservesReplacementAtVerifiedUnlink(t *testing.T) {
+	root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
+	initial := materializationArtifacts(t,
+		artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"},
+		artifactFixture{id: "story/stale", path: "stale.md", content: "stale\n"},
+	)
+	if _, err := workspace.SynchronizeMaterialization(
+		root, testGeneratorVersion, initial, workspace.MaterializationOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	desired := materializationArtifacts(t, artifactFixture{
+		id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n",
+	})
+	mutated := false
+	backup := filepath.Join(canonicalMaterializationTestTempDir(t), "transaction-quarantine-backup")
+	fault := func(point workspace.MaterializationFaultPoint) error {
+		if point != workspace.MaterializationFaultBeforeCleanupUnlink || mutated {
+			return nil
+		}
+		pending := readPendingMaterializationFixture(t, root)
+		quarantine := filepath.Join(root, filepath.FromSlash(pending.Deletes[0].QuarantinePath))
+		if err := os.Rename(quarantine, backup); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(quarantine, []byte("user-owned replacement\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		mutated = true
+		return nil
+	}
+	if _, err := workspace.SynchronizeMaterialization(
+		root, testGeneratorVersion, desired, workspace.MaterializationOptions{FaultInjector: fault},
+	); err == nil || !mutated {
+		t.Fatalf("cleanup accepted a concurrent replacement: mutated=%t err=%v", mutated, err)
+	}
+	pending := readPendingMaterializationFixture(t, root)
+	quarantine := filepath.Join(root, filepath.FromSlash(pending.Deletes[0].QuarantinePath))
+	assertFileContent(t, quarantine, "user-owned replacement\n")
+	assertFileContent(t, backup, "stale\n")
+	if _, err := os.Stat(filepath.Join(root, "stale.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("committed stale target unexpectedly reappeared: %v", err)
+	}
+}
+
 func TestMaterializationRejectsCorruptStagedBytesDuringRecovery(t *testing.T) {
 	root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 	artifacts := materializationArtifacts(t, artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"})
@@ -1338,6 +1507,9 @@ type pendingMaterializationFixture struct {
 	InventoryControl struct {
 		TemporaryPath string `json:"temporary_path"`
 	} `json:"inventory_control"`
+	Deletes []struct {
+		QuarantinePath string `json:"quarantine_path"`
+	} `json:"deletes"`
 	Writes []struct {
 		Path           string `json:"path"`
 		StagePath      string `json:"stage_path"`
@@ -1375,6 +1547,7 @@ func assertNoMaterializationTransaction(t *testing.T, root string) {
 	t.Helper()
 	for _, relative := range []string{
 		workspace.MaterializationPendingFileName,
+		workspace.MaterializationCleanupFileName,
 		workspace.MaterializationStagingDirectoryName,
 	} {
 		if _, err := os.Stat(filepath.Join(root, relative)); !errors.Is(err, os.ErrNotExist) {
