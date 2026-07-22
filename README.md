@@ -168,6 +168,8 @@ merge_units:
 
 Optional commit, review-fix, and review-loop protocols are strict schemas within each merge-unit execution entry. An absent commit protocol leaves normal local commits unconstrained; the first configured review atomically adopts the exact clean head. A configured commit protocol owns its commits and isolated checks.
 
+Agent-driven broad review loops are capped at three iterations for the plan and for each merge unit. A new iteration starts only when the preceding review found a Critical or High issue. When a review has no Critical or High findings, worthwhile Medium and Low findings are still applied once, but another broad iteration is not started solely to re-review them.
+
 `feature workspace validate --write-locks` synchronizes immutable projections under `<bundle>/generated/`. The ownership inventory permits replacement only when an existing generated file still matches its last-generated hash. Modified projections, hidden paths, symlink traversal, missing inventory, and unowned conflicts fail closed.
 
 ## Journal-backed execution

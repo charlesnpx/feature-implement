@@ -44,17 +44,18 @@ Do not push, open a PR, or merge with direct Git or GitHub commands. Those effec
 
 ## Governed review
 
-When the merge unit configures a review loop:
+Run a broad subagent review loop for every merge unit.
 
-1. Submit `review start` for the attempt and use the returned exact request: generation, merge unit, round, profile, head, tree, runner, and request digest.
-2. Submit `review reserve` with a fresh reviewer instance when the profile requires one. Use a deterministic SHA256 idempotency key for that exact request/reviewer pair and reuse it only for retries of the same invocation.
-3. Spawn a fresh Claude subagent for each fresh invocation. Give it the exact base-to-head branch diff and review request. The reviewer is read-only, uses ephemeral scratch, has no provider credentials, repository hooks, write network, external-write authority, or provider-broker capability.
-4. Record the review only through `review record`, preserving exact severity, category, path, line, summary, evidence digest, reviewer identity, request digest, isolation proof, and externally signed review-evidence receipt. Never fabricate a finding, isolation claim, or receipt.
-5. For accepted findings, submit `review reserve-fix`, implement and stage the bounded fix, run `review apply-fix` so the review-fix protocol owns its commit and checks, then submit `review record-fix` to bind that commit to the accepted finding IDs.
-6. Start a new round after every fix. Respect configured round, fix, infrastructure-retry, and reviewer-retention budgets. Stop if the journal reports exhaustion.
-7. Continue until `review ready` returns exact-head readiness. Apply worthwhile Medium and Low findings only within the configured fix budget; Critical and High findings must be resolved before readiness.
+1. Treat each fresh broad audit as one review iteration and run at most three iterations for the merge unit, even when configuration permits more. Use a fresh Claude subagent and give it the exact base-to-head branch diff. It is read-only, uses ephemeral scratch, and has no provider credentials, repository hooks, write network, external-write authority, or provider-broker capability.
+2. Apply evidence-backed Critical and High fixes and worthwhile Medium and Low fixes once. Required targeted confirmation of findings fixed during an iteration remains part of that iteration; it does not justify another fresh broad audit.
+3. Start another broad review iteration only when the preceding broad review reported at least one Critical or High finding and fewer than three iterations have run. If it reported no Critical or High findings, apply worthwhile Medium and Low findings, perform only required targeted confirmation, and stop; do not start another broad review iteration.
+4. If the third iteration still has Critical or High findings, apply supported fixes, run validation, stop at the cap, and report that no subsequent clean broad review was obtained.
+5. When a governed review loop is configured, submit `review start` and use the returned exact request: generation, merge unit, round, profile, head, tree, runner, and request digest. Submit `review reserve` with a fresh reviewer instance when required, using a deterministic SHA256 idempotency key for that exact request/reviewer pair.
+6. Record governed results only through `review record`, preserving exact severity, category, path, line, summary, evidence digest, reviewer identity, request digest, isolation proof, and externally signed review-evidence receipt. Never fabricate a finding, isolation claim, or receipt.
+7. For accepted governed findings, submit `review reserve-fix`, implement and stage the bounded fix, run `review apply-fix` so the review-fix protocol owns its commit and checks, then submit `review record-fix` to bind that commit to the accepted finding IDs.
+8. Respect the tighter configured round, fix, infrastructure-retry, and reviewer-retention budgets. Seek `review ready` within the three-iteration cap. If the journal reports exhaustion or readiness cannot be established within the cap, stop and report the unresolved gate; never exceed the cap or fabricate readiness.
 
-If no review loop is configured, do not invent review events or claim a configured review gate.
+When no governed review loop is configured, perform the same capped read-only branch-diff audit, apply accepted fixes with ordinary local commits, and rerun repository checks. Do not invent review events or claim a configured review gate.
 
 ## Protected authorization and provider effects
 

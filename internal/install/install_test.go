@@ -93,8 +93,9 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"pause_only",
 			"require_signed_receipts",
 			"operator-supplied, externally pinned public authority material",
+			"at most three plan-review iterations",
 			"evidence-backed Critical and High findings",
-			"Apply worthwhile Medium and Low findings once",
+			"do not start another plan-review iteration",
 			"feature workspace validate --bundle <bundle-dir> --write-locks --json",
 			"tool-owned immutable projections",
 			"feature workspace schema bundle --json",
@@ -111,6 +112,7 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"existing `feature implement` lifecycle",
 			"local-only",
 			"remote-delete",
+			"Repeat until a fresh review has no Critical or High findings",
 		})
 		assertInOrder(t, path, content, []string{
 			"Invocation guard",
@@ -152,6 +154,8 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"review reserve",
 			"review record",
 			"review ready",
+			"at most three iterations for the merge unit",
+			"do not start another broad review iteration",
 			"control grant",
 			"`push`, `open_pull_request`, and `merge`",
 			"provider dispatch",
@@ -180,6 +184,7 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"provider_command",
 			"git -C <worktree>",
 			"gh pr",
+			"Continue until `review ready` returns exact-head readiness",
 		})
 		assertInOrder(t, path, content, []string{
 			"Invocation guard",
