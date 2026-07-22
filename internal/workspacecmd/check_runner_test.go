@@ -38,6 +38,18 @@ func TestConfiguredCheckRunnerUsesExactCloneAndDeniesAmbientRepository(t *testin
 		t.Fatal(err)
 	}
 	defer listener.Close()
+	socketDirectory, err := os.MkdirTemp("", "fi-sock-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDirectory) })
+	socketPath := filepath.Join(socketDirectory, "provider.sock")
+	providerSocket, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerSocket.Close()
+	hostEnvironment := fmt.Sprintf("/proc/%d/environ", os.Getpid())
 	probeSource := filepath.Join(repository, "network_probe.go")
 	if err := os.WriteFile(probeSource, []byte(`package main
 
@@ -48,7 +60,7 @@ import (
 )
 
 func main() {
-	connection, err := net.DialTimeout("tcp", os.Args[1], time.Second)
+	connection, err := net.DialTimeout(os.Args[1], os.Args[2], time.Second)
 	if err != nil {
 		os.Exit(1)
 	}
@@ -69,12 +81,21 @@ if /bin/cat %s >/dev/null 2>&1; then
   printf '{"schema_version":1,"status":"failed","assertions":[{"id":"ambient-repository-readable","status":"failed"}]}\n'
   exit 1
 fi
-if ./network-probe %s >/dev/null 2>&1; then
+if /bin/cat %s >/dev/null 2>&1; then
+  printf '{"schema_version":1,"status":"failed","assertions":[{"id":"host-process-environment-readable","status":"failed"}]}\n'
+  exit 1
+fi
+if ./network-probe tcp %s >/dev/null 2>&1; then
   printf '{"schema_version":1,"status":"failed","assertions":[{"id":"network-write-allowed","status":"failed"}]}\n'
   exit 1
 fi
+if ./network-probe unix %s >/dev/null 2>&1; then
+  printf '{"schema_version":1,"status":"failed","assertions":[{"id":"provider-socket-reachable","status":"failed"}]}\n'
+  exit 1
+fi
 printf '{"schema_version":1,"status":"passed","assertions":[]}\n'
-`, shellSingleQuote(ambientConfig), shellSingleQuote(listener.Addr().String()))
+`, shellSingleQuote(ambientConfig), shellSingleQuote(hostEnvironment),
+		shellSingleQuote(listener.Addr().String()), shellSingleQuote(socketPath))
 	if err := os.WriteFile(checkScript, []byte(checkContent), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -134,6 +155,40 @@ printf '{"schema_version":1,"status":"passed","assertions":[]}\n'
 	}
 	if state.Phase() != workspace.CommitProtocolComplete {
 		t.Fatalf("configured protocol phase = %s", state.Phase())
+	}
+}
+
+func TestLinuxCheckSandboxHasNoHostRootRuntimeOrSourceMount(t *testing.T) {
+	scratch := canonicalWorkspaceCommandTempDir(t)
+	repository := filepath.Join(scratch, "repository")
+	if err := os.MkdirAll(repository, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	executable, err := filepath.EvalSymlinks("/usr/bin/true")
+	if err != nil {
+		t.Skip("standard absolute executable is unavailable")
+	}
+	source := filepath.Join(filepath.Dir(scratch), "source-worktree")
+	arguments, err := linuxCheckSandboxArguments(scratch, repository, source, "", []string{executable})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := "\x00" + strings.Join(arguments, "\x00") + "\x00"
+	for _, required := range []string{
+		"\x00--unshare-all\x00", "\x00--tmpfs\x00/\x00",
+		"\x00--bind\x00" + scratch + "\x00" + scratch + "\x00",
+		"\x00--proc\x00/proc\x00", "\x00--dev\x00/dev\x00",
+	} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("linux sandbox arguments omit %q: %#v", required, arguments)
+		}
+	}
+	for _, forbidden := range []string{
+		"\x00--ro-bind\x00/\x00/\x00", source, "\x00/run\x00", "\x00/var/run\x00",
+	} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("linux sandbox exposes forbidden host path %q: %#v", forbidden, arguments)
+		}
 	}
 }
 

@@ -226,27 +226,103 @@ func sandboxedCheckCommand(
 		if err != nil {
 			return nil, fmt.Errorf("configured checks require bubblewrap (bwrap) on linux")
 		}
-		home, _ := os.UserHomeDir()
-		arguments := []string{
-			"--die-with-parent", "--new-session", "--unshare-net", "--ro-bind", "/", "/",
-			"--bind", scratch, scratch, "--proc", "/proc", "--dev", "/dev",
+		arguments, err := linuxCheckSandboxArguments(scratch, repository, sourceWorktree, moduleCache, argv)
+		if err != nil {
+			return nil, err
 		}
-		if home != "" && filepath.IsAbs(home) && home != "/" && !pathWithin(home, scratch) {
-			arguments = append(arguments, "--tmpfs", home)
-		}
-		if filepath.IsAbs(sourceWorktree) && !pathWithin(sourceWorktree, scratch) &&
-			(home == "" || !pathWithin(home, sourceWorktree)) {
-			arguments = append(arguments, "--tmpfs", filepath.Clean(sourceWorktree))
-		}
-		if moduleCache != "" {
-			arguments = append(arguments, "--dir", "/feature-go-mod-cache", "--ro-bind", moduleCache, "/feature-go-mod-cache")
-		}
-		arguments = append(arguments, "--chdir", repository, "--")
-		arguments = append(arguments, argv...)
 		return exec.CommandContext(ctx, bubblewrap, arguments...), nil
 	default:
 		return nil, fmt.Errorf("configured checks have no strict network sandbox on %s", runtime.GOOS)
 	}
+}
+
+func linuxCheckSandboxArguments(
+	scratch, repository, sourceWorktree, moduleCache string,
+	argv []string,
+) ([]string, error) {
+	scratch = filepath.Clean(scratch)
+	repository = filepath.Clean(repository)
+	if !filepath.IsAbs(scratch) || !filepath.IsAbs(repository) || !pathWithin(scratch, repository) || len(argv) == 0 {
+		return nil, fmt.Errorf("linux check sandbox requires absolute scratch, contained repository, and argv")
+	}
+	if filepath.IsAbs(sourceWorktree) && pathWithin(scratch, filepath.Clean(sourceWorktree)) {
+		return nil, fmt.Errorf("source worktree must remain outside the isolated check scratch")
+	}
+	systemRoots := existingLinuxCheckSystemRoots()
+	resolvedExecutable := filepath.Clean(argv[0])
+	if !filepath.IsAbs(resolvedExecutable) {
+		return nil, fmt.Errorf("linux check sandbox requires a resolved absolute executable")
+	}
+	executableVisible := pathWithin(scratch, resolvedExecutable)
+	for _, root := range systemRoots {
+		if pathWithin(root, resolvedExecutable) {
+			executableVisible = true
+			break
+		}
+	}
+	if !executableVisible {
+		return nil, fmt.Errorf("configured check executable %q is outside minimal sandbox roots", resolvedExecutable)
+	}
+	arguments := []string{"--die-with-parent", "--new-session", "--unshare-all", "--tmpfs", "/"}
+	for _, root := range systemRoots {
+		arguments = append(arguments, "--dir", root, "--ro-bind", root, root)
+	}
+	arguments = append(arguments, "--dir", "/etc")
+	for _, path := range []string{"/etc/group", "/etc/ld.so.cache", "/etc/localtime", "/etc/nsswitch.conf", "/etc/passwd"} {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			arguments = append(arguments, "--ro-bind", path, path)
+		}
+	}
+	ancestors, err := isolatedMountAncestors(scratch, systemRoots)
+	if err != nil {
+		return nil, err
+	}
+	for _, ancestor := range ancestors {
+		arguments = append(arguments, "--dir", ancestor)
+	}
+	arguments = append(arguments,
+		"--bind", scratch, scratch,
+		"--dir", "/proc", "--proc", "/proc",
+		"--dir", "/dev", "--dev", "/dev",
+	)
+	if moduleCache != "" {
+		moduleCache = filepath.Clean(moduleCache)
+		if !filepath.IsAbs(moduleCache) {
+			return nil, fmt.Errorf("linux check module cache must be absolute")
+		}
+		arguments = append(arguments,
+			"--dir", "/feature-go-mod-cache", "--ro-bind", moduleCache, "/feature-go-mod-cache",
+		)
+	}
+	arguments = append(arguments, "--chdir", repository, "--")
+	arguments = append(arguments, argv...)
+	return arguments, nil
+}
+
+func existingLinuxCheckSystemRoots() []string {
+	roots := make([]string, 0, 6)
+	for _, root := range []string{"/bin", "/lib", "/lib64", "/nix/store", "/sbin", "/usr"} {
+		if info, err := os.Stat(root); err == nil && info.IsDir() {
+			roots = append(roots, root)
+		}
+	}
+	return roots
+}
+
+func isolatedMountAncestors(path string, mountedRoots []string) ([]string, error) {
+	parents := make([]string, 0, 8)
+	for parent := filepath.Dir(filepath.Clean(path)); parent != string(filepath.Separator); parent = filepath.Dir(parent) {
+		for _, mounted := range mountedRoots {
+			if pathWithin(mounted, parent) || pathWithin(parent, mounted) {
+				return nil, fmt.Errorf("isolated scratch path overlaps read-only system root %s", mounted)
+			}
+		}
+		parents = append(parents, parent)
+	}
+	for left, right := 0, len(parents)-1; left < right; left, right = left+1, right-1 {
+		parents[left], parents[right] = parents[right], parents[left]
+	}
+	return parents, nil
 }
 
 func darwinCheckSandboxProfile(scratch, moduleCache string) string {

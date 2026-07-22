@@ -143,27 +143,20 @@ func (adapter *githubProviderAdapter) Merge(ctx context.Context, request workspa
 		}
 		return workspace.ProviderMergeAdapterResult{}, providerAdapterFailure(workspace.ProviderAdapterFailedBeforeEffect, marker, err)
 	}
-	output, err := adapter.runGH(ctx,
-		"api", "--method", "PUT",
-		fmt.Sprintf("repos/%s/pulls/%d/merge", adapter.providerRepository, request.PullRequest().Number()),
-		"--raw-field", "merge_method=merge", "--raw-field", "sha="+gitObjectHex(request.Head()),
+	remoteURL, err := adapter.configuredRemoteURL(ctx)
+	if err != nil {
+		return workspace.ProviderMergeAdapterResult{}, providerAdapterFailure(workspace.ProviderAdapterFailedBeforeEffect, marker, err)
+	}
+	mergeCommit, err := adapter.createProviderMergeCommit(
+		ctx, request.ExpectedBaseHead(), request.Head(), request.Tree(), request.PullRequest().Number(),
 	)
 	if err != nil {
-		return workspace.ProviderMergeAdapterResult{}, providerAdapterFailure(workspace.ProviderAdapterAmbiguous, marker, err)
+		return workspace.ProviderMergeAdapterResult{}, providerAdapterFailure(workspace.ProviderAdapterFailedBeforeEffect, marker, err)
 	}
-	var result struct {
-		SHA     string `json:"sha"`
-		Merged  bool   `json:"merged"`
-		Message string `json:"message"`
-	}
-	if err := decodeProviderJSON(output, &result); err != nil || !result.Merged {
-		if err == nil {
-			err = fmt.Errorf("provider refused merge: %s", result.Message)
-		}
-		return workspace.ProviderMergeAdapterResult{}, providerAdapterFailure(workspace.ProviderAdapterAmbiguous, marker, err)
-	}
-	mergeCommit, err := parseGitHubObject(result.SHA, request.Head().Algorithm())
-	if err != nil {
+	ref := "refs/heads/" + request.BaseRef()
+	if _, err := adapter.runGitProviderWrite(ctx, providerMergePushArguments(
+		ref, request.ExpectedBaseHead(), mergeCommit, remoteURL,
+	)...); err != nil {
 		return workspace.ProviderMergeAdapterResult{}, providerAdapterFailure(workspace.ProviderAdapterAmbiguous, marker, err)
 	}
 	finalBase, exists, err := adapter.remoteRef(ctx, "refs/heads/"+request.BaseRef(), request.Head().Algorithm())
@@ -174,6 +167,62 @@ func (adapter *githubProviderAdapter) Merge(ctx context.Context, request workspa
 		return workspace.ProviderMergeAdapterResult{}, providerAdapterFailure(workspace.ProviderAdapterAmbiguous, marker, err)
 	}
 	return workspace.NewProviderMergeAdapterResult(marker, mergeCommit, finalBase)
+}
+
+func (adapter *githubProviderAdapter) createProviderMergeCommit(
+	ctx context.Context,
+	base, head, tree workspace.GitObjectID,
+	pullRequest uint64,
+) (workspace.GitObjectID, error) {
+	if base.IsZero() || head.IsZero() || tree.IsZero() || pullRequest == 0 ||
+		base.Algorithm() != head.Algorithm() || head.Algorithm() != tree.Algorithm() {
+		return workspace.GitObjectID{}, fmt.Errorf("provider merge commit requires exact algorithm-matched topology")
+	}
+	observedTree, err := adapter.commitTree(ctx, head)
+	if err != nil || observedTree != tree {
+		if err == nil {
+			err = fmt.Errorf("provider merge head tree %s does not match expected tree %s", observedTree, tree)
+		}
+		return workspace.GitObjectID{}, err
+	}
+	if _, err := adapter.runGit(
+		ctx, false, "merge-base", "--is-ancestor", gitObjectHex(base), gitObjectHex(head),
+	); err != nil {
+		return workspace.GitObjectID{}, fmt.Errorf("provider merge head does not descend from approved base: %w", err)
+	}
+	output, err := adapter.runGitProviderWrite(
+		ctx,
+		"-c", "user.name=feature-implement",
+		"-c", "user.email=feature-implement@users.noreply.github.com",
+		"commit-tree", gitObjectHex(tree),
+		"-p", gitObjectHex(base), "-p", gitObjectHex(head),
+		"-m", fmt.Sprintf("Merge pull request #%d", pullRequest),
+	)
+	if err != nil {
+		return workspace.GitObjectID{}, err
+	}
+	mergeCommit, err := parseGitHubObject(strings.TrimSpace(string(output)), head.Algorithm())
+	if err != nil {
+		return workspace.GitObjectID{}, fmt.Errorf("parse provider merge commit: %w", err)
+	}
+	inspection, err := workspace.DefaultLocalCommitGitAdapter().InspectCommit(ctx, adapter.repositoryRoot, mergeCommit)
+	if err != nil {
+		return workspace.GitObjectID{}, fmt.Errorf("inspect provider merge commit: %w", err)
+	}
+	parents := inspection.Parents()
+	if inspection.Tree() != tree || len(parents) != 2 || parents[0] != base || parents[1] != head {
+		return workspace.GitObjectID{}, fmt.Errorf("provider merge commit does not match approved two-parent topology")
+	}
+	return mergeCommit, nil
+}
+
+func providerMergePushArguments(
+	ref string,
+	expectedBase, mergeCommit workspace.GitObjectID,
+	remoteURL string,
+) []string {
+	lease := "--force-with-lease=" + ref + ":" + gitObjectHex(expectedBase)
+	return []string{"push", "--porcelain", lease, remoteURL, gitObjectHex(mergeCommit) + ":" + ref}
 }
 
 func (adapter *githubProviderAdapter) QueryIntent(ctx context.Context, query workspace.ProviderIntentQuery) (workspace.ProviderReconciliationObservation, error) {
@@ -824,12 +873,34 @@ func (adapter *githubProviderAdapter) runGitProviderWrite(ctx context.Context, a
 func (adapter *githubProviderAdapter) runGH(ctx context.Context, arguments ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, adapter.ghExecutable, arguments...)
 	command.Dir = adapter.repositoryRoot
-	command.Env = append(os.Environ(), "GH_PROMPT_DISABLED=1", "GH_REPO="+adapter.providerRepository)
+	command.Env = githubProcessEnvironment(os.Environ(), adapter.providerRepository)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("gh %s: %w: %s", strings.Join(arguments, " "), err, strings.TrimSpace(string(output)))
 	}
 	return output, nil
+}
+
+func githubProcessEnvironment(base []string, repository string) []string {
+	result := make([]string, 0, len(base)+3)
+	for _, entry := range base {
+		name, _, found := strings.Cut(entry, "=")
+		if !found {
+			continue
+		}
+		switch strings.ToUpper(strings.TrimSpace(name)) {
+		case "GH_HOST", "GH_REPO", "GH_PROMPT_DISABLED":
+			continue
+		default:
+			result = append(result, entry)
+		}
+	}
+	result = append(result,
+		"GH_HOST=github.com",
+		"GH_REPO=github.com/"+repository,
+		"GH_PROMPT_DISABLED=1",
+	)
+	return result
 }
 
 func providerAdapterFailure(kind workspace.ProviderAdapterFailureKind, marker string, cause error) error {

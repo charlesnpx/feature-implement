@@ -36,7 +36,7 @@ Every successful mutation returns a complete journal-derived report. Use it as t
 
 1. Execute the merge unit's stories and testing criteria in the attempt worktree.
 2. When a commit protocol is configured, stage only the next step's allowed changes and use `feature workspace commit next`. The workspace shell owns the exact commit and its ordered structured checks. Do not make that commit manually.
-3. When no commit protocol is configured, ordinary local commits are allowed. Keep the attempt worktree clean; the first configured review safely adopts its exact new head.
+3. When no commit protocol is configured, ordinary local commits are allowed. Keep the attempt worktree clean; the first configured review safely adopts its exact new head. When no governed review loop is configured, submit `attempt adopt-head` after the ordinary commits so the journal adopts the exact clean descendant before provider reservation.
 4. Configured checks run against a private clone of the recorded commit with credentials and hooks scrubbed and write-capable network denied. A host without a supported strict sandbox fails closed.
 5. Use `commit rebase` only for a real, already-performed rebase whose new base and head are exact and whose configured history can be re-proved. Never use it to bless an unrelated replacement history.
 

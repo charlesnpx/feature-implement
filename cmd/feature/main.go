@@ -392,7 +392,7 @@ func usageWorkspace(w io.Writer) {
   feature workspace init|recover --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
   feature workspace status|scheduler|gates|queue|receipts|report --bundle <dir> --workspace <dir> [--json]
   feature workspace reconcile stage|plan|activate --bundle <dir> --candidate-bundle <dir> --workspace <dir> --input <json-file|-> [--json]
-  feature workspace attempt reserve|materialize|boundary|next-goal|acknowledge|owner-response|resume --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
+  feature workspace attempt reserve|materialize|adopt-head|boundary|next-goal|acknowledge|owner-response|resume --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
   feature workspace commit next|rebase --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
   feature workspace review start|reserve|record|reserve-fix|apply-fix|record-fix|ready --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
   feature workspace control grant|revoke|safety|segment-complete|inspect-receipt --bundle <dir> --workspace <dir> --input <json-file|-> [--json]

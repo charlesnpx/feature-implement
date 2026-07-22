@@ -134,6 +134,18 @@ func executeAttempt(ctx context.Context, bundle workspace.WorkspaceBundle, optio
 			return MutationResult{}, err
 		}
 		return mutationResult("attempt.materialize", journal, definition, nil)
+	case "adopt-head":
+		_, occurredAt, attemptID, err := decodeAttemptIDInput(options.Input)
+		if err != nil {
+			return MutationResult{}, err
+		}
+		repository := localReviewRepository{git: workspace.DefaultLocalCommitGitAdapter()}
+		if _, err := workspace.AdoptAttemptHead(ctx, journal, definition, repository, workspace.AdoptAttemptHeadRequest{
+			AttemptID: attemptID, OccurredAt: occurredAt,
+		}); err != nil {
+			return MutationResult{}, err
+		}
+		return mutationResult("attempt.adopt-head", journal, definition, nil)
 	case "boundary":
 		var input boundaryInput
 		if err := decodeRequest(options.Input, &input); err != nil {

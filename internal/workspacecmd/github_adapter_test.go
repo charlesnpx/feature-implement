@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -72,6 +73,96 @@ func TestGitHubRepositoryIdentityRequiresExactGitHubRepository(t *testing.T) {
 		if repository, err := githubRepositoryFromRemoteURL(value); err == nil {
 			t.Fatalf("invalid repository identity %q normalized to %q", value, repository)
 		}
+	}
+}
+
+func TestGitHubCommandsPinCanonicalHostAndRepository(t *testing.T) {
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "fake-gh")
+	script := `#!/bin/sh
+printf '%s\n%s\n' "$GH_HOST" "$GH_REPO"
+`
+	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GH_HOST", "example.invalid")
+	t.Setenv("GH_REPO", "example.invalid/other/project")
+	adapter := &githubProviderAdapter{
+		repositoryRoot: directory, providerRepository: "example/project", ghExecutable: executable,
+	}
+	output, err := adapter.runGH(context.Background(), "api", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(output) != "github.com\ngithub.com/example/project\n" {
+		t.Fatalf("pinned GitHub environment = %q", output)
+	}
+	environment := githubProcessEnvironment([]string{
+		"PATH=/usr/bin", "GH_HOST=one.invalid", "gh_host=two.invalid", "GH_REPO=wrong/repository",
+	}, "example/project")
+	joined := "\x00" + strings.Join(environment, "\x00") + "\x00"
+	if strings.Count(joined, "\x00GH_HOST=") != 1 || strings.Count(joined, "\x00GH_REPO=") != 1 ||
+		!strings.Contains(joined, "\x00GH_HOST=github.com\x00") ||
+		!strings.Contains(joined, "\x00GH_REPO=github.com/example/project\x00") {
+		t.Fatalf("deduplicated GitHub environment = %#v", environment)
+	}
+}
+
+func TestProviderMergeCommitUsesExactTopologyAndBaseLease(t *testing.T) {
+	repository := canonicalWorkspaceCommandTempDir(t)
+	runGitTest(t, repository, "init", "-b", "main")
+	runGitTest(t, repository, "config", "user.name", "Feature Test")
+	runGitTest(t, repository, "config", "user.email", "feature@example.test")
+	tracked := filepath.Join(repository, "tracked.txt")
+	if err := os.WriteFile(tracked, []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repository, "add", "tracked.txt")
+	runGitTest(t, repository, "commit", "-m", "Base")
+	base := parseWorkspaceCommandGitObject(t, strings.TrimSpace(runGitTest(t, repository, "rev-parse", "HEAD")))
+	if err := os.WriteFile(tracked, []byte("head\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repository, "add", "tracked.txt")
+	runGitTest(t, repository, "commit", "-m", "Head")
+	head := parseWorkspaceCommandGitObject(t, strings.TrimSpace(runGitTest(t, repository, "rev-parse", "HEAD")))
+	tree := parseWorkspaceCommandGitObject(t, strings.TrimSpace(runGitTest(t, repository, "rev-parse", "HEAD^{tree}")))
+	adapter := &githubProviderAdapter{repositoryRoot: repository, remote: "origin", gitExecutable: "git"}
+	mergeCommit, err := adapter.createProviderMergeCommit(context.Background(), base, head, tree, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := workspace.DefaultLocalCommitGitAdapter().InspectCommit(context.Background(), repository, mergeCommit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parents := inspection.Parents()
+	if inspection.Tree() != tree || len(parents) != 2 || parents[0] != base || parents[1] != head {
+		t.Fatalf("provider merge topology = tree:%s parents:%v", inspection.Tree(), parents)
+	}
+
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	runGitTest(t, repository, "init", "--bare", remote)
+	runGitTest(t, repository, "push", remote, gitObjectHex(base)+":refs/heads/main")
+	runGitTest(t, repository, "checkout", "-b", "drift", gitObjectHex(base))
+	if err := os.WriteFile(tracked, []byte("drift\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repository, "add", "tracked.txt")
+	runGitTest(t, repository, "commit", "-m", "Competing base update")
+	drift := parseWorkspaceCommandGitObject(t, strings.TrimSpace(runGitTest(t, repository, "rev-parse", "HEAD")))
+	runGitTest(t, repository, "push", remote, gitObjectHex(drift)+":refs/heads/main")
+
+	arguments := providerMergePushArguments("refs/heads/main", base, mergeCommit, remote)
+	command := exec.Command("git", arguments...)
+	command.Dir = repository
+	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0")
+	if output, err := command.CombinedOutput(); err == nil {
+		t.Fatalf("drifted base lease unexpectedly updated remote: %s", output)
+	}
+	remoteLine := strings.TrimSpace(runGitTest(t, repository, "ls-remote", remote, "refs/heads/main"))
+	if !strings.HasPrefix(remoteLine, gitObjectHex(drift)+"\t") {
+		t.Fatalf("drifted base changed despite rejected lease: %q", remoteLine)
 	}
 }
 

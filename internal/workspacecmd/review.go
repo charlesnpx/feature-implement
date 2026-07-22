@@ -123,14 +123,13 @@ func (adapter localReviewRepository) InspectReviewSnapshot(
 	ctx context.Context,
 	request workspace.ReviewRepositoryRequest,
 ) (workspace.ReviewRepositorySnapshot, error) {
-	inspection, err := adapter.git.InspectCommit(ctx, request.Worktree(), request.Head())
+	inspection, err := adapter.git.InspectCleanWorktreeHead(
+		ctx, request.Worktree(), request.Branch(), request.Head(),
+	)
 	if err != nil {
 		return workspace.ReviewRepositorySnapshot{}, err
 	}
-	if err := adapter.git.VerifyCleanWorktree(ctx, request.Worktree(), request.Branch(), request.Head()); err != nil {
-		return workspace.ReviewRepositorySnapshot{}, err
-	}
-	return workspace.NewReviewRepositorySnapshot(request.Head(), inspection.Tree(), true)
+	return workspace.NewReviewRepositorySnapshot(inspection.Commit(), inspection.Tree(), true)
 }
 
 func executeReview(ctx context.Context, bundle workspace.WorkspaceBundle, options Options) (any, error) {

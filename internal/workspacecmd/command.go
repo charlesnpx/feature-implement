@@ -251,6 +251,7 @@ func RequestSchemas() map[string]any {
 			"base": stringProperty(), "worktree_root": stringProperty(), "goal": goal,
 		})),
 		"attempt.materialize": request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
+		"attempt.adopt-head":  request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
 		"attempt.boundary": request([]string{"occurred_at", "attempt_id", "evidence"}, occurred(map[string]any{
 			"attempt_id": stringProperty(), "evidence": map[string]any{"type": "array", "items": evidence},
 		})),

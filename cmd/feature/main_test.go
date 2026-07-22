@@ -125,7 +125,7 @@ func TestWorkspaceSchemaExampleAndJournalBackedStatus(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &requestSchema); err != nil || requestSchema.SchemaVersion != 2 {
 		t.Fatalf("request schema is invalid: err=%v output=%s", err, stdout)
 	}
-	for _, name := range []string{"init", "attempt.reserve", "review.record", "provider.dispatch", "complete.verify"} {
+	for _, name := range []string{"init", "attempt.reserve", "attempt.adopt-head", "review.record", "provider.dispatch", "complete.verify"} {
 		if _, exists := requestSchema.Requests[name]; !exists {
 			t.Fatalf("request schema omits %s", name)
 		}

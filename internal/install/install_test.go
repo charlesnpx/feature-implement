@@ -147,6 +147,7 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"feature workspace scheduler",
 			"attempt reserve",
 			"attempt materialize",
+			"attempt adopt-head",
 			"journal-derived report",
 			"feature workspace commit next",
 			"typed provider intents",
