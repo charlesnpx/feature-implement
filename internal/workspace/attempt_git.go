@@ -849,10 +849,10 @@ func (buffer *boundedProcessBuffer) bytes() []byte {
 }
 
 func mergeProcessEnvironment(base []string, additions []EnvironmentVariable) []string {
-	values := make(map[string]string, len(base)+len(additions))
+	values := make(map[string]string, len(additions)+20)
 	for _, entry := range base {
 		name, value, found := strings.Cut(entry, "=")
-		if found && !unsafeAttemptGitEnvironment(name) {
+		if found && allowedNonProviderAmbientEnvironment(name) {
 			values[name] = value
 		}
 	}
@@ -885,9 +885,19 @@ func mergeProcessEnvironment(base []string, additions []EnvironmentVariable) []s
 	return result
 }
 
+func allowedNonProviderAmbientEnvironment(name string) bool {
+	switch strings.ToUpper(strings.TrimSpace(name)) {
+	case "PATH", "TMPDIR", "TMP", "TEMP", "TZ", "LANG", "LC_ALL", "LC_CTYPE",
+		"SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT":
+		return true
+	default:
+		return false
+	}
+}
+
 // BuildNonProviderProcessEnvironment is the shared environment boundary for
 // local Git, checks, implementation processes, and reviewers. It removes
-// ambient provider credentials and Git redirection variables, then forces
+// all ambient state except a small operational allowlist, then forces
 // credential helpers, prompts, SSH identities, and system/global Git config
 // off. Network sandboxing and provider-broker exclusion remain mandatory
 // responsibilities of the typed runner port.

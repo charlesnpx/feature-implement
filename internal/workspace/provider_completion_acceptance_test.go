@@ -83,16 +83,18 @@ func newProviderOpenScenarioWithHarness(
 	); err != nil {
 		t.Fatal(err)
 	}
-	clock.now = mustTime(t, "2026-07-21T"+hour+":05:00Z")
-	ticket, err := workspace.AuthorizeProviderIntentDispatch(harness.journal, harness.definition, evaluator, open.IntentID())
-	if err != nil {
-		t.Fatal(err)
-	}
 	openResult, _ := workspace.NewProviderOpenPullRequestAdapterResult(
 		"open-provider-topology", pullRequestNumber, head,
 	)
 	adapter := &providerLifecycleAdapter{openResult: openResult}
 	broker, err := workspace.NewProviderBroker(harness.definition.Workspace().Provider(), adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.now = mustTime(t, "2026-07-21T"+hour+":05:00Z")
+	ticket, err := workspace.AuthorizeProviderIntentDispatch(
+		harness.journal, harness.definition, evaluator, broker, open.IntentID(),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +249,7 @@ func (scenario *providerOpenScenario) executeMerge(
 	}
 	scenario.clock.now = mustTime(t, "2026-07-21T"+scenario.hour+":08:00Z")
 	ticket, err := workspace.AuthorizeProviderIntentDispatch(
-		scenario.harness.journal, scenario.harness.definition, scenario.evaluator, intent.IntentID(),
+		scenario.harness.journal, scenario.harness.definition, scenario.evaluator, scenario.broker, intent.IntentID(),
 	)
 	if err != nil {
 		return intent, workspace.ProviderExecutionResult{}, err
@@ -451,7 +453,7 @@ func TestProviderFailedBeforeEffectCanRetryExactMergeIntent(t *testing.T) {
 	}
 	scenario.clock.now = mustTime(t, "2026-07-21T13:08:00Z")
 	ticket, err := workspace.AuthorizeProviderIntentDispatch(
-		scenario.harness.journal, scenario.harness.definition, scenario.evaluator, intent.IntentID(),
+		scenario.harness.journal, scenario.harness.definition, scenario.evaluator, scenario.broker, intent.IntentID(),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -490,7 +492,7 @@ func TestProviderFailedBeforeEffectCanRetryExactMergeIntent(t *testing.T) {
 	}
 	scenario.clock.now = mustTime(t, "2026-07-21T13:10:00Z")
 	ticket, err = workspace.AuthorizeProviderIntentDispatch(
-		scenario.harness.journal, scenario.harness.definition, scenario.evaluator, intent.IntentID(),
+		scenario.harness.journal, scenario.harness.definition, scenario.evaluator, scenario.broker, intent.IntentID(),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -510,7 +512,7 @@ func TestProviderIntentAfterOpenPRMustBindSoleDerivedIdentity(t *testing.T) {
 	scenario := newProviderOpenScenario(t, "13", workspace.GitHashSHA1, 171)
 	pushWithoutIdentity, err := workspace.NewProviderPushIntent(workspace.ProviderPushIntentOptions{
 		Scope:  providerIntentScope(scenario.harness, scenario.attempt, scenario.frontier, workspace.PullRequestIdentity{}),
-		Branch: scenario.attempt.Branch(), Head: scenario.head,
+		Branch: scenario.attempt.Branch(), ExpectRemoteAbsent: true, Head: scenario.head,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -532,40 +534,30 @@ func TestProviderIntentAfterOpenPRMustBindSoleDerivedIdentity(t *testing.T) {
 	}
 }
 
-func TestProviderPushAfterOpenPRBindsIdentityAndPostflightHeadTree(t *testing.T) {
+func TestProviderPushRequiresExplicitAuthorizedLeaseBeforeAnyWrite(t *testing.T) {
 	scenario := newProviderOpenScenario(t, "13", workspace.GitHashSHA1, 171)
-	push, err := workspace.NewProviderPushIntent(workspace.ProviderPushIntentOptions{
+	if _, err := workspace.NewProviderPushIntent(workspace.ProviderPushIntentOptions{
 		Scope:  providerIntentScope(scenario.harness, scenario.attempt, scenario.frontier, scenario.pull),
-		Branch: scenario.attempt.Branch(), ExpectedRemoteHead: scenario.base,
+		Branch: scenario.attempt.Branch(), Head: scenario.head, Tree: scenario.tree,
+	}); err == nil || !strings.Contains(err.Error(), "exactly one explicit") {
+		t.Fatalf("missing post-PR push lease error = %v", err)
+	}
+	wrong := mustProviderGitObject(t, workspace.GitHashSHA1, 'd')
+	if _, err := workspace.NewProviderPushIntent(workspace.ProviderPushIntentOptions{
+		Scope:  providerIntentScope(scenario.harness, scenario.attempt, scenario.frontier, scenario.pull),
+		Branch: scenario.attempt.Branch(), ExpectedRemoteHead: wrong,
 		Head: scenario.head, Tree: scenario.tree,
-	})
-	if err != nil {
-		t.Fatal(err)
+	}); err == nil || !strings.Contains(err.Error(), "frontier-base lease") {
+		t.Fatalf("wrong post-PR push lease error = %v", err)
 	}
-	scenario.clock.now = mustTime(t, "2026-07-21T13:07:00Z")
-	if _, _, err := workspace.ReserveProviderIntent(
-		scenario.harness.journal, scenario.harness.definition, scenario.evaluator,
-		workspace.ReserveProviderIntentRequest{Intent: push, OccurredAt: mustTime(t, "2026-07-21T13:07:01Z")},
-	); err != nil {
-		t.Fatal(err)
+	if _, err := workspace.NewProviderPushIntent(workspace.ProviderPushIntentOptions{
+		Scope:  providerIntentScope(scenario.harness, scenario.attempt, scenario.frontier, workspace.PullRequestIdentity{}),
+		Branch: scenario.attempt.Branch(), Head: scenario.head,
+	}); err == nil || !strings.Contains(err.Error(), "exactly one explicit") {
+		t.Fatalf("missing initial push absence lease error = %v", err)
 	}
-	scenario.clock.now = mustTime(t, "2026-07-21T13:08:00Z")
-	ticket, err := workspace.AuthorizeProviderIntentDispatch(
-		scenario.harness.journal, scenario.harness.definition, scenario.evaluator, push.IntentID(),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, _ := workspace.NewProviderPushAdapterResult("post-pr-push", scenario.head)
-	scenario.adapter.pushResult = result
-	queriesBefore := scenario.adapter.queryPRCalls
-	execution, err := workspace.ExecuteProviderIntent(
-		context.Background(), scenario.harness.journal, scenario.harness.definition, scenario.broker, ticket,
-		mustTime(t, "2026-07-21T13:08:01Z"),
-	)
-	if err != nil || execution.Result().Status() != workspace.ProviderIntentSucceeded ||
-		scenario.adapter.pushCalls != 1 || scenario.adapter.queryPRCalls != queriesBefore+1 {
-		t.Fatalf("post-PR push = %#v push=%d query=%d err=%v", execution, scenario.adapter.pushCalls, scenario.adapter.queryPRCalls, err)
+	if scenario.adapter.pushCalls != 0 {
+		t.Fatalf("provider push ran while validating rejected leases: %d", scenario.adapter.pushCalls)
 	}
 }
 

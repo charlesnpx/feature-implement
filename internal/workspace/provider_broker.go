@@ -12,6 +12,9 @@ import (
 // The adapter request types are closed, typed provider inputs. None can carry
 // an executable, argv, shell fragment, arbitrary provider action, delete ref,
 // or close-without-merge operation.
+// ProviderPushRequest always carries one mandatory atomic lease: either the
+// branch must not exist or it must still equal ExpectedRemoteHead. Provider
+// adapters must reject a mismatch before changing the remote branch.
 type ProviderPushRequest struct{ intent ProviderIntent }
 
 func (request ProviderPushRequest) Repository() RepositoryIdentity {
@@ -23,6 +26,7 @@ func (request ProviderPushRequest) Head() GitObjectID { return request.intent.he
 func (request ProviderPushRequest) ExpectedRemoteHead() (GitObjectID, bool) {
 	return request.intent.expectedRemote, !request.intent.expectedRemote.IsZero()
 }
+func (request ProviderPushRequest) ExpectsRemoteAbsent() bool { return request.intent.expectAbsent }
 func (request ProviderPushRequest) PullRequest() (PullRequestIdentity, bool) {
 	return request.intent.pullRequest, !request.intent.pullRequest.IsZero()
 }
@@ -306,16 +310,25 @@ type providerBrokerCapability struct {
 	idempotencyKey Digest
 	epoch          uint64
 	dispatchRecord Digest
+	sequence       uint64
+	binding        *providerBrokerBinding
 	digest         Digest
 }
 
-func newProviderBrokerCapability(intent ProviderIntent, epoch uint64, dispatchRecord Digest) (providerBrokerCapability, error) {
-	if intent.intentID.IsZero() || intent.digest.IsZero() || intent.idempotencyKey.IsZero() || epoch == 0 || dispatchRecord.IsZero() {
+func newProviderBrokerCapability(
+	binding *providerBrokerBinding,
+	sequence uint64,
+	intent ProviderIntent,
+	epoch uint64,
+	dispatchRecord Digest,
+) (providerBrokerCapability, error) {
+	if binding == nil || sequence == 0 || intent.intentID.IsZero() || intent.digest.IsZero() ||
+		intent.idempotencyKey.IsZero() || epoch == 0 || dispatchRecord.IsZero() {
 		return providerBrokerCapability{}, fmt.Errorf("provider broker capability requires intent, authorization epoch, and durable dispatch record")
 	}
 	capability := providerBrokerCapability{
 		intentID: intent.intentID, intentDigest: intent.digest, idempotencyKey: intent.idempotencyKey,
-		epoch: epoch, dispatchRecord: dispatchRecord,
+		epoch: epoch, dispatchRecord: dispatchRecord, sequence: sequence, binding: binding,
 	}
 	type canonical struct {
 		SchemaVersion  int    `json:"schema_version"`
@@ -324,11 +337,12 @@ func newProviderBrokerCapability(intent ProviderIntent, epoch uint64, dispatchRe
 		IdempotencyKey string `json:"idempotency_key"`
 		Epoch          uint64 `json:"epoch"`
 		DispatchRecord string `json:"dispatch_record"`
+		Sequence       uint64 `json:"broker_sequence"`
 	}
 	content, _ := json.Marshal(canonical{
 		SchemaVersion: JournalSchemaVersion, IntentID: intent.intentID.String(),
 		IntentDigest: intent.digest.String(), IdempotencyKey: intent.idempotencyKey.String(),
-		Epoch: epoch, DispatchRecord: dispatchRecord.String(),
+		Epoch: epoch, DispatchRecord: dispatchRecord.String(), Sequence: sequence,
 	})
 	capability.digest = DigestBytes(content)
 	return capability, nil
@@ -338,89 +352,237 @@ type providerQueryCapability struct {
 	intentID       ID
 	intentDigest   Digest
 	idempotencyKey Digest
+	dispatchRecord Digest
 	journalHead    Digest
 	queryAttempt   time.Time
+	sequence       uint64
+	binding        *providerBrokerBinding
 	digest         Digest
 }
 
 func newProviderQueryCapability(
+	binding *providerBrokerBinding,
+	sequence uint64,
 	intent ProviderIntent,
+	dispatchRecord Digest,
 	journalHead Digest,
 	queryAttempt time.Time,
 ) (providerQueryCapability, error) {
-	if intent.intentID.IsZero() || intent.digest.IsZero() || intent.idempotencyKey.IsZero() ||
-		journalHead.IsZero() || queryAttempt.IsZero() {
+	if binding == nil || sequence == 0 || intent.intentID.IsZero() || intent.digest.IsZero() ||
+		intent.idempotencyKey.IsZero() || dispatchRecord.IsZero() || journalHead.IsZero() || queryAttempt.IsZero() {
 		return providerQueryCapability{}, fmt.Errorf("provider query capability requires intent, durable journal head, and query attempt")
 	}
 	queryAttempt = queryAttempt.UTC()
 	capability := providerQueryCapability{
 		intentID: intent.intentID, intentDigest: intent.digest,
-		idempotencyKey: intent.idempotencyKey, journalHead: journalHead, queryAttempt: queryAttempt,
+		idempotencyKey: intent.idempotencyKey, dispatchRecord: dispatchRecord,
+		journalHead: journalHead, queryAttempt: queryAttempt, sequence: sequence, binding: binding,
 	}
 	type canonical struct {
 		SchemaVersion  int    `json:"schema_version"`
 		IntentID       string `json:"intent_id"`
 		IntentDigest   string `json:"intent_digest"`
 		IdempotencyKey string `json:"idempotency_key"`
+		DispatchRecord string `json:"dispatch_record"`
 		JournalHead    string `json:"journal_head"`
 		QueryAttempt   string `json:"query_attempt"`
+		Sequence       uint64 `json:"broker_sequence"`
 	}
 	content, _ := json.Marshal(canonical{
 		SchemaVersion: JournalSchemaVersion, IntentID: intent.intentID.String(),
 		IntentDigest: intent.digest.String(), IdempotencyKey: intent.idempotencyKey.String(),
-		JournalHead: journalHead.String(), QueryAttempt: queryAttempt.Format(time.RFC3339Nano),
+		DispatchRecord: dispatchRecord.String(), JournalHead: journalHead.String(),
+		QueryAttempt: queryAttempt.Format(time.RFC3339Nano), Sequence: sequence,
 	})
 	capability.digest = DigestBytes(content)
 	return capability, nil
 }
 
+type providerBrokerBinding struct{ marker byte }
+
+type providerBrokerOperationKind string
+
+const (
+	providerBrokerDispatchOperation  providerBrokerOperationKind = "dispatch"
+	providerBrokerReconcileOperation providerBrokerOperationKind = "reconcile"
+)
+
+type providerBrokerOperationKey struct {
+	provider       ProviderIdentity
+	intentID       ID
+	intentDigest   Digest
+	dispatchRecord Digest
+}
+
+type providerBrokerActiveOperation struct {
+	kind       providerBrokerOperationKind
+	capability Digest
+	binding    *providerBrokerBinding
+}
+
+var providerBrokerOperations = struct {
+	sync.Mutex
+	active map[providerBrokerOperationKey]providerBrokerActiveOperation
+}{active: make(map[providerBrokerOperationKey]providerBrokerActiveOperation)}
+
+type providerBrokerOperationClaim struct {
+	key        providerBrokerOperationKey
+	kind       providerBrokerOperationKind
+	capability Digest
+	binding    *providerBrokerBinding
+	release    sync.Once
+}
+
+func (claim *providerBrokerOperationClaim) Release() {
+	if claim == nil {
+		return
+	}
+	claim.release.Do(func() {
+		providerBrokerOperations.Lock()
+		defer providerBrokerOperations.Unlock()
+		active, exists := providerBrokerOperations.active[claim.key]
+		if exists && active.kind == claim.kind && active.capability == claim.capability && active.binding == claim.binding {
+			delete(providerBrokerOperations.active, claim.key)
+		}
+	})
+}
+
 // ProviderBroker is the sole credential-bearing provider boundary. It owns
-// the adapter and consumes every opaque dispatch/query capability exactly
-// once before invoking that adapter.
+// the adapter, issues broker-bound opaque capabilities, and serializes a live
+// dispatch against reconciliation through durable result recording.
 type ProviderBroker struct {
 	provider ProviderIdentity
 	adapter  providerAdapterPort
+	binding  *providerBrokerBinding
+	self     *ProviderBroker
 	mu       sync.Mutex
+	sequence uint64
 	consumed map[Digest]struct{}
+}
+
+func (broker *ProviderBroker) available() bool {
+	return broker != nil && broker.self == broker && broker.adapter != nil && broker.binding != nil
 }
 
 func NewProviderBroker(provider ProviderIdentity, adapter providerAdapterPort) (*ProviderBroker, error) {
 	if provider.kind.IsZero() || provider.repository == "" || adapter == nil {
 		return nil, fmt.Errorf("provider broker requires provider identity and typed adapter")
 	}
-	return &ProviderBroker{provider: provider, adapter: adapter, consumed: make(map[Digest]struct{})}, nil
+	broker := &ProviderBroker{
+		provider: provider, adapter: adapter, binding: &providerBrokerBinding{marker: 1},
+		consumed: make(map[Digest]struct{}),
+	}
+	broker.self = broker
+	return broker, nil
 }
 
-func (broker *ProviderBroker) consume(capability Digest) error {
-	if broker == nil || broker.adapter == nil || capability.IsZero() {
-		return fmt.Errorf("provider broker capability is unavailable")
+func (broker *ProviderBroker) nextSequence() (uint64, error) {
+	if !broker.available() {
+		return 0, fmt.Errorf("provider broker is unavailable")
+	}
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+	broker.sequence++
+	if broker.sequence == 0 {
+		return 0, fmt.Errorf("provider broker capability sequence overflow")
+	}
+	return broker.sequence, nil
+}
+
+func (broker *ProviderBroker) issueDispatchCapability(
+	intent ProviderIntent,
+	epoch uint64,
+	dispatchRecord Digest,
+) (providerBrokerCapability, error) {
+	sequence, err := broker.nextSequence()
+	if err != nil {
+		return providerBrokerCapability{}, err
+	}
+	return newProviderBrokerCapability(broker.binding, sequence, intent, epoch, dispatchRecord)
+}
+
+func (broker *ProviderBroker) issueQueryCapability(
+	intent ProviderIntent,
+	dispatchRecord, journalHead Digest,
+	queryAttempt time.Time,
+) (providerQueryCapability, error) {
+	sequence, err := broker.nextSequence()
+	if err != nil {
+		return providerQueryCapability{}, err
+	}
+	return newProviderQueryCapability(
+		broker.binding, sequence, intent, dispatchRecord, journalHead, queryAttempt,
+	)
+}
+
+func (broker *ProviderBroker) claimOperation(
+	binding *providerBrokerBinding,
+	capability Digest,
+	key providerBrokerOperationKey,
+	kind providerBrokerOperationKind,
+) (*providerBrokerOperationClaim, error) {
+	if !broker.available() || binding != broker.binding ||
+		capability.IsZero() || key.provider != broker.provider || key.intentID.IsZero() ||
+		key.intentDigest.IsZero() || key.dispatchRecord.IsZero() {
+		return nil, fmt.Errorf("provider capability was not issued by this broker")
 	}
 	broker.mu.Lock()
 	defer broker.mu.Unlock()
 	if _, exists := broker.consumed[capability]; exists {
-		return fmt.Errorf("provider broker capability %s was already consumed", capability)
+		return nil, fmt.Errorf("provider broker capability %s was already consumed", capability)
+	}
+	providerBrokerOperations.Lock()
+	defer providerBrokerOperations.Unlock()
+	if active, exists := providerBrokerOperations.active[key]; exists {
+		return nil, fmt.Errorf("provider intent %s already has a live %s operation", key.intentID, active.kind)
+	}
+	providerBrokerOperations.active[key] = providerBrokerActiveOperation{
+		kind: kind, capability: capability, binding: binding,
 	}
 	broker.consumed[capability] = struct{}{}
-	return nil
+	return &providerBrokerOperationClaim{
+		key: key, kind: kind, capability: capability, binding: binding,
+	}, nil
 }
 
-func (broker *ProviderBroker) dispatch(
+func (broker *ProviderBroker) claimDispatch(
+	capability providerBrokerCapability,
+	intent ProviderIntent,
+) (*providerBrokerOperationClaim, error) {
+	if capability.intentID != intent.intentID || capability.intentDigest != intent.digest ||
+		capability.idempotencyKey != intent.idempotencyKey || capability.epoch != intent.scope.epoch ||
+		capability.dispatchRecord.IsZero() || capability.sequence == 0 || capability.binding == nil ||
+		capability.digest.IsZero() {
+		return nil, fmt.Errorf("provider broker capability does not match the exact intent and authorization epoch")
+	}
+	expected, err := newProviderBrokerCapability(
+		capability.binding, capability.sequence, intent, capability.epoch, capability.dispatchRecord,
+	)
+	if err != nil || expected.digest != capability.digest {
+		return nil, fmt.Errorf("provider broker capability digest is invalid")
+	}
+	return broker.claimOperation(
+		capability.binding,
+		capability.digest,
+		providerBrokerOperationKey{
+			provider: broker.provider, intentID: intent.intentID,
+			intentDigest: intent.digest, dispatchRecord: capability.dispatchRecord,
+		},
+		providerBrokerDispatchOperation,
+	)
+}
+
+func (broker *ProviderBroker) dispatchClaimed(
 	ctx context.Context,
+	claim *providerBrokerOperationClaim,
 	capability providerBrokerCapability,
 	intent ProviderIntent,
 	preflight ProviderMergePreflight,
 ) (ProviderResult, error) {
-	if capability.intentID != intent.intentID || capability.intentDigest != intent.digest ||
-		capability.idempotencyKey != intent.idempotencyKey || capability.epoch != intent.scope.epoch ||
-		capability.dispatchRecord.IsZero() || capability.digest.IsZero() {
-		return ProviderResult{}, fmt.Errorf("provider broker capability does not match the exact intent and authorization epoch")
-	}
-	expected, err := newProviderBrokerCapability(intent, capability.epoch, capability.dispatchRecord)
-	if err != nil || expected.digest != capability.digest {
-		return ProviderResult{}, fmt.Errorf("provider broker capability digest is invalid")
-	}
-	if err := broker.consume(capability.digest); err != nil {
-		return ProviderResult{}, err
+	if !broker.available() || claim == nil || claim.kind != providerBrokerDispatchOperation || claim.binding != broker.binding ||
+		claim.capability != capability.digest || claim.key.intentID != intent.intentID ||
+		claim.key.intentDigest != intent.digest || claim.key.dispatchRecord != capability.dispatchRecord {
+		return ProviderResult{}, fmt.Errorf("provider dispatch requires the broker's live execution claim")
 	}
 	if intent.kind == ProviderIntentMerge {
 		if preflight.intentID != intent.intentID || preflight.intentDigest != intent.digest || preflight.digest.IsZero() {
@@ -554,22 +716,44 @@ func (broker *ProviderBroker) failureResult(
 	return result, cause
 }
 
-func (broker *ProviderBroker) reconcile(
+func (broker *ProviderBroker) claimReconciliation(
+	capability providerQueryCapability,
+	intent ProviderIntent,
+) (*providerBrokerOperationClaim, error) {
+	if capability.intentID != intent.intentID || capability.intentDigest != intent.digest ||
+		capability.idempotencyKey != intent.idempotencyKey || capability.dispatchRecord.IsZero() ||
+		capability.journalHead.IsZero() || capability.queryAttempt.IsZero() || capability.sequence == 0 ||
+		capability.binding == nil || capability.digest.IsZero() {
+		return nil, fmt.Errorf("provider reconciliation capability does not match the exact intent")
+	}
+	expected, err := newProviderQueryCapability(
+		capability.binding, capability.sequence, intent, capability.dispatchRecord,
+		capability.journalHead, capability.queryAttempt,
+	)
+	if err != nil || expected.digest != capability.digest {
+		return nil, fmt.Errorf("provider reconciliation capability digest is invalid")
+	}
+	return broker.claimOperation(
+		capability.binding,
+		capability.digest,
+		providerBrokerOperationKey{
+			provider: broker.provider, intentID: intent.intentID,
+			intentDigest: intent.digest, dispatchRecord: capability.dispatchRecord,
+		},
+		providerBrokerReconcileOperation,
+	)
+}
+
+func (broker *ProviderBroker) reconcileClaimed(
 	ctx context.Context,
+	claim *providerBrokerOperationClaim,
 	capability providerQueryCapability,
 	intent ProviderIntent,
 ) (ProviderReconciliationObservation, error) {
-	if capability.intentID != intent.intentID || capability.intentDigest != intent.digest ||
-		capability.idempotencyKey != intent.idempotencyKey || capability.journalHead.IsZero() ||
-		capability.queryAttempt.IsZero() || capability.digest.IsZero() {
-		return ProviderReconciliationObservation{}, fmt.Errorf("provider reconciliation capability does not match the exact intent")
-	}
-	expected, err := newProviderQueryCapability(intent, capability.journalHead, capability.queryAttempt)
-	if err != nil || expected.digest != capability.digest {
-		return ProviderReconciliationObservation{}, fmt.Errorf("provider reconciliation capability digest is invalid")
-	}
-	if err := broker.consume(capability.digest); err != nil {
-		return ProviderReconciliationObservation{}, err
+	if !broker.available() || claim == nil || claim.kind != providerBrokerReconcileOperation || claim.binding != broker.binding ||
+		claim.capability != capability.digest || claim.key.intentID != intent.intentID ||
+		claim.key.intentDigest != intent.digest || claim.key.dispatchRecord != capability.dispatchRecord {
+		return ProviderReconciliationObservation{}, fmt.Errorf("provider reconciliation requires the broker's live query claim")
 	}
 	observation, err := broker.adapter.QueryIntent(ctx, ProviderIntentQuery{intent: intent})
 	if err != nil {
@@ -585,7 +769,7 @@ func (broker *ProviderBroker) observePullRequest(
 	ctx context.Context,
 	query ProviderPullRequestQuery,
 ) (ProviderPullRequestState, error) {
-	if broker == nil || broker.adapter == nil || query.repository.String() == "" || query.pullRequest.IsZero() ||
+	if !broker.available() || query.repository.String() == "" || query.pullRequest.IsZero() ||
 		query.pullRequest.repository != query.repository || query.pullRequest.provider != broker.provider.kind {
 		return ProviderPullRequestState{}, fmt.Errorf("provider broker pull request query has invalid identity")
 	}
@@ -607,7 +791,7 @@ func (broker *ProviderBroker) VerifyProviderPullRequest(
 	verification ProviderPullRequestVerification,
 	observation ProviderPullRequestObservation,
 ) error {
-	if broker == nil || observation.digest.IsZero() || observation.identity.provider != broker.provider.kind ||
+	if !broker.available() || observation.digest.IsZero() || observation.identity.provider != broker.provider.kind ||
 		verification.repository != observation.identity.repository || verification.observedHead != observation.head ||
 		verification.observation != observation.digest {
 		return fmt.Errorf("provider pull request verification does not match broker and observation bindings")

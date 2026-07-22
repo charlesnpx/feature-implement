@@ -15,6 +15,10 @@ func TestNonProviderProcessEnvironmentScrubsCredentialsAndDisablesGitCredentialP
 		"PATH=/usr/bin:/bin",
 		"HOME=/tmp/non-provider-home",
 		"FEATURE_SAFE_BASE=present",
+		"GITHUB_APP_PRIVATE_KEY_BASE64=forbidden",
+		"CUSTOM_PROVIDER_SIGNING_MATERIAL=forbidden",
+		"KRB5CCNAME=/tmp/forbidden-credential-cache",
+		"KRB5_CLIENT_KTNAME=/tmp/forbidden-keytab",
 		"GITHUB_TOKEN=forbidden",
 		"CI_JOB_TOKEN=forbidden",
 		"AWS_ACCESS_KEY_ID=forbidden",
@@ -37,14 +41,16 @@ func TestNonProviderProcessEnvironmentScrubsCredentialsAndDisablesGitCredentialP
 	}
 	for _, forbidden := range []string{
 		"GITHUB_TOKEN", "CI_JOB_TOKEN", "AWS_ACCESS_KEY_ID", "SSH_AUTH_SOCK",
-		"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+		"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "FEATURE_SAFE_BASE",
+		"GITHUB_APP_PRIVATE_KEY_BASE64", "CUSTOM_PROVIDER_SIGNING_MATERIAL",
+		"KRB5CCNAME", "KRB5_CLIENT_KTNAME",
 	} {
 		if _, exists := values[forbidden]; exists {
 			t.Fatalf("credential or redirect variable %s survived non-provider isolation", forbidden)
 		}
 	}
 	for name, expected := range map[string]string{
-		"FEATURE_SAFE_BASE": "present", "FEATURE_SAFE_VALUE": "present",
+		"PATH": "/usr/bin:/bin", "FEATURE_SAFE_VALUE": "present",
 		"HOME": os.DevNull, "XDG_CONFIG_HOME": os.DevNull,
 		"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.DevNull,
 		"GIT_CONFIG_SYSTEM": os.DevNull, "GIT_TERMINAL_PROMPT": "0",

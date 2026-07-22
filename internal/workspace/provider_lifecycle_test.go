@@ -26,6 +26,37 @@ type providerLifecycleAdapter struct {
 	mergeCalls        int
 	queryIntentCalls  int
 	queryPRCalls      int
+	pushStarted       chan struct{}
+	pushRelease       <-chan struct{}
+}
+
+type leaseEnforcingProviderAdapter struct {
+	providerLifecycleAdapter
+	remoteAbsent bool
+	remoteHead   workspace.GitObjectID
+	pushEffects  int
+}
+
+func (adapter *leaseEnforcingProviderAdapter) Push(
+	_ context.Context,
+	request workspace.ProviderPushRequest,
+) (workspace.ProviderPushAdapterResult, error) {
+	adapter.pushCalls++
+	expected, hasExpected := request.ExpectedRemoteHead()
+	leaseMatches := adapter.remoteAbsent && request.ExpectsRemoteAbsent() && !hasExpected
+	if !adapter.remoteAbsent {
+		leaseMatches = !request.ExpectsRemoteAbsent() && hasExpected && expected == adapter.remoteHead
+	}
+	if !leaseMatches {
+		failure, _ := workspace.NewProviderAdapterFailure(
+			workspace.ProviderAdapterFailedBeforeEffect,
+			"atomic-push-lease-mismatch",
+			errors.New("provider branch changed before push"),
+		)
+		return workspace.ProviderPushAdapterResult{}, failure
+	}
+	adapter.pushEffects++
+	return adapter.pushResult, adapter.pushErr
 }
 
 func (adapter *providerLifecycleAdapter) Push(
@@ -33,6 +64,12 @@ func (adapter *providerLifecycleAdapter) Push(
 	_ workspace.ProviderPushRequest,
 ) (workspace.ProviderPushAdapterResult, error) {
 	adapter.pushCalls++
+	if adapter.pushStarted != nil {
+		close(adapter.pushStarted)
+	}
+	if adapter.pushRelease != nil {
+		<-adapter.pushRelease
+	}
 	return adapter.pushResult, adapter.pushErr
 }
 
@@ -174,9 +211,15 @@ func TestProviderLifecycleDispatchesThroughSingleUseBrokerAndRecordsCanonicalCom
 	if err != nil || reserved.Status() != workspace.ProviderIntentReserved {
 		t.Fatalf("reserve open PR = %#v, %v", reserved, err)
 	}
+	openAdapterResult, _ := workspace.NewProviderOpenPullRequestAdapterResult("request-open-1", 71, head)
+	adapter := &providerLifecycleAdapter{openResult: openAdapterResult}
+	broker, err := workspace.NewProviderBroker(harness.definition.Workspace().Provider(), adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
 	clock.now = mustTime(t, "2026-07-21T10:05:00Z")
 	openTicket, err := workspace.AuthorizeProviderIntentDispatch(
-		harness.journal, harness.definition, evaluator, openIntent.IntentID(),
+		harness.journal, harness.definition, evaluator, broker, openIntent.IntentID(),
 	)
 	if err != nil || openTicket.CapabilityDigest().IsZero() {
 		t.Fatalf("authorize open PR = %#v, %v", openTicket, err)
@@ -184,12 +227,6 @@ func TestProviderLifecycleDispatchesThroughSingleUseBrokerAndRecordsCanonicalCom
 	state, _, err := workspace.ReadAuthorizationEvaluationSnapshot(harness.journal, harness.definition)
 	if err != nil || len(state.OutstandingReconciliationObligations()) != 1 {
 		t.Fatalf("dispatch obligation = %#v, %v", state.OutstandingReconciliationObligations(), err)
-	}
-	openAdapterResult, _ := workspace.NewProviderOpenPullRequestAdapterResult("request-open-1", 71, head)
-	adapter := &providerLifecycleAdapter{openResult: openAdapterResult}
-	broker, err := workspace.NewProviderBroker(harness.definition.Workspace().Provider(), adapter)
-	if err != nil {
-		t.Fatal(err)
 	}
 	openExecution, err := workspace.ExecuteProviderIntent(
 		context.Background(), harness.journal, harness.definition, broker, openTicket,
@@ -201,7 +238,7 @@ func TestProviderLifecycleDispatchesThroughSingleUseBrokerAndRecordsCanonicalCom
 	if _, err := workspace.ExecuteProviderIntent(
 		context.Background(), harness.journal, harness.definition, broker, openTicket,
 		mustTime(t, "2026-07-21T10:05:02Z"),
-	); err == nil || !strings.Contains(err.Error(), "stale or already resolved") {
+	); err == nil || !strings.Contains(err.Error(), "already consumed") {
 		t.Fatalf("reused dispatch ticket error = %v", err)
 	}
 	state, _, err = workspace.ReadAuthorizationEvaluationSnapshot(harness.journal, harness.definition)
@@ -249,7 +286,7 @@ func TestProviderLifecycleDispatchesThroughSingleUseBrokerAndRecordsCanonicalCom
 	}
 	clock.now = mustTime(t, "2026-07-21T10:08:00Z")
 	mergeTicket, err := workspace.AuthorizeProviderIntentDispatch(
-		harness.journal, harness.definition, evaluator, mergeIntent.IntentID(),
+		harness.journal, harness.definition, evaluator, broker, mergeIntent.IntentID(),
 	)
 	if err != nil {
 		t.Fatalf("authorize merge: %v", err)
@@ -314,7 +351,10 @@ func TestProviderAmbiguityBlocksDispatchUntilTypedQueryReconciles(t *testing.T) 
 	frontier, _ := workspace.NewAuthorizationFrontier(attempt.Base(), attempt.VerifiedHead())
 	recordProviderLifecycleGrant(
 		t, harness, attempt, frontier,
-		[]workspace.StandingAuthorizationAction{workspace.StandingAuthorizationPush},
+		[]workspace.StandingAuthorizationAction{
+			workspace.StandingAuthorizationPush,
+			workspace.StandingAuthorizationOpenPullRequest,
+		},
 		"2026-07-21T11:03:00Z",
 	)
 	clock := &authorizationTestClock{now: mustTime(t, "2026-07-21T11:03:00Z")}
@@ -327,12 +367,14 @@ func TestProviderAmbiguityBlocksDispatchUntilTypedQueryReconciles(t *testing.T) 
 		t.Fatal(err)
 	}
 	clock.now = mustTime(t, "2026-07-21T11:04:00Z")
-	ticket, err := workspace.AuthorizeProviderIntentDispatch(harness.journal, harness.definition, evaluator, intent.IntentID())
+	adapter := &providerLifecycleAdapter{pushErr: errors.New("connection lost after request")}
+	broker, _ := workspace.NewProviderBroker(harness.definition.Workspace().Provider(), adapter)
+	ticket, err := workspace.AuthorizeProviderIntentDispatch(
+		harness.journal, harness.definition, evaluator, broker, intent.IntentID(),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	adapter := &providerLifecycleAdapter{pushErr: errors.New("connection lost after request")}
-	broker, _ := workspace.NewProviderBroker(harness.definition.Workspace().Provider(), adapter)
 	execution, err := workspace.ExecuteProviderIntent(
 		context.Background(), harness.journal, harness.definition, broker, ticket,
 		mustTime(t, "2026-07-21T11:04:01Z"),
@@ -344,19 +386,14 @@ func TestProviderAmbiguityBlocksDispatchUntilTypedQueryReconciles(t *testing.T) 
 	if len(state.OutstandingReconciliationObligations()) != 1 {
 		t.Fatalf("ambiguous obligations = %#v", state.OutstandingReconciliationObligations())
 	}
-	second, err := workspace.NewProviderPushIntent(workspace.ProviderPushIntentOptions{
+	second, err := workspace.NewProviderOpenPullRequestIntent(workspace.ProviderOpenPullRequestIntentOptions{
 		Scope:  providerIntentScope(harness, attempt, frontier, workspace.PullRequestIdentity{}),
-		Branch: attempt.Branch(), ExpectedRemoteHead: attempt.Base(), Head: attempt.VerifiedHead(),
+		Branch: attempt.Branch(), BaseRef: harness.definition.Workspace().BaseRef(),
+		Head: attempt.VerifiedHead(), Tree: mustGitObject(t, 'b'),
+		Title: "Blocked by reconciliation", Body: "Must not dispatch while push is ambiguous.",
 	})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if second.IntentID() == intent.IntentID() {
-		// Change the expected remote binding so this is a distinct intent.
-		second, _ = workspace.NewProviderPushIntent(workspace.ProviderPushIntentOptions{
-			Scope:  providerIntentScope(harness, attempt, frontier, workspace.PullRequestIdentity{}),
-			Branch: attempt.Branch(), Head: attempt.VerifiedHead(),
-		})
 	}
 	clock.now = mustTime(t, "2026-07-21T11:05:00Z")
 	if _, _, reserveErr := workspace.ReserveProviderIntent(
@@ -420,7 +457,8 @@ func TestProviderReconciledNotAppliedIntentCanBeReservedAndDispatchedAgain(t *te
 	}
 	scenario.clock.now = mustTime(t, "2026-07-21T11:08:00Z")
 	ticket, err = workspace.AuthorizeProviderIntentDispatch(
-		scenario.harness.journal, scenario.harness.definition, scenario.evaluator, scenario.intent.IntentID(),
+		scenario.harness.journal, scenario.harness.definition, scenario.evaluator, scenario.broker,
+		scenario.intent.IntentID(),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -492,7 +530,7 @@ func providerPushIntent(
 	t.Helper()
 	intent, err := workspace.NewProviderPushIntent(workspace.ProviderPushIntentOptions{
 		Scope:  providerIntentScope(harness, attempt, frontier, workspace.PullRequestIdentity{}),
-		Branch: attempt.Branch(), Head: attempt.VerifiedHead(),
+		Branch: attempt.Branch(), ExpectRemoteAbsent: true, Head: attempt.VerifiedHead(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -568,9 +606,11 @@ func TestProviderBrokerCancellationBeforeInvocationRecordsFailedBeforeEffect(t *
 		workspace.ReserveProviderIntentRequest{Intent: intent, OccurredAt: mustTime(t, "2026-07-21T12:03:01Z")},
 	)
 	clock.now = mustTime(t, "2026-07-21T12:04:00Z")
-	ticket, _ := workspace.AuthorizeProviderIntentDispatch(harness.journal, harness.definition, evaluator, intent.IntentID())
 	adapter := &providerLifecycleAdapter{}
 	broker, _ := workspace.NewProviderBroker(harness.definition.Workspace().Provider(), adapter)
+	ticket, _ := workspace.AuthorizeProviderIntentDispatch(
+		harness.journal, harness.definition, evaluator, broker, intent.IntentID(),
+	)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	execution, err := workspace.ExecuteProviderIntent(
@@ -582,6 +622,38 @@ func TestProviderBrokerCancellationBeforeInvocationRecordsFailedBeforeEffect(t *
 	state, _, _ := workspace.ReadAuthorizationEvaluationSnapshot(harness.journal, harness.definition)
 	if len(state.OutstandingReconciliationObligations()) != 0 {
 		t.Fatalf("failed-before-effect retained obligation: %#v", state.OutstandingReconciliationObligations())
+	}
+}
+
+func TestProviderAtomicPushLeaseRejectsRemoteDriftBeforeWrite(t *testing.T) {
+	scenario := newProviderPushScenario(t, "12")
+	result, _ := workspace.NewProviderPushAdapterResult("unreachable-push", scenario.attempt.VerifiedHead())
+	adapter := &leaseEnforcingProviderAdapter{
+		providerLifecycleAdapter: providerLifecycleAdapter{pushResult: result},
+		remoteHead:               mustGitObject(t, 'd'),
+	}
+	broker, err := workspace.NewProviderBroker(scenario.harness.definition.Workspace().Provider(), adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenario.clock.now = mustTime(t, "2026-07-21T12:05:00Z")
+	ticket, err := workspace.AuthorizeProviderIntentDispatch(
+		scenario.harness.journal, scenario.harness.definition, scenario.evaluator, broker,
+		scenario.intent.IntentID(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := workspace.ExecuteProviderIntent(
+		context.Background(), scenario.harness.journal, scenario.harness.definition, broker, ticket,
+		mustTime(t, "2026-07-21T12:05:01Z"),
+	)
+	if err == nil || execution.Result().Status() != workspace.ProviderIntentFailedBeforeEffect ||
+		adapter.pushCalls != 1 || adapter.pushEffects != 0 {
+		t.Fatalf(
+			"drifted atomic lease = %#v calls=%d effects=%d err=%v",
+			execution, adapter.pushCalls, adapter.pushEffects, err,
+		)
 	}
 }
 

@@ -531,28 +531,32 @@ func AuthorizationSafetyChangeControlPlaneBinding(
 }
 
 type AuthorizationRequestOptions struct {
-	WorkspaceID   ID
-	Repository    RepositoryIdentity
-	Remote        string
-	Generation    Digest
-	SerialSegment ID
-	Frontier      AuthorizationFrontier
-	Action        StandingAuthorizationAction
-	PullRequest   PullRequestIdentity
-	Epoch         uint64
+	WorkspaceID        ID
+	Repository         RepositoryIdentity
+	Remote             string
+	Generation         Digest
+	SerialSegment      ID
+	Frontier           AuthorizationFrontier
+	Action             StandingAuthorizationAction
+	PullRequest        PullRequestIdentity
+	ExpectedRemoteHead GitObjectID
+	ExpectRemoteAbsent bool
+	Epoch              uint64
 }
 
 type AuthorizationRequest struct {
-	workspaceID   ID
-	repository    RepositoryIdentity
-	remote        string
-	generation    Digest
-	serialSegment ID
-	frontier      AuthorizationFrontier
-	action        StandingAuthorizationAction
-	pullRequest   PullRequestIdentity
-	epoch         uint64
-	digest        Digest
+	workspaceID        ID
+	repository         RepositoryIdentity
+	remote             string
+	generation         Digest
+	serialSegment      ID
+	frontier           AuthorizationFrontier
+	action             StandingAuthorizationAction
+	pullRequest        PullRequestIdentity
+	expectedRemote     GitObjectID
+	expectRemoteAbsent bool
+	epoch              uint64
+	digest             Digest
 }
 
 func NewAuthorizationRequest(options AuthorizationRequestOptions) (AuthorizationRequest, error) {
@@ -571,23 +575,45 @@ func NewAuthorizationRequest(options AuthorizationRequestOptions) (Authorization
 	if !options.PullRequest.IsZero() && options.PullRequest.repository != options.Repository {
 		return AuthorizationRequest{}, fmt.Errorf("authorization request pull request belongs to a different repository")
 	}
+	if options.Action == StandingAuthorizationPush {
+		if options.ExpectRemoteAbsent == !options.ExpectedRemoteHead.IsZero() {
+			return AuthorizationRequest{}, fmt.Errorf("push authorization requires exactly one explicit remote-absence or expected-head lease")
+		}
+		if options.PullRequest.IsZero() {
+			if !options.ExpectRemoteAbsent {
+				return AuthorizationRequest{}, fmt.Errorf("initial push authorization requires an explicit absent-branch lease")
+			}
+		} else if options.ExpectRemoteAbsent || options.ExpectedRemoteHead != options.Frontier.base {
+			return AuthorizationRequest{}, fmt.Errorf("pull-request push authorization requires the exact frontier-base lease")
+		}
+		if !options.ExpectedRemoteHead.IsZero() &&
+			options.ExpectedRemoteHead.Algorithm() != options.Frontier.head.Algorithm() {
+			return AuthorizationRequest{}, fmt.Errorf("push authorization lease uses a different Git object format")
+		}
+	} else if options.ExpectRemoteAbsent || !options.ExpectedRemoteHead.IsZero() {
+		return AuthorizationRequest{}, fmt.Errorf("only push authorization can carry a remote lease")
+	}
 	type requestJSON struct {
-		SchemaVersion int                          `json:"schema_version"`
-		WorkspaceID   string                       `json:"workspace_id"`
-		Repository    string                       `json:"repository"`
-		Remote        string                       `json:"remote"`
-		Generation    string                       `json:"generation"`
-		SerialSegment string                       `json:"serial_segment"`
-		Base          string                       `json:"base"`
-		Head          string                       `json:"head"`
-		Action        StandingAuthorizationAction  `json:"action"`
-		PullRequest   *controlPlanePullRequestWire `json:"pull_request,omitempty"`
-		Epoch         uint64                       `json:"epoch"`
+		SchemaVersion      int                          `json:"schema_version"`
+		WorkspaceID        string                       `json:"workspace_id"`
+		Repository         string                       `json:"repository"`
+		Remote             string                       `json:"remote"`
+		Generation         string                       `json:"generation"`
+		SerialSegment      string                       `json:"serial_segment"`
+		Base               string                       `json:"base"`
+		Head               string                       `json:"head"`
+		Action             StandingAuthorizationAction  `json:"action"`
+		PullRequest        *controlPlanePullRequestWire `json:"pull_request,omitempty"`
+		ExpectedRemoteHead string                       `json:"expected_remote_head,omitempty"`
+		ExpectRemoteAbsent bool                         `json:"expect_remote_absent,omitempty"`
+		Epoch              uint64                       `json:"epoch"`
 	}
 	wire := requestJSON{
 		SchemaVersion: 2, WorkspaceID: options.WorkspaceID.String(), Repository: options.Repository.String(),
 		Remote: remote, Generation: options.Generation.String(), SerialSegment: options.SerialSegment.String(),
-		Base: options.Frontier.base.String(), Head: options.Frontier.head.String(), Action: options.Action, Epoch: options.Epoch,
+		Base: options.Frontier.base.String(), Head: options.Frontier.head.String(), Action: options.Action,
+		ExpectedRemoteHead: options.ExpectedRemoteHead.String(), ExpectRemoteAbsent: options.ExpectRemoteAbsent,
+		Epoch: options.Epoch,
 	}
 	if !options.PullRequest.IsZero() {
 		wire.PullRequest = &controlPlanePullRequestWire{
@@ -603,6 +629,7 @@ func NewAuthorizationRequest(options AuthorizationRequestOptions) (Authorization
 		workspaceID: options.WorkspaceID, repository: options.Repository, remote: remote,
 		generation: options.Generation, serialSegment: options.SerialSegment,
 		frontier: options.Frontier, action: options.Action, pullRequest: options.PullRequest,
+		expectedRemote: options.ExpectedRemoteHead, expectRemoteAbsent: options.ExpectRemoteAbsent,
 		epoch: options.Epoch, digest: DigestBytes(canonical),
 	}, nil
 }

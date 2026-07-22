@@ -110,6 +110,7 @@ type ProviderIntent struct {
 	authorization  AuthorizationRequest
 	branch         string
 	expectedRemote GitObjectID
+	expectAbsent   bool
 	baseRef        string
 	head           GitObjectID
 	tree           GitObjectID
@@ -123,6 +124,7 @@ type ProviderPushIntentOptions struct {
 	Scope              ProviderIntentScopeOptions
 	Branch             string
 	ExpectedRemoteHead GitObjectID
+	ExpectRemoteAbsent bool
 	Head               GitObjectID
 	Tree               GitObjectID
 }
@@ -135,6 +137,16 @@ func NewProviderPushIntent(options ProviderPushIntentOptions) (ProviderIntent, e
 	if options.Head.IsZero() || options.Head != scope.frontier.head {
 		return ProviderIntent{}, fmt.Errorf("provider push must bind the exact authorized frontier head")
 	}
+	if options.ExpectRemoteAbsent == !options.ExpectedRemoteHead.IsZero() {
+		return ProviderIntent{}, fmt.Errorf("provider push requires exactly one explicit remote-absence or expected-head lease")
+	}
+	if scope.pullRequest.IsZero() {
+		if !options.ExpectRemoteAbsent {
+			return ProviderIntent{}, fmt.Errorf("provider initial push requires an explicit absent-branch lease")
+		}
+	} else if options.ExpectRemoteAbsent || options.ExpectedRemoteHead != scope.frontier.base {
+		return ProviderIntent{}, fmt.Errorf("provider pull-request push requires the exact authorized frontier-base lease")
+	}
 	if !options.ExpectedRemoteHead.IsZero() && options.ExpectedRemoteHead.Algorithm() != options.Head.Algorithm() {
 		return ProviderIntent{}, fmt.Errorf("provider push remote and target heads use different Git object formats")
 	}
@@ -146,7 +158,8 @@ func NewProviderPushIntent(options ProviderPushIntentOptions) (ProviderIntent, e
 	}
 	return newProviderIntent(ProviderIntent{
 		kind: ProviderIntentPush, scope: scope, branch: options.Branch,
-		expectedRemote: options.ExpectedRemoteHead, head: options.Head, tree: options.Tree, pullRequest: scope.pullRequest,
+		expectedRemote: options.ExpectedRemoteHead, expectAbsent: options.ExpectRemoteAbsent,
+		head: options.Head, tree: options.Tree, pullRequest: scope.pullRequest,
 	})
 }
 
@@ -235,6 +248,7 @@ func newProviderIntent(intent ProviderIntent) (ProviderIntent, error) {
 		Remote: intent.scope.remote, Generation: intent.scope.generation,
 		SerialSegment: intent.scope.serialSegment, Frontier: intent.scope.frontier,
 		Action: intent.kind.authorizationAction(), PullRequest: intent.scope.pullRequest,
+		ExpectedRemoteHead: intent.expectedRemote, ExpectRemoteAbsent: intent.expectAbsent,
 		Epoch: intent.scope.epoch,
 	})
 	if err != nil {
@@ -279,6 +293,7 @@ type providerIntentCanonical struct {
 	Authorization      string                       `json:"authorization_request_digest"`
 	Branch             string                       `json:"branch,omitempty"`
 	ExpectedRemoteHead string                       `json:"expected_remote_head,omitempty"`
+	ExpectRemoteAbsent bool                         `json:"expect_remote_absent,omitempty"`
 	BaseRef            string                       `json:"base_ref,omitempty"`
 	Head               string                       `json:"head"`
 	Tree               string                       `json:"tree,omitempty"`
@@ -304,8 +319,9 @@ func canonicalProviderIntent(intent ProviderIntent, includeIdentity bool) ([]byt
 		Remote: intent.scope.remote, SerialSegment: intent.scope.serialSegment.String(),
 		Base: intent.scope.frontier.base.String(), AuthorizedHead: intent.scope.frontier.head.String(),
 		AuthorizationEpoch: intent.scope.epoch, Authorization: intent.authorization.digest.String(),
-		Branch: intent.branch, ExpectedRemoteHead: intent.expectedRemote.String(), BaseRef: intent.baseRef,
-		Head: intent.head.String(), Tree: intent.tree.String(), Title: intent.title, Body: intent.body,
+		Branch: intent.branch, ExpectedRemoteHead: intent.expectedRemote.String(), ExpectRemoteAbsent: intent.expectAbsent,
+		BaseRef: intent.baseRef,
+		Head:    intent.head.String(), Tree: intent.tree.String(), Title: intent.title, Body: intent.body,
 		MergeStrategy: intent.mergeStrategy,
 	}
 	if includeIdentity {
@@ -337,11 +353,12 @@ func (intent ProviderIntent) Branch() string                             { retur
 func (intent ProviderIntent) ExpectedRemoteHead() (GitObjectID, bool) {
 	return intent.expectedRemote, !intent.expectedRemote.IsZero()
 }
-func (intent ProviderIntent) BaseRef() string   { return intent.baseRef }
-func (intent ProviderIntent) Head() GitObjectID { return intent.head }
-func (intent ProviderIntent) Tree() GitObjectID { return intent.tree }
-func (intent ProviderIntent) Title() string     { return intent.title }
-func (intent ProviderIntent) Body() string      { return intent.body }
+func (intent ProviderIntent) ExpectsRemoteAbsent() bool { return intent.expectAbsent }
+func (intent ProviderIntent) BaseRef() string           { return intent.baseRef }
+func (intent ProviderIntent) Head() GitObjectID         { return intent.head }
+func (intent ProviderIntent) Tree() GitObjectID         { return intent.tree }
+func (intent ProviderIntent) Title() string             { return intent.title }
+func (intent ProviderIntent) Body() string              { return intent.body }
 func (intent ProviderIntent) PullRequest() (PullRequestIdentity, bool) {
 	return intent.pullRequest, !intent.pullRequest.IsZero()
 }

@@ -33,7 +33,10 @@ func newProviderPushScenario(t *testing.T, hour string) providerPushScenario {
 	}
 	grant := recordProviderLifecycleGrant(
 		t, harness, attempt, frontier,
-		[]workspace.StandingAuthorizationAction{workspace.StandingAuthorizationPush},
+		[]workspace.StandingAuthorizationAction{
+			workspace.StandingAuthorizationPush,
+			workspace.StandingAuthorizationOpenPullRequest,
+		},
 		"2026-07-21T"+hour+":03:00Z",
 	)
 	clock := &authorizationTestClock{now: mustTime(t, "2026-07-21T"+hour+":04:00Z")}
@@ -65,7 +68,8 @@ func (scenario *providerPushScenario) authorize(t *testing.T, hour string) works
 	t.Helper()
 	scenario.clock.now = mustTime(t, "2026-07-21T"+hour+":05:00Z")
 	ticket, err := workspace.AuthorizeProviderIntentDispatch(
-		scenario.harness.journal, scenario.harness.definition, scenario.evaluator, scenario.intent.IntentID(),
+		scenario.harness.journal, scenario.harness.definition, scenario.evaluator, scenario.broker,
+		scenario.intent.IntentID(),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -97,7 +101,8 @@ func TestProviderRevocationBetweenReservationAndDispatchPreventsBrokerCapability
 	}
 	scenario.clock.now = mustTime(t, "2026-07-21T14:05:00Z")
 	ticket, err := workspace.AuthorizeProviderIntentDispatch(
-		scenario.harness.journal, scenario.harness.definition, scenario.evaluator, scenario.intent.IntentID(),
+		scenario.harness.journal, scenario.harness.definition, scenario.evaluator, scenario.broker,
+		scenario.intent.IntentID(),
 	)
 	if err == nil || !ticket.CapabilityDigest().IsZero() {
 		t.Fatalf("revoked reservation produced broker capability %#v, err=%v", ticket, err)
@@ -135,10 +140,11 @@ func TestProviderRevocationBetweenReservationAndDispatchPreventsBrokerCapability
 
 func TestProviderDistinctReservedIntentsRaceAtDurableDispatchCAS(t *testing.T) {
 	scenario := newProviderPushScenario(t, "15")
-	second, err := workspace.NewProviderPushIntent(workspace.ProviderPushIntentOptions{
+	second, err := workspace.NewProviderOpenPullRequestIntent(workspace.ProviderOpenPullRequestIntentOptions{
 		Scope:  providerIntentScope(scenario.harness, scenario.attempt, scenario.frontier, workspace.PullRequestIdentity{}),
-		Branch: scenario.attempt.Branch(), ExpectedRemoteHead: scenario.attempt.Base(),
-		Head: scenario.attempt.VerifiedHead(),
+		Branch: scenario.attempt.Branch(), BaseRef: scenario.harness.definition.Workspace().BaseRef(),
+		Head: scenario.attempt.VerifiedHead(), Tree: mustGitObject(t, 'b'),
+		Title: "Dispatch race", Body: "Only one provider intent may cross the durable boundary.",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -167,7 +173,7 @@ func TestProviderDistinctReservedIntentsRaceAtDurableDispatchCAS(t *testing.T) {
 			defer wait.Done()
 			<-start
 			ticket, dispatchErr := workspace.AuthorizeProviderIntentDispatch(
-				scenario.harness.journal, scenario.harness.definition, scenario.evaluator, id,
+				scenario.harness.journal, scenario.harness.definition, scenario.evaluator, scenario.broker, id,
 			)
 			outcomes <- dispatchOutcome{intent: id, ticket: ticket, err: dispatchErr}
 		}(intentID)
@@ -208,7 +214,7 @@ func TestProviderDistinctReservedIntentsRaceAtDurableDispatchCAS(t *testing.T) {
 	}
 	scenario.clock.now = mustTime(t, "2026-07-21T15:06:00Z")
 	if ticket, err := workspace.AuthorizeProviderIntentDispatch(
-		scenario.harness.journal, scenario.harness.definition, scenario.evaluator, loser,
+		scenario.harness.journal, scenario.harness.definition, scenario.evaluator, scenario.broker, loser,
 	); err != nil || ticket.CapabilityDigest().IsZero() {
 		t.Fatalf("settled queue did not release the losing reservation: %#v err=%v", ticket, err)
 	}
@@ -248,6 +254,104 @@ func TestProviderFailedAfterEffectRequiresTypedQueryReconciliation(t *testing.T)
 	)
 	if err != nil || reconciled.Projection().Status() != workspace.ProviderIntentReconciled {
 		t.Fatalf("failed-after-effect reconciliation = %#v err=%v", reconciled, err)
+	}
+}
+
+func TestProviderLiveDispatchClaimBlocksConcurrentNotAppliedReconciliationAcrossBrokers(t *testing.T) {
+	scenario := newProviderPushScenario(t, "16")
+	ticket := scenario.authorize(t, "16")
+	push, _ := workspace.NewProviderPushAdapterResult("claimed-push", scenario.attempt.VerifiedHead())
+	notApplied, _ := workspace.NewProviderReconciliationObservation(
+		workspace.ProviderReconciliationObservationOptions{
+			Disposition: workspace.ProviderEffectNotApplied, RequestMarker: "premature-not-applied",
+		},
+	)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	scenario.adapter.pushResult = push
+	scenario.adapter.reconciliation = notApplied
+	scenario.adapter.pushStarted = started
+	scenario.adapter.pushRelease = release
+	type executionOutcome struct {
+		result workspace.ProviderExecutionResult
+		err    error
+	}
+	completed := make(chan executionOutcome, 1)
+	go func() {
+		result, err := workspace.ExecuteProviderIntent(
+			context.Background(), scenario.harness.journal, scenario.harness.definition,
+			scenario.broker, ticket, mustTime(t, "2026-07-21T16:05:01Z"),
+		)
+		completed <- executionOutcome{result: result, err: err}
+	}()
+	<-started
+	freshBroker, err := workspace.NewProviderBroker(
+		scenario.harness.definition.Workspace().Provider(), scenario.adapter,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.ReconcileProviderIntent(
+		context.Background(), scenario.harness.journal, scenario.harness.definition, freshBroker,
+		scenario.intent.IntentID(), mustTime(t, "2026-07-21T16:05:02Z"),
+	); err == nil || !strings.Contains(err.Error(), "live dispatch") {
+		t.Fatalf("reconciliation raced a live provider dispatch: %v", err)
+	}
+	if scenario.adapter.queryIntentCalls != 0 {
+		t.Fatalf("provider query ran while dispatch was live: %d", scenario.adapter.queryIntentCalls)
+	}
+	close(release)
+	released = true
+	outcome := <-completed
+	if outcome.err != nil || outcome.result.Result().Status() != workspace.ProviderIntentSucceeded ||
+		scenario.adapter.pushCalls != 1 {
+		t.Fatalf("claimed dispatch completion = %#v calls=%d err=%v", outcome.result, scenario.adapter.pushCalls, outcome.err)
+	}
+	projection, err := workspace.RebuildProviderRuntime(
+		mustJournalSnapshot(t, scenario.harness.journal), scenario.harness.definition,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, _ := projection.Intent(scenario.intent.IntentID())
+	if resolved.Status() != workspace.ProviderIntentSucceeded {
+		t.Fatalf("live dispatch was overwritten by reconciliation: %#v", resolved)
+	}
+}
+
+func TestProviderDispatchTicketIsBoundToIssuingBroker(t *testing.T) {
+	scenario := newProviderPushScenario(t, "16")
+	ticket := scenario.authorize(t, "16")
+	push, _ := workspace.NewProviderPushAdapterResult("issuing-broker-push", scenario.attempt.VerifiedHead())
+	scenario.adapter.pushResult = push
+	freshBroker, err := workspace.NewProviderBroker(
+		scenario.harness.definition.Workspace().Provider(), scenario.adapter,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := workspace.ExecuteProviderIntent(
+		context.Background(), scenario.harness.journal, scenario.harness.definition, freshBroker, ticket,
+		mustTime(t, "2026-07-21T16:05:01Z"),
+	); err == nil || !result.Result().Digest().IsZero() ||
+		!strings.Contains(err.Error(), "not issued by this broker") {
+		t.Fatalf("fresh broker accepted copied dispatch ticket: %#v err=%v", result, err)
+	}
+	if scenario.adapter.pushCalls != 0 {
+		t.Fatalf("fresh broker invoked provider with copied ticket: %d", scenario.adapter.pushCalls)
+	}
+	result, err := workspace.ExecuteProviderIntent(
+		context.Background(), scenario.harness.journal, scenario.harness.definition, scenario.broker, ticket,
+		mustTime(t, "2026-07-21T16:05:02Z"),
+	)
+	if err != nil || result.Result().Status() != workspace.ProviderIntentSucceeded || scenario.adapter.pushCalls != 1 {
+		t.Fatalf("issuing broker could not consume its ticket: %#v calls=%d err=%v", result, scenario.adapter.pushCalls, err)
 	}
 }
 
@@ -359,7 +463,7 @@ func TestProviderCrashAfterEffectBeforeResultRecordLeavesDurableReconciliation(t
 		context.Background(), scenario.harness.journal, scenario.harness.definition, scenario.broker, ticket,
 		mustTime(t, "2026-07-21T19:05:02Z"),
 	)
-	if replayErr == nil || replay.Result().Status() != workspace.ProviderIntentAmbiguous || scenario.adapter.pushCalls != 1 {
+	if replayErr == nil || !replay.Result().Digest().IsZero() || scenario.adapter.pushCalls != 1 {
 		t.Fatalf("consumed broker capability replay = %#v calls=%d err=%v", replay, scenario.adapter.pushCalls, replayErr)
 	}
 	projection, err := workspace.RebuildProviderRuntime(mustJournalSnapshot(t, scenario.harness.journal), scenario.harness.definition)
@@ -367,7 +471,7 @@ func TestProviderCrashAfterEffectBeforeResultRecordLeavesDurableReconciliation(t
 		t.Fatal(err)
 	}
 	dispatched, _ := projection.Intent(scenario.intent.IntentID())
-	if dispatched.Status() != workspace.ProviderIntentAmbiguous || !dispatched.NeedsReconciliation() {
+	if dispatched.Status() != workspace.ProviderIntentDispatched || !dispatched.NeedsReconciliation() {
 		t.Fatalf("crash-after-effect durable state = %#v", dispatched)
 	}
 	applied, _ := workspace.NewProviderReconciliationObservation(workspace.ProviderReconciliationObservationOptions{

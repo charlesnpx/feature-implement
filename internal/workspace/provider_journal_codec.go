@@ -367,8 +367,9 @@ func providerIntentToWire(intent ProviderIntent) providerIntentWire {
 		Remote: intent.scope.remote, SerialSegment: intent.scope.serialSegment.String(),
 		Base: intent.scope.frontier.base.String(), AuthorizedHead: intent.scope.frontier.head.String(),
 		AuthorizationEpoch: intent.scope.epoch, Authorization: intent.authorization.digest.String(),
-		Branch: intent.branch, ExpectedRemoteHead: intent.expectedRemote.String(), BaseRef: intent.baseRef,
-		Head: intent.head.String(), Tree: intent.tree.String(), Title: intent.title, Body: intent.body,
+		Branch: intent.branch, ExpectedRemoteHead: intent.expectedRemote.String(), ExpectRemoteAbsent: intent.expectAbsent,
+		BaseRef: intent.baseRef,
+		Head:    intent.head.String(), Tree: intent.tree.String(), Title: intent.title, Body: intent.body,
 		MergeStrategy: intent.mergeStrategy,
 	}
 	if !intent.pullRequest.IsZero() {
@@ -469,7 +470,8 @@ func providerIntentFromWire(wire providerIntentWire) (ProviderIntent, error) {
 	switch wire.Kind {
 	case ProviderIntentPush:
 		intent, err = NewProviderPushIntent(ProviderPushIntentOptions{
-			Scope: scope, Branch: wire.Branch, ExpectedRemoteHead: expectedRemote, Head: head, Tree: tree,
+			Scope: scope, Branch: wire.Branch, ExpectedRemoteHead: expectedRemote,
+			ExpectRemoteAbsent: wire.ExpectRemoteAbsent, Head: head, Tree: tree,
 		})
 	case ProviderIntentOpenPullRequest:
 		intent, err = NewProviderOpenPullRequestIntent(ProviderOpenPullRequestIntentOptions{

@@ -47,6 +47,9 @@ func ReserveProviderIntent(
 	if err != nil {
 		return ProviderIntentProjection{}, JournalRecord{}, fmt.Errorf("plan provider authorization: %w", err)
 	}
+	if err := validateProviderPushLeaseAuthorization(authorization.state, planning, request.Intent); err != nil {
+		return ProviderIntentProjection{}, JournalRecord{}, err
+	}
 	reservation, err := evaluator.ReserveAuthorizationIntent(
 		authorization.state, request.Intent.authorization, binding, planning,
 	)
@@ -72,6 +75,38 @@ func ReserveProviderIntent(
 		return ProviderIntentProjection{}, JournalRecord{}, fmt.Errorf("provider intent reservation did not replay")
 	}
 	return projected, record, nil
+}
+
+func validateProviderPushLeaseAuthorization(
+	state AuthorizationState,
+	capability AuthorizationCapability,
+	intent ProviderIntent,
+) error {
+	if intent.kind != ProviderIntentPush {
+		return nil
+	}
+	var authorized StandingGrant
+	for _, grant := range state.grants {
+		if grant.grantID == capability.grantID {
+			authorized = grant
+			break
+		}
+	}
+	if authorized.grantID.IsZero() {
+		return fmt.Errorf("provider push lease has no exact durable authorization grant")
+	}
+	if intent.pullRequest.IsZero() {
+		if !intent.expectAbsent || !intent.expectedRemote.IsZero() || !authorized.providerObservedHead.IsZero() {
+			return fmt.Errorf("initial provider push requires the authorized absent-branch lease")
+		}
+		return nil
+	}
+	if intent.expectAbsent || intent.expectedRemote.IsZero() ||
+		intent.expectedRemote != intent.scope.frontier.base ||
+		authorized.providerObservedHead != intent.expectedRemote {
+		return fmt.Errorf("provider push lease does not match the durable provider-observed branch head")
+	}
+	return nil
 }
 
 func validateProviderIntentAgainstRuntime(
@@ -239,7 +274,7 @@ func RecordProviderMergePreflight(
 	intentID ID,
 	occurredAt time.Time,
 ) (ProviderMergePreflight, JournalRecord, error) {
-	if journal == nil || broker == nil || intentID.IsZero() || occurredAt.IsZero() {
+	if journal == nil || !broker.available() || intentID.IsZero() || occurredAt.IsZero() {
 		return ProviderMergePreflight{}, JournalRecord{}, fmt.Errorf("record provider merge preflight requires journal, broker, intent, and occurrence time")
 	}
 	if broker.provider != definition.workspace.provider {
@@ -305,10 +340,14 @@ func AuthorizeProviderIntentDispatch(
 	journal *WorkspaceJournal,
 	definition EffectiveWorkspaceDefinition,
 	evaluator *AuthorizationEvaluator,
+	broker *ProviderBroker,
 	intentID ID,
 ) (ProviderDispatchTicket, error) {
-	if journal == nil || evaluator == nil || intentID.IsZero() {
-		return ProviderDispatchTicket{}, fmt.Errorf("authorize provider dispatch requires journal, evaluator, and intent")
+	if journal == nil || evaluator == nil || !broker.available() || intentID.IsZero() {
+		return ProviderDispatchTicket{}, fmt.Errorf("authorize provider dispatch requires journal, evaluator, broker, and intent")
+	}
+	if broker.provider != definition.workspace.provider {
+		return ProviderDispatchTicket{}, fmt.Errorf("provider dispatch broker does not match active definition")
 	}
 	snapshot, providerProjection, authorization, core, err := readProviderLifecycleRuntime(journal, definition)
 	if err != nil {
@@ -336,6 +375,9 @@ func AuthorizeProviderIntentDispatch(
 	planning, err := evaluator.PlanAuthorization(authorization.state, projected.intent.authorization, binding)
 	if err != nil {
 		return ProviderDispatchTicket{}, fmt.Errorf("recheck provider planning authorization: %w", err)
+	}
+	if err := validateProviderPushLeaseAuthorization(authorization.state, planning, projected.intent); err != nil {
+		return ProviderDispatchTicket{}, err
 	}
 	reservation, err := evaluator.ReserveAuthorizationIntent(
 		authorization.state, projected.intent.authorization, binding, planning,
@@ -370,7 +412,7 @@ func AuthorizeProviderIntentDispatch(
 	if err != nil {
 		return ProviderDispatchTicket{}, err
 	}
-	capability, err := newProviderBrokerCapability(projected.intent, before.epoch, record.eventHash)
+	capability, err := broker.issueDispatchCapability(projected.intent, before.epoch, record.eventHash)
 	if err != nil {
 		return ProviderDispatchTicket{}, err
 	}
@@ -397,7 +439,7 @@ func ExecuteProviderIntent(
 	ticket ProviderDispatchTicket,
 	occurredAt time.Time,
 ) (ProviderExecutionResult, error) {
-	if journal == nil || broker == nil || ticket.intent.intentID.IsZero() ||
+	if journal == nil || !broker.available() || ticket.intent.intentID.IsZero() ||
 		ticket.record.eventHash.IsZero() || ticket.capability.digest.IsZero() || occurredAt.IsZero() {
 		return ProviderExecutionResult{}, fmt.Errorf("execute provider intent requires journal, broker, durable dispatch ticket, and occurrence time")
 	}
@@ -406,6 +448,11 @@ func ExecuteProviderIntent(
 		ticket.capability.dispatchRecord != ticket.record.eventHash {
 		return ProviderExecutionResult{}, fmt.Errorf("provider dispatch ticket does not match broker or active definition")
 	}
+	claim, err := broker.claimDispatch(ticket.capability, ticket.intent)
+	if err != nil {
+		return ProviderExecutionResult{}, fmt.Errorf("claim provider dispatch: %w", err)
+	}
+	defer claim.Release()
 	current, err := readProviderProjection(journal, definition)
 	if err != nil {
 		return ProviderExecutionResult{}, err
@@ -415,7 +462,7 @@ func ExecuteProviderIntent(
 		projected.dispatchRecordHash != ticket.record.eventHash || projected.intent.digest != ticket.intent.digest {
 		return ProviderExecutionResult{}, fmt.Errorf("provider dispatch ticket is stale or already resolved")
 	}
-	providerResult, brokerErr := broker.dispatch(ctx, ticket.capability, ticket.intent, ticket.preflight)
+	providerResult, brokerErr := broker.dispatchClaimed(ctx, claim, ticket.capability, ticket.intent, ticket.preflight)
 	if providerResult.digest.IsZero() {
 		if brokerErr == nil {
 			brokerErr = fmt.Errorf("provider broker returned no canonical result")
@@ -506,7 +553,7 @@ func ReconcileProviderIntent(
 	intentID ID,
 	occurredAt time.Time,
 ) (ProviderReconciliationResult, error) {
-	if journal == nil || broker == nil || intentID.IsZero() || occurredAt.IsZero() {
+	if journal == nil || !broker.available() || intentID.IsZero() || occurredAt.IsZero() {
 		return ProviderReconciliationResult{}, fmt.Errorf("reconcile provider intent requires journal, broker, intent, and occurrence time")
 	}
 	if broker.provider != definition.workspace.provider {
@@ -524,11 +571,35 @@ func ReconcileProviderIntent(
 	if !exists || !projected.status.needsReconciliation() {
 		return ProviderReconciliationResult{}, fmt.Errorf("provider intent %s has no reconciliation obligation", intentID)
 	}
-	capability, err := newProviderQueryCapability(projected.intent, snapshot.head, occurredAt)
+	capability, err := broker.issueQueryCapability(
+		projected.intent, projected.dispatchRecordHash, snapshot.head, occurredAt,
+	)
 	if err != nil {
 		return ProviderReconciliationResult{}, err
 	}
-	observation, err := broker.reconcile(ctx, capability, projected.intent)
+	claim, err := broker.claimReconciliation(capability, projected.intent)
+	if err != nil {
+		return ProviderReconciliationResult{}, fmt.Errorf("claim provider reconciliation: %w", err)
+	}
+	defer claim.Release()
+	claimedSnapshot, err := journal.ReadSnapshot()
+	if err != nil {
+		return ProviderReconciliationResult{}, err
+	}
+	if claimedSnapshot.head != snapshot.head {
+		return ProviderReconciliationResult{}, fmt.Errorf("provider reconciliation snapshot changed before query claim")
+	}
+	claimedProjection, err := RebuildProviderRuntime(claimedSnapshot, definition)
+	if err != nil {
+		return ProviderReconciliationResult{}, err
+	}
+	claimed, exists := claimedProjection.Intent(intentID)
+	if !exists || !claimed.status.needsReconciliation() || claimed.intent.digest != projected.intent.digest ||
+		claimed.dispatchRecordHash != projected.dispatchRecordHash {
+		return ProviderReconciliationResult{}, fmt.Errorf("provider reconciliation target changed before query claim")
+	}
+	snapshot, projected = claimedSnapshot, claimed
+	observation, err := broker.reconcileClaimed(ctx, claim, capability, projected.intent)
 	if err != nil {
 		return ProviderReconciliationResult{}, fmt.Errorf("query provider reconciliation: %w", err)
 	}
@@ -573,7 +644,7 @@ func RecordProviderPullRequestAuthorization(
 	intentID ID,
 	occurredAt time.Time,
 ) (StandingGrant, JournalRecord, error) {
-	if journal == nil || broker == nil || intentID.IsZero() || occurredAt.IsZero() {
+	if journal == nil || !broker.available() || intentID.IsZero() || occurredAt.IsZero() {
 		return StandingGrant{}, JournalRecord{}, fmt.Errorf("record provider pull request authorization requires journal, broker, intent, and occurrence time")
 	}
 	projection, err := readProviderProjection(journal, definition)

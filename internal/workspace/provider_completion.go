@@ -967,7 +967,7 @@ func VerifyAndRecordProviderCompletion(
 	git ProviderCompletionGitPort,
 	request ProviderCompletionRequest,
 ) (ProviderCompletionReceipt, JournalRecord, error) {
-	if journal == nil || broker == nil || git == nil || request.AttemptID.IsZero() || request.OccurredAt.IsZero() {
+	if journal == nil || !broker.available() || git == nil || request.AttemptID.IsZero() || request.OccurredAt.IsZero() {
 		return ProviderCompletionReceipt{}, JournalRecord{}, fmt.Errorf("provider completion requires journal, broker, independent Git adapter, attempt, and occurrence time")
 	}
 	snapshot, err := journal.ReadSnapshot()

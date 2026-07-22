@@ -21,7 +21,7 @@ func TestProviderReservationCodecRoundTripsFirstCheckpointAndRejectsTampering(t 
 			MergeUnit: mergeUnit, Repository: repository, Remote: "origin",
 			SerialSegment: MustID("codec-segment"), Frontier: frontier, Epoch: 1,
 		},
-		Branch: "mu/provider-codec-a1-0123456789ab", Head: head,
+		Branch: "mu/provider-codec-a1-0123456789ab", ExpectRemoteAbsent: true, Head: head,
 	})
 	if err != nil {
 		t.Fatal(err)
