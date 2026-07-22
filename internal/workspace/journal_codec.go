@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -489,6 +490,9 @@ func parseWorkspaceGenerationBindings(workspace, generation, definition string) 
 }
 
 func decodeStrictJSON(source []byte, target any) error {
+	if err := rejectDuplicateJSONObjectKeys(source); err != nil {
+		return err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(source))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
@@ -502,6 +506,108 @@ func decodeStrictJSON(source []byte, target any) error {
 		return err
 	}
 	return nil
+}
+
+func decodeStrictJSONRequired(source []byte, target any) error {
+	if err := decodeStrictJSON(source, target); err != nil {
+		return err
+	}
+	return validateRequiredJSONFields(source, target)
+}
+
+var jsonRawMessageType = reflect.TypeOf(json.RawMessage{})
+
+// validateRequiredJSONFields makes the runtime decoder honor the same field
+// presence contract used by the emitted schemas: every exported JSON field
+// without omitempty is required, and an explicitly supplied field may not be
+// null. Nested structs and arrays are checked recursively.
+func validateRequiredJSONFields(source []byte, target any) error {
+	targetType := reflect.TypeOf(target)
+	if targetType == nil || targetType.Kind() != reflect.Pointer || reflect.ValueOf(target).IsNil() {
+		return fmt.Errorf("strict JSON target must be a non-nil pointer")
+	}
+	return validateRequiredJSONValue(json.RawMessage(source), targetType.Elem(), "$", true)
+}
+
+func validateRequiredJSONValue(raw json.RawMessage, targetType reflect.Type, path string, required bool) error {
+	for targetType.Kind() == reflect.Pointer {
+		targetType = targetType.Elem()
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		if required {
+			return fmt.Errorf("required JSON field %s must not be null", path)
+		}
+		return fmt.Errorf("JSON field %s must not be null", path)
+	}
+	if targetType == jsonRawMessageType {
+		return nil
+	}
+
+	switch targetType.Kind() {
+	case reflect.Struct:
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &object); err != nil {
+			return err
+		}
+		for index := 0; index < targetType.NumField(); index++ {
+			field := targetType.Field(index)
+			if field.PkgPath != "" {
+				continue
+			}
+			name, options := parseJSONFieldTag(field)
+			if name == "-" {
+				continue
+			}
+			value, exists := object[name]
+			fieldPath := path + "." + name
+			fieldRequired := !options["omitempty"]
+			if !exists {
+				if fieldRequired {
+					return fmt.Errorf("required JSON field %s is missing", fieldPath)
+				}
+				continue
+			}
+			if err := validateRequiredJSONValue(value, field.Type, fieldPath, fieldRequired); err != nil {
+				return err
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		if targetType.Elem().Kind() == reflect.Uint8 {
+			return nil
+		}
+		var items []json.RawMessage
+		if err := json.Unmarshal(raw, &items); err != nil {
+			return err
+		}
+		for index, item := range items {
+			if err := validateRequiredJSONValue(item, targetType.Elem(), fmt.Sprintf("%s[%d]", path, index), true); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func parseJSONFieldTag(field reflect.StructField) (string, map[string]bool) {
+	name, rawOptions, hasOptions := strings.Cut(field.Tag.Get("json"), ",")
+	if name == "" {
+		name = field.Name
+	}
+	options := make(map[string]bool)
+	if hasOptions {
+		for _, option := range strings.Split(rawOptions, ",") {
+			if option != "" {
+				options[option] = true
+			}
+		}
+	}
+	return name, options
+}
+
+// DecodeStrictJSON exposes the shared bounded-command decoding contract to
+// composition roots without exposing wire DTOs from the domain package.
+func DecodeStrictJSON(source []byte, target any) error {
+	return decodeStrictJSONRequired(source, target)
 }
 
 func equalJournalReadSets(left, right []JournalResourceRevision) bool {

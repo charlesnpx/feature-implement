@@ -8,6 +8,32 @@ import (
 	"github.com/charlesnpx/feature-implement/internal/workspace"
 )
 
+func TestStrictJSONRequiresPresentNonNullFields(t *testing.T) {
+	type item struct {
+		Enabled bool `json:"enabled"`
+	}
+	type document struct {
+		SchemaVersion int    `json:"schema_version"`
+		Items         []item `json:"items"`
+		Note          string `json:"note,omitempty"`
+	}
+	var decoded document
+	if err := workspace.DecodeStrictJSON([]byte(`{"schema_version":2,"items":[{"enabled":false}]}`), &decoded); err != nil {
+		t.Fatalf("present false boolean was rejected: %v", err)
+	}
+	for _, source := range []string{
+		`{"items":[]}`,
+		`{"schema_version":2}`,
+		`{"schema_version":2,"items":null}`,
+		`{"schema_version":2,"items":[{}]}`,
+	} {
+		if err := workspace.DecodeStrictJSON([]byte(source), &decoded); err == nil ||
+			!strings.Contains(err.Error(), "required JSON field") {
+			t.Fatalf("missing or null required field %s error = %v", source, err)
+		}
+	}
+}
+
 func TestStrictWorkspaceDecoderRejectsNonV2AndAmbiguousYAML(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	valid := string(fixture.sources.Workspace.Bytes)
@@ -65,6 +91,31 @@ func TestStrictWorkspaceDecoderRejectsNonV2AndAmbiguousYAML(t *testing.T) {
 			name:    "integer in string field",
 			source:  strings.Replace(valid, "remote: origin", "remote: 7", 1),
 			wantErr: "root.remote must be a string",
+		},
+		{
+			name:    "local-only remote sentinel",
+			source:  strings.Replace(valid, "remote: origin", "remote: local-only", 1),
+			wantErr: "does not support local-only execution",
+		},
+		{
+			name:    "local-only provider sentinel",
+			source:  strings.Replace(valid, "repository: example/project", "repository: local-only", 1),
+			wantErr: "does not support local-only execution",
+		},
+		{
+			name:    "unsupported provider",
+			source:  strings.Replace(valid, "kind: github", "kind: gitlab", 1),
+			wantErr: "workspace v2 supports github",
+		},
+		{
+			name:    "malformed github repository",
+			source:  strings.Replace(valid, "repository: example/project", "repository: example/project/extra", 1),
+			wantErr: "must be GitHub owner/repository",
+		},
+		{
+			name:    "unsafe github repository",
+			source:  strings.Replace(valid, "repository: example/project", "repository: example/project%2Fother", 1),
+			wantErr: "must be GitHub owner/repository",
 		},
 		{
 			name:    "noncanonical integer",

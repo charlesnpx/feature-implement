@@ -145,6 +145,94 @@ type StartAttemptReviewRoundRequest struct {
 	OccurredAt time.Time
 }
 
+type AdoptAttemptHeadRequest struct {
+	AttemptID  ID
+	OccurredAt time.Time
+}
+
+type AttemptHeadAdoptionResult struct {
+	head    GitObjectID
+	tree    GitObjectID
+	record  JournalRecord
+	adopted bool
+}
+
+func (result AttemptHeadAdoptionResult) Head() GitObjectID     { return result.head }
+func (result AttemptHeadAdoptionResult) Tree() GitObjectID     { return result.tree }
+func (result AttemptHeadAdoptionResult) Record() JournalRecord { return result.record }
+func (result AttemptHeadAdoptionResult) Adopted() bool         { return result.adopted }
+
+// AdoptAttemptHead records ordinary local commits for an active attempt that
+// has no durable commit or review-fix protocol. It is usable independently of
+// governed review so protocol-free merge units can reach the provider surface.
+func AdoptAttemptHead(
+	ctx context.Context,
+	journal *WorkspaceJournal,
+	definition EffectiveWorkspaceDefinition,
+	repository ReviewRepositoryPort,
+	request AdoptAttemptHeadRequest,
+) (AttemptHeadAdoptionResult, error) {
+	if journal == nil || repository == nil || request.AttemptID.IsZero() || request.OccurredAt.IsZero() {
+		return AttemptHeadAdoptionResult{}, fmt.Errorf("adopt attempt head requires journal, repository inspector, attempt, and occurrence time")
+	}
+	snapshot, projection, err := readReviewRuntime(journal, definition)
+	if err != nil {
+		return AttemptHeadAdoptionResult{}, err
+	}
+	attempt, exists := projection.core.Attempt(request.AttemptID)
+	if !exists || attempt.phase != AttemptActive {
+		return AttemptHeadAdoptionResult{}, fmt.Errorf("attempt %s must be active for head adoption", request.AttemptID)
+	}
+	unit, err := executionForMergeUnit(definition.execution, attempt.mergeUnit)
+	if err != nil {
+		return AttemptHeadAdoptionResult{}, err
+	}
+	if _, configured := unit.CommitProtocol(); configured || attempt.reviewFixes != nil {
+		return AttemptHeadAdoptionResult{}, fmt.Errorf("ordinary head adoption is unavailable after durable commit or review-fix state")
+	}
+	if _, hasState := projection.State(request.AttemptID); hasState {
+		return AttemptHeadAdoptionResult{}, fmt.Errorf("ordinary head adoption is unavailable after durable review state")
+	}
+	repositoryRequest, err := NewReviewRepositoryRequest(
+		attempt.repository, attempt.worktree, attempt.branch, attempt.verifiedHead,
+	)
+	if err != nil {
+		return AttemptHeadAdoptionResult{}, err
+	}
+	repositorySnapshot, err := repository.InspectReviewSnapshot(ctx, repositoryRequest)
+	if err != nil {
+		return AttemptHeadAdoptionResult{}, err
+	}
+	if !repositorySnapshot.clean {
+		return AttemptHeadAdoptionResult{}, fmt.Errorf("head adoption requires a clean attempt worktree")
+	}
+	result := AttemptHeadAdoptionResult{head: repositorySnapshot.head, tree: repositorySnapshot.tree}
+	if repositorySnapshot.head == attempt.verifiedHead {
+		return result, nil
+	}
+	adoption, err := NewReviewHeadAdoptedJournalEvent(
+		definition.workspace.id, definition.generation, attempt.attemptID, attempt.mergeUnit,
+		attempt.verifiedHead, repositorySnapshot.head, repositorySnapshot.tree, repositorySnapshot.digest,
+	)
+	if err != nil {
+		return AttemptHeadAdoptionResult{}, err
+	}
+	record, err := appendReviewJournalEvent(journal, snapshot, adoption, request.OccurredAt)
+	if err != nil {
+		return AttemptHeadAdoptionResult{}, err
+	}
+	_, rebuilt, err := readReviewRuntime(journal, definition)
+	if err != nil {
+		return AttemptHeadAdoptionResult{}, err
+	}
+	updated, exists := rebuilt.core.Attempt(request.AttemptID)
+	if !exists || updated.phase != AttemptActive || updated.verifiedHead != repositorySnapshot.head {
+		return AttemptHeadAdoptionResult{}, fmt.Errorf("attempt head adoption did not rebuild to the inspected head")
+	}
+	result.record, result.adopted = record, true
+	return result, nil
+}
+
 func StartAttemptReviewRound(
 	ctx context.Context,
 	journal *WorkspaceJournal,

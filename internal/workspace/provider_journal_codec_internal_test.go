@@ -112,7 +112,8 @@ func TestProviderPreflightAndAbandonmentCodecsRoundTripCanonicalEvidence(t *test
 	state, err := NewProviderPullRequestState(ProviderPullRequestStateOptions{
 		Repository: repository, PullRequest: pullRequest, BaseRef: intent.baseRef, Branch: intent.branch,
 		Head: head, HeadTree: tree, RemoteBranchHead: head, BaseHeadBeforeMerge: base,
-		Checks: []ProviderCheckState{check}, Reviews: []ProviderReviewState{review}, RequestMarker: "codec-preflight",
+		Checks: []ProviderCheckState{check}, Reviews: []ProviderReviewState{review},
+		Lifecycle: ProviderPullRequestOpen, RequestMarker: "codec-preflight",
 	})
 	if err != nil {
 		t.Fatal(err)

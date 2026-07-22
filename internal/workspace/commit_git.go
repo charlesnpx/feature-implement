@@ -394,6 +394,63 @@ func (adapter LocalCommitGitAdapter) InspectCommit(
 	return NewGitCommitInspection(commit, parents, tree, subject, body, diff)
 }
 
+// InspectCleanWorktreeHead returns the worktree's actual clean branch head.
+// When that head differs from priorHead, every intervening first-parent commit
+// must be a single-parent descendant. This is the trusted bridge used to adopt
+// ordinary local commits without allowing a reset, rebase, or merge commit to
+// replace the durable attempt frontier.
+func (adapter LocalCommitGitAdapter) InspectCleanWorktreeHead(
+	ctx context.Context,
+	worktree, branch string,
+	priorHead GitObjectID,
+) (GitCommitInspection, error) {
+	if priorHead.IsZero() {
+		return GitCommitInspection{}, fmt.Errorf("clean worktree head inspection requires a prior head")
+	}
+	if err := validateAttemptBranchSyntax(branch); err != nil {
+		return GitCommitInspection{}, err
+	}
+	binding, err := adapter.captureTrustedWorktreeBinding(ctx, worktree)
+	if err != nil {
+		return GitCommitInspection{}, err
+	}
+	worktree = binding.root
+	actualBranch, err := adapter.symbolicBranch(ctx, worktree)
+	if err != nil {
+		return GitCommitInspection{}, err
+	}
+	if actualBranch != branch {
+		return GitCommitInspection{}, fmt.Errorf("worktree branch %q does not match %q", actualBranch, branch)
+	}
+	algorithm, err := adapter.git.objectFormat(ctx, worktree)
+	if err != nil {
+		return GitCommitInspection{}, err
+	}
+	if algorithm != priorHead.Algorithm() {
+		return GitCommitInspection{}, fmt.Errorf("prior head object format does not match repository")
+	}
+	head, err := adapter.resolveObject(ctx, worktree, algorithm, "HEAD")
+	if err != nil {
+		return GitCommitInspection{}, err
+	}
+	if err := adapter.VerifyCleanWorktree(ctx, worktree, branch, head); err != nil {
+		return GitCommitInspection{}, err
+	}
+	if head != priorHead {
+		if _, err := adapter.InspectFirstParentRange(ctx, worktree, priorHead, head); err != nil {
+			return GitCommitInspection{}, fmt.Errorf("ordinary commit head must descend from durable head: %w", err)
+		}
+	}
+	inspection, err := adapter.InspectCommit(ctx, worktree, head)
+	if err != nil {
+		return GitCommitInspection{}, err
+	}
+	if err := adapter.VerifyCleanWorktree(ctx, worktree, branch, head); err != nil {
+		return GitCommitInspection{}, fmt.Errorf("confirm clean worktree head: %w", err)
+	}
+	return inspection, nil
+}
+
 func (adapter LocalCommitGitAdapter) InspectFirstParentRange(
 	ctx context.Context,
 	repositoryRoot string,

@@ -945,6 +945,53 @@ func TestReviewAdoptsCleanImplementationHeadWithoutCommitProtocol(t *testing.T) 
 	}
 }
 
+func TestProtocolFreeAttemptAdoptsOrdinaryHeadWithoutReviewLoop(t *testing.T) {
+	harness := newAttemptHarness(t, "unit-one")
+	attempt := harness.reserve(t, "2026-07-21T11:18:00Z")
+	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T11:18:01Z")
+	implementationHead, implementationTree := mustGitObject(t, 'c'), mustGitObject(t, 'd')
+	repositorySnapshot, err := workspace.NewReviewRepositorySnapshot(implementationHead, implementationTree, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &reviewRepositoryStub{snapshot: repositorySnapshot}
+	result, err := workspace.AdoptAttemptHead(
+		context.Background(), harness.journal, harness.definition, repository,
+		workspace.AdoptAttemptHeadRequest{
+			AttemptID: attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T11:18:02Z"),
+		},
+	)
+	if err != nil || !result.Adopted() || result.Head() != implementationHead ||
+		result.Tree() != implementationTree || result.Record().Sequence() == 0 {
+		t.Fatalf("protocol-free head adoption = %#v error=%v", result, err)
+	}
+	snapshot, err := harness.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := snapshot.Records()
+	if len(records) == 0 || records[len(records)-1].EventType() != workspace.JournalEventReviewHeadAdopted {
+		t.Fatalf("protocol-free adoption journal tail = %#v", records)
+	}
+	runtime, err := workspace.RebuildWorkspaceRuntime(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, exists := runtime.Attempt(attempt.AttemptID())
+	if !exists || updated.VerifiedHead() != implementationHead {
+		t.Fatalf("protocol-free adopted attempt = %#v exists=%v", updated, exists)
+	}
+	retry, err := workspace.AdoptAttemptHead(
+		context.Background(), harness.journal, harness.definition, repository,
+		workspace.AdoptAttemptHeadRequest{
+			AttemptID: attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T11:18:03Z"),
+		},
+	)
+	if err != nil || retry.Adopted() || retry.Record().Sequence() != 0 || retry.Head() != implementationHead {
+		t.Fatalf("idempotent protocol-free head adoption = %#v error=%v", retry, err)
+	}
+}
+
 func TestReviewFixCommitInvalidatesReadinessUntilAllProfilesReconfirm(t *testing.T) {
 	harness := newReviewHarness(t)
 	start, err := workspace.StartAttemptReviewRound(

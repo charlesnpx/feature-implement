@@ -35,12 +35,16 @@ func TestMaterializeAndValidateWritesLock(t *testing.T) {
 	if validated.LockPath == "" {
 		t.Fatalf("expected lock path: %+v", validated)
 	}
-	status, err := Status(materialized.PlanDir)
+	lockBytes, err := os.ReadFile(validated.LockPath)
 	if err != nil {
-		t.Fatalf("Status: %v", err)
+		t.Fatalf("read lock: %v", err)
 	}
-	if status.Status != "validated" {
-		t.Fatalf("status = %s", status.Status)
+	var lockDocument map[string]json.RawMessage
+	if err := json.Unmarshal(lockBytes, &lockDocument); err != nil {
+		t.Fatalf("decode lock: %v", err)
+	}
+	if _, exists := lockDocument["state"]; exists {
+		t.Fatalf("plan lock contains removed mutable runtime state: %s", lockBytes)
 	}
 }
 
@@ -328,41 +332,6 @@ epics:
 				t.Fatalf("Materialize error = %v, want %q", err, tt.wantErr)
 			}
 		})
-	}
-}
-
-func TestImplementRequiresLockAndExplicitWriteFlags(t *testing.T) {
-	root := canonicalPlanTestTempDir(t)
-	if _, err := Implement(ImplementOptions{PlanDir: root, Action: "push"}); err == nil {
-		t.Fatalf("implement should require lock")
-	}
-	manifestPath := filepath.Join(root, "feature.plan.yaml")
-	if err := os.WriteFile(manifestPath, []byte(sampleManifest()), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	materialized, err := Materialize(MaterializeOptions{ManifestPath: manifestPath, OutRoot: root})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
-	if _, err := Validate(ValidateOptions{PlanDir: materialized.PlanDir, WriteLock: true}); err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-	mergeUnitID := "story-install-contract"
-	if _, err := Implement(ImplementOptions{PlanDir: materialized.PlanDir, Action: "start", MergeUnit: mergeUnitID, WriteState: true, BaseSHA: "base-sha"}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	if _, err := Implement(ImplementOptions{PlanDir: materialized.PlanDir, Action: "commit", MergeUnit: mergeUnitID, WriteState: true, CommitSHA: "commit-sha"}); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	if _, err := Implement(ImplementOptions{PlanDir: materialized.PlanDir, Action: "push", MergeUnit: mergeUnitID}); err == nil {
-		t.Fatalf("push should require explicit flag")
-	}
-	result, err := Implement(ImplementOptions{PlanDir: materialized.PlanDir, Action: "push", MergeUnit: mergeUnitID, AllowPush: true})
-	if err != nil {
-		t.Fatalf("push with flag: %v", err)
-	}
-	if result.Status != "planned" {
-		t.Fatalf("result = %+v", result)
 	}
 }
 

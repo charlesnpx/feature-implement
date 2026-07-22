@@ -1,169 +1,224 @@
 # feature-implement
 
-`feature-implement` provides a delegated `mise-en-place` skill and Go CLI for turning implementation scope into validated epic, feature, story, and merge-unit plans, then executing those plans through guarded branch and PR workflows.
+`feature-implement` provides a self-contained Go CLI and delegated Codex and Claude skills for planning implementation work and executing it through immutable workspace-v2 definitions, a typed journal, isolated Git worktrees, protected review and authorization boundaries, and verified GitHub merge receipts.
 
 It installs:
 
-- `feature`, a self-contained Go CLI under `~/.local/bin`
+- `feature` under `~/.local/bin`
 - `$feature` and `$feature:implement` for Codex
 - `/feature` and `/feature:implement` for Claude Code
 
-## Install Contract
+## Install contract
 
-This repo follows the `mise-en-place` delegated installer contract. `install-skill.sh` is a thin wrapper around:
+This repository follows the `mise-en-place` delegated installer contract. `install-skill.sh` is a thin wrapper around:
 
 ```sh
 feature install-skills [--plan|--install|--uninstall] [--target claude|codex|tools|all] [--json] [--install-root <dir>]
 ```
 
-The installer emits delegated JSON with `schema: 1`, `kind: delegated`, target file records, setup metadata, and SHA256 hashes for installed files. Go/self-contained tool installation is owned by the delegated installer through the `tools` target.
+The installer emits delegated JSON with `schema: 1`, `kind: delegated`, target file records, setup metadata, and SHA256 hashes for installed files. The `tools` target owns the self-contained Go binary.
 
-## Commands
+## Command surfaces
+
+The standalone version-one plan materializer remains available for planning-only consumers:
 
 ```sh
 feature plan example
 feature plan schema --json
-feature plan materialize --manifest feature.plan.yaml --json
-feature validate <plan-dir> --write-lock --json
-feature status <plan-dir> --json
-feature implement next <plan-dir> --json
-feature implement start <plan-dir> --merge-unit <id> --base-sha <sha> --write-state --json
-feature implement commit <plan-dir> --merge-unit <id> --commit-sha <sha> --write-state --json
-feature implement push <plan-dir> --merge-unit <id> --allow-push --write-state --json
-feature implement open-pr <plan-dir> --merge-unit <id> --allow-open-pr --pr <number> --pr-url <url> --write-state --json
-feature implement review <plan-dir> --merge-unit <id> --review-status passed --write-state --json
-feature implement merge <plan-dir> --merge-unit <id> --allow-merge --merge-commit <sha> --write-state --json
-feature implement cleanup <plan-dir> --merge-unit <id> --write-state --json
+feature plan materialize --manifest feature.plan.yaml --out-root <dir> --json
+feature validate <plan-dir> [--write-lock] --json
 ```
 
-`feature validate` writes `feature.plan.lock.json`; implementation commands consume that validated snapshot rather than live-edited Markdown.
-Lifecycle write steps use immutable lock transitions: each `--write-state` command reads the current lock, returns a new ordered merge-unit state snapshot, and writes that snapshot back to `feature.plan.lock.json`. Existing v1 lock files with map-shaped state are migrated on the next state write.
-
-`feature:implement` creates one temporary worktree for the active merge unit under `<plan-dir>/worktrees/<merge-unit-id>`. After the PR is merged and local `main` is updated, remove that worktree and record `feature implement cleanup ... --write-state`. Remote branch deletion is separate and still requires both merge policy allowance and explicit approval.
-
-`feature implement ... --json` results for a selected merge unit include `story_progress_label`, such as `(Story 4/16)` or `(Stories 4-5/16)`, derived from the ordered stories in `feature.plan.lock.json`.
-
-When `$feature` or `/feature` needs to draft the temporary `feature.plan.yaml`, it should stage that scratch manifest under the user-provided output folder, `~/tmp` when it exists, or the system temp directory. It should not write scratch manifests into the current repository root unless that repo root was explicitly supplied as the output folder.
-
-## Manifest Contract
-
-`$feature` and `/feature` create a `feature.plan.yaml` manifest, then `feature plan materialize` turns it into epic, feature, and story Markdown folders.
-
-Materialization bootstraps only an absent or empty destination and records those plan outputs in the non-hidden `feature.materialization.v2.json` ownership inventory. Later runs replace or remove an owned artifact only while its bytes still match the recorded last-generated hash. Modified owned files, unowned candidate paths, missing or corrupt inventories, symlink traversal, hidden paths, and case or Unicode aliases fail without changing plan outputs. Validation locks, worktrees, Git metadata, and installed skill assets are outside the inventory and are never removed by the materializer.
-
-Required top-level fields:
-
-- `schema_version: 1`
-- `id`
-- `title`
-- `epics`
-
-Optional top-level fields:
-
-- `output_name`: output folder name under the selected root.
-- `base_ref`: implementation base branch, usually `main`.
-- `remote`: implementation remote, usually `origin`.
-- `merge_policy`: `auto_merge_allowed`, `delete_branch_allowed`, `require_passing_checks`.
-- `merge_units`: explicit implementation/PR units. If omitted, validation creates one merge unit per story.
-
-Each epic requires `id`, `number`, `name`, and at least one feature. Each feature requires `id`, `number`, `name`, and at least one story.
-
-Every story must be implementation-ready and include:
-
-- `id`, `number`, `name`, and `summary`
-- `acceptance`: concrete acceptance criteria that define done behavior
-- `implementation`: specific implementation notes detailed enough for a coding agent to act on
-- `testing`: explicit test criteria, including unit/integration/manual checks as appropriate
-- `dependencies` when the story depends on earlier story IDs
-
-Story dependencies must reference story IDs.
-
-Materialized story Markdown includes Acceptance Criteria, Implementation Notes, and Testing Criteria sections.
-
-Each merge unit requires `id` and `story_ids`. Use `allow_feature_level_pr: true` only when grouping multiple stories from the same feature.
-
-For migration or phased-planning prompts, map phases to epics, workstreams/capability areas to features, and concrete implementation steps to stories.
-
-```yaml
-schema_version: 1
-id: sample-migration-plan
-title: Sample Migration Plan
-output_name: sample-migration-plan
-base_ref: main
-remote: origin
-merge_policy:
-  require_passing_checks: true
-epics:
-  - id: epic-discovery
-    number: 1
-    name: Discovery
-    summary: Inventory the current state and migration constraints.
-    constraints:
-      - Keep production behavior stable while planning.
-    features:
-      - id: feature-inventory
-        number: 1
-        name: Inventory
-        summary: Capture the systems, data, and workflows that must migrate.
-        stories:
-          - id: story-current-state
-            number: 1
-            name: Current State Inventory
-            summary: Document systems, owners, data, dependencies, and risks.
-            acceptance:
-              - Current systems and owners are listed.
-              - Migration risks and unknowns are captured.
-            implementation:
-              - Review existing docs, code paths, and operational runbooks.
-            testing:
-              - Validate that the inventory covers systems, owners, dependencies, and risks.
-          - id: story-target-plan
-            number: 2
-            name: Target Migration Plan
-            summary: Produce sequencing, rollback approach, and validation gates.
-            acceptance:
-              - Target phases and success gates are defined.
-              - Rollback and validation steps are documented.
-            implementation:
-              - Convert findings into an implementation-ready migration sequence.
-            testing:
-              - Review the plan against phase gates, rollback expectations, and validation steps.
-            dependencies:
-              - story-current-state
-merge_units:
-  - id: story-current-state
-    name: Current State Inventory
-    story_ids:
-      - story-current-state
-  - id: story-target-plan
-    name: Target Migration Plan
-    story_ids:
-      - story-target-plan
-```
-
-Smoke test:
+Execution is workspace-v2 only. Direct `feature status` and `feature implement` lifecycle commands have been removed; plan locks no longer contain mutable runtime state.
 
 ```sh
-scratch_root="${HOME}/tmp"
-if [ -d "$scratch_root" ]; then
-  scratch_dir="$(mktemp -d "$scratch_root/feature-manifest-XXXXXX")"
-else
-  scratch_dir="$(mktemp -d)"
-fi
+feature workspace schema bundle --json
+feature workspace schema requests --json
+feature workspace example
+feature workspace validate --bundle <bundle-dir> [--write-locks] --json
+feature workspace init --bundle <bundle-dir> --workspace <runtime-dir> --input <request.json> --json
+feature workspace status --bundle <bundle-dir> --workspace <runtime-dir> --json
+feature workspace recover --bundle <bundle-dir> --workspace <runtime-dir> --input <request.json> --json
+feature workspace scheduler|gates|queue|receipts|report --bundle <bundle-dir> --workspace <runtime-dir> --json
+```
 
-manifest="$scratch_dir/feature.plan.yaml"
-feature plan example > "$manifest"
-plan_dir="$(feature plan materialize --manifest "$manifest")"
-feature validate "$plan_dir" --write-lock
-feature status "$plan_dir"
+Mutation groups expose closed, typed subactions:
+
+```text
+reconcile  stage | plan | activate
+attempt    reserve | materialize | boundary | next-goal | acknowledge | owner-response | resume
+commit     next | rebase
+review     start | reserve | record | reserve-fix | apply-fix | record-fix | ready
+control    grant | revoke | safety | segment-complete | inspect-receipt
+provider   reserve | preflight | dispatch | reconcile | abandon | authorize-pr
+complete   verify
+```
+
+Every mutation accepts exactly one strict schema-version-2 JSON request through `--input <file|->`. Unknown fields, duplicate keys, trailing JSON, unsupported enum values, and oversized inputs fail before a transition is recorded. Use `feature workspace schema requests --json` as the request reference.
+
+## Workspace bundle
+
+A bundle is an immutable set of source files rooted by `feature.workspace.bundle.json`:
+
+```text
+sample-workspace/
+├── feature.workspace.bundle.json
+├── feature.workspace.yaml
+├── plans/
+│   └── sample-plan.yaml
+├── config/
+│   └── execution.yaml
+├── authority/
+│   └── owner-policy.json       # optional, externally pinned authority material
+└── generated/                  # tool-owned immutable lock projections
+```
+
+The descriptor contains discovery and authority-selection bindings rather than runtime state. Its exact bytes, every referenced source byte, every authority pin, and the selected control-plane authority contribute to the effective generation. Source paths are relative, non-hidden, outside `generated/`, rooted beneath the bundle, and cannot traverse symlinks or collide across roles.
+
+```json
+{
+  "schema_version": 2,
+  "workspace": "feature.workspace.yaml",
+  "plans": ["plans/sample-plan.yaml"],
+  "execution_config": "config/execution.yaml",
+  "authorities": []
+}
+```
+
+The workspace manifest owns repository, provider, base, remote, plan membership, cross-plan dependencies, and authority declarations. It never requires the primary checkout to be clean.
+
+```yaml
+schema_version: 2
+id: sample-workspace
+repository:
+  root: /absolute/path/to/repository
+  identity: https://github.com/example/project.git
+provider:
+  kind: github
+  repository: example/project
+base_ref: feature/sample-workspace
+remote: origin
+execution_config: config/execution.yaml
+plans:
+  - id: sample-plan
+    source: plans/sample-plan.yaml
+dependencies: []
+authority_sources: []
+```
+
+Plan sources own stories, story dependencies, and merge-unit composition:
+
+```yaml
+schema_version: 2
+id: sample-plan
+title: Sample Plan
+stories:
+  - id: story-first-contract
+    summary: Establish the first implementation contract.
+    acceptance:
+      - The contract is explicit and enforced.
+    implementation:
+      - Implement the bounded contract.
+    testing:
+      - Exercise success and rejection paths.
+    dependencies: []
+merge_units:
+  - id: first-contract
+    name: First Contract
+    story_ids:
+      - story-first-contract
+```
+
+Execution configuration assigns every merge unit exactly one effective profile, explicit boundary behavior, and policy that can only narrow its parent policy:
+
+```yaml
+schema_version: 2
+policy:
+  require_passing_checks: true
+  require_signed_receipts: true
+  allow_write_network: false
+  max_attempts: 3
+  max_review_rounds: 3
+  max_review_fixes: 2
+profiles:
+  - id: standard
+    runner: codex
+    policy:
+      require_passing_checks: true
+      require_signed_receipts: true
+      allow_write_network: false
+      max_attempts: 3
+      max_review_rounds: 3
+      max_review_fixes: 2
+merge_units:
+  - plan_id: sample-plan
+    merge_unit_id: first-contract
+    profile: standard
+    boundary:
+      mode: pause_only
+      serial_segment: serial-first-contract
+    policy:
+      require_passing_checks: true
+      require_signed_receipts: true
+      allow_write_network: false
+      max_attempts: 3
+      max_review_rounds: 3
+      max_review_fixes: 2
+```
+
+Optional commit, review-fix, and review-loop protocols are strict schemas within each merge-unit execution entry. An absent commit protocol leaves normal local commits unconstrained; the first configured review atomically adopts the exact clean head. A configured commit protocol owns its commits and isolated checks.
+
+Agent-driven broad review loops are capped at three iterations for the plan and for each merge unit. A new iteration starts only when the preceding review found a Critical or High issue. When a review has no Critical or High findings, worthwhile Medium and Low findings are still applied once, but another broad iteration is not started solely to re-review them.
+
+`feature workspace validate --write-locks` synchronizes immutable projections under `<bundle>/generated/`. The ownership inventory permits replacement only when an existing generated file still matches its last-generated hash. Modified projections, hidden paths, symlink traversal, missing inventory, and unowned conflicts fail closed.
+
+## Journal-backed execution
+
+Keep runtime state separate from the source bundle, for example `<bundle>/runtime/`. Initialization writes the append-only journal, generation store, and disposable projections under `<runtime>/state/`.
+
+1. Validate the bundle and initialize the runtime with a strict request containing `schema_version` and an RFC3339Nano `occurred_at` value.
+2. Run `recover`, then read `status` or `scheduler`. Reserve only a `ready` merge unit against the exact integration-base Git object.
+3. Materialize the reserved attempt. The CLI derives its flat branch and worktree identity and never modifies or cleans the primary checkout.
+4. Work only in the returned attempt worktree. Use `commit next` for configured commit steps; otherwise make ordinary local commits. The first configured review adopts the exact clean descendant head; when no governed review is configured, submit `attempt adopt-head` before provider reservation. Record only receipt-backed governed-review results for their exact head and tree.
+5. Treat every returned boundary directive as authoritative. Scheduler reports re-emit `boundary_pending`, `boundary_reason`, and `pending_directives`; complete goal acknowledgements and owner gates with matching signed control-plane receipts before resuming or creating another goal.
+6. Obtain operator approval and a matching standing-grant receipt before provider writes. Reserve typed `push`, `open_pull_request`, or `merge` intents, then dispatch only through the trusted provider adapter. Ambiguous effects must be reconciled before further dispatch.
+7. Verify completion independently. The completion receipt binds the branch, head, tree, PR checks and reviews, merge-commit parents and tree, integration topology, and final base head.
+8. Record and resolve the final attempt boundary to release its lease and serial segment. A provider completion receipt alone does not complete the scheduler unit or unblock dependents; use the journal-derived report as the completion source of truth.
+
+Provider results contain typed evidence and idempotency markers, never executable provider commands. The only provider intents are push, pull-request creation, and merge; completion always verifies a merge commit. GitHub observations bind only branch-protection-required check runs, commit-status contexts, and review decisions rather than treating optional activity as required. The primary checkout need not be clean.
+
+## Protected receipts
+
+Review evidence, standing grants, revocations, reconciliation activation, orchestration acknowledgements, and owner decisions require canonical signed control-plane receipts when their transition is protected. The bundle must pin the corresponding public authority material and identify it with `control_plane_authority`. Private signing keys are external to this repository and are never generated or stored by the CLI.
+
+## Minimal smoke test
+
+After creating the three source YAML files and descriptor above:
+
+```sh
+bundle_dir=/absolute/path/to/sample-workspace
+runtime_dir="$bundle_dir/runtime"
+request_file="$bundle_dir/init-request.json"
+
+feature workspace validate --bundle "$bundle_dir" --write-locks --json
+feature workspace init --bundle "$bundle_dir" --workspace "$runtime_dir" --input "$request_file" --json
+feature workspace status --bundle "$bundle_dir" --workspace "$runtime_dir" --json
+```
+
+`init-request.json` contains one canonical request:
+
+```json
+{"schema_version":2,"occurred_at":"2026-07-22T12:00:00Z"}
 ```
 
 ## Development
 
-Run the full local check:
-
 ```sh
+gofmt -w cmd/feature/*.go internal/install/*.go internal/plan/*.go internal/workspace/*.go internal/workspacecmd/*.go
 go test ./...
+go test -shuffle=on ./...
+go test -race ./internal/workspace ./internal/workspacecmd
+go vet ./...
 ./install-skill.sh --plan --target all --json
 stage="$(mktemp -d)"
 ./install-skill.sh --install --target all --json --install-root "$stage"

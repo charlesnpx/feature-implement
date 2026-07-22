@@ -143,6 +143,23 @@ type attemptHarness struct {
 func newAttemptHarness(t *testing.T, unitID string) attemptHarness {
 	t.Helper()
 	fixture := newDefinitionFixture(t)
+	return newAttemptHarnessFromFixture(t, fixture, unitID)
+}
+
+func newIndependentAttemptHarness(t *testing.T, unitID string) attemptHarness {
+	t.Helper()
+	fixture := newDefinitionFixture(t)
+	fixture.sources.Plans[0].Bytes = []byte(strings.Replace(
+		string(fixture.sources.Plans[0].Bytes),
+		"    dependencies:\n      - story-one",
+		"    dependencies: []",
+		1,
+	))
+	return newAttemptHarnessFromFixture(t, fixture, unitID)
+}
+
+func newAttemptHarnessFromFixture(t *testing.T, fixture definitionFixture, unitID string) attemptHarness {
+	t.Helper()
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
 	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T10:00:00Z")); err != nil {
@@ -244,6 +261,44 @@ func TestAttemptIdentityIsFlatBoundedDigestBackedAndRejectsRefConflicts(t *testi
 				t.Fatalf("conflict = %#v, %v", conflict, err)
 			}
 		})
+	}
+}
+
+func TestAttemptReservationEnforcesSchedulerOrderAndEffectiveAttemptBudget(t *testing.T) {
+	harness := newAttemptHarness(t, "unit-one")
+	blockedUnit := mustMergeUnitReference(t, "alpha-plan", "unit-two")
+	if _, err := workspace.ReserveAttempt(
+		context.Background(), harness.journal, harness.definition, harness.git,
+		workspace.ReserveAttemptRequest{
+			MergeUnit: blockedUnit, AttemptNumber: 1, Base: harness.base,
+			WorktreeRoot: harness.worktrees, Goal: harness.goal,
+			OccurredAt: mustTime(t, "2026-07-21T10:01:00Z"),
+		},
+	); err == nil || !strings.Contains(err.Error(), "not scheduler-ready") || !strings.Contains(err.Error(), "dependency:alpha-plan/unit-one") {
+		t.Fatalf("dependency-bypassing reservation error = %v", err)
+	}
+	if _, err := workspace.ReserveAttempt(
+		context.Background(), harness.journal, harness.definition, harness.git,
+		workspace.ReserveAttemptRequest{
+			MergeUnit: harness.unit, AttemptNumber: 4, Base: harness.base,
+			WorktreeRoot: harness.worktrees, Goal: harness.goal,
+			OccurredAt: mustTime(t, "2026-07-21T10:02:00Z"),
+		},
+	); err == nil || !strings.Contains(err.Error(), "exceeds max_attempts 3") {
+		t.Fatalf("over-budget reservation error = %v", err)
+	}
+	if _, err := workspace.ReserveAttempt(
+		context.Background(), harness.journal, harness.definition, harness.git,
+		workspace.ReserveAttemptRequest{
+			MergeUnit: harness.unit, AttemptNumber: 2, Base: harness.base,
+			WorktreeRoot: harness.worktrees, Goal: harness.goal,
+			OccurredAt: mustTime(t, "2026-07-21T10:03:00Z"),
+		},
+	); err == nil || !strings.Contains(err.Error(), "next attempt is 1") {
+		t.Fatalf("out-of-sequence reservation error = %v", err)
+	}
+	if attempt := harness.reserve(t, "2026-07-21T10:04:00Z"); attempt.AttemptNumber() != 1 {
+		t.Fatalf("valid scheduler-ready reservation = %#v", attempt)
 	}
 }
 
@@ -781,7 +836,7 @@ func TestLocalAttemptInspectionRejectsRawModeDrift(t *testing.T) {
 }
 
 func TestCompleteGoalBoundaryRecoversIdempotentlyThroughHandoffAndRejectsStaleHead(t *testing.T) {
-	harness := newAttemptHarness(t, "unit-two")
+	harness := newIndependentAttemptHarness(t, "unit-two")
 	attempt := harness.reserve(t, "2026-07-21T12:01:00Z")
 	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T12:02:00Z")
 	crash := errors.New("simulated crash")
@@ -991,7 +1046,7 @@ func TestCompleteGoalBoundaryRecoversIdempotentlyThroughHandoffAndRejectsStaleHe
 }
 
 func TestSerialSegmentsFenceOnlyMatchingSegments(t *testing.T) {
-	harness := newAttemptHarness(t, "unit-one")
+	harness := newIndependentAttemptHarness(t, "unit-one")
 	first := harness.reserve(t, "2026-07-21T13:01:00Z")
 	otherUnit := mustMergeUnitReference(t, "alpha-plan", "unit-two")
 	otherGoal, _ := workspace.NewGoalBinding(workspace.MustID("other-goal"), workspace.GoalScopeMergeUnit)
@@ -1010,6 +1065,12 @@ func TestSerialSegmentsFenceOnlyMatchingSegments(t *testing.T) {
 	}
 
 	fixture := newDefinitionFixture(t)
+	fixture.sources.Plans[0].Bytes = []byte(strings.Replace(
+		string(fixture.sources.Plans[0].Bytes),
+		"    dependencies:\n      - story-one",
+		"    dependencies: []",
+		1,
+	))
 	fixture.sources.ExecutionConfig.Bytes = []byte(strings.Replace(
 		string(fixture.sources.ExecutionConfig.Bytes),
 		"    boundary:\n      mode: complete_goal_and_wait",
