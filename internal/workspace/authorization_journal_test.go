@@ -743,7 +743,8 @@ func TestPullRequestStandingGrantFrontierAdvanceAuthorizesExactReviewFixPush(t *
 		WorkspaceID: definition.Workspace().ID(), Repository: definition.Workspace().Repository(),
 		Remote: definition.Workspace().Remote(), Generation: definition.Generation(),
 		SerialSegment: segment, Frontier: fixFrontier, Action: workspace.StandingAuthorizationPush,
-		Epoch: 1,
+		ExpectRemoteAbsent: true,
+		Epoch:              1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -760,7 +761,8 @@ func TestPullRequestStandingGrantFrontierAdvanceAuthorizesExactReviewFixPush(t *
 		WorkspaceID: definition.Workspace().ID(), Repository: definition.Workspace().Repository(),
 		Remote: definition.Workspace().Remote(), Generation: definition.Generation(),
 		SerialSegment: segment, Frontier: initialFrontier, Action: workspace.StandingAuthorizationPush,
-		Epoch: 1,
+		ExpectRemoteAbsent: true,
+		Epoch:              1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -810,7 +812,7 @@ func TestPullRequestStandingGrantFrontierAdvanceAuthorizesExactReviewFixPush(t *
 		WorkspaceID: definition.Workspace().ID(), Repository: definition.Workspace().Repository(),
 		Remote: definition.Workspace().Remote(), Generation: definition.Generation(),
 		SerialSegment: segment, Frontier: initialFrontier, Action: workspace.StandingAuthorizationPush,
-		PullRequest: currentPR.PullRequest(), Epoch: 1,
+		PullRequest: currentPR.PullRequest(), ExpectedRemoteHead: initialFrontier.Base(), Epoch: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -824,7 +826,7 @@ func TestPullRequestStandingGrantFrontierAdvanceAuthorizesExactReviewFixPush(t *
 		WorkspaceID: definition.Workspace().ID(), Repository: definition.Workspace().Repository(),
 		Remote: definition.Workspace().Remote(), Generation: definition.Generation(),
 		SerialSegment: segment, Frontier: fixFrontier, Action: workspace.StandingAuthorizationPush,
-		PullRequest: currentPR.PullRequest(), Epoch: 1,
+		PullRequest: currentPR.PullRequest(), ExpectedRemoteHead: fixFrontier.Base(), Epoch: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -843,7 +845,7 @@ func TestPullRequestStandingGrantFrontierAdvanceAuthorizesExactReviewFixPush(t *
 		WorkspaceID: definition.Workspace().ID(), Repository: definition.Workspace().Repository(),
 		Remote: definition.Workspace().Remote(), Generation: definition.Generation(),
 		SerialSegment: segment, Frontier: wrongFrontier, Action: workspace.StandingAuthorizationPush,
-		PullRequest: currentPR.PullRequest(), Epoch: 1,
+		PullRequest: currentPR.PullRequest(), ExpectedRemoteHead: wrongFrontier.Base(), Epoch: 1,
 	})
 	if _, err := evaluator.PlanAuthorization(state, wrongRequest, binding); err == nil || !strings.Contains(err.Error(), "exact request") {
 		t.Fatalf("wrong review-fix frontier authorization error = %v", err)
@@ -993,7 +995,7 @@ func authorizationJournalRequest(
 	request, err := workspace.NewAuthorizationRequest(workspace.AuthorizationRequestOptions{
 		WorkspaceID: definition.Workspace().ID(), Repository: definition.Workspace().Repository(),
 		Remote: definition.Workspace().Remote(), Generation: definition.Generation(), SerialSegment: segment,
-		Frontier: frontier, Action: workspace.StandingAuthorizationPush, Epoch: epoch,
+		Frontier: frontier, Action: workspace.StandingAuthorizationPush, ExpectRemoteAbsent: true, Epoch: epoch,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -173,7 +173,7 @@ func NewLocalAttemptGitAdapter(executable string, environment []EnvironmentVaria
 			return LocalAttemptGitAdapter{}, fmt.Errorf("Git environment contains an invalid variable")
 		}
 		if unsafeAttemptGitEnvironment(variable.name) {
-			return LocalAttemptGitAdapter{}, fmt.Errorf("Git environment variable %s can redirect repository operations", variable.name)
+			return LocalAttemptGitAdapter{}, fmt.Errorf("Git environment variable %s can redirect operations or expose credentials", variable.name)
 		}
 		if _, exists := seen[variable.name]; exists {
 			return LocalAttemptGitAdapter{}, fmt.Errorf("duplicate Git environment variable %s", variable.name)
@@ -801,12 +801,16 @@ func (adapter LocalAttemptGitAdapter) run(
 	}
 	argv := trustedGitArguments(repositoryRoot, arguments...)
 	command := exec.CommandContext(ctx, adapter.executable, argv...)
-	command.Env = mergeProcessEnvironment(os.Environ(), adapter.environment)
+	environment, err := BuildNonProviderProcessEnvironment(os.Environ(), adapter.environment)
+	if err != nil {
+		return nil, -1, err
+	}
+	command.Env = environment
 	var stdout, stderr boundedProcessBuffer
 	stdout.maximum = maxAttemptGitOutputBytes
 	stderr.maximum = 64 * 1024
 	command.Stdout, command.Stderr = &stdout, &stderr
-	err := command.Run()
+	err = command.Run()
 	exitCode := 0
 	if err != nil {
 		var exitError *exec.ExitError
@@ -845,10 +849,10 @@ func (buffer *boundedProcessBuffer) bytes() []byte {
 }
 
 func mergeProcessEnvironment(base []string, additions []EnvironmentVariable) []string {
-	values := make(map[string]string, len(base)+len(additions))
+	values := make(map[string]string, len(additions)+20)
 	for _, entry := range base {
 		name, value, found := strings.Cut(entry, "=")
-		if found && !unsafeAttemptGitEnvironment(name) {
+		if found && allowedNonProviderAmbientEnvironment(name) {
 			values[name] = value
 		}
 	}
@@ -858,6 +862,17 @@ func mergeProcessEnvironment(base []string, additions []EnvironmentVariable) []s
 	values["GIT_NO_REPLACE_OBJECTS"] = "1"
 	values["GIT_GRAFT_FILE"] = os.DevNull
 	values["GIT_OPTIONAL_LOCKS"] = "0"
+	values["GIT_CONFIG_NOSYSTEM"] = "1"
+	values["GIT_CONFIG_GLOBAL"] = os.DevNull
+	values["GIT_CONFIG_SYSTEM"] = os.DevNull
+	values["GIT_TERMINAL_PROMPT"] = "0"
+	values["GCM_INTERACTIVE"] = "Never"
+	values["GIT_ASKPASS"] = os.DevNull
+	values["SSH_ASKPASS"] = os.DevNull
+	values["GIT_SSH_COMMAND"] = os.DevNull
+	values["GIT_SSH_VARIANT"] = "ssh"
+	values["HOME"] = os.DevNull
+	values["XDG_CONFIG_HOME"] = os.DevNull
 	names := make([]string, 0, len(values))
 	for name := range values {
 		names = append(names, name)
@@ -870,24 +885,91 @@ func mergeProcessEnvironment(base []string, additions []EnvironmentVariable) []s
 	return result
 }
 
-func unsafeAttemptGitEnvironment(name string) bool {
-	if name == "GIT_CONFIG" || strings.HasPrefix(name, "GIT_CONFIG_") {
-		return true
-	}
-	switch name {
-	case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
-		"GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-		"GIT_NO_REPLACE_OBJECTS", "GIT_GRAFT_FILE", "GIT_OPTIONAL_LOCKS":
+func allowedNonProviderAmbientEnvironment(name string) bool {
+	switch strings.ToUpper(strings.TrimSpace(name)) {
+	case "PATH", "TMPDIR", "TMP", "TEMP", "TZ", "LANG", "LC_ALL", "LC_CTYPE",
+		"SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT":
 		return true
 	default:
 		return false
 	}
 }
 
+// BuildNonProviderProcessEnvironment is the shared environment boundary for
+// local Git, checks, implementation processes, and reviewers. It removes
+// all ambient state except a small operational allowlist, then forces
+// credential helpers, prompts, SSH identities, and system/global Git config
+// off. Network sandboxing and provider-broker exclusion remain mandatory
+// responsibilities of the typed runner port.
+func BuildNonProviderProcessEnvironment(
+	base []string,
+	additions []EnvironmentVariable,
+) ([]string, error) {
+	for _, variable := range additions {
+		if variable.name == "" || unsafeAttemptGitEnvironment(variable.name) {
+			return nil, fmt.Errorf("non-provider environment variable %s is unsafe", variable.name)
+		}
+	}
+	return mergeProcessEnvironment(base, additions), nil
+}
+
+func unsafeAttemptGitEnvironment(name string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(name))
+	if providerCredentialEnvironment(upper) || upper == "GIT_CONFIG" || strings.HasPrefix(upper, "GIT_CONFIG_") {
+		return true
+	}
+	switch upper {
+	case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+		"GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+		"GIT_NO_REPLACE_OBJECTS", "GIT_GRAFT_FILE", "GIT_OPTIONAL_LOCKS",
+		"GIT_ASKPASS", "GIT_TERMINAL_PROMPT", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT",
+		"SSH_ASKPASS", "SSH_AUTH_SOCK", "SSH_AGENT_PID", "GCM_INTERACTIVE",
+		"GIT_PROXY_COMMAND", "GIT_EXEC_PATH", "GIT_TEMPLATE_DIR":
+		return true
+	default:
+		return false
+	}
+}
+
+func providerCredentialEnvironment(name string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(name))
+	switch upper {
+	case "TOKEN", "PAT", "PASSWORD", "PASS", "PASSPHRASE", "SECRET", "API_KEY", "ACCESS_KEY",
+		"PRIVATE_KEY", "CREDENTIAL", "CREDENTIALS", "AUTHORIZATION", "AUTH_HEADER",
+		"GH_TOKEN", "GITHUB_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GITLAB_TOKEN",
+		"BITBUCKET_TOKEN", "AZURE_DEVOPS_EXT_PAT", "SYSTEM_ACCESSTOKEN", "ADO_PAT",
+		"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+		"AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE",
+		"GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_API_KEY", "GCLOUD_ACCESS_TOKEN",
+		"CLOUDSDK_CONFIG", "AZURE_CLIENT_SECRET", "AZURE_CONFIG_DIR", "ARM_CLIENT_SECRET",
+		"DOCKER_CONFIG", "KUBECONFIG", "NETRC", "GH_CONFIG_DIR", "CI_JOB_TOKEN", "NPM_TOKEN":
+		return true
+	}
+	for _, suffix := range []string{
+		"_TOKEN", "_PAT", "_PASSWORD", "_PASS", "_PASSPHRASE", "_SECRET",
+		"_API_KEY", "_ACCESS_KEY", "_PRIVATE_KEY", "_CLIENT_SECRET", "_CREDENTIAL", "_CREDENTIALS",
+	} {
+		if strings.HasSuffix(upper, suffix) {
+			return true
+		}
+	}
+	for _, segment := range strings.Split(upper, "_") {
+		switch segment {
+		case "TOKEN", "PAT", "PASSWORD", "PASS", "PASSPHRASE", "SECRET", "CREDENTIAL", "CREDENTIALS":
+			return true
+		}
+	}
+	return false
+}
+
 func trustedGitArguments(repositoryRoot string, arguments ...string) []string {
 	prefix := []string{
 		"--no-replace-objects",
 		"-c", "core.hooksPath=" + os.DevNull,
+		"-c", "credential.helper=",
+		"-c", "credential.interactive=false",
+		"-c", "core.askPass=" + os.DevNull,
+		"-c", "http.extraHeader=",
 		"-c", "core.fsmonitor=false",
 		"-c", "core.untrackedCache=false",
 		"-C", repositoryRoot,

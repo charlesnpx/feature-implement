@@ -1060,13 +1060,17 @@ func (adapter LocalCommitGitAdapter) runWithInput(
 	}
 	argv := trustedGitArguments(repositoryRoot, arguments...)
 	command := exec.CommandContext(ctx, adapter.git.executable, argv...)
-	command.Env = mergeProcessEnvironment(os.Environ(), adapter.git.environment)
+	environment, err := BuildNonProviderProcessEnvironment(os.Environ(), adapter.git.environment)
+	if err != nil {
+		return nil, -1, err
+	}
+	command.Env = environment
 	command.Stdin = bytes.NewReader(input)
 	var stdout, stderr boundedProcessBuffer
 	stdout.maximum = maxAttemptGitOutputBytes
 	stderr.maximum = 64 * 1024
 	command.Stdout, command.Stderr = &stdout, &stderr
-	err := command.Run()
+	err = command.Run()
 	if stdout.exceeded || stderr.exceeded {
 		return nil, -1, fmt.Errorf("Git output exceeded its bound")
 	}

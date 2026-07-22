@@ -67,7 +67,13 @@ func (identity PullRequestIdentity) IsZero() bool {
 // digest binds provider result identity and the observed remote head.
 type ProviderPullRequestObservation struct {
 	identity     PullRequestIdentity
+	baseRef      string
+	branch       string
+	baseHead     GitObjectID
 	head         GitObjectID
+	headTree     GitObjectID
+	remoteHead   GitObjectID
+	merged       bool
 	resultDigest Digest
 	digest       Digest
 }
@@ -86,24 +92,72 @@ func NewProviderPullRequestObservation(
 	if head.IsZero() || resultDigest.IsZero() {
 		return ProviderPullRequestObservation{}, fmt.Errorf("provider pull request observation requires exact head and result digest")
 	}
+	observation := ProviderPullRequestObservation{
+		identity: identity, head: head, resultDigest: resultDigest,
+	}
+	canonical, err := canonicalProviderPullRequestObservation(observation)
+	if err != nil {
+		return ProviderPullRequestObservation{}, err
+	}
+	observation.digest = DigestBytes(canonical)
+	return observation, nil
+}
+
+func newProviderPullRequestTopologyObservation(
+	state ProviderPullRequestState,
+	resultDigest Digest,
+) (ProviderPullRequestObservation, error) {
+	if err := state.validate(); err != nil {
+		return ProviderPullRequestObservation{}, err
+	}
+	if state.merged || state.baseRef == "" || state.branch == "" || state.baseHeadBeforeMerge.IsZero() ||
+		state.headTree.IsZero() || state.remoteBranchHead.IsZero() || resultDigest.IsZero() {
+		return ProviderPullRequestObservation{}, fmt.Errorf("provider pull request authorization requires exact unmerged topology")
+	}
+	observation := ProviderPullRequestObservation{
+		identity: state.pullRequest, baseRef: state.baseRef, branch: state.branch,
+		baseHead: state.baseHeadBeforeMerge, head: state.head, headTree: state.headTree,
+		remoteHead: state.remoteBranchHead, merged: state.merged, resultDigest: resultDigest,
+	}
+	canonical, err := canonicalProviderPullRequestObservation(observation)
+	if err != nil {
+		return ProviderPullRequestObservation{}, err
+	}
+	observation.digest = DigestBytes(canonical)
+	return observation, nil
+}
+
+func canonicalProviderPullRequestObservation(observation ProviderPullRequestObservation) ([]byte, error) {
+	if observation.identity.IsZero() || observation.head.IsZero() || observation.resultDigest.IsZero() {
+		return nil, fmt.Errorf("provider pull request observation requires identity, head, and result digest")
+	}
 	type observationJSON struct {
 		SchemaVersion int    `json:"schema_version"`
 		Provider      string `json:"provider"`
 		Repository    string `json:"repository"`
 		Number        uint64 `json:"number"`
+		BaseRef       string `json:"base_ref,omitempty"`
+		Branch        string `json:"branch,omitempty"`
+		BaseHead      string `json:"base_head,omitempty"`
 		Head          string `json:"head"`
+		HeadTree      string `json:"head_tree,omitempty"`
+		RemoteHead    string `json:"remote_head,omitempty"`
+		Merged        bool   `json:"merged"`
 		ResultDigest  string `json:"result_digest"`
 	}
-	canonical, err := json.Marshal(observationJSON{
-		SchemaVersion: 2, Provider: provider.String(), Repository: repository.String(),
-		Number: number, Head: head.String(), ResultDigest: resultDigest.String(),
+	return json.Marshal(observationJSON{
+		SchemaVersion: JournalSchemaVersion, Provider: observation.identity.provider.String(),
+		Repository: observation.identity.repository.String(), Number: observation.identity.number,
+		BaseRef: observation.baseRef, Branch: observation.branch, BaseHead: observation.baseHead.String(),
+		Head: observation.head.String(), HeadTree: observation.headTree.String(),
+		RemoteHead: observation.remoteHead.String(), Merged: observation.merged,
+		ResultDigest: observation.resultDigest.String(),
 	})
-	if err != nil {
-		return ProviderPullRequestObservation{}, err
-	}
-	return ProviderPullRequestObservation{
-		identity: identity, head: head, resultDigest: resultDigest, digest: DigestBytes(canonical),
-	}, nil
+}
+
+func (observation ProviderPullRequestObservation) hasExactUnmergedTopology() bool {
+	return observation.baseRef != "" && observation.branch != "" && !observation.baseHead.IsZero() &&
+		!observation.headTree.IsZero() && !observation.remoteHead.IsZero() && !observation.merged
 }
 
 func (observation ProviderPullRequestObservation) Provider() ID {
@@ -137,7 +191,13 @@ type ProviderPullRequestVerification struct {
 	frontier            AuthorizationFrontier
 	parentGrantID       Digest
 	priorDerivedGrantID Digest
+	baseRef             string
+	branch              string
+	baseHead            GitObjectID
 	observedHead        GitObjectID
+	headTree            GitObjectID
+	remoteHead          GitObjectID
+	merged              bool
 	observation         Digest
 }
 
@@ -160,7 +220,9 @@ func newProviderPullRequestVerification(
 		workspaceID: scope.workspaceID, generation: scope.generation, repository: scope.repository,
 		remote: scope.remote, serialSegment: scope.serialSegment, frontier: scope.frontier,
 		parentGrantID: parentGrantID, priorDerivedGrantID: priorDerivedGrantID,
-		observedHead: expectedObservedHead, observation: observation.digest,
+		baseRef: observation.baseRef, branch: observation.branch, baseHead: observation.baseHead,
+		observedHead: expectedObservedHead, headTree: observation.headTree,
+		remoteHead: observation.remoteHead, merged: observation.merged, observation: observation.digest,
 	}, nil
 }
 

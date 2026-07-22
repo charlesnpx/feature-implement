@@ -1013,9 +1013,23 @@ func ConfirmReviewMergeReadiness(
 	if err != nil || !snapshot.clean || snapshot.head != state.head || snapshot.tree != state.tree {
 		return ReviewReadiness{}, fmt.Errorf("review readiness is stale against repository head/tree")
 	}
+	return newReviewMergeReadiness(definition, attempt, state)
+}
+
+func newReviewMergeReadiness(
+	definition EffectiveWorkspaceDefinition,
+	attempt RuntimeAttemptProjection,
+	state ReviewState,
+) (ReviewReadiness, error) {
+	if !state.MergeReady() || state.workspaceID != definition.workspace.id ||
+		state.generation != definition.generation || state.attemptID != attempt.attemptID ||
+		state.mergeUnit != attempt.mergeUnit || state.head != attempt.verifiedHead ||
+		state.head.IsZero() || state.tree.IsZero() {
+		return ReviewReadiness{}, fmt.Errorf("review readiness does not match durable exact-head review state")
+	}
 	readiness := ReviewReadiness{
 		purpose: ReviewMergeReadinessPurpose, workspace: definition.workspace.id,
-		generation: definition.generation, attemptID: attemptID, mergeUnit: attempt.mergeUnit,
+		generation: definition.generation, attemptID: attempt.attemptID, mergeUnit: attempt.mergeUnit,
 		repository: attempt.repository, remote: definition.workspace.remote,
 		round: state.RoundsUsed(), head: state.head, tree: state.tree,
 	}
@@ -1038,7 +1052,7 @@ func ConfirmReviewMergeReadiness(
 		SchemaVersion: 2, Purpose: readiness.purpose, WorkspaceID: readiness.workspace.String(),
 		Generation: readiness.generation.String(), PlanID: readiness.mergeUnit.planID.String(),
 		MergeUnitID: readiness.mergeUnit.mergeUnitID.String(), Repository: readiness.repository.String(),
-		Remote: readiness.remote, AttemptID: attemptID.String(), Round: readiness.round,
+		Remote: readiness.remote, AttemptID: attempt.attemptID.String(), Round: readiness.round,
 		Head: readiness.head.String(), Tree: readiness.tree.String(), Loop: state.loop.digest.String(),
 	})
 	readiness.digest = DigestBytes(canonical)

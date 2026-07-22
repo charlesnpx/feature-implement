@@ -361,11 +361,19 @@ func authorizationRequest(
 	epoch uint64,
 ) workspace.AuthorizationRequest {
 	t.Helper()
-	request, err := workspace.NewAuthorizationRequest(workspace.AuthorizationRequestOptions{
+	options := workspace.AuthorizationRequestOptions{
 		WorkspaceID: fixture.workspaceID, Repository: fixture.repository, Remote: fixture.remote,
 		Generation: fixture.generation, SerialSegment: fixture.segment, Frontier: frontier,
 		Action: action, PullRequest: pullRequest, Epoch: epoch,
-	})
+	}
+	if action == workspace.StandingAuthorizationPush {
+		if pullRequest.IsZero() {
+			options.ExpectRemoteAbsent = true
+		} else {
+			options.ExpectedRemoteHead = frontier.Base()
+		}
+	}
+	request, err := workspace.NewAuthorizationRequest(options)
 	if err != nil {
 		t.Fatal(err)
 	}

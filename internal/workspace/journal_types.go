@@ -144,6 +144,13 @@ const (
 	JournalEventReviewResultRecorded           JournalEventType = "review.result_recorded.v2"
 	JournalEventReviewFindingFixReserved       JournalEventType = "review.finding_fix_reserved.v2"
 	JournalEventReviewFixApplied               JournalEventType = "review.fix_applied.v2"
+	JournalEventProviderIntentReserved         JournalEventType = "provider.intent_reserved.v2"
+	JournalEventProviderIntentAbandoned        JournalEventType = "provider.intent_abandoned.v2"
+	JournalEventProviderMergePreflightRecorded JournalEventType = "provider.merge_preflight_recorded.v2"
+	JournalEventProviderIntentDispatched       JournalEventType = "provider.intent_dispatched.v2"
+	JournalEventProviderResultRecorded         JournalEventType = "provider.result_recorded.v2"
+	JournalEventProviderIntentReconciled       JournalEventType = "provider.intent_reconciled.v2"
+	JournalEventProviderCompletionVerified     JournalEventType = "provider.completion_verified.v2"
 )
 
 type WorkspaceJournalEvent interface {
@@ -407,6 +414,11 @@ func newJournalAppend(
 			ReviewInvocationFailedJournalEvent, ReviewResultRecordedJournalEvent,
 			ReviewFindingFixReservedJournalEvent, ReviewFixAppliedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("review events must use the exact-head verifier-backed review workflow")
+		case ProviderIntentReservedJournalEvent, ProviderIntentAbandonedJournalEvent,
+			ProviderMergePreflightRecordedJournalEvent, ProviderIntentDispatchedJournalEvent,
+			ProviderResultRecordedJournalEvent, ProviderIntentReconciledJournalEvent,
+			ProviderCompletionVerifiedJournalEvent:
+			return JournalAppend{}, fmt.Errorf("provider events must use the trusted broker and verifier-backed provider workflow")
 		}
 	}
 	if occurredAt.IsZero() {
@@ -445,7 +457,7 @@ func supportedWorkspaceJournalEvent(event WorkspaceJournalEvent) bool {
 		return true
 	default:
 		return isAttemptJournalEvent(event) || isCommitJournalEvent(event) || isAuthorizationJournalEvent(event) ||
-			isReviewJournalEvent(event)
+			isReviewJournalEvent(event) || isProviderJournalEvent(event)
 	}
 }
 
@@ -491,6 +503,9 @@ func validateJournalEventResources(
 		}
 		if !ok {
 			expectedReads, expectedWrites, ok = reviewJournalEventResources(event)
+		}
+		if !ok {
+			expectedReads, expectedWrites, ok = providerJournalEventResources(event)
 		}
 		if !ok {
 			return fmt.Errorf("unsupported workspace journal event %T", event)
@@ -621,6 +636,9 @@ func cloneWorkspaceJournalEvent(event WorkspaceJournalEvent) WorkspaceJournalEve
 		if cloned := cloneAuthorizationJournalEvent(event); cloned != nil {
 			return cloned
 		}
-		return cloneReviewJournalEvent(event)
+		if cloned := cloneReviewJournalEvent(event); cloned != nil {
+			return cloned
+		}
+		return cloneProviderJournalEvent(event)
 	}
 }

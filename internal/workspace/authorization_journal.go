@@ -517,6 +517,67 @@ func reduceAuthorizationRuntime(
 			return AuthorizationRuntimeProjection{}, err
 		}
 		next.state = state
+	case ProviderIntentDispatchedJournalEvent:
+		if !current.initialized || event.workspaceID != current.state.workspaceID ||
+			event.generation != current.state.generation {
+			return AuthorizationRuntimeProjection{}, fmt.Errorf("provider dispatch authorization has stale bindings")
+		}
+		capability := event.effect.capability
+		if capability.snapshot.journalHead != record.previousHash {
+			return AuthorizationRuntimeProjection{}, fmt.Errorf("provider dispatch authorization is bound to a stale journal head")
+		}
+		epochResource := AuthorizationEpochJournalResource(event.workspaceID)
+		var revision uint64
+		var found bool
+		for _, read := range record.readSet {
+			if read.resource == epochResource {
+				revision, found = read.revision, true
+				break
+			}
+		}
+		if !found || capability.snapshot.authorizationRevision != revision {
+			return AuthorizationRuntimeProjection{}, fmt.Errorf("provider dispatch authorization has a stale resource revision")
+		}
+		state, err := ReduceAuthorization(current.state, event.effect)
+		if err != nil {
+			return AuthorizationRuntimeProjection{}, err
+		}
+		next.state = state
+	case ProviderResultRecordedJournalEvent:
+		if !current.initialized || event.workspaceID != current.state.workspaceID ||
+			event.generation != current.state.generation || event.dispatchEpoch == 0 {
+			return AuthorizationRuntimeProjection{}, fmt.Errorf("provider result authorization has stale bindings")
+		}
+		if event.result.status.terminal() {
+			resolved, err := NewAuthorizationEffectResolved(
+				event.result.intentID, event.authorizationRequest, event.result.digest, event.dispatchEpoch,
+			)
+			if err != nil {
+				return AuthorizationRuntimeProjection{}, err
+			}
+			state, err := ReduceAuthorization(current.state, resolved)
+			if err != nil {
+				return AuthorizationRuntimeProjection{}, err
+			}
+			next.state = state
+		}
+	case ProviderIntentReconciledJournalEvent:
+		if !current.initialized || event.workspaceID != current.state.workspaceID ||
+			event.generation != current.state.generation || event.dispatchEpoch == 0 {
+			return AuthorizationRuntimeProjection{}, fmt.Errorf("provider reconciliation authorization has stale bindings")
+		}
+		resolved, err := NewAuthorizationEffectResolved(
+			event.reconciliation.intentID, event.authorizationRequest,
+			event.reconciliation.digest, event.dispatchEpoch,
+		)
+		if err != nil {
+			return AuthorizationRuntimeProjection{}, err
+		}
+		state, err := ReduceAuthorization(current.state, resolved)
+		if err != nil {
+			return AuthorizationRuntimeProjection{}, err
+		}
+		next.state = state
 	case AuthorizationRevokedJournalEvent:
 		if !current.initialized || event.workspaceID != current.state.workspaceID || event.generation != current.state.generation {
 			return AuthorizationRuntimeProjection{}, fmt.Errorf("authorization revocation journal event has stale bindings")
