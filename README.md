@@ -49,6 +49,8 @@ When `$feature` or `/feature` needs to draft the temporary `feature.plan.yaml`, 
 
 `$feature` and `/feature` create a `feature.plan.yaml` manifest, then `feature plan materialize` turns it into epic, feature, and story Markdown folders.
 
+Materialization bootstraps only an absent or empty destination and records those plan outputs in the non-hidden `feature.materialization.v2.json` ownership inventory. Later runs replace or remove an owned artifact only while its bytes still match the recorded last-generated hash. Modified owned files, unowned candidate paths, missing or corrupt inventories, symlink traversal, hidden paths, and case or Unicode aliases fail without changing plan outputs. Validation locks, worktrees, Git metadata, and installed skill assets are outside the inventory and are never removed by the materializer.
+
 Required top-level fields:
 
 - `schema_version: 1`
