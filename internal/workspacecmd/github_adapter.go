@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -927,16 +928,91 @@ func (adapter *githubProviderAdapter) runGitProviderNetwork(
 	if remoteURL != canonicalGitHubRemoteURL(adapter.providerRepository) {
 		return nil, fmt.Errorf("provider Git transport requires canonical GitHub HTTPS URL")
 	}
+	execution, err := adapter.prepareProviderGitNetworkContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(execution.root)
 	command := exec.CommandContext(ctx, adapter.gitExecutable, arguments...)
-	command.Dir = adapter.repositoryRoot
-	command.Env = providerGitProcessEnvironment(os.Environ(), remoteURL, authorization)
+	command.Dir = execution.root
+	command.Env = providerGitNetworkProcessEnvironment(os.Environ(), remoteURL, authorization, execution)
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
-	err := command.Run()
+	err = command.Run()
 	if err != nil {
 		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(arguments, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.Bytes(), nil
+}
+
+type providerGitNetworkContext struct {
+	root            string
+	gitDirectory    string
+	objectDirectory string
+}
+
+func (adapter *githubProviderAdapter) prepareProviderGitNetworkContext(
+	ctx context.Context,
+) (providerGitNetworkContext, error) {
+	algorithm, err := adapter.objectFormat(ctx)
+	if err != nil {
+		return providerGitNetworkContext{}, fmt.Errorf("resolve provider Git object format: %w", err)
+	}
+	objectDirectory, err := adapter.providerGitObjectDirectory(ctx)
+	if err != nil {
+		return providerGitNetworkContext{}, err
+	}
+	root, err := os.MkdirTemp("", "feature-provider-git-")
+	if err != nil {
+		return providerGitNetworkContext{}, err
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		_ = os.RemoveAll(root)
+		return providerGitNetworkContext{}, err
+	}
+	root = canonicalRoot
+	gitDirectory := filepath.Join(root, "repository.git")
+	command := exec.CommandContext(
+		ctx, adapter.gitExecutable,
+		"init", "--bare", "--quiet", "--object-format="+string(algorithm), "--", gitDirectory,
+	)
+	command.Dir = root
+	command.Env = providerLocalGitProcessEnvironment(os.Environ())
+	var stderr bytes.Buffer
+	command.Stdout, command.Stderr = io.Discard, &stderr
+	if err := command.Run(); err != nil {
+		_ = os.RemoveAll(root)
+		return providerGitNetworkContext{}, fmt.Errorf("initialize isolated provider Git context: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	gitDirectory, err = filepath.EvalSymlinks(gitDirectory)
+	if err != nil {
+		_ = os.RemoveAll(root)
+		return providerGitNetworkContext{}, fmt.Errorf("resolve isolated provider Git directory: %w", err)
+	}
+	return providerGitNetworkContext{
+		root: root, gitDirectory: gitDirectory, objectDirectory: objectDirectory,
+	}, nil
+}
+
+func (adapter *githubProviderAdapter) providerGitObjectDirectory(ctx context.Context) (string, error) {
+	output, err := adapter.runGit(ctx, "rev-parse", "--path-format=absolute", "--git-path", "objects")
+	if err != nil {
+		return "", fmt.Errorf("resolve provider Git object directory: %w", err)
+	}
+	directory := strings.TrimSpace(string(output))
+	if directory == "" || strings.ContainsAny(directory, "\r\n") || !filepath.IsAbs(directory) {
+		return "", fmt.Errorf("provider Git object directory is not one absolute path")
+	}
+	directory, err = filepath.EvalSymlinks(directory)
+	if err != nil {
+		return "", fmt.Errorf("resolve provider Git object directory: %w", err)
+	}
+	info, err := os.Stat(directory)
+	if err != nil || !info.IsDir() {
+		return "", fmt.Errorf("provider Git object directory is unavailable")
+	}
+	return directory, nil
 }
 
 func (adapter *githubProviderAdapter) githubGitAuthorization(ctx context.Context) (string, error) {
@@ -958,14 +1034,30 @@ type providerGitConfigEntry struct {
 }
 
 func providerLocalGitProcessEnvironment(base []string) []string {
-	return providerGitEnvironment(base, "", "")
+	return providerGitEnvironment(base, "", "", nil)
 }
 
 func providerGitProcessEnvironment(base []string, remoteURL, authorization string) []string {
-	return providerGitEnvironment(base, remoteURL, authorization)
+	return providerGitEnvironment(base, remoteURL, authorization, nil)
 }
 
-func providerGitEnvironment(base []string, remoteURL, authorization string) []string {
+func providerGitNetworkProcessEnvironment(
+	base []string,
+	remoteURL, authorization string,
+	execution providerGitNetworkContext,
+) []string {
+	return providerGitEnvironment(base, remoteURL, authorization, map[string]string{
+		"GIT_CEILING_DIRECTORIES": execution.root,
+		"GIT_DIR":                 execution.gitDirectory,
+		"GIT_OBJECT_DIRECTORY":    execution.objectDirectory,
+	})
+}
+
+func providerGitEnvironment(
+	base []string,
+	remoteURL, authorization string,
+	fixed map[string]string,
+) []string {
 	values := make(map[string]string)
 	for _, entry := range base {
 		name, value, found := strings.Cut(entry, "=")
@@ -992,6 +1084,9 @@ func providerGitEnvironment(base []string, remoteURL, authorization string) []st
 	values["GIT_GRAFT_FILE"] = os.DevNull
 	values["GIT_OPTIONAL_LOCKS"] = "0"
 	values["GIT_PROTOCOL_FROM_USER"] = "0"
+	for name, value := range fixed {
+		values[name] = value
+	}
 
 	config := []providerGitConfigEntry{
 		{key: "core.hooksPath", value: os.DevNull},

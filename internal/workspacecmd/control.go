@@ -1,11 +1,13 @@
 package workspacecmd
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -47,7 +49,14 @@ type durableReplayStore struct {
 	directory string
 }
 
-func (store durableReplayStore) ClaimControlPlaneNonce(_ context.Context, claim workspace.ControlPlaneReplayClaim) error {
+func (store durableReplayStore) ClaimControlPlaneNonce(ctx context.Context, claim workspace.ControlPlaneReplayClaim) error {
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+	}
 	if err := os.MkdirAll(store.directory, 0o700); err != nil {
 		return err
 	}
@@ -67,16 +76,31 @@ func (store durableReplayStore) ClaimControlPlaneNonce(_ context.Context, claim 
 	if err != nil {
 		return err
 	}
+	content = append(content, '\n')
 	name := strings.TrimPrefix(workspace.DigestBytes([]byte(claim.KeyID().String()+"\x00"+claim.Nonce())).String(), "sha256:") + ".json"
 	path := filepath.Join(store.directory, name)
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if os.IsExist(err) {
-		return fmt.Errorf("control-plane nonce %q for key %s was already claimed", claim.Nonce(), claim.KeyID())
+	if exists, err := verifyDurableReplayClaim(path, content, claim); err != nil {
+		return err
+	} else if exists {
+		return syncDurableReplayDirectory(store.directory)
 	}
+
+	file, err := os.CreateTemp(store.directory, ".control-plane-claim-")
 	if err != nil {
 		return err
 	}
-	if _, err := file.Write(append(content, '\n')); err != nil {
+	temporary := file.Name()
+	temporaryExists := true
+	defer func() {
+		if temporaryExists {
+			_ = os.Remove(temporary)
+		}
+	}()
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if _, err := file.Write(content); err != nil {
 		_ = file.Close()
 		return err
 	}
@@ -87,12 +111,83 @@ func (store durableReplayStore) ClaimControlPlaneNonce(_ context.Context, claim 
 	if err := file.Close(); err != nil {
 		return err
 	}
-	directory, err := os.Open(store.directory)
+	if err := os.Link(temporary, path); err != nil {
+		if os.IsExist(err) {
+			exists, verifyErr := verifyDurableReplayClaim(path, content, claim)
+			if verifyErr != nil {
+				return verifyErr
+			}
+			if !exists {
+				return fmt.Errorf("concurrent control-plane replay claim disappeared")
+			}
+			return syncDurableReplayDirectory(store.directory)
+		}
+		return fmt.Errorf("publish control-plane replay claim: %w", err)
+	}
+	removeErr := os.Remove(temporary)
+	if removeErr == nil {
+		temporaryExists = false
+	}
+	if err := syncDurableReplayDirectory(store.directory); err != nil {
+		return err
+	}
+	if removeErr != nil {
+		return fmt.Errorf("remove published control-plane replay temporary file: %w", removeErr)
+	}
+	return nil
+}
+
+func syncDurableReplayDirectory(path string) error {
+	directory, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer directory.Close()
 	return directory.Sync()
+}
+
+func verifyDurableReplayClaim(
+	path string,
+	expected []byte,
+	claim workspace.ControlPlaneReplayClaim,
+) (bool, error) {
+	entry, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	replayError := func() (bool, error) {
+		return true, fmt.Errorf(
+			"control-plane nonce %q for key %s was already claimed with different or invalid evidence",
+			claim.Nonce(), claim.KeyID(),
+		)
+	}
+	if entry.Mode()&os.ModeSymlink != 0 || !entry.Mode().IsRegular() || entry.Size() != int64(len(expected)) {
+		return replayError()
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return false, err
+	}
+	if !os.SameFile(entry, opened) {
+		return replayError()
+	}
+	content, err := io.ReadAll(io.LimitReader(file, int64(len(expected))+1))
+	if err != nil {
+		return false, err
+	}
+	current, err := os.Lstat(path)
+	if err != nil || !os.SameFile(opened, current) || !bytes.Equal(content, expected) {
+		return replayError()
+	}
+	return true, nil
 }
 
 type controlGrantInput struct {

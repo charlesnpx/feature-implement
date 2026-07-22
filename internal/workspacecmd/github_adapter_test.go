@@ -164,6 +164,50 @@ printf '%s\n' 'test-token'
 	}
 }
 
+func TestProviderNetworkGitContextExcludesSourceLocalConfig(t *testing.T) {
+	repository := canonicalWorkspaceCommandTempDir(t)
+	runGitTest(t, repository, "init", "-b", "main")
+	runGitTest(t, repository, "config", "user.name", "Feature Test")
+	runGitTest(t, repository, "config", "user.email", "feature@example.test")
+	tracked := filepath.Join(repository, "tracked.txt")
+	if err := os.WriteFile(tracked, []byte("content\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repository, "add", "tracked.txt")
+	runGitTest(t, repository, "commit", "-m", "Provider object")
+	head := strings.TrimSpace(runGitTest(t, repository, "rev-parse", "HEAD"))
+	canonical := canonicalGitHubRemoteURL("example/project")
+	maliciousKey := "url.https://example.invalid/.insteadOf"
+	runGitTest(t, repository, "config", maliciousKey, canonical)
+
+	adapter := &githubProviderAdapter{
+		repositoryRoot: repository, providerRepository: "example/project", gitExecutable: "git",
+	}
+	execution, err := adapter.prepareProviderGitNetworkContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(execution.root) })
+	environment := providerGitNetworkProcessEnvironment(os.Environ(), canonical, "", execution)
+
+	localConfig := exec.Command("git", "config", "--local", "--get", maliciousKey)
+	localConfig.Dir, localConfig.Env = execution.root, environment
+	if output, err := localConfig.CombinedOutput(); err == nil {
+		t.Fatalf("isolated provider Git loaded source local config: %s", output)
+	}
+	object := exec.Command("git", "cat-file", "-e", head+"^{commit}")
+	object.Dir, object.Env = execution.root, environment
+	if output, err := object.CombinedOutput(); err != nil {
+		t.Fatalf("isolated provider Git cannot read approved objects: %v: %s", err, output)
+	}
+	expanded := exec.Command("git", "ls-remote", "--get-url", canonical)
+	expanded.Dir, expanded.Env = execution.root, environment
+	output, err := expanded.CombinedOutput()
+	if err != nil || strings.TrimSpace(string(output)) != canonical {
+		t.Fatalf("isolated provider Git URL = %q, %v", output, err)
+	}
+}
+
 func TestGitHubPullRequestLifecycleIsExplicit(t *testing.T) {
 	for input, expected := range map[string]workspace.ProviderPullRequestLifecycle{
 		"open": workspace.ProviderPullRequestOpen, "CLOSED": workspace.ProviderPullRequestClosed,
@@ -423,13 +467,24 @@ func newFakeGitHubAdapter(t *testing.T) *githubProviderAdapter {
 	gitExecutable := filepath.Join(directory, "fake-git")
 	ghExecutable := filepath.Join(directory, "fake-gh")
 	gitScript := `#!/bin/sh
+script_dir=$(dirname "$0")
+script_dir=$(cd "$script_dir" && pwd)
 case "$1" in
   remote)
-    if [ -f fake-git-remote-url ]; then cat fake-git-remote-url; else printf '%s\n' 'https://github.com/example/project.git'; fi ;;
+    if [ -f "$script_dir/fake-git-remote-url" ]; then cat "$script_dir/fake-git-remote-url"; else printf '%s\n' 'https://github.com/example/project.git'; fi ;;
   ls-remote)
-    if [ -f fake-git-ls-remote ]; then cat fake-git-ls-remote; fi ;;
+    if [ -f "$script_dir/fake-git-ls-remote" ]; then cat "$script_dir/fake-git-ls-remote"; fi ;;
   rev-parse)
-    if [ "$2" = "--show-object-format" ]; then printf 'sha1\n'; elif [ -f fake-git-tree ]; then cat fake-git-tree; fi ;;
+    if [ "$2" = "--show-object-format" ]; then
+      printf 'sha1\n'
+    elif [ "$2" = "--path-format=absolute" ]; then
+      printf '%s\n' "$script_dir/fake-objects"
+    elif [ -f "$script_dir/fake-git-tree" ]; then
+      cat "$script_dir/fake-git-tree"
+    fi ;;
+  init)
+    for argument in "$@"; do target=$argument; done
+    mkdir -p "$target" ;;
   *) printf 'unsupported fake git invocation: %s\n' "$*" >&2; exit 97 ;;
 esac
 `
@@ -443,6 +498,9 @@ esac
 		if err := os.WriteFile(path, []byte(content), 0o700); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := os.Mkdir(filepath.Join(directory, "fake-objects"), 0o700); err != nil {
+		t.Fatal(err)
 	}
 	repository, err := workspace.NewRepositoryIdentity("https://github.com/example/project.git")
 	if err != nil {
