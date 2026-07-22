@@ -45,9 +45,6 @@ func Materialize(opts MaterializeOptions) (MaterializeResult, error) {
 	if strings.TrimSpace(dirName) == "" {
 		dirName = slug(manifest.Title)
 	}
-	if err := os.MkdirAll(outRoot, 0o755); err != nil {
-		return MaterializeResult{}, fmt.Errorf("create materialization output root: %w", err)
-	}
 	planDir := filepath.Join(outRoot, slug(dirName))
 	manifestBytes, err := yaml.Marshal(manifest)
 	if err != nil {
@@ -115,5 +112,10 @@ func defaultOutRoot(value string) (string, error) {
 			return tmp, nil
 		}
 	}
-	return os.TempDir(), nil
+	temporaryRoot := os.TempDir()
+	canonical, err := filepath.EvalSymlinks(temporaryRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve default temporary output root: %w", err)
+	}
+	return canonical, nil
 }

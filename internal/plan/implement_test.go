@@ -208,7 +208,7 @@ func TestImplementPlansConcretePushCommand(t *testing.T) {
 }
 
 func TestImplementQuotesWorktreeCommandsWithSpaces(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "plans with spaces")
+	root := filepath.Join(canonicalPlanTestTempDir(t), "plans with spaces")
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +446,7 @@ func TestImplementMigratesLegacyMapStateOnWrite(t *testing.T) {
 
 func materializeExamplePlan(t *testing.T) string {
 	t.Helper()
-	return materializeExamplePlanAt(t, t.TempDir())
+	return materializeExamplePlanAt(t, canonicalPlanTestTempDir(t))
 }
 
 func materializeExamplePlanAt(t *testing.T, root string) string {

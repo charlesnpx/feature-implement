@@ -11,7 +11,7 @@ import (
 )
 
 func TestMaterializeAndValidateWritesLock(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalPlanTestTempDir(t)
 	manifestPath := filepath.Join(root, "feature.plan.yaml")
 	if err := os.WriteFile(manifestPath, []byte(sampleManifest()), 0o644); err != nil {
 		t.Fatal(err)
@@ -44,8 +44,32 @@ func TestMaterializeAndValidateWritesLock(t *testing.T) {
 	}
 }
 
+func TestMaterializeRejectsSymlinkedOutRoot(t *testing.T) {
+	sourceRoot := canonicalPlanTestTempDir(t)
+	manifestPath := filepath.Join(sourceRoot, "feature.plan.yaml")
+	if err := os.WriteFile(manifestPath, []byte(sampleManifest()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	external := canonicalPlanTestTempDir(t)
+	outRoot := filepath.Join(canonicalPlanTestTempDir(t), "out")
+	if err := os.Symlink(external, outRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Materialize(MaterializeOptions{ManifestPath: manifestPath, OutRoot: outRoot}); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Materialize symlinked OutRoot error = %v", err)
+	}
+	entries, err := os.ReadDir(external)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("symlinked OutRoot received materialized files: %v", entries)
+	}
+}
+
 func TestMaterializeRematerializesOwnedPlanOutputsAndPreservesUnownedFiles(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalPlanTestTempDir(t)
 	manifestPath := filepath.Join(root, "source.plan.yaml")
 	if err := os.WriteFile(manifestPath, []byte(sampleManifest()), 0o644); err != nil {
 		t.Fatal(err)
@@ -120,7 +144,7 @@ func TestMaterializeRematerializesOwnedPlanOutputsAndPreservesUnownedFiles(t *te
 }
 
 func TestValidateRejectsBrokenDependency(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalPlanTestTempDir(t)
 	manifestPath := filepath.Join(root, "feature.plan.yaml")
 	broken := `schema_version: 1
 id: broken
@@ -280,7 +304,7 @@ func TestMaterializeRejectsSparseStories(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			root := t.TempDir()
+			root := canonicalPlanTestTempDir(t)
 			manifestPath := filepath.Join(root, "feature.plan.yaml")
 			manifest := `schema_version: 1
 id: sparse
@@ -308,7 +332,7 @@ epics:
 }
 
 func TestImplementRequiresLockAndExplicitWriteFlags(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalPlanTestTempDir(t)
 	if _, err := Implement(ImplementOptions{PlanDir: root, Action: "push"}); err == nil {
 		t.Fatalf("implement should require lock")
 	}
@@ -383,7 +407,7 @@ func TestValidateRejectsUnsafeStoryIDs(t *testing.T) {
 }
 
 func TestExampleManifestMaterializesAndValidates(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalPlanTestTempDir(t)
 	manifestPath := filepath.Join(root, "feature.plan.yaml")
 	if err := os.WriteFile(manifestPath, []byte(ExampleManifestYAML()), 0o644); err != nil {
 		t.Fatal(err)
@@ -448,6 +472,16 @@ func containsAny(values []any, want string) bool {
 		}
 	}
 	return false
+}
+
+func canonicalPlanTestTempDir(t *testing.T) string {
+	t.Helper()
+	directory := t.TempDir()
+	canonical, err := filepath.EvalSymlinks(directory)
+	if err != nil {
+		t.Fatalf("canonicalize temporary test directory: %v", err)
+	}
+	return canonical
 }
 
 func sampleManifest() string {

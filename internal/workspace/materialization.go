@@ -25,6 +25,7 @@ const (
 	maxMaterializationEntries                   = 100_000
 	maxMaterializationPathBytes                 = 4096
 	maxMaterializationComponentBytes            = 200
+	materializationTransactionPathPrefix        = "feature.materialization.txn-"
 )
 
 var materializationControlPaths = []string{
@@ -49,6 +50,9 @@ func NewMaterializationArtifact(id, relativePath string, content []byte) (Materi
 	normalized, err := normalizeMaterializationPath(relativePath)
 	if err != nil {
 		return MaterializationArtifact{}, err
+	}
+	if materializationPathUsesTransactionNamespace(normalized) {
+		return MaterializationArtifact{}, fmt.Errorf("materialization path %q uses the reserved transaction namespace", normalized)
 	}
 	if int64(len(content)) > MaxMaterializationArtifactBytes {
 		return MaterializationArtifact{}, fmt.Errorf(
@@ -77,6 +81,8 @@ const (
 	MaterializationFaultAfterBootstrapState      MaterializationFaultPoint = "after_bootstrap_state"
 	MaterializationFaultAfterStaging             MaterializationFaultPoint = "after_staging"
 	MaterializationFaultAfterPending             MaterializationFaultPoint = "after_pending"
+	MaterializationFaultAfterTemporarySync       MaterializationFaultPoint = "after_temporary_sync"
+	MaterializationFaultAfterQuarantine          MaterializationFaultPoint = "after_quarantine"
 	MaterializationFaultAfterDirectoryCreate     MaterializationFaultPoint = "after_directory_create"
 	MaterializationFaultAfterArtifactWrite       MaterializationFaultPoint = "after_artifact_write"
 	MaterializationFaultAfterStaleDelete         MaterializationFaultPoint = "after_stale_delete"
@@ -276,6 +282,9 @@ func normalizeMaterializationInventoryWire(wire materializationInventoryWire) (M
 		if err != nil || relative != item.Path {
 			return MaterializationInventory{}, newMaterializationCorruption("artifact %s has invalid path %q", id, item.Path)
 		}
+		if materializationPathUsesTransactionNamespace(relative) {
+			return MaterializationInventory{}, newMaterializationCorruption("artifact %s uses the reserved transaction namespace", id)
+		}
 		hash, err := ParseDigest(item.LastGeneratedHash)
 		if err != nil || hash.IsZero() {
 			return MaterializationInventory{}, newMaterializationCorruption("artifact %s has invalid last-generated hash", id)
@@ -314,6 +323,9 @@ func normalizeMaterializationInventoryWire(wire materializationInventoryWire) (M
 		normalized, err := normalizeMaterializationPath(directory)
 		if err != nil || normalized != directory {
 			return MaterializationInventory{}, newMaterializationCorruption("directory %d has invalid path %q", index, directory)
+		}
+		if materializationPathUsesTransactionNamespace(normalized) {
+			return MaterializationInventory{}, newMaterializationCorruption("directory %q uses the reserved transaction namespace", directory)
 		}
 		if lastDirectory != "" && directory <= lastDirectory {
 			return MaterializationInventory{}, newMaterializationCorruption("inventory directories are not strictly sorted")
@@ -439,6 +451,16 @@ func normalizeMaterializationPath(value string) (string, error) {
 		}
 	}
 	return clean, nil
+}
+
+func materializationPathUsesTransactionNamespace(relative string) bool {
+	prefixKey := materializationCollisionKey(materializationTransactionPathPrefix)
+	for _, component := range strings.Split(relative, "/") {
+		if strings.HasPrefix(materializationCollisionKey(component), prefixKey) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateMaterializationPathPrefixes(paths []string) error {

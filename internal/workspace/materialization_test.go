@@ -19,11 +19,11 @@ const testGeneratorVersion = "materialization-test/v2"
 var _ workspace.FilesystemPort = (*workspace.RootedFilesystemAdapter)(nil)
 
 func TestRootedFilesystemAdapterRejectsCrossRootAndSymlinkTraversal(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalMaterializationTestTempDir(t)
 	if err := os.WriteFile(filepath.Join(root, "safe.txt"), []byte("safe\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	external := t.TempDir()
+	external := canonicalMaterializationTestTempDir(t)
 	if err := os.WriteFile(filepath.Join(external, "outside.txt"), []byte("outside\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -58,10 +58,72 @@ func TestRootedFilesystemAdapterRejectsCrossRootAndSymlinkTraversal(t *testing.T
 	}
 }
 
+func TestMaterializationRejectsSymlinkedDestinationRootsAndAncestors(t *testing.T) {
+	artifacts := materializationArtifacts(t, artifactFixture{
+		id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n",
+	})
+	for _, test := range []struct {
+		name string
+		root func(t *testing.T, external string) string
+	}{
+		{
+			name: "ancestor",
+			root: func(t *testing.T, external string) string {
+				t.Helper()
+				alias := filepath.Join(canonicalMaterializationTestTempDir(t), "alias")
+				if err := os.Symlink(external, alias); err != nil {
+					t.Fatal(err)
+				}
+				return filepath.Join(alias, "plan")
+			},
+		},
+		{
+			name: "final root",
+			root: func(t *testing.T, external string) string {
+				t.Helper()
+				root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
+				if err := os.Symlink(external, root); err != nil {
+					t.Fatal(err)
+				}
+				return root
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			external := canonicalMaterializationTestTempDir(t)
+			root := test.root(t, external)
+			if _, err := workspace.SynchronizeMaterialization(
+				root, testGeneratorVersion, artifacts, workspace.MaterializationOptions{},
+			); err == nil || !strings.Contains(err.Error(), "symlink") {
+				t.Fatalf("symlinked destination error = %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(external, "feature.plan.yaml")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("symlink target was materialized: %v", err)
+			}
+		})
+	}
+}
+
+func TestMaterializationRejectsHiddenDestinationAncestors(t *testing.T) {
+	base := canonicalMaterializationTestTempDir(t)
+	root := filepath.Join(base, ".hidden", "plan")
+	artifacts := materializationArtifacts(t, artifactFixture{
+		id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n",
+	})
+	if _, err := workspace.SynchronizeMaterialization(
+		root, testGeneratorVersion, artifacts, workspace.MaterializationOptions{},
+	); err == nil || !strings.Contains(err.Error(), "unsafe component") {
+		t.Fatalf("hidden destination error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, ".hidden")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("hidden destination ancestor was created: %v", err)
+	}
+}
+
 func TestMaterializationBootstrapsAbsentOrEmptyDestinationWithV2Inventory(t *testing.T) {
 	for _, existing := range []bool{false, true} {
 		t.Run(fmt.Sprintf("existing=%t", existing), func(t *testing.T) {
-			root := filepath.Join(t.TempDir(), "plan")
+			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 			if existing {
 				if err := os.Mkdir(root, 0o755); err != nil {
 					t.Fatal(err)
@@ -112,7 +174,7 @@ func TestMaterializationBootstrapsAbsentOrEmptyDestinationWithV2Inventory(t *tes
 }
 
 func TestMaterializationRejectsNonemptyUnownedDestinationWithoutWritingState(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "plan")
+	root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +198,7 @@ func TestMaterializationRejectsNonemptyUnownedDestinationWithoutWritingState(t *
 }
 
 func TestMaterializationNeverClaimsAByteMatchingUnownedCandidate(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "plan")
+	root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 	initial := materializationArtifacts(t, artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"})
 	if _, err := workspace.SynchronizeMaterialization(root, testGeneratorVersion, initial, workspace.MaterializationOptions{}); err != nil {
 		t.Fatal(err)
@@ -161,7 +223,7 @@ func TestMaterializationNeverClaimsAByteMatchingUnownedCandidate(t *testing.T) {
 }
 
 func TestMaterializationUpdatesAndDeletesOnlyHashMatchedOwnedFiles(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "plan")
+	root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 	initial := materializationArtifacts(t,
 		artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "v1\n"},
 		artifactFixture{id: "story/stale", path: "old/stale.md", content: "stale\n"},
@@ -235,7 +297,7 @@ func TestMaterializationPreservesModifiedOrMissingOwnedArtifacts(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			root := filepath.Join(t.TempDir(), "plan")
+			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 			initial := materializationArtifacts(t,
 				artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"},
 				artifactFixture{id: "story/owned", path: "owned.md", content: "generated v1\n"},
@@ -297,7 +359,7 @@ func TestMaterializationTreatsLaterMissingOrCorruptInventoryAsCorruption(t *test
 		},
 	} {
 		t.Run(mutate.name, func(t *testing.T) {
-			root := filepath.Join(t.TempDir(), "plan")
+			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 			artifacts := materializationArtifacts(t, artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"})
 			if _, err := workspace.SynchronizeMaterialization(root, testGeneratorVersion, artifacts, workspace.MaterializationOptions{}); err != nil {
 				t.Fatal(err)
@@ -316,12 +378,12 @@ func TestMaterializationTreatsLaterMissingOrCorruptInventoryAsCorruption(t *test
 
 func TestMaterializationRejectsSymlinkTraversalAndPathAliases(t *testing.T) {
 	t.Run("symlink traversal", func(t *testing.T) {
-		root := filepath.Join(t.TempDir(), "plan")
+		root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 		base := materializationArtifacts(t, artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"})
 		if _, err := workspace.SynchronizeMaterialization(root, testGeneratorVersion, base, workspace.MaterializationOptions{}); err != nil {
 			t.Fatal(err)
 		}
-		external := t.TempDir()
+		external := canonicalMaterializationTestTempDir(t)
 		if err := os.Symlink(external, filepath.Join(root, "docs")); err != nil {
 			t.Fatal(err)
 		}
@@ -340,7 +402,7 @@ func TestMaterializationRejectsSymlinkTraversalAndPathAliases(t *testing.T) {
 	})
 
 	t.Run("existing case alias", func(t *testing.T) {
-		root := filepath.Join(t.TempDir(), "plan")
+		root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 		base := materializationArtifacts(t, artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"})
 		if _, err := workspace.SynchronizeMaterialization(root, testGeneratorVersion, base, workspace.MaterializationOptions{}); err != nil {
 			t.Fatal(err)
@@ -364,7 +426,7 @@ func TestMaterializationRejectsSymlinkTraversalAndPathAliases(t *testing.T) {
 			artifactFixture{id: "story/a", path: "Docs/a.md", content: "a"},
 			artifactFixture{id: "story/b", path: "docs/b.md", content: "b"},
 		)
-		root := filepath.Join(t.TempDir(), "plan")
+		root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 		if _, err := workspace.SynchronizeMaterialization(root, testGeneratorVersion, caseAliases, workspace.MaterializationOptions{}); err == nil || !strings.Contains(err.Error(), "directory spellings") {
 			t.Fatalf("case alias error = %v", err)
 		}
@@ -377,7 +439,7 @@ func TestMaterializationRejectsSymlinkTraversalAndPathAliases(t *testing.T) {
 			artifactFixture{id: "story/middle", path: "docs-extra", content: "middle"},
 			artifactFixture{id: "story/b", path: "docs/b.md", content: "b"},
 		)
-		if _, err := workspace.SynchronizeMaterialization(filepath.Join(t.TempDir(), "plan"), testGeneratorVersion, prefixes, workspace.MaterializationOptions{}); err == nil || !strings.Contains(err.Error(), "path-prefix") {
+		if _, err := workspace.SynchronizeMaterialization(filepath.Join(canonicalMaterializationTestTempDir(t), "plan"), testGeneratorVersion, prefixes, workspace.MaterializationOptions{}); err == nil || !strings.Contains(err.Error(), "path-prefix") {
 			t.Fatalf("prefix error = %v", err)
 		}
 	})
@@ -389,11 +451,16 @@ func TestMaterializationRejectsSymlinkTraversalAndPathAliases(t *testing.T) {
 		if _, err := workspace.NewMaterializationArtifact("story/a", "Cafe\u0301.md", []byte("a")); err == nil {
 			t.Fatal("non-NFC materialization path was accepted")
 		}
+		if _, err := workspace.NewMaterializationArtifact(
+			"story/reserved", "FEATURE.MATERIALIZATION.TXN-user.md", []byte("a"),
+		); err == nil {
+			t.Fatal("case alias of reserved transaction namespace was accepted")
+		}
 		fullFoldAliases := materializationArtifacts(t,
 			artifactFixture{id: "story/strasse", path: "Straße/a.md", content: "a"},
 			artifactFixture{id: "story/ss", path: "STRASSE/b.md", content: "b"},
 		)
-		if _, err := workspace.SynchronizeMaterialization(filepath.Join(t.TempDir(), "plan"), testGeneratorVersion, fullFoldAliases, workspace.MaterializationOptions{}); err == nil || !strings.Contains(err.Error(), "directory spellings") {
+		if _, err := workspace.SynchronizeMaterialization(filepath.Join(canonicalMaterializationTestTempDir(t), "plan"), testGeneratorVersion, fullFoldAliases, workspace.MaterializationOptions{}); err == nil || !strings.Contains(err.Error(), "directory spellings") {
 			t.Fatalf("full Unicode case-fold alias error = %v", err)
 		}
 	})
@@ -404,6 +471,7 @@ func TestMaterializationRecoversAcrossStagedUpdateFaults(t *testing.T) {
 		workspace.MaterializationFaultAfterBootstrapState,
 		workspace.MaterializationFaultAfterStaging,
 		workspace.MaterializationFaultAfterPending,
+		workspace.MaterializationFaultAfterTemporarySync,
 		workspace.MaterializationFaultAfterDirectoryCreate,
 		workspace.MaterializationFaultAfterArtifactWrite,
 		workspace.MaterializationFaultAfterInventoryActivation,
@@ -411,7 +479,7 @@ func TestMaterializationRecoversAcrossStagedUpdateFaults(t *testing.T) {
 	}
 	for _, point := range points {
 		t.Run(string(point), func(t *testing.T) {
-			root := filepath.Join(t.TempDir(), "plan")
+			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 			artifacts := materializationArtifacts(t,
 				artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"},
 				artifactFixture{id: "story/a", path: "docs/nested/story.md", content: "story\n"},
@@ -441,13 +509,201 @@ func TestMaterializationRecoversAcrossStagedUpdateFaults(t *testing.T) {
 	}
 }
 
+func TestMaterializationRecoveryNeverClaimsTargetsThatAppearAfterPending(t *testing.T) {
+	t.Run("matching file", func(t *testing.T) {
+		root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
+		initial := materializationArtifacts(t, artifactFixture{
+			id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n",
+		})
+		if _, err := workspace.SynchronizeMaterialization(
+			root, testGeneratorVersion, initial, workspace.MaterializationOptions{},
+		); err != nil {
+			t.Fatal(err)
+		}
+		desired := materializationArtifacts(t,
+			artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"},
+			artifactFixture{id: "story/a", path: "story.md", content: "generated story\n"},
+		)
+		fault := func(point workspace.MaterializationFaultPoint) error {
+			if point != workspace.MaterializationFaultAfterPending {
+				return nil
+			}
+			if err := os.WriteFile(filepath.Join(root, "story.md"), []byte("generated story\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return errors.New("simulated crash")
+		}
+		if _, err := workspace.SynchronizeMaterialization(
+			root, testGeneratorVersion, desired, workspace.MaterializationOptions{FaultInjector: fault},
+		); err == nil {
+			t.Fatal("pending fault did not interrupt materialization")
+		}
+
+		conflicts := requireMaterializationConflicts(t, synchronize(root, desired))
+		if !hasMaterializationConflict(conflicts, workspace.MaterializationConflictUnownedPath, "story.md") {
+			t.Fatalf("conflicts = %#v", conflicts)
+		}
+		assertFileContent(t, filepath.Join(root, "story.md"), "generated story\n")
+		if got := len(readInventoryFixture(t, root).Artifacts); got != 1 {
+			t.Fatalf("inventory claimed matching user file: %d artifacts", got)
+		}
+	})
+
+	t.Run("directory", func(t *testing.T) {
+		root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
+		initial := materializationArtifacts(t, artifactFixture{
+			id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n",
+		})
+		if _, err := workspace.SynchronizeMaterialization(
+			root, testGeneratorVersion, initial, workspace.MaterializationOptions{},
+		); err != nil {
+			t.Fatal(err)
+		}
+		desired := materializationArtifacts(t,
+			artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"},
+			artifactFixture{id: "story/a", path: "docs/story.md", content: "story\n"},
+		)
+		fault := func(point workspace.MaterializationFaultPoint) error {
+			if point != workspace.MaterializationFaultAfterPending {
+				return nil
+			}
+			if err := os.Mkdir(filepath.Join(root, "docs"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "docs", "keep.txt"), []byte("user\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return errors.New("simulated crash")
+		}
+		if _, err := workspace.SynchronizeMaterialization(
+			root, testGeneratorVersion, desired, workspace.MaterializationOptions{FaultInjector: fault},
+		); err == nil {
+			t.Fatal("pending fault did not interrupt materialization")
+		}
+
+		conflicts := requireMaterializationConflicts(t, synchronize(root, desired))
+		if !hasMaterializationConflict(conflicts, workspace.MaterializationConflictUnownedPath, "docs") {
+			t.Fatalf("conflicts = %#v", conflicts)
+		}
+		assertFileContent(t, filepath.Join(root, "docs", "keep.txt"), "user\n")
+		if _, err := os.Stat(filepath.Join(root, "docs", "story.md")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("story was written into unowned directory: %v", err)
+		}
+	})
+}
+
+func TestMaterializationQuarantinesBeforeHashingOwnedTargets(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		initial    []artifactFixture
+		desired    []artifactFixture
+		mutatePath string
+	}{
+		{
+			name: "overwrite",
+			initial: []artifactFixture{
+				{id: "manifest/sample", path: "feature.plan.yaml", content: "v1\n"},
+			},
+			desired: []artifactFixture{
+				{id: "manifest/sample", path: "feature.plan.yaml", content: "v2\n"},
+			},
+			mutatePath: "feature.plan.yaml",
+		},
+		{
+			name: "delete",
+			initial: []artifactFixture{
+				{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"},
+				{id: "story/stale", path: "stale.md", content: "stale\n"},
+			},
+			desired: []artifactFixture{
+				{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"},
+			},
+			mutatePath: "stale.md",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
+			if _, err := workspace.SynchronizeMaterialization(
+				root, testGeneratorVersion, materializationArtifacts(t, test.initial...), workspace.MaterializationOptions{},
+			); err != nil {
+				t.Fatal(err)
+			}
+			mutated := false
+			fault := func(point workspace.MaterializationFaultPoint) error {
+				if point != workspace.MaterializationFaultAfterQuarantine || mutated {
+					return nil
+				}
+				entries, err := os.ReadDir(root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, entry := range entries {
+					if strings.HasPrefix(entry.Name(), "feature.materialization.txn-") &&
+						strings.HasSuffix(entry.Name(), ".quarantine") {
+						if err := os.WriteFile(filepath.Join(root, entry.Name()), []byte("user edit during apply\n"), 0o644); err != nil {
+							t.Fatal(err)
+						}
+						mutated = true
+						break
+					}
+				}
+				if !mutated {
+					t.Fatal("quarantine was not visible at the quarantine fault point")
+				}
+				return nil
+			}
+			_, err := workspace.SynchronizeMaterialization(
+				root,
+				testGeneratorVersion,
+				materializationArtifacts(t, test.desired...),
+				workspace.MaterializationOptions{FaultInjector: fault},
+			)
+			conflicts := requireMaterializationConflicts(t, err)
+			if !hasMaterializationConflict(conflicts, workspace.MaterializationConflictModifiedOwnedPath, test.mutatePath) {
+				t.Fatalf("conflicts = %#v", conflicts)
+			}
+			assertFileContent(t, filepath.Join(root, test.mutatePath), "user edit during apply\n")
+		})
+	}
+}
+
+func TestMaterializationPreservesUnownedReservedStagingPaths(t *testing.T) {
+	root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
+	artifacts := materializationArtifacts(t, artifactFixture{
+		id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n",
+	})
+	if _, err := workspace.SynchronizeMaterialization(
+		root, testGeneratorVersion, artifacts, workspace.MaterializationOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	staging := filepath.Join(root, workspace.MaterializationStagingDirectoryName)
+	if err := os.Mkdir(staging, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	userFile := filepath.Join(staging, "artifact-000000.data")
+	if err := os.WriteFile(userFile, []byte("user-owned\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := workspace.SynchronizeMaterialization(
+		root, testGeneratorVersion, artifacts, workspace.MaterializationOptions{},
+	)
+	var corruption workspace.MaterializationCorruptionError
+	if !errors.As(err, &corruption) {
+		t.Fatalf("error = %T %v, want MaterializationCorruptionError", err, err)
+	}
+	assertFileContent(t, userFile, "user-owned\n")
+}
+
 func TestMaterializationRecoversStaleDeletionAndDirectoryCleanup(t *testing.T) {
 	for _, point := range []workspace.MaterializationFaultPoint{
+		workspace.MaterializationFaultAfterQuarantine,
 		workspace.MaterializationFaultAfterStaleDelete,
 		workspace.MaterializationFaultAfterDirectoryCleanup,
 	} {
 		t.Run(string(point), func(t *testing.T) {
-			root := filepath.Join(t.TempDir(), "plan")
+			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 			initial := materializationArtifacts(t,
 				artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"},
 				artifactFixture{id: "story/stale", path: "old/nested/stale.md", content: "stale\n"},
@@ -480,8 +736,55 @@ func TestMaterializationRecoversStaleDeletionAndDirectoryCleanup(t *testing.T) {
 	}
 }
 
+func TestMaterializationRecoversOwnedUpdatesAcrossTransactionFaults(t *testing.T) {
+	for _, point := range []workspace.MaterializationFaultPoint{
+		workspace.MaterializationFaultAfterStaging,
+		workspace.MaterializationFaultAfterPending,
+		workspace.MaterializationFaultAfterQuarantine,
+		workspace.MaterializationFaultAfterTemporarySync,
+		workspace.MaterializationFaultAfterArtifactWrite,
+		workspace.MaterializationFaultAfterInventoryActivation,
+		workspace.MaterializationFaultAfterStateActivation,
+	} {
+		t.Run(string(point), func(t *testing.T) {
+			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
+			initial := materializationArtifacts(t, artifactFixture{
+				id: "manifest/sample", path: "feature.plan.yaml", content: "v1\n",
+			})
+			if _, err := workspace.SynchronizeMaterialization(
+				root, testGeneratorVersion, initial, workspace.MaterializationOptions{},
+			); err != nil {
+				t.Fatal(err)
+			}
+			desired := materializationArtifacts(t, artifactFixture{
+				id: "manifest/sample", path: "feature.plan.yaml", content: "v2\n",
+			})
+			failed := false
+			fault := func(observed workspace.MaterializationFaultPoint) error {
+				if !failed && observed == point {
+					failed = true
+					return errors.New("simulated crash")
+				}
+				return nil
+			}
+			if _, err := workspace.SynchronizeMaterialization(
+				root, testGeneratorVersion, desired, workspace.MaterializationOptions{FaultInjector: fault},
+			); err == nil || !failed {
+				t.Fatalf("fault %s did not interrupt update: %v", point, err)
+			}
+			if _, err := workspace.SynchronizeMaterialization(
+				root, testGeneratorVersion, desired, workspace.MaterializationOptions{},
+			); err != nil {
+				t.Fatalf("recover update after %s: %v", point, err)
+			}
+			assertFileContent(t, filepath.Join(root, "feature.plan.yaml"), "v2\n")
+			assertNoMaterializationTransaction(t, root)
+		})
+	}
+}
+
 func TestMaterializationRejectsCorruptStagedBytesDuringRecovery(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "plan")
+	root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 	artifacts := materializationArtifacts(t, artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"})
 	fault := func(point workspace.MaterializationFaultPoint) error {
 		if point == workspace.MaterializationFaultAfterPending {
@@ -494,12 +797,17 @@ func TestMaterializationRejectsCorruptStagedBytesDuringRecovery(t *testing.T) {
 	); err == nil {
 		t.Fatal("pending fault did not interrupt materialization")
 	}
-	stage := filepath.Join(root, workspace.MaterializationStagingDirectoryName, "artifact-000000.data")
+	staging := filepath.Join(root, workspace.MaterializationStagingDirectoryName)
+	entries, err := os.ReadDir(staging)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("staging entries = %v, err=%v", entries, err)
+	}
+	stage := filepath.Join(staging, entries[0].Name())
 	if err := os.WriteFile(stage, []byte("tampered\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := workspace.SynchronizeMaterialization(root, testGeneratorVersion, artifacts, workspace.MaterializationOptions{})
+	_, err = workspace.SynchronizeMaterialization(root, testGeneratorVersion, artifacts, workspace.MaterializationOptions{})
 	var corruption workspace.MaterializationCorruptionError
 	if !errors.As(err, &corruption) {
 		t.Fatalf("error = %T %v, want corruption", err, err)
@@ -532,7 +840,7 @@ func TestMaterializationRecoveryRechecksOwnedBytesBeforeOverwriteOrDelete(t *tes
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root := filepath.Join(t.TempDir(), "plan")
+			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 			initial := materializationArtifacts(t,
 				artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest v1\n"},
 				artifactFixture{id: "story/stale", path: "stale.md", content: "stale\n"},
@@ -571,7 +879,7 @@ func TestMaterializationRecoveryRechecksOwnedBytesBeforeOverwriteOrDelete(t *tes
 }
 
 func TestMaterializationRemovesOnlyEmptyProvenOwnedDirectories(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "plan")
+	root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 	initial := materializationArtifacts(t,
 		artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"},
 		artifactFixture{id: "story/stale", path: "old/nested/stale.md", content: "stale\n"},
@@ -606,6 +914,16 @@ type artifactFixture struct {
 	id      string
 	path    string
 	content string
+}
+
+func canonicalMaterializationTestTempDir(t *testing.T) string {
+	t.Helper()
+	directory := t.TempDir()
+	canonical, err := filepath.EvalSymlinks(directory)
+	if err != nil {
+		t.Fatalf("canonicalize temporary test directory: %v", err)
+	}
+	return canonical
 }
 
 func materializationArtifacts(t *testing.T, fixtures ...artifactFixture) []workspace.MaterializationArtifact {
@@ -692,5 +1010,16 @@ func assertNoMaterializationTransaction(t *testing.T, root string) {
 		if _, err := os.Stat(filepath.Join(root, relative)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("transaction path %s remains: %v", relative, err)
 		}
+	}
+	if err := filepath.WalkDir(root, func(current string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if strings.HasPrefix(entry.Name(), "feature.materialization.txn-") {
+			t.Fatalf("transaction path remains after cleanup: %s", current)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("inspect materialization transaction cleanup: %v", err)
 	}
 }
