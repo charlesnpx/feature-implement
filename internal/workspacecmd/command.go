@@ -330,12 +330,18 @@ func RequestSchemas() map[string]any {
 }
 
 func validateBundle(bundle workspace.WorkspaceBundle, options Options) (ValidationResult, error) {
+	if err := bundle.VerifyRoot(); err != nil {
+		return ValidationResult{}, err
+	}
 	result := ValidationResult{
 		SchemaVersion: requestSchemaVersion, Status: "valid", BundleRoot: bundle.Root(),
 		WorkspaceID: bundle.Definition().Workspace().ID().String(), Generation: bundle.Definition().Generation().String(),
 		DescriptorDigest: bundle.DescriptorDigest().String(), Created: []string{}, Updated: []string{}, Deleted: []string{},
 	}
 	if !options.WriteLocks {
+		if err := bundle.VerifyRoot(); err != nil {
+			return ValidationResult{}, err
+		}
 		return result, nil
 	}
 	artifacts, err := workspace.WorkspaceBundleLockArtifacts(bundle)
@@ -353,6 +359,9 @@ func validateBundle(bundle workspace.WorkspaceBundle, options Options) (Validati
 	result.Updated = materialized.Updated()
 	result.Deleted = materialized.Deleted()
 	result.LockRoot = lockRoot
+	if err := bundle.VerifyRoot(); err != nil {
+		return ValidationResult{}, err
+	}
 	return result, nil
 }
 
@@ -374,7 +383,13 @@ func initializeWorkspace(bundle workspace.WorkspaceBundle, options Options) (Ini
 	if err != nil {
 		return InitializationResult{}, err
 	}
+	if err := bundle.VerifyRoot(); err != nil {
+		return InitializationResult{}, err
+	}
 	if _, err := validateBundle(bundle, Options{WriteLocks: true, GeneratorVersion: options.GeneratorVersion}); err != nil {
+		return InitializationResult{}, err
+	}
+	if err := bundle.VerifyRoot(); err != nil {
 		return InitializationResult{}, err
 	}
 	initialized, err := workspace.InitializeWorkspaceV2(workspaceDir, bundle.Definition(), occurredAt)

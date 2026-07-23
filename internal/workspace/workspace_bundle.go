@@ -1,7 +1,6 @@
 package workspace
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -41,6 +40,7 @@ type workspaceBundleAuthorityWire struct {
 // value it contains is incorporated into the effective generation.
 type WorkspaceBundle struct {
 	root                  string
+	rootIdentity          PlatformFileIdentity
 	descriptorDigest      Digest
 	sources               DefinitionSources
 	definition            EffectiveWorkspaceDefinition
@@ -48,12 +48,28 @@ type WorkspaceBundle struct {
 }
 
 func (bundle WorkspaceBundle) Root() string                             { return bundle.root }
+func (bundle WorkspaceBundle) RootIdentity() PlatformFileIdentity       { return bundle.rootIdentity }
 func (bundle WorkspaceBundle) DescriptorDigest() Digest                 { return bundle.descriptorDigest }
 func (bundle WorkspaceBundle) Definition() EffectiveWorkspaceDefinition { return bundle.definition }
 func (bundle WorkspaceBundle) Sources() DefinitionSources {
 	return cloneDefinitionSources(bundle.sources)
 }
 func (bundle WorkspaceBundle) ControlPlaneAuthorityID() ID { return bundle.controlPlaneAuthority }
+
+func (bundle WorkspaceBundle) VerifyRoot() error {
+	if bundle.root == "" {
+		return fmt.Errorf("workspace bundle root is unavailable")
+	}
+	root, err := OpenVerifiedRoot(RootRolePlan, bundle.root, false)
+	if err != nil {
+		return fmt.Errorf("reopen workspace bundle root: %w", err)
+	}
+	defer root.Close()
+	if root.Identity() != bundle.rootIdentity {
+		return fmt.Errorf("workspace bundle root at %s was replaced", bundle.root)
+	}
+	return nil
+}
 
 // LoadWorkspaceBundle resolves a strict v2 bundle through the rooted
 // filesystem adapter. It never follows a source path outside the bundle root
@@ -67,7 +83,11 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 		}
 		bundleRoot = absolute
 	}
-	filesystem, err := OpenRootedFilesystemAdapter(bundleRoot)
+	bundleRoot, err := canonicalizeTrustedRootPath(bundleRoot)
+	if err != nil {
+		return WorkspaceBundle{}, err
+	}
+	filesystem, err := OpenVerifiedRoot(RootRolePlan, bundleRoot, false)
 	if err != nil {
 		return WorkspaceBundle{}, fmt.Errorf("open workspace bundle: %w", err)
 	}
@@ -200,9 +220,13 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 	if err != nil {
 		return WorkspaceBundle{}, fmt.Errorf("bind workspace bundle authority: %w", err)
 	}
+	if err := filesystem.VerifyPath(); err != nil {
+		return WorkspaceBundle{}, fmt.Errorf("revalidate workspace bundle root: %w", err)
+	}
 	return WorkspaceBundle{
-		root: filesystem.Root(), descriptorDigest: DigestBytes(descriptor),
-		sources: cloneDefinitionSources(sources), definition: definition,
+		root: filesystem.Path(), rootIdentity: filesystem.Identity(),
+		descriptorDigest: DigestBytes(descriptor),
+		sources:          cloneDefinitionSources(sources), definition: definition,
 		controlPlaneAuthority: controlPlaneAuthority,
 	}, nil
 }
@@ -302,12 +326,8 @@ func normalizeBundleSourcePath(field, value string) (string, error) {
 	return path, nil
 }
 
-func readWorkspaceBundleFile(filesystem *RootedFilesystemAdapter, relative string, maximum int) ([]byte, error) {
-	rooted, err := NewRootedPath(filesystem.Root(), relative)
-	if err != nil {
-		return nil, err
-	}
-	content, err := filesystem.ReadFile(context.Background(), rooted)
+func readWorkspaceBundleFile(filesystem *VerifiedRoot, relative string, maximum int) ([]byte, error) {
+	content, err := filesystem.ReadBounded(relative, int64(maximum))
 	if err != nil {
 		return nil, err
 	}

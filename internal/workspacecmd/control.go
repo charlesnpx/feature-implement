@@ -6,10 +6,9 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -46,7 +45,7 @@ type systemClock struct{}
 func (systemClock) Now() time.Time { return time.Now().UTC() }
 
 type durableReplayStore struct {
-	directory string
+	runtimeDirectory string
 }
 
 func (store durableReplayStore) ClaimControlPlaneNonce(ctx context.Context, claim workspace.ControlPlaneReplayClaim) error {
@@ -57,9 +56,16 @@ func (store durableReplayStore) ClaimControlPlaneNonce(ctx context.Context, clai
 		default:
 		}
 	}
-	if err := os.MkdirAll(store.directory, 0o700); err != nil {
+	runtime, err := workspace.OpenRuntimeStorage(store.runtimeDirectory, true)
+	if err != nil {
 		return err
 	}
+	defer runtime.Close()
+	root, err := runtime.OpenStateDirectory("control-plane-replay", true)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	type canonicalClaim struct {
 		SchemaVersion int    `json:"schema_version"`
 		KeyID         string `json:"key_id"`
@@ -78,114 +84,44 @@ func (store durableReplayStore) ClaimControlPlaneNonce(ctx context.Context, clai
 	}
 	content = append(content, '\n')
 	name := strings.TrimPrefix(workspace.DigestBytes([]byte(claim.KeyID().String()+"\x00"+claim.Nonce())).String(), "sha256:") + ".json"
-	path := filepath.Join(store.directory, name)
-	if exists, err := verifyDurableReplayClaim(path, content, claim); err != nil {
+	if exists, err := verifyDurableReplayClaim(root, name, content, claim); err != nil {
 		return err
 	} else if exists {
-		return syncDurableReplayDirectory(store.directory)
+		return root.Sync()
 	}
-
-	file, err := os.CreateTemp(store.directory, ".control-plane-claim-")
-	if err != nil {
-		return err
-	}
-	temporary := file.Name()
-	temporaryExists := true
-	defer func() {
-		if temporaryExists {
-			_ = os.Remove(temporary)
+	if err := root.WriteExclusive(name, content, 0o600); err != nil {
+		exists, verifyErr := verifyDurableReplayClaim(root, name, content, claim)
+		if verifyErr != nil {
+			return verifyErr
 		}
-	}()
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if _, err := file.Write(content); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	if err := os.Link(temporary, path); err != nil {
-		if os.IsExist(err) {
-			exists, verifyErr := verifyDurableReplayClaim(path, content, claim)
-			if verifyErr != nil {
-				return verifyErr
-			}
-			if !exists {
-				return fmt.Errorf("concurrent control-plane replay claim disappeared")
-			}
-			return syncDurableReplayDirectory(store.directory)
+		if !exists {
+			return fmt.Errorf("concurrent control-plane replay claim disappeared")
 		}
-		return fmt.Errorf("publish control-plane replay claim: %w", err)
 	}
-	removeErr := os.Remove(temporary)
-	if removeErr == nil {
-		temporaryExists = false
-	}
-	if err := syncDurableReplayDirectory(store.directory); err != nil {
-		return err
-	}
-	if removeErr != nil {
-		return fmt.Errorf("remove published control-plane replay temporary file: %w", removeErr)
-	}
-	return nil
-}
-
-func syncDurableReplayDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	return directory.Sync()
+	return root.Sync()
 }
 
 func verifyDurableReplayClaim(
-	path string,
+	root *workspace.VerifiedRoot,
+	name string,
 	expected []byte,
 	claim workspace.ControlPlaneReplayClaim,
 ) (bool, error) {
-	entry, err := os.Lstat(path)
-	if os.IsNotExist(err) {
+	content, err := root.ReadBounded(name, int64(len(expected)))
+	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
 	if err != nil {
-		return false, err
+		return true, fmt.Errorf(
+			"control-plane nonce %q for key %s was already claimed with different or invalid evidence: %w",
+			claim.Nonce(), claim.KeyID(), err,
+		)
 	}
-	replayError := func() (bool, error) {
+	if !bytes.Equal(content, expected) {
 		return true, fmt.Errorf(
 			"control-plane nonce %q for key %s was already claimed with different or invalid evidence",
 			claim.Nonce(), claim.KeyID(),
 		)
-	}
-	if entry.Mode()&os.ModeSymlink != 0 || !entry.Mode().IsRegular() || entry.Size() != int64(len(expected)) {
-		return replayError()
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return false, err
-	}
-	defer file.Close()
-	opened, err := file.Stat()
-	if err != nil {
-		return false, err
-	}
-	if !os.SameFile(entry, opened) {
-		return replayError()
-	}
-	content, err := io.ReadAll(io.LimitReader(file, int64(len(expected))+1))
-	if err != nil {
-		return false, err
-	}
-	current, err := os.Lstat(path)
-	if err != nil || !os.SameFile(opened, current) || !bytes.Equal(content, expected) {
-		return replayError()
 	}
 	return true, nil
 }
@@ -476,7 +412,7 @@ func newControlPlaneVerifier(bundle workspace.WorkspaceBundle, workspaceDir stri
 	if err != nil {
 		return nil, err
 	}
-	replay := durableReplayStore{directory: filepath.Join(workspace.WorkspaceStateDirectory(directory), "control-plane-replay")}
+	replay := durableReplayStore{runtimeDirectory: directory}
 	return workspace.NewEd25519ControlPlaneVerifier(adapterID, policy, anchors, replay, systemClock{})
 }
 

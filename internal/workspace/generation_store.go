@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -55,6 +56,8 @@ func (generation StoredGeneration) CanonicalBytes() []byte {
 type GenerationStore struct {
 	workspaceDir   string
 	generationsDir string
+	runtime        *RuntimeStorage
+	root           *VerifiedRoot
 }
 
 func WorkspaceGenerationsDirectory(workspaceDir string) string {
@@ -66,19 +69,65 @@ func OpenGenerationStore(workspaceDir string) (*GenerationStore, error) {
 	if !filepath.IsAbs(workspaceDir) {
 		return nil, fmt.Errorf("generation store requires an absolute workspace directory")
 	}
-	if err := ensureSynchronizedDirectory(WorkspaceStateDirectory(workspaceDir)); err != nil {
+	runtime, err := OpenRuntimeStorage(workspaceDir, true)
+	if err != nil {
 		return nil, err
 	}
-	generationsDir := WorkspaceGenerationsDirectory(workspaceDir)
-	if err := ensureSynchronizedDirectory(generationsDir); err != nil {
+	closeRuntime := true
+	defer func() {
+		if closeRuntime {
+			_ = runtime.Close()
+		}
+	}()
+	if err := runtime.state.EnsureDirectory(WorkspaceGenerationsDirectoryName, 0o700); err != nil {
 		return nil, err
 	}
-	return &GenerationStore{workspaceDir: workspaceDir, generationsDir: generationsDir}, nil
+	generationsDir := filepath.Join(runtime.state.Path(), WorkspaceGenerationsDirectoryName)
+	root, err := OpenVerifiedRoot(RootRoleRuntime, generationsDir, false)
+	if err != nil {
+		return nil, fmt.Errorf("open generation root: %w", err)
+	}
+	closeRuntime = false
+	return &GenerationStore{
+		workspaceDir:   runtime.WorkspaceDir(),
+		generationsDir: generationsDir,
+		runtime:        runtime,
+		root:           root,
+	}, nil
+}
+
+func (store *GenerationStore) Close() error {
+	if store == nil {
+		return nil
+	}
+	var errs []error
+	if store.root != nil {
+		errs = append(errs, store.root.Close())
+		store.root = nil
+	}
+	if store.runtime != nil {
+		errs = append(errs, store.runtime.Close())
+		store.runtime = nil
+	}
+	return errors.Join(errs...)
+}
+
+func (store *GenerationStore) verify() error {
+	if store == nil || store.runtime == nil || store.root == nil {
+		return fmt.Errorf("generation store is closed")
+	}
+	if err := store.runtime.Verify(); err != nil {
+		return err
+	}
+	return store.root.VerifyPath()
 }
 
 func (store *GenerationStore) Store(definition EffectiveWorkspaceDefinition) (StoredGeneration, error) {
 	if store == nil || definition.generation.IsZero() {
 		return StoredGeneration{}, fmt.Errorf("generation store and effective definition are required")
+	}
+	if err := store.verify(); err != nil {
+		return StoredGeneration{}, err
 	}
 	canonical, err := marshalStoredGeneration(definition)
 	if err != nil {
@@ -87,20 +136,24 @@ func (store *GenerationStore) Store(definition EffectiveWorkspaceDefinition) (St
 	if len(canonical) > MaxStoredGenerationBytes {
 		return StoredGeneration{}, fmt.Errorf("stored generation exceeds %d bytes", MaxStoredGenerationBytes)
 	}
-	path := store.path(definition.generation)
-	if existing, err := readBoundedFile(path, MaxStoredGenerationBytes); err == nil {
+	relative := store.relativePath(definition.generation)
+	if existing, err := store.root.ReadBounded(relative, MaxStoredGenerationBytes); err == nil {
 		if !bytes.Equal(existing, canonical) {
 			return StoredGeneration{}, fmt.Errorf("generation %s already exists with different canonical bytes", definition.generation)
 		}
-		if err := syncFileAndDirectory(path, store.generationsDir); err != nil {
+		if err := store.root.Sync(); err != nil {
 			return StoredGeneration{}, fmt.Errorf("synchronize existing generation %s: %w", definition.generation, err)
 		}
 		return parseStoredGeneration(existing, definition.generation)
 	} else if !os.IsNotExist(err) {
 		return StoredGeneration{}, err
 	}
-	if err := atomicWriteSynchronized(path, canonical, 0o644); err != nil {
-		return StoredGeneration{}, err
+	if err := store.root.WriteExclusive(relative, canonical, 0o600); err != nil {
+		if existing, readErr := store.root.ReadBounded(relative, MaxStoredGenerationBytes); readErr == nil &&
+			bytes.Equal(existing, canonical) {
+			return parseStoredGeneration(existing, definition.generation)
+		}
+		return StoredGeneration{}, fmt.Errorf("publish generation %s: %w", definition.generation, err)
 	}
 	return parseStoredGeneration(canonical, definition.generation)
 }
@@ -109,7 +162,10 @@ func (store *GenerationStore) Load(generation Digest) (StoredGeneration, error) 
 	if store == nil || generation.IsZero() {
 		return StoredGeneration{}, fmt.Errorf("generation store and generation are required")
 	}
-	content, err := readBoundedFile(store.path(generation), MaxStoredGenerationBytes)
+	if err := store.verify(); err != nil {
+		return StoredGeneration{}, err
+	}
+	content, err := store.root.ReadBounded(store.relativePath(generation), MaxStoredGenerationBytes)
 	if err != nil {
 		return StoredGeneration{}, err
 	}
@@ -128,16 +184,19 @@ func (store *GenerationStore) List() ([]Digest, error) {
 	if store == nil {
 		return nil, fmt.Errorf("generation store is required")
 	}
-	entries, err := os.ReadDir(store.generationsDir)
+	if err := store.verify(); err != nil {
+		return nil, err
+	}
+	entries, err := store.root.adapter.readDirectory(".")
 	if err != nil {
 		return nil, err
 	}
 	result := make([]Digest, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if entry.info.IsDir() {
 			continue
 		}
-		name := entry.Name()
+		name := entry.name
 		if !strings.HasPrefix(name, "generation-") || !strings.HasSuffix(name, ".json") {
 			continue
 		}
@@ -279,9 +338,9 @@ func (store *GenerationStore) RecoverOrphanCandidate(
 	return journal.Append(appendRequest)
 }
 
-func (store *GenerationStore) path(generation Digest) string {
+func (store *GenerationStore) relativePath(generation Digest) string {
 	hexDigest := strings.TrimPrefix(generation.String(), "sha256:")
-	return filepath.Join(store.generationsDir, "generation-"+hexDigest+".json")
+	return "generation-" + hexDigest + ".json"
 }
 
 func marshalStoredGeneration(definition EffectiveWorkspaceDefinition) ([]byte, error) {

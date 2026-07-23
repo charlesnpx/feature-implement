@@ -14,8 +14,8 @@ import (
 
 const (
 	WorkspaceStateDirectoryName = "state"
-	WorkspaceJournalFileName    = "journal.v2.jsonl"
-	WorkspaceJournalLockName    = "journal.v2.lock"
+	WorkspaceJournalFileName    = "journal.v3.jsonl"
+	WorkspaceJournalLockName    = "journal.v3.lock"
 	MaxJournalRecordBytes       = 1 << 20
 	MaxJournalBytes             = 64 << 20
 )
@@ -113,9 +113,7 @@ func (snapshot JournalSnapshot) Revision(resource JournalResource) uint64 {
 
 type WorkspaceJournal struct {
 	workspaceDir string
-	stateDir     string
-	journalPath  string
-	lockPath     string
+	runtime      *RuntimeStorage
 	lockFile     *os.File
 	mode         JournalMode
 	fault        JournalFaultInjector
@@ -147,24 +145,32 @@ func OpenWorkspaceJournalWithOptions(workspaceDir string, mode JournalMode, opti
 	if mode != JournalReadOnly && mode != JournalReadWrite {
 		return nil, fmt.Errorf("unsupported workspace journal mode %d", mode)
 	}
-	stateDir := WorkspaceStateDirectory(workspaceDir)
-	if mode == JournalReadWrite {
-		if err := ensureSynchronizedDirectory(stateDir); err != nil {
-			return nil, err
-		}
-	} else if info, err := os.Stat(stateDir); err != nil || !info.IsDir() {
-		if err == nil {
-			err = fmt.Errorf("not a directory")
-		}
-		return nil, fmt.Errorf("open workspace state directory: %w", err)
+	runtime, err := OpenRuntimeStorage(workspaceDir, mode == JournalReadWrite)
+	if err != nil {
+		return nil, err
 	}
-	lockPath := WorkspaceJournalLockPath(workspaceDir)
-	lockExisted := pathExists(lockPath)
+	closeRuntime := true
+	defer func() {
+		if closeRuntime {
+			_ = runtime.Close()
+		}
+	}()
+	stateDir := runtime.state.Path()
+	lockPath := filepath.Join(stateDir, WorkspaceJournalLockName)
+	_, lockExisted, err := runtime.state.adapter.inspectExact(WorkspaceJournalLockName)
+	if err != nil {
+		return nil, fmt.Errorf("inspect workspace journal lock: %w", err)
+	}
 	flags := os.O_RDONLY
 	if mode == JournalReadWrite {
-		flags = os.O_RDWR | os.O_CREATE
+		flags = os.O_RDWR
 	}
-	lockFile, err := os.OpenFile(lockPath, flags, 0o644)
+	lockFile, _, err := runtime.state.openOwnedRegularFile(
+		WorkspaceJournalLockName,
+		flags,
+		0o600,
+		mode == JournalReadWrite,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("open workspace journal lock: %w", err)
 	}
@@ -179,24 +185,54 @@ func OpenWorkspaceJournalWithOptions(workspaceDir string, mode JournalMode, opti
 		}
 		return nil, fmt.Errorf("acquire workspace journal lock: %w", err)
 	}
+	if err := runtime.state.verifyOwnedRegularFile(WorkspaceJournalLockName, lockFile); err != nil {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+		return nil, fmt.Errorf("verify locked workspace journal lock: %w", err)
+	}
 	if !lockExisted && mode == JournalReadWrite {
-		if err := syncDirectory(stateDir); err != nil {
+		if err := runtime.state.Sync(); err != nil {
 			_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 			_ = lockFile.Close()
 			return nil, err
 		}
 	}
-	if mode == JournalReadWrite && pathExists(WorkspaceJournalPath(workspaceDir)) {
-		if err := syncFileAndDirectory(WorkspaceJournalPath(workspaceDir), stateDir); err != nil {
+	_, journalExists, err := runtime.state.adapter.inspectExact(WorkspaceJournalFileName)
+	if err != nil {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+		return nil, fmt.Errorf("inspect workspace journal: %w", err)
+	}
+	if mode == JournalReadWrite && journalExists {
+		journalFile, _, openErr := runtime.state.openOwnedRegularFile(
+			WorkspaceJournalFileName, os.O_RDWR, 0, false,
+		)
+		if openErr == nil {
+			openErr = runtime.state.adapter.synchronizeOpenedFile(WorkspaceJournalFileName, journalFile)
+			if closeErr := journalFile.Close(); openErr == nil {
+				openErr = closeErr
+			}
+		}
+		if openErr != nil {
 			_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 			_ = lockFile.Close()
-			return nil, fmt.Errorf("synchronize existing workspace journal: %w", err)
+			return nil, fmt.Errorf("synchronize existing workspace journal: %w", openErr)
 		}
 	}
+	if err := runtime.Verify(); err != nil {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+		return nil, err
+	}
+	if err := runtime.state.verifyOwnedRegularFile(WorkspaceJournalLockName, lockFile); err != nil {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+		return nil, fmt.Errorf("revalidate workspace journal lock: %w", err)
+	}
+	closeRuntime = false
 	return &WorkspaceJournal{
-		workspaceDir: workspaceDir, stateDir: stateDir,
-		journalPath: WorkspaceJournalPath(workspaceDir), lockPath: lockPath,
-		lockFile: lockFile, mode: mode, fault: options.FaultInjector,
+		workspaceDir: runtime.WorkspaceDir(),
+		runtime:      runtime, lockFile: lockFile, mode: mode, fault: options.FaultInjector,
 	}, nil
 }
 
@@ -206,16 +242,21 @@ func (journal *WorkspaceJournal) Close() error {
 	if journal.closed {
 		return nil
 	}
+	verifyErr := journal.runtime.state.verifyOwnedRegularFile(WorkspaceJournalLockName, journal.lockFile)
 	journal.closed = true
 	unlockErr := syscall.Flock(int(journal.lockFile.Fd()), syscall.LOCK_UN)
 	closeErr := journal.lockFile.Close()
+	runtimeErr := journal.runtime.Close()
+	if verifyErr != nil {
+		verifyErr = fmt.Errorf("workspace journal lock was replaced before close: %w", verifyErr)
+	}
 	if unlockErr != nil {
-		return fmt.Errorf("unlock workspace journal: %w", unlockErr)
+		unlockErr = fmt.Errorf("unlock workspace journal: %w", unlockErr)
 	}
 	if closeErr != nil {
-		return fmt.Errorf("close workspace journal lock: %w", closeErr)
+		closeErr = fmt.Errorf("close workspace journal lock: %w", closeErr)
 	}
-	return nil
+	return errors.Join(verifyErr, unlockErr, closeErr, runtimeErr)
 }
 
 func (journal *WorkspaceJournal) ReadSnapshot() (JournalSnapshot, error) {
@@ -224,15 +265,33 @@ func (journal *WorkspaceJournal) ReadSnapshot() (JournalSnapshot, error) {
 	if err := journal.requireOpen(); err != nil {
 		return JournalSnapshot{}, err
 	}
-	recoveryPending, err := journalRecoveryPending(journal.workspaceDir)
+	recoveryPending, err := journalRecoveryPending(journal)
 	if err != nil {
 		return JournalSnapshot{}, err
 	}
 	if recoveryPending {
 		return JournalSnapshot{}, fmt.Errorf("journal recovery is pending; ordinary readers cannot repair state")
 	}
-	if journal.mode == JournalReadWrite && pathExists(journal.journalPath) {
-		if err := syncFileAndDirectory(journal.journalPath, journal.stateDir); err != nil {
+	_, journalExists, err := journal.runtime.state.adapter.inspectExact(WorkspaceJournalFileName)
+	if err != nil {
+		return JournalSnapshot{}, err
+	}
+	if journal.mode == JournalReadWrite && journalExists {
+		file, _, err := journal.runtime.state.openOwnedRegularFile(
+			WorkspaceJournalFileName, os.O_RDWR, 0, false,
+		)
+		if err != nil {
+			return JournalSnapshot{}, err
+		}
+		syncErr := journal.runtime.state.adapter.synchronizeOpenedFile(WorkspaceJournalFileName, file)
+		closeErr := file.Close()
+		if syncErr != nil {
+			return JournalSnapshot{}, fmt.Errorf("synchronize workspace journal before writer reconciliation: %w", syncErr)
+		}
+		if closeErr != nil {
+			return JournalSnapshot{}, fmt.Errorf("close workspace journal before writer reconciliation: %w", closeErr)
+		}
+		if err := journal.runtime.Verify(); err != nil {
 			return JournalSnapshot{}, fmt.Errorf("synchronize workspace journal before writer reconciliation: %w", err)
 		}
 	}
@@ -242,6 +301,9 @@ func (journal *WorkspaceJournal) ReadSnapshot() (JournalSnapshot, error) {
 	}
 	if tail != nil {
 		return JournalSnapshot{}, *tail
+	}
+	if err := journal.requireOpen(); err != nil {
+		return JournalSnapshot{}, err
 	}
 	return snapshot, nil
 }
@@ -272,7 +334,7 @@ func (journal *WorkspaceJournal) appendWithHead(request JournalAppend, expectedH
 	if err := journal.requireWriter(); err != nil {
 		return JournalRecord{}, err
 	}
-	recoveryPending, err := journalRecoveryPending(journal.workspaceDir)
+	recoveryPending, err := journalRecoveryPending(journal)
 	if err != nil {
 		return JournalRecord{}, err
 	}
@@ -293,6 +355,9 @@ func (journal *WorkspaceJournal) appendWithHead(request JournalAppend, expectedH
 }
 
 func (journal *WorkspaceJournal) appendToSnapshot(snapshot JournalSnapshot, request JournalAppend) (JournalRecord, error) {
+	if err := journal.requireWriter(); err != nil {
+		return JournalRecord{}, err
+	}
 	if request.event == nil {
 		return JournalRecord{}, fmt.Errorf("journal append requires a typed event")
 	}
@@ -321,7 +386,12 @@ func (journal *WorkspaceJournal) appendToSnapshot(snapshot JournalSnapshot, requ
 	if snapshot.byteLength+int64(len(encoded)) > MaxJournalBytes {
 		return JournalRecord{}, fmt.Errorf("journal exceeds %d bytes", MaxJournalBytes)
 	}
-	file, err := os.OpenFile(journal.journalPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+	file, _, err := journal.runtime.state.openOwnedRegularFile(
+		WorkspaceJournalFileName,
+		os.O_WRONLY|os.O_APPEND,
+		0o600,
+		true,
+	)
 	if err != nil {
 		return JournalRecord{}, err
 	}
@@ -357,6 +427,9 @@ func (journal *WorkspaceJournal) appendToSnapshot(snapshot JournalSnapshot, requ
 	if err := file.Sync(); err != nil {
 		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: closeWith(err)}
 	}
+	if err := journal.runtime.state.verifyOwnedRegularFile(WorkspaceJournalFileName, file); err != nil {
+		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: closeWith(err)}
+	}
 	if err := journal.inject(JournalFaultAfterFileSync); err != nil {
 		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: closeWith(err)}
 	}
@@ -366,17 +439,20 @@ func (journal *WorkspaceJournal) appendToSnapshot(snapshot JournalSnapshot, requ
 	if err := journal.inject(JournalFaultBeforeDirectorySync); err != nil {
 		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: err}
 	}
-	if err := syncDirectory(journal.stateDir); err != nil {
+	if err := journal.runtime.state.Sync(); err != nil {
 		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: err}
 	}
 	if err := journal.inject(JournalFaultAfterDirectorySync); err != nil {
+		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: err}
+	}
+	if err := journal.requireOpen(); err != nil {
 		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: err}
 	}
 	return record, nil
 }
 
 func (journal *WorkspaceJournal) readSnapshotAllowTail() (JournalSnapshot, *IncompleteJournalTailError, error) {
-	content, err := readBoundedFile(journal.journalPath, MaxJournalBytes)
+	content, err := journal.runtime.state.ReadBounded(WorkspaceJournalFileName, MaxJournalBytes)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return emptyJournalSnapshot(), nil, nil
@@ -475,8 +551,14 @@ func applyJournalWrites(revisions []JournalResourceRevision, writes []JournalRes
 }
 
 func (journal *WorkspaceJournal) requireOpen() error {
-	if journal == nil || journal.closed || journal.lockFile == nil {
+	if journal == nil || journal.closed || journal.lockFile == nil || journal.runtime == nil {
 		return fmt.Errorf("workspace journal is closed")
+	}
+	if err := journal.runtime.Verify(); err != nil {
+		return err
+	}
+	if err := journal.runtime.state.verifyOwnedRegularFile(WorkspaceJournalLockName, journal.lockFile); err != nil {
+		return fmt.Errorf("workspace journal lock was replaced: %w", err)
 	}
 	return nil
 }
@@ -501,82 +583,6 @@ func (journal *WorkspaceJournal) inject(point JournalFaultPoint) error {
 	return nil
 }
 
-func ensureSynchronizedDirectory(path string) error {
-	path = filepath.Clean(path)
-	missing := make([]string, 0, 2)
-	for cursor := path; ; cursor = filepath.Dir(cursor) {
-		info, err := os.Stat(cursor)
-		if err == nil {
-			if !info.IsDir() {
-				return fmt.Errorf("%s is not a directory", cursor)
-			}
-			break
-		}
-		if !os.IsNotExist(err) {
-			return err
-		}
-		parent := filepath.Dir(cursor)
-		if parent == cursor {
-			return fmt.Errorf("cannot find an existing parent directory for %s", path)
-		}
-		missing = append(missing, cursor)
-	}
-	for index := len(missing) - 1; index >= 0; index-- {
-		created := missing[index]
-		if err := os.Mkdir(created, 0o755); err != nil {
-			if !os.IsExist(err) {
-				return err
-			}
-			info, statErr := os.Stat(created)
-			if statErr != nil {
-				return statErr
-			}
-			if !info.IsDir() {
-				return fmt.Errorf("%s is not a directory", created)
-			}
-		}
-		if err := syncDirectory(filepath.Dir(created)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func syncDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	if err := directory.Sync(); err != nil {
-		return fmt.Errorf("sync directory %s: %w", path, err)
-	}
-	return nil
-}
-
-func readBoundedFile(path string, maximum int64) ([]byte, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if info.Size() > maximum {
-		return nil, fmt.Errorf("file %s exceeds %d bytes", filepath.Base(path), maximum)
-	}
-	content, err := io.ReadAll(io.LimitReader(file, maximum+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(content)) > maximum {
-		return nil, fmt.Errorf("file %s exceeds %d bytes", filepath.Base(path), maximum)
-	}
-	return content, nil
-}
-
 func writeAll(writer io.Writer, content []byte) error {
 	for len(content) > 0 {
 		written, err := writer.Write(content)
@@ -589,9 +595,4 @@ func writeAll(writer io.Writer, content []byte) error {
 		content = content[written:]
 	}
 	return nil
-}
-
-func pathExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }

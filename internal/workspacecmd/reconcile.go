@@ -55,6 +55,7 @@ func executeReconciliation(ctx context.Context, activeBundle workspace.Workspace
 	if err != nil {
 		return nil, err
 	}
+	defer store.Close()
 	active := activeBundle.Definition()
 	candidate := candidateBundle.Definition()
 	switch options.Subaction {
