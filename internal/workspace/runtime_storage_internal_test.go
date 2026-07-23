@@ -145,6 +145,41 @@ func TestRuntimeCapabilityFailureOccursBeforeMarkersOrStateUse(t *testing.T) {
 	}
 }
 
+func TestRuntimeInitializationCandidateWaitsForInProgressLock(t *testing.T) {
+	runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "runtime")
+	root, err := OpenVerifiedRoot(RootRoleRuntime, runtimePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := root.WriteExclusive(RuntimeInitializationLockName, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.EnsureDirectory(WorkspaceStateDirectoryName, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state, err := OpenVerifiedRoot(
+		RootRoleRuntime,
+		filepath.Join(runtimePath, WorkspaceStateDirectoryName),
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	if err := state.EnsureDirectory("runtime-capability-in-progress", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if initializable, err := runtimeRootInitializable(root); err != nil {
+		t.Fatal(err)
+	} else if initializable {
+		t.Fatal("transient runtime state unexpectedly appeared initializable")
+	}
+	if err := requireRuntimeInitializationCandidate(root, runtimePath, true); err != nil {
+		t.Fatalf("in-progress initialization candidate: %v", err)
+	}
+}
+
 func TestRuntimeInitializationRecoversPartialMarkerPublication(t *testing.T) {
 	for _, location := range []string{"runtime", "state"} {
 		t.Run(location, func(t *testing.T) {

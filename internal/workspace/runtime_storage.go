@@ -87,12 +87,8 @@ func openRuntimeStorageWithProbe(
 		return nil, err
 	}
 	if !markerExists {
-		initializable, err := runtimeRootInitializable(runtimeRoot)
-		if err != nil {
+		if err := requireRuntimeInitializationCandidate(runtimeRoot, canonical, create); err != nil {
 			return nil, err
-		}
-		if !create || !initializable {
-			return nil, incompatibleRuntimeFormatError(canonical)
 		}
 		initializationLock, _, err := runtimeRoot.openOwnedRegularFile(
 			RuntimeInitializationLockName, os.O_RDWR, 0o600, true,
@@ -113,7 +109,7 @@ func openRuntimeStorageWithProbe(
 			return nil, err
 		}
 		if !markerExists {
-			initializable, err = runtimeRootInitializable(runtimeRoot)
+			initializable, err := runtimeRootInitializable(runtimeRoot)
 			if err != nil {
 				return nil, err
 			}
@@ -269,6 +265,33 @@ func (storage *RuntimeStorage) Close() error {
 		storage.root = nil
 	}
 	return errors.Join(errs...)
+}
+
+func requireRuntimeInitializationCandidate(
+	root *VerifiedRoot,
+	runtimePath string,
+	create bool,
+) error {
+	initializable, err := runtimeRootInitializable(root)
+	if err != nil {
+		return err
+	}
+	if !create {
+		return incompatibleRuntimeFormatError(runtimePath)
+	}
+	if initializable {
+		return nil
+	}
+	_, initializationInProgress, err := root.adapter.inspectExact(
+		RuntimeInitializationLockName,
+	)
+	if err != nil {
+		return err
+	}
+	if !initializationInProgress {
+		return incompatibleRuntimeFormatError(runtimePath)
+	}
+	return nil
 }
 
 func runtimeRootInitializable(root *VerifiedRoot) (bool, error) {
