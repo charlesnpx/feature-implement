@@ -224,3 +224,24 @@ stage="$(mktemp -d)"
 ./install-skill.sh --install --target all --json --install-root "$stage"
 "$stage/.local/bin/feature" version
 ```
+
+The exact-head CI baseline is also reusable locally. Set the exact commit expected
+for the checkout, then run every Linux/macOS-compatible gate or an individual
+gate:
+
+```sh
+EXPECTED_HEAD_SHA="$(git rev-parse HEAD)" ./scripts/ci-baseline.sh all
+./scripts/ci-baseline.sh normal
+FEATURE_SHUFFLE_SEED=1700000000 ./scripts/ci-baseline.sh shuffle
+./scripts/ci-baseline.sh race
+./scripts/ci-baseline.sh vet
+./scripts/ci-baseline.sh build
+./scripts/ci-baseline.sh installer
+./scripts/ci-baseline.sh diff
+./scripts/ci-baseline.sh clean
+```
+
+The GitHub workflow checks out the pull request head SHA directly, disables
+persisted checkout credentials and dependency caching, and runs the same gates
+on pinned Ubuntu and macOS runners. A shuffled run prints its seed so it can be
+reproduced with `FEATURE_SHUFFLE_SEED`.
