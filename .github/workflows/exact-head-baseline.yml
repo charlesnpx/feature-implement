@@ -1,0 +1,72 @@
+name: Exact-head baseline
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      head_sha:
+        description: Exact commit SHA to validate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    name: Baseline (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - macos-15
+    env:
+      EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.head_sha }}
+      GH_TOKEN: ""
+      GITHUB_TOKEN: ""
+    steps:
+      - name: Check out the exact requested head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 1
+          lfs: false
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || inputs.head_sha }}
+          submodules: false
+
+      - name: Install Go 1.26.0 without dependency caching
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          cache: false
+          check-latest: false
+          go-version: "1.26.0"
+
+      - name: Assert exact head and credential isolation
+        run: ./scripts/ci-baseline.sh assert-head
+
+      - name: Run uncached tests
+        run: ./scripts/ci-baseline.sh normal
+
+      - name: Run seeded shuffled tests
+        run: ./scripts/ci-baseline.sh shuffle
+
+      - name: Run race tests
+        run: ./scripts/ci-baseline.sh race
+
+      - name: Run vet
+        run: ./scripts/ci-baseline.sh vet
+
+      - name: Build
+        run: ./scripts/ci-baseline.sh build
+
+      - name: Smoke-test the installer
+        run: ./scripts/ci-baseline.sh installer
+
+      - name: Check generated diffs and formatting
+        run: ./scripts/ci-baseline.sh diff
+
+      - name: Verify the checkout stayed clean
+        run: ./scripts/ci-baseline.sh clean
