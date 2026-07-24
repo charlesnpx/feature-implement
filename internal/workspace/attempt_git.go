@@ -11,9 +11,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 const maxAttemptGitOutputBytes = 8 * 1024 * 1024
+const maxAttemptWorktreeClaimBytes = 16 * 1024
 
 type AttemptRefInventory struct {
 	local  []string
@@ -137,11 +139,12 @@ func (claim AttemptWorktreeClaim) Worktree() string   { return claim.worktree }
 
 type AttemptGitPort interface {
 	ValidateAttemptBranch(context.Context, string, string) error
+	ValidateAttemptWorktreeRoot(context.Context, string, string) error
 	InspectAttemptRefs(context.Context, string, string) (AttemptRefInventory, error)
 	InspectAttemptWorktree(context.Context, string, string, string) (AttemptGitInspection, error)
-	PrepareAttemptWorktree(context.Context, AttemptWorktreeClaim, bool) error
+	PrepareAttemptWorktree(context.Context, string, AttemptWorktreeClaim, bool) error
 	ReleaseAttemptWorktreeClaim(context.Context, AttemptWorktreeClaim) error
-	CreateAttemptWorktree(context.Context, string, string, string, GitObjectID, bool, bool) error
+	CreateAttemptWorktree(context.Context, string, AttemptWorktreeClaim, bool, bool) error
 }
 
 type AttemptWorktreeClaimFaultPoint string
@@ -391,40 +394,108 @@ func (adapter LocalAttemptGitAdapter) InspectAttemptWorktree(
 
 func (adapter LocalAttemptGitAdapter) CreateAttemptWorktree(
 	ctx context.Context,
-	repositoryRoot, branch, worktree string,
-	base GitObjectID,
+	repositoryRoot string,
+	claim AttemptWorktreeClaim,
 	createBranch, recoverRegistered bool,
 ) error {
-	if base.IsZero() || !filepath.IsAbs(worktree) {
+	if claim.base.IsZero() || !filepath.IsAbs(claim.worktree) {
 		return fmt.Errorf("attempt worktree creation requires an exact base and absolute path")
 	}
-	if err := os.MkdirAll(filepath.Dir(filepath.Clean(worktree)), 0o755); err != nil {
-		return fmt.Errorf("create attempt worktree parent: %w", err)
+	marker := attemptWorktreeClaimPath(claim.worktree)
+	parentPath, err := canonicalizeTrustedRootPath(filepath.Dir(marker))
+	if err != nil {
+		return err
+	}
+	parent, err := OpenVerifiedRoot(RootRoleWorktree, parentPath, false)
+	if err != nil {
+		return fmt.Errorf("reopen claimed attempt worktree root: %w", err)
+	}
+	defer parent.Close()
+	worktree := filepath.Join(
+		parent.Path(), filepath.Base(filepath.Clean(claim.worktree)),
+	)
+	expectedClaim, err := canonicalAttemptWorktreeClaim(
+		claim, worktree, parent.Identity(),
+	)
+	if err != nil {
+		return err
+	}
+	markerName := filepath.Base(marker)
+	durableClaim, err := readAttemptWorktreeClaim(parent, markerName)
+	if err != nil {
+		return fmt.Errorf("reopen durable attempt worktree claim: %w", err)
+	}
+	if !bytes.Equal(durableClaim, expectedClaim) {
+		return fmt.Errorf(
+			"attempt worktree claim %s does not bind the verified parent root",
+			marker,
+		)
+	}
+	if err := parent.VerifyPath(); err != nil {
+		return fmt.Errorf("verify claimed attempt worktree root before Git creation: %w", err)
 	}
 	commitAdapter := LocalCommitGitAdapter{git: adapter}
 	binding, err := commitAdapter.captureTrustedWorktreeBinding(ctx, repositoryRoot)
 	if err != nil {
 		return fmt.Errorf("inspect attempt materialization Git binding: %w", err)
 	}
-	baseText := strings.TrimPrefix(base.String(), string(base.algorithm)+":")
+	baseText := strings.TrimPrefix(
+		claim.base.String(), string(claim.base.algorithm)+":",
+	)
 	arguments := []string{"worktree", "add"}
 	if createBranch {
 		if recoverRegistered {
 			return fmt.Errorf("new attempt branch cannot recover an existing worktree registration")
 		}
-		arguments = append(arguments, "--no-track", "-b", branch, worktree, baseText)
+		arguments = append(
+			arguments, "--no-track", "-b", claim.branch, worktree, baseText,
+		)
 	} else {
 		if recoverRegistered {
 			arguments = append(arguments, "--force")
 		}
-		arguments = append(arguments, worktree, branch)
+		arguments = append(arguments, worktree, claim.branch)
 	}
-	_, exitCode, err := adapter.run(ctx, repositoryRoot, arguments...)
+	if err := parent.VerifyPath(); err != nil {
+		return fmt.Errorf("revalidate claimed attempt worktree root before Git effect: %w", err)
+	}
+	preEffectClaim, err := readAttemptWorktreeClaim(parent, markerName)
 	if err != nil {
-		return fmt.Errorf("create attempt worktree: %w", err)
+		return fmt.Errorf("revalidate durable attempt worktree claim before Git effect: %w", err)
 	}
-	if exitCode != 0 {
-		return fmt.Errorf("create attempt worktree: Git exited with status %d", exitCode)
+	if !bytes.Equal(preEffectClaim, expectedClaim) {
+		return fmt.Errorf("durable attempt worktree claim changed before Git creation")
+	}
+	_, exitCode, gitErr := adapter.run(ctx, repositoryRoot, arguments...)
+	var effectErr error
+	if gitErr != nil {
+		effectErr = fmt.Errorf("create attempt worktree: %w", gitErr)
+	} else if exitCode != 0 {
+		effectErr = fmt.Errorf(
+			"create attempt worktree: Git exited with status %d", exitCode,
+		)
+	}
+	if err := parent.VerifyPath(); err != nil {
+		return errors.Join(
+			effectErr,
+			fmt.Errorf("verify claimed attempt worktree root after Git creation: %w", err),
+		)
+	}
+	confirmedClaim, err := readAttemptWorktreeClaim(parent, markerName)
+	if err != nil {
+		return errors.Join(
+			effectErr,
+			fmt.Errorf("confirm durable attempt worktree claim: %w", err),
+		)
+	}
+	if !bytes.Equal(confirmedClaim, expectedClaim) {
+		return errors.Join(
+			effectErr,
+			fmt.Errorf("durable attempt worktree claim changed during Git creation"),
+		)
+	}
+	if effectErr != nil {
+		return effectErr
 	}
 	confirmed, err := commitAdapter.captureTrustedWorktreeBinding(ctx, binding.root)
 	if err != nil {
@@ -433,53 +504,105 @@ func (adapter LocalAttemptGitAdapter) CreateAttemptWorktree(
 	if confirmed != binding {
 		return fmt.Errorf("Git worktree administration changed during attempt materialization")
 	}
+	if err := parent.VerifyPath(); err != nil {
+		return fmt.Errorf("finalize claimed attempt worktree root verification: %w", err)
+	}
+	finalClaim, err := readAttemptWorktreeClaim(parent, markerName)
+	if err != nil {
+		return fmt.Errorf("finalize durable attempt worktree claim verification: %w", err)
+	}
+	if !bytes.Equal(finalClaim, expectedClaim) {
+		return fmt.Errorf("durable attempt worktree claim changed after Git creation")
+	}
 	return nil
 }
 
 func (adapter LocalAttemptGitAdapter) PrepareAttemptWorktree(
 	ctx context.Context,
+	repositoryRoot string,
 	claim AttemptWorktreeClaim,
 	recoverUnregistered bool,
 ) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	payload, err := canonicalAttemptWorktreeClaim(claim)
-	if err != nil {
-		return err
-	}
-	marker := attemptWorktreeClaimPath(claim.worktree)
-	if err := ensureSynchronizedDirectory(filepath.Dir(marker)); err != nil {
-		return fmt.Errorf("prepare attempt worktree claim directory: %w", err)
-	}
-	created, err := createOrVerifyAttemptWorktreeClaim(
-		marker, claim.worktree, payload, adapter.worktreeClaimFault,
+	guard, err := adapter.openAttemptWorktreeRootGuard(
+		ctx, repositoryRoot, claim.worktree, true,
 	)
 	if err != nil {
 		return err
 	}
-	info, statErr := os.Lstat(claim.worktree)
-	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-		return fmt.Errorf("inspect claimed attempt worktree: %w", statErr)
+	defer guard.Close()
+	parent := guard.worktree
+	if err := guard.Verify(ctx, adapter); err != nil {
+		return fmt.Errorf("verify attempt worktree roots before capability probe: %w", err)
 	}
-	if created && statErr == nil {
-		_ = removeSynchronized(marker)
-		return fmt.Errorf("attempt worktree path %s appeared while ownership was being claimed", claim.worktree)
+	if effectErr := parent.ProbeDurability(); effectErr != nil {
+		return errors.Join(
+			fmt.Errorf("preflight attempt worktree root capabilities: %w", effectErr),
+			guard.verifyAfterEffect(ctx, adapter, "capability probe"),
+		)
 	}
-	if statErr != nil {
+	if err := guard.Verify(ctx, adapter); err != nil {
+		return fmt.Errorf("verify attempt worktree roots after capability probe: %w", err)
+	}
+	marker := attemptWorktreeClaimPath(claim.worktree)
+	worktreeName := filepath.Base(filepath.Clean(claim.worktree))
+	markerName := filepath.Base(marker)
+	canonicalWorktree := filepath.Join(parent.Path(), worktreeName)
+	payload, err := canonicalAttemptWorktreeClaim(claim, canonicalWorktree, parent.Identity())
+	if err != nil {
+		return err
+	}
+	created, effectErr := createOrVerifyAttemptWorktreeClaim(
+		parent, markerName, worktreeName, payload, adapter.worktreeClaimFault,
+	)
+	if effectErr != nil {
+		return errors.Join(
+			effectErr,
+			guard.verifyAfterEffect(ctx, adapter, "claim publication"),
+		)
+	}
+	if err := guard.Verify(ctx, adapter); err != nil {
+		return fmt.Errorf("verify attempt worktree roots after claim publication: %w", err)
+	}
+	info, worktreeExists, err := parent.adapter.inspectExact(worktreeName)
+	if err != nil {
+		return fmt.Errorf("inspect claimed attempt worktree: %w", err)
+	}
+	if created && worktreeExists {
+		_, removeErr := parent.adapter.removeFileContentExact(
+			markerName, payload, int64(len(payload)), parent.VerifyPath,
+		)
+		return errors.Join(
+			fmt.Errorf(
+				"attempt worktree path %s appeared while ownership was being claimed",
+				canonicalWorktree,
+			),
+			removeErr,
+			guard.verifyAfterEffect(ctx, adapter, "raced claim cleanup"),
+		)
+	}
+	if !worktreeExists {
 		return nil
 	}
 	if !recoverUnregistered {
-		return fmt.Errorf("attempt worktree path %s exists but recovery was not requested", claim.worktree)
+		return fmt.Errorf("attempt worktree path %s exists but recovery was not requested", canonicalWorktree)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return fmt.Errorf("claimed attempt worktree path %s is not a recoverable directory", claim.worktree)
+		return fmt.Errorf("claimed attempt worktree path %s is not a recoverable directory", canonicalWorktree)
 	}
-	if err := os.RemoveAll(claim.worktree); err != nil {
-		return fmt.Errorf("remove partial attempt worktree %s: %w", claim.worktree, err)
+	if err := guard.Verify(ctx, adapter); err != nil {
+		return fmt.Errorf("verify attempt worktree roots before partial recovery: %w", err)
 	}
-	if err := syncDirectory(filepath.Dir(claim.worktree)); err != nil {
-		return fmt.Errorf("synchronize recovered attempt worktree parent: %w", err)
+	if effectErr := parent.adapter.removeDirectoryTreeExact(worktreeName); effectErr != nil {
+		return errors.Join(
+			fmt.Errorf("remove partial attempt worktree %s: %w", canonicalWorktree, effectErr),
+			guard.verifyAfterEffect(ctx, adapter, "partial recovery"),
+		)
+	}
+	if err := guard.Verify(ctx, adapter); err != nil {
+		return fmt.Errorf("synchronize recovered attempt worktree roots: %w", err)
 	}
 	return nil
 }
@@ -491,12 +614,23 @@ func (adapter LocalAttemptGitAdapter) ReleaseAttemptWorktreeClaim(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	payload, err := canonicalAttemptWorktreeClaim(claim)
+	marker := attemptWorktreeClaimPath(claim.worktree)
+	parentPath, err := canonicalizeTrustedRootPath(filepath.Dir(marker))
 	if err != nil {
 		return err
 	}
-	marker := attemptWorktreeClaimPath(claim.worktree)
-	existing, err := readAttemptWorktreeClaim(marker)
+	parent, err := OpenVerifiedRoot(RootRoleWorktree, parentPath, false)
+	if err != nil {
+		return fmt.Errorf("open attempt worktree root: %w", err)
+	}
+	defer parent.Close()
+	canonicalWorktree := filepath.Join(parent.Path(), filepath.Base(filepath.Clean(claim.worktree)))
+	payload, err := canonicalAttemptWorktreeClaim(claim, canonicalWorktree, parent.Identity())
+	if err != nil {
+		return err
+	}
+	markerName := filepath.Base(marker)
+	existing, err := readAttemptWorktreeClaim(parent, markerName)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -506,33 +640,45 @@ func (adapter LocalAttemptGitAdapter) ReleaseAttemptWorktreeClaim(
 	if !bytes.Equal(existing, payload) {
 		return fmt.Errorf("attempt worktree claim %s belongs to different immutable bindings", marker)
 	}
-	if err := removeSynchronized(marker); err != nil {
+	removed, err := parent.adapter.removeFileContentExact(
+		markerName, payload, int64(len(payload)), parent.VerifyPath,
+	)
+	if err != nil {
 		return fmt.Errorf("release attempt worktree claim: %w", err)
+	}
+	if !removed {
+		return fmt.Errorf("release attempt worktree claim: claim disappeared")
 	}
 	return nil
 }
 
-func canonicalAttemptWorktreeClaim(claim AttemptWorktreeClaim) ([]byte, error) {
+func canonicalAttemptWorktreeClaim(
+	claim AttemptWorktreeClaim,
+	canonicalWorktree string,
+	rootIdentity PlatformFileIdentity,
+) ([]byte, error) {
 	if claim.attemptID.IsZero() || claim.generation.IsZero() || claim.base.IsZero() ||
-		!filepath.IsAbs(claim.worktree) {
+		!filepath.IsAbs(canonicalWorktree) {
 		return nil, fmt.Errorf("attempt worktree claim is incomplete")
 	}
 	if err := validateAttemptBranchSyntax(claim.branch); err != nil {
 		return nil, err
 	}
 	type claimJSON struct {
-		SchemaVersion int    `json:"schema_version"`
-		Kind          string `json:"kind"`
-		AttemptID     string `json:"attempt_id"`
-		Generation    string `json:"generation"`
-		Base          string `json:"base"`
-		Branch        string `json:"branch"`
-		Worktree      string `json:"worktree"`
+		SchemaVersion int                  `json:"schema_version"`
+		Kind          string               `json:"kind"`
+		AttemptID     string               `json:"attempt_id"`
+		Generation    string               `json:"generation"`
+		Base          string               `json:"base"`
+		Branch        string               `json:"branch"`
+		Worktree      string               `json:"worktree"`
+		RootIdentity  PlatformFileIdentity `json:"root_identity"`
 	}
 	return json.Marshal(claimJSON{
-		SchemaVersion: JournalSchemaVersion, Kind: "attempt_worktree_claim",
+		SchemaVersion: RuntimeFormatSchemaVersion, Kind: "attempt_worktree_claim",
 		AttemptID: claim.attemptID.String(), Generation: claim.generation.String(),
-		Base: claim.base.String(), Branch: claim.branch, Worktree: claim.worktree,
+		Base: claim.base.String(), Branch: claim.branch, Worktree: canonicalWorktree,
+		RootIdentity: rootIdentity,
 	})
 }
 
@@ -541,94 +687,190 @@ func attemptWorktreeClaimPath(worktree string) string {
 }
 
 func createOrVerifyAttemptWorktreeClaim(
+	root *VerifiedRoot,
 	marker, worktree string,
 	payload []byte,
 	fault AttemptWorktreeClaimFaultInjector,
 ) (bool, error) {
-	if _, err := os.Lstat(marker); err == nil {
-		existing, readErr := readAttemptWorktreeClaim(marker)
+	for {
+		published, retry, err := createOrVerifyAttemptWorktreeClaimOnce(
+			root, marker, worktree, payload, fault,
+		)
+		if retry {
+			continue
+		}
+		return published, err
+	}
+}
+
+func createOrVerifyAttemptWorktreeClaimOnce(
+	root *VerifiedRoot,
+	marker, worktree string,
+	payload []byte,
+	fault AttemptWorktreeClaimFaultInjector,
+) (bool, bool, error) {
+	if root == nil {
+		return false, false, fmt.Errorf("attempt worktree claim requires a verified root")
+	}
+	if _, exists, err := root.adapter.inspectExact(marker); err != nil {
+		return false, false, fmt.Errorf("inspect attempt worktree claim: %w", err)
+	} else if exists {
+		existing, readErr := readAttemptWorktreeClaim(root, marker)
 		if readErr != nil {
-			return false, readErr
+			return false, false, readErr
 		}
 		if !bytes.Equal(existing, payload) {
-			return false, fmt.Errorf("attempt worktree claim %s belongs to different immutable bindings", marker)
+			return false, false, fmt.Errorf("attempt worktree claim %s belongs to different immutable bindings", marker)
 		}
-		if err := syncDirectory(filepath.Dir(marker)); err != nil {
-			return false, fmt.Errorf("synchronize existing attempt worktree claim: %w", err)
+		if err := root.Sync(); err != nil {
+			return false, false, fmt.Errorf("synchronize existing attempt worktree claim: %w", err)
 		}
-		return false, nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return false, fmt.Errorf("inspect attempt worktree claim: %w", err)
+		return false, false, nil
 	}
-	if _, err := os.Lstat(worktree); err == nil {
-		return false, fmt.Errorf("attempt worktree path %s predates its ownership claim", worktree)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return false, fmt.Errorf("inspect attempt worktree before claim: %w", err)
+	if _, exists, err := root.adapter.inspectExact(worktree); err != nil {
+		return false, false, fmt.Errorf("inspect attempt worktree before claim: %w", err)
+	} else if exists {
+		return false, false, fmt.Errorf("attempt worktree path %s predates its ownership claim", worktree)
 	}
-	directory := filepath.Dir(marker)
-	file, err := os.CreateTemp(directory, "pending-attempt-claim-")
+
+	pending := marker + ".pending"
+	file, created, err := root.adapter.openRegularFileExact(
+		pending, os.O_RDWR, 0o600, true,
+	)
 	if err != nil {
-		return false, fmt.Errorf("create pending attempt worktree claim: %w", err)
+		return false, false, fmt.Errorf("open pending attempt worktree claim: %w", err)
 	}
-	temporary := file.Name()
-	removeOnFailure := true
+	fileOpen := true
+	locked := false
 	defer func() {
-		_ = file.Close()
-		if removeOnFailure {
-			_ = os.Remove(temporary)
+		if locked {
+			_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		}
+		if fileOpen {
+			_ = file.Close()
 		}
 	}()
-	if err := injectAttemptWorktreeClaimFault(fault, AttemptWorktreeClaimFaultAfterTemporaryCreated); err != nil {
-		return false, err
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return false, false, fmt.Errorf("pending attempt worktree claim %s is active", pending)
+		}
+		return false, false, fmt.Errorf("lock pending attempt worktree claim: %w", err)
 	}
-	if err := file.Chmod(0o600); err != nil {
-		return false, fmt.Errorf("set pending attempt worktree claim permissions: %w", err)
+	locked = true
+	if err := root.verifyOwnedRegularFile(pending, file); err != nil {
+		return false, false, err
 	}
-	if err := writeAll(file, payload); err != nil {
-		return false, fmt.Errorf("write pending attempt worktree claim: %w", err)
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return false, false, fmt.Errorf("inspect pending attempt worktree claim: %w", err)
 	}
-	if err := injectAttemptWorktreeClaimFault(fault, AttemptWorktreeClaimFaultAfterTemporaryWritten); err != nil {
-		return false, err
+	if err := root.adapter.verifyOpenedFileExact(pending, file); err != nil {
+		return false, false, err
 	}
-	if err := file.Sync(); err != nil {
-		return false, fmt.Errorf("synchronize pending attempt worktree claim: %w", err)
-	}
-	if err := injectAttemptWorktreeClaimFault(fault, AttemptWorktreeClaimFaultAfterTemporarySynced); err != nil {
-		return false, err
-	}
-	if err := file.Close(); err != nil {
-		return false, fmt.Errorf("close pending attempt worktree claim: %w", err)
-	}
-	if err := os.Link(temporary, marker); errors.Is(err, os.ErrExist) {
-		existing, readErr := readAttemptWorktreeClaim(marker)
+	if !created {
+		existing, readErr := readOpenedFileBounded(file, maxAttemptWorktreeClaimBytes)
 		if readErr != nil {
-			return false, readErr
+			return false, false, fmt.Errorf("read pending attempt worktree claim: %w", readErr)
 		}
 		if !bytes.Equal(existing, payload) {
-			return false, fmt.Errorf("attempt worktree claim %s belongs to different immutable bindings", marker)
+			if json.Valid(existing) {
+				return false, false, fmt.Errorf(
+					"pending attempt worktree claim belongs to different immutable bindings",
+				)
+			}
+			removed, removeErr := root.adapter.removeFileIdentityExact(
+				pending,
+				openedInfo,
+				func() error {
+					if err := root.VerifyPath(); err != nil {
+						return err
+					}
+					if _, exists, err := root.adapter.inspectExact(marker); err != nil {
+						return err
+					} else if exists {
+						return fmt.Errorf("attempt worktree claim appeared during pending recovery")
+					}
+					if _, exists, err := root.adapter.inspectExact(worktree); err != nil {
+						return err
+					} else if exists {
+						return fmt.Errorf("attempt worktree appeared during pending recovery")
+					}
+					return root.adapter.verifyOpenedFileExact(pending, file)
+				},
+			)
+			if removeErr != nil {
+				return false, false, fmt.Errorf(
+					"recover partial pending attempt worktree claim: %w", removeErr,
+				)
+			}
+			if !removed {
+				return false, false, fmt.Errorf(
+					"recover partial pending attempt worktree claim: staging file disappeared",
+				)
+			}
+			if err := root.Sync(); err != nil {
+				return false, false, fmt.Errorf(
+					"synchronize recovered pending attempt worktree claim: %w", err,
+				)
+			}
+			return false, true, nil
 		}
-		if err := os.Remove(temporary); err != nil {
-			return false, fmt.Errorf("remove superseded pending attempt worktree claim: %w", err)
-		}
-		removeOnFailure = false
-		if err := syncDirectory(directory); err != nil {
-			return false, fmt.Errorf("synchronize concurrently published attempt worktree claim: %w", err)
-		}
-		return false, nil
-	} else if err != nil {
-		return false, fmt.Errorf("publish attempt worktree claim without replacement: %w", err)
 	}
-	if err := injectAttemptWorktreeClaimFault(fault, AttemptWorktreeClaimFaultAfterPublished); err != nil {
-		return false, err
+	removeOnFailure := true
+	defer func() {
+		if removeOnFailure && created {
+			_, _ = root.adapter.removeFileIdentityExact(pending, openedInfo, nil)
+		}
+	}()
+	if created {
+		if err := injectAttemptWorktreeClaimFault(fault, AttemptWorktreeClaimFaultAfterTemporaryCreated); err != nil {
+			return false, false, err
+		}
+		if err := writeAll(file, payload); err != nil {
+			return false, false, fmt.Errorf("write pending attempt worktree claim: %w", err)
+		}
+		if err := injectAttemptWorktreeClaimFault(fault, AttemptWorktreeClaimFaultAfterTemporaryWritten); err != nil {
+			return false, false, err
+		}
 	}
-	if err := os.Remove(temporary); err != nil {
-		return false, fmt.Errorf("remove published pending attempt worktree claim: %w", err)
+	if err := file.Sync(); err != nil {
+		return false, false, fmt.Errorf("synchronize pending attempt worktree claim: %w", err)
+	}
+	if err := root.adapter.verifyOpenedFileExact(pending, file); err != nil {
+		return false, false, err
+	}
+	if created {
+		if err := injectAttemptWorktreeClaimFault(fault, AttemptWorktreeClaimFaultAfterTemporarySynced); err != nil {
+			return false, false, err
+		}
+	}
+	if err := root.adapter.renameFileNoReplace(pending, marker); err != nil {
+		if existing, readErr := readAttemptWorktreeClaim(root, marker); readErr == nil &&
+			bytes.Equal(existing, payload) {
+			_, _ = root.adapter.removeFileContentExact(
+				pending, payload, int64(len(payload)), nil,
+			)
+			removeOnFailure = false
+			return false, false, root.Sync()
+		}
+		return false, false, fmt.Errorf("publish attempt worktree claim without replacement: %w", err)
 	}
 	removeOnFailure = false
-	if err := syncDirectory(directory); err != nil {
-		return false, fmt.Errorf("publish attempt worktree claim: %w", err)
+	if err := injectAttemptWorktreeClaimFault(fault, AttemptWorktreeClaimFaultAfterPublished); err != nil {
+		return false, false, err
 	}
-	return true, nil
+	if err := root.Sync(); err != nil {
+		return false, false, fmt.Errorf("publish attempt worktree claim: %w", err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_UN); err != nil {
+		return false, false, fmt.Errorf("unlock published attempt worktree claim: %w", err)
+	}
+	locked = false
+	if err := file.Close(); err != nil {
+		return false, false, fmt.Errorf("close published attempt worktree claim: %w", err)
+	}
+	fileOpen = false
+	return true, false, nil
 }
 
 func injectAttemptWorktreeClaimFault(
@@ -644,15 +886,8 @@ func injectAttemptWorktreeClaimFault(
 	return nil
 }
 
-func readAttemptWorktreeClaim(marker string) ([]byte, error) {
-	info, err := os.Lstat(marker)
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("attempt worktree claim %s is not a regular file", marker)
-	}
-	content, err := readBoundedFile(marker, 16*1024)
+func readAttemptWorktreeClaim(root *VerifiedRoot, marker string) ([]byte, error) {
+	content, err := root.ReadBounded(marker, maxAttemptWorktreeClaimBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read attempt worktree claim: %w", err)
 	}

@@ -23,14 +23,27 @@ type RootedFilesystemAdapter struct {
 }
 
 func OpenRootedFilesystemAdapter(rootPath string) (*RootedFilesystemAdapter, error) {
-	return openRootedFilesystemAdapter(rootPath, false)
+	return openRootedFilesystemAdapter(rootPath, false, true)
 }
 
 func openOrCreateRootedFilesystemAdapter(rootPath string) (*RootedFilesystemAdapter, error) {
-	return openRootedFilesystemAdapter(rootPath, true)
+	return openRootedFilesystemAdapter(rootPath, true, true)
 }
 
-func openRootedFilesystemAdapter(rootPath string, create bool) (*RootedFilesystemAdapter, error) {
+// reopenVerifiedRootedFilesystemAdapter is used only after the same absolute
+// path has already passed exact-name validation. Revalidation still walks each
+// component without following links and compares every opened object with its
+// no-follow observation, but avoids repeatedly enumerating large ancestor
+// directories merely to rediscover the already-authorized spelling.
+func reopenVerifiedRootedFilesystemAdapter(rootPath string) (*RootedFilesystemAdapter, error) {
+	return openRootedFilesystemAdapter(rootPath, false, false)
+}
+
+func openRootedFilesystemAdapter(
+	rootPath string,
+	create bool,
+	requireExactNames bool,
+) (*RootedFilesystemAdapter, error) {
 	rootPath = filepath.Clean(strings.TrimSpace(rootPath))
 	if !filepath.IsAbs(rootPath) {
 		return nil, fmt.Errorf("rooted filesystem requires an absolute root")
@@ -56,7 +69,13 @@ func openRootedFilesystemAdapter(rootPath string, create bool) (*RootedFilesyste
 		if component == "" || component == "." || component == ".." {
 			return nil, fmt.Errorf("rooted filesystem root %s has an invalid component", rootPath)
 		}
-		info, exists, err := inspectRootEntryExact(current, component)
+		var info os.FileInfo
+		var exists bool
+		if requireExactNames {
+			info, exists, err = inspectRootEntryExact(current, component)
+		} else {
+			info, exists, err = inspectRootEntryKnownExact(current, component)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("inspect rooted filesystem component %s: %w", component, err)
 		}
@@ -64,11 +83,22 @@ func openRootedFilesystemAdapter(rootPath string, create bool) (*RootedFilesyste
 			if !create {
 				return nil, &os.PathError{Op: "open-root", Path: rootPath, Err: os.ErrNotExist}
 			}
-			if err := current.Mkdir(component, 0o755); err != nil {
-				return nil, fmt.Errorf("create rooted filesystem component %s: %w", component, err)
+			created := false
+			permission := os.FileMode(0o755)
+			if index == len(components)-1 {
+				permission = 0o700
 			}
-			if err := syncRootHandle(current); err != nil {
-				return nil, err
+			if err := current.Mkdir(component, permission); err != nil {
+				if !errors.Is(err, os.ErrExist) {
+					return nil, fmt.Errorf("create rooted filesystem component %s: %w", component, err)
+				}
+			} else {
+				created = true
+			}
+			if created {
+				if err := syncRootHandle(current); err != nil {
+					return nil, err
+				}
 			}
 			info, exists, err = inspectRootEntryExact(current, component)
 			if err != nil || !exists {
@@ -107,6 +137,17 @@ func openRootedFilesystemAdapter(rootPath string, create bool) (*RootedFilesyste
 		}
 	}
 	return nil, fmt.Errorf("rooted filesystem root %s could not be opened", rootPath)
+}
+
+func inspectRootEntryKnownExact(directory *os.Root, name string) (os.FileInfo, bool, error) {
+	info, err := directory.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return info, true, nil
 }
 
 func (adapter *RootedFilesystemAdapter) Root() string {
@@ -185,6 +226,25 @@ func (adapter *RootedFilesystemAdapter) readDirectory(relative string) ([]rooted
 }
 
 func readRootDirectoryEntries(directory *os.Root) ([]rootedDirectoryEntry, error) {
+	names, err := readRootDirectoryNames(directory)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]rootedDirectoryEntry, 0, len(names))
+	for _, name := range names {
+		info, err := directory.Lstat(name)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("inspect rooted directory entry %s: %w", name, err)
+		}
+		result = append(result, rootedDirectoryEntry{name: name, info: info})
+	}
+	return result, nil
+}
+
+func readRootDirectoryNames(directory *os.Root) ([]string, error) {
 	opened, err := directory.Open(".")
 	if err != nil {
 		return nil, fmt.Errorf("open rooted directory: %w", err)
@@ -197,34 +257,27 @@ func readRootDirectoryEntries(directory *os.Root) ([]rootedDirectoryEntry, error
 	if closeErr != nil {
 		return nil, fmt.Errorf("close rooted directory: %w", closeErr)
 	}
-	result := make([]rootedDirectoryEntry, 0, len(entries))
+	result := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		info, err := directory.Lstat(entry.Name())
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			return nil, fmt.Errorf("inspect rooted directory entry %s: %w", entry.Name(), err)
-		}
-		result = append(result, rootedDirectoryEntry{name: entry.Name(), info: info})
+		result = append(result, entry.Name())
 	}
 	return result, nil
 }
 
 func inspectRootEntryExact(directory *os.Root, name string) (os.FileInfo, bool, error) {
-	entries, err := readRootDirectoryEntries(directory)
+	names, err := readRootDirectoryNames(directory)
 	if err != nil {
 		return nil, false, err
 	}
 	exact := false
 	aliases := make([]string, 0, 1)
 	key := materializationCollisionKey(name)
-	for _, entry := range entries {
-		if entry.name == name {
+	for _, observedName := range names {
+		if observedName == name {
 			exact = true
 		}
-		if materializationCollisionKey(entry.name) == key {
-			aliases = append(aliases, entry.name)
+		if materializationCollisionKey(observedName) == key {
+			aliases = append(aliases, observedName)
 		}
 	}
 	if len(aliases) > 1 || (!exact && len(aliases) == 1) {
@@ -373,6 +426,106 @@ func (adapter *RootedFilesystemAdapter) readBounded(relative string, maximum int
 	return content, nil
 }
 
+func (adapter *RootedFilesystemAdapter) openRegularFileExact(
+	relative string,
+	flags int,
+	permission os.FileMode,
+	create bool,
+) (*os.File, bool, error) {
+	rooted, err := NewRootedPath(adapter.rootPath, relative)
+	if err != nil {
+		return nil, false, err
+	}
+	if flags&os.O_TRUNC != 0 {
+		return nil, false, fmt.Errorf("rooted file %s must be verified before truncation", relative)
+	}
+	parent := path.Dir(rooted.Relative())
+	base := path.Base(rooted.Relative())
+	directory, err := adapter.openDirectoryExact(parent)
+	if err != nil {
+		return nil, false, err
+	}
+	defer directory.Close()
+
+	info, exists, err := inspectRootEntryExact(directory, base)
+	if err != nil {
+		return nil, false, err
+	}
+	if exists && (info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular()) {
+		return nil, false, fmt.Errorf("rooted path %s is not a regular file", relative)
+	}
+	if !exists && !create {
+		return nil, false, &os.PathError{Op: "open", Path: relative, Err: os.ErrNotExist}
+	}
+
+	openFlags := flags &^ (os.O_CREATE | os.O_EXCL)
+	created := false
+	if !exists {
+		openFlags |= os.O_CREATE | os.O_EXCL
+		created = true
+	}
+	file, err := directory.OpenFile(base, openFlags, permission.Perm())
+	if err != nil && created && errors.Is(err, os.ErrExist) {
+		info, exists, inspectErr := inspectRootEntryExact(directory, base)
+		if inspectErr != nil {
+			return nil, false, inspectErr
+		}
+		if !exists || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return nil, false, fmt.Errorf("concurrently created rooted path %s is not a regular file", relative)
+		}
+		created = false
+		file, err = directory.OpenFile(base, flags&^(os.O_CREATE|os.O_EXCL), permission.Perm())
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("open rooted file %s: %w", relative, err)
+	}
+	if err := adapter.verifyOpenedFileExact(relative, file); err != nil {
+		_ = file.Close()
+		return nil, false, err
+	}
+	if created {
+		if err := syncRootHandle(directory); err != nil {
+			_ = file.Close()
+			return nil, false, err
+		}
+	}
+	return file, created, nil
+}
+
+func (adapter *RootedFilesystemAdapter) verifyOpenedFileExact(relative string, opened *os.File) error {
+	if opened == nil {
+		return fmt.Errorf("verify rooted file %s: file is required", relative)
+	}
+	openedInfo, err := opened.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect opened rooted file %s: %w", relative, err)
+	}
+	if !openedInfo.Mode().IsRegular() {
+		return fmt.Errorf("opened rooted path %s is not a regular file", relative)
+	}
+	currentInfo, exists, err := adapter.inspectExact(relative)
+	if err != nil {
+		return fmt.Errorf("reinspect rooted file %s: %w", relative, err)
+	}
+	if !exists || !os.SameFile(openedInfo, currentInfo) {
+		return fmt.Errorf("rooted file %s was replaced", relative)
+	}
+	return nil
+}
+
+func (adapter *RootedFilesystemAdapter) synchronizeOpenedFile(relative string, opened *os.File) error {
+	if err := adapter.verifyOpenedFileExact(relative, opened); err != nil {
+		return err
+	}
+	if err := opened.Sync(); err != nil {
+		return fmt.Errorf("synchronize rooted file %s: %w", relative, err)
+	}
+	if err := adapter.verifyOpenedFileExact(relative, opened); err != nil {
+		return err
+	}
+	return adapter.syncDirectory(path.Dir(relative))
+}
+
 func (adapter *RootedFilesystemAdapter) makeDirectory(relative string, permission os.FileMode) (bool, error) {
 	rooted, err := NewRootedPath(adapter.rootPath, relative)
 	if err != nil {
@@ -396,6 +549,15 @@ func (adapter *RootedFilesystemAdapter) makeDirectory(relative string, permissio
 		return false, nil
 	}
 	if err := directory.Mkdir(base, permission.Perm()); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			info, exists, inspectErr := inspectRootEntryExact(directory, base)
+			if inspectErr != nil {
+				return false, inspectErr
+			}
+			if exists && info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
+				return false, nil
+			}
+		}
 		return false, fmt.Errorf("create rooted directory %s: %w", relative, err)
 	}
 	if err := syncRootHandle(directory); err != nil {
@@ -749,6 +911,26 @@ func (adapter *RootedFilesystemAdapter) removeFileExact(
 	}, beforeUnlink)
 }
 
+func (adapter *RootedFilesystemAdapter) removeFileIdentityExact(
+	relative string,
+	expected os.FileInfo,
+	beforeUnlink func() error,
+) (bool, error) {
+	if expected == nil {
+		return false, fmt.Errorf("rooted removal identity is required")
+	}
+	return adapter.removeFileBound(relative, func(opened *os.File) error {
+		observed, err := opened.Stat()
+		if err != nil {
+			return err
+		}
+		if !os.SameFile(expected, observed) {
+			return fmt.Errorf("rooted removal target %s does not match its opened identity", relative)
+		}
+		return nil
+	}, beforeUnlink)
+}
+
 func (adapter *RootedFilesystemAdapter) removeFileContentExact(
 	relative string,
 	expected []byte,
@@ -950,6 +1132,125 @@ func (adapter *RootedFilesystemAdapter) removeEmptyDirectoryExact(
 		return false, err
 	}
 	return true, nil
+}
+
+// removeDirectoryTreeExact removes one rooted directory without following
+// links or allowing a replaced entry to be removed under the original
+// authorization. It is reserved for directories whose absence was claimed
+// before tool-owned materialization began.
+func (adapter *RootedFilesystemAdapter) removeDirectoryTreeExact(relative string) error {
+	rooted, err := NewRootedPath(adapter.rootPath, relative)
+	if err != nil {
+		return err
+	}
+	parent, err := adapter.openDirectoryExact(path.Dir(rooted.Relative()))
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	base := path.Base(rooted.Relative())
+	info, exists, err := inspectRootEntryExact(parent, base)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("rooted tree %s is not a directory", relative)
+	}
+	tree, err := parent.OpenRoot(base)
+	if err != nil {
+		return fmt.Errorf("open rooted tree %s: %w", relative, err)
+	}
+	openedInfo, err := tree.Stat(".")
+	if err != nil || !os.SameFile(info, openedInfo) {
+		_ = tree.Close()
+		if err == nil {
+			err = fmt.Errorf("directory identity changed")
+		}
+		return fmt.Errorf("verify rooted tree %s: %w", relative, err)
+	}
+	if err := removeRootContentsExact(tree, relative); err != nil {
+		_ = tree.Close()
+		return err
+	}
+	if err := tree.Close(); err != nil {
+		return fmt.Errorf("close rooted tree %s: %w", relative, err)
+	}
+	current, currentExists, err := inspectRootEntryExact(parent, base)
+	if err != nil || !currentExists || !os.SameFile(openedInfo, current) {
+		if err == nil {
+			err = fmt.Errorf("directory was replaced")
+		}
+		return fmt.Errorf("revalidate rooted tree %s: %w", relative, err)
+	}
+	if err := parent.Remove(base); err != nil {
+		return fmt.Errorf("remove rooted tree %s: %w", relative, err)
+	}
+	return syncRootHandle(parent)
+}
+
+func removeRootContentsExact(directory *os.Root, display string) error {
+	entries, err := readRootDirectoryEntries(directory)
+	if err != nil {
+		return fmt.Errorf("read rooted tree %s: %w", display, err)
+	}
+	for _, entry := range entries {
+		current, exists, err := inspectRootEntryExact(directory, entry.name)
+		if err != nil {
+			return fmt.Errorf("inspect rooted tree entry %s/%s: %w", display, entry.name, err)
+		}
+		if !exists || !os.SameFile(entry.info, current) {
+			return fmt.Errorf("rooted tree entry %s/%s was replaced", display, entry.name)
+		}
+		switch {
+		case current.IsDir():
+			child, err := directory.OpenRoot(entry.name)
+			if err != nil {
+				return fmt.Errorf("open rooted tree directory %s/%s: %w", display, entry.name, err)
+			}
+			opened, err := child.Stat(".")
+			if err != nil || !os.SameFile(current, opened) {
+				_ = child.Close()
+				if err == nil {
+					err = fmt.Errorf("directory identity changed")
+				}
+				return fmt.Errorf("verify rooted tree directory %s/%s: %w", display, entry.name, err)
+			}
+			if err := removeRootContentsExact(child, display+"/"+entry.name); err != nil {
+				_ = child.Close()
+				return err
+			}
+			if err := child.Close(); err != nil {
+				return err
+			}
+			rechecked, recheckedExists, err := inspectRootEntryExact(directory, entry.name)
+			if err != nil || !recheckedExists || !os.SameFile(opened, rechecked) {
+				if err == nil {
+					err = fmt.Errorf("directory was replaced")
+				}
+				return fmt.Errorf("revalidate rooted tree directory %s/%s: %w", display, entry.name, err)
+			}
+			if err := directory.Remove(entry.name); err != nil {
+				return fmt.Errorf("remove rooted tree directory %s/%s: %w", display, entry.name, err)
+			}
+		case current.Mode().IsRegular() || current.Mode()&os.ModeSymlink != 0:
+			rechecked, recheckedExists, err := inspectRootEntryExact(directory, entry.name)
+			if err != nil || !recheckedExists || !os.SameFile(current, rechecked) {
+				if err == nil {
+					err = fmt.Errorf("entry was replaced")
+				}
+				return fmt.Errorf("revalidate rooted tree entry %s/%s: %w", display, entry.name, err)
+			}
+			if err := directory.Remove(entry.name); err != nil {
+				return fmt.Errorf("remove rooted tree entry %s/%s: %w", display, entry.name, err)
+			}
+		default:
+			return fmt.Errorf("rooted tree entry %s/%s has unsupported type %s", display, entry.name, current.Mode())
+		}
+	}
+	return syncRootHandle(directory)
 }
 
 func (adapter *RootedFilesystemAdapter) syncDirectory(relative string) error {

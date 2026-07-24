@@ -8,7 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/charlesnpx/feature-implement/internal/workspace"
@@ -32,6 +34,10 @@ func (git *fakeAttemptGit) ValidateAttemptBranch(context.Context, string, string
 	return git.validateErr
 }
 
+func (git *fakeAttemptGit) ValidateAttemptWorktreeRoot(context.Context, string, string) error {
+	return git.validateErr
+}
+
 func (git *fakeAttemptGit) InspectAttemptRefs(context.Context, string, string) (workspace.AttemptRefInventory, error) {
 	if git.inspectErr != nil {
 		return workspace.AttemptRefInventory{}, git.inspectErr
@@ -48,6 +54,7 @@ func (git *fakeAttemptGit) InspectAttemptWorktree(context.Context, string, strin
 
 func (git *fakeAttemptGit) PrepareAttemptWorktree(
 	_ context.Context,
+	_ string,
 	claim workspace.AttemptWorktreeClaim,
 	recoverUnregistered bool,
 ) error {
@@ -91,10 +98,11 @@ func (git *fakeAttemptGit) ReleaseAttemptWorktreeClaim(
 func (git *fakeAttemptGit) CreateAttemptWorktree(
 	_ context.Context,
 	_ string,
-	branch, _ string,
-	base workspace.GitObjectID,
+	claim workspace.AttemptWorktreeClaim,
 	createBranch, _ bool,
 ) error {
+	branch := claim.Branch()
+	base := claim.Base()
 	if git.createErr != nil {
 		if git.partialOnCreateError {
 			git.local = append(git.local, branch)
@@ -486,6 +494,8 @@ func TestAttemptMaterializationRecoversClaimedUnregisteredPartialWorktree(t *tes
 }
 
 func TestAttemptWorktreeClaimPublicationIsAtomicAcrossCrashPoints(t *testing.T) {
+	repositoryRoot := filepath.Join(t.TempDir(), "repository")
+	runGitSetup(t, "", "init", "--initial-branch=main", repositoryRoot)
 	base, err := workspace.ParseGitObjectID("sha1:" + strings.Repeat("a", 40))
 	if err != nil {
 		t.Fatal(err)
@@ -517,7 +527,9 @@ func TestAttemptWorktreeClaimPublicationIsAtomicAcrossCrashPoints(t *testing.T) 
 					return nil
 				},
 			)
-			if err := adapter.PrepareAttemptWorktree(context.Background(), claim, false); !errors.Is(err, crash) {
+			if err := adapter.PrepareAttemptWorktree(
+				context.Background(), repositoryRoot, claim, false,
+			); !errors.Is(err, crash) {
 				t.Fatalf("claim fault at %s = %v", point, err)
 			}
 			marker := worktree + ".feature-attempt-claim"
@@ -531,7 +543,9 @@ func TestAttemptWorktreeClaimPublicationIsAtomicAcrossCrashPoints(t *testing.T) 
 			}
 
 			adapter = workspace.DefaultLocalAttemptGitAdapter()
-			if err := adapter.PrepareAttemptWorktree(context.Background(), claim, false); err != nil {
+			if err := adapter.PrepareAttemptWorktree(
+				context.Background(), repositoryRoot, claim, false,
+			); err != nil {
 				t.Fatalf("claim retry after %s: %v", point, err)
 			}
 			if err := adapter.ReleaseAttemptWorktreeClaim(context.Background(), claim); err != nil {
@@ -541,6 +555,412 @@ func TestAttemptWorktreeClaimPublicationIsAtomicAcrossCrashPoints(t *testing.T) 
 				t.Fatalf("claim marker remained after retry at %s: %v", point, err)
 			}
 		})
+	}
+}
+
+func TestAttemptWorktreeClaimRecoversCrashStrandedPendingFile(t *testing.T) {
+	const (
+		pendingPathEnvironment = "FEATURE_TEST_ATTEMPT_CLAIM_PENDING_PATH"
+		pendingModeEnvironment = "FEATURE_TEST_ATTEMPT_CLAIM_PENDING_MODE"
+	)
+	if pending := os.Getenv(pendingPathEnvironment); pending != "" {
+		file, err := os.OpenFile(pending, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "create crash-stranded pending claim: %v\n", err)
+			os.Exit(2)
+		}
+		if os.Getenv(pendingModeEnvironment) == "partial" {
+			if _, err := file.Write([]byte(`{"schema_version":3,"kind":"attempt_`)); err != nil {
+				_, _ = fmt.Fprintf(os.Stderr, "write partial pending claim: %v\n", err)
+				os.Exit(2)
+			}
+		}
+		if err := file.Sync(); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "synchronize crash-stranded pending claim: %v\n", err)
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
+
+	repositoryRoot := filepath.Join(t.TempDir(), "repository")
+	runGitSetup(t, "", "init", "--initial-branch=main", repositoryRoot)
+	base, err := workspace.ParseGitObjectID("sha1:" + strings.Repeat("a", 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"empty", "partial"} {
+		t.Run(mode, func(t *testing.T) {
+			worktree := filepath.Join(t.TempDir(), "attempt-worktree")
+			claim, err := workspace.NewAttemptWorktreeClaim(
+				workspace.MustID("attempt-crash-pending-"+mode),
+				workspace.DigestBytes([]byte("generation-"+mode)),
+				base,
+				"mu/claim-crash-pending-"+mode+"-a1-123456789abc",
+				worktree,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pending := worktree + ".feature-attempt-claim.pending"
+			command := exec.Command(
+				os.Args[0],
+				"-test.run=^TestAttemptWorktreeClaimRecoversCrashStrandedPendingFile$",
+			)
+			command.Env = append(
+				os.Environ(),
+				pendingPathEnvironment+"="+pending,
+				pendingModeEnvironment+"="+mode,
+			)
+			if output, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("crash helper: %v\n%s", err, output)
+			}
+			if _, err := os.Lstat(pending); err != nil {
+				t.Fatalf("crash helper did not leave pending claim: %v", err)
+			}
+
+			adapter := workspace.DefaultLocalAttemptGitAdapter()
+			if err := adapter.PrepareAttemptWorktree(
+				context.Background(), repositoryRoot, claim, false,
+			); err != nil {
+				t.Fatalf("recover %s pending claim: %v", mode, err)
+			}
+			if _, err := os.Lstat(pending); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("recovered pending claim remains: %v", err)
+			}
+			marker := worktree + ".feature-attempt-claim"
+			if _, err := os.Lstat(marker); err != nil {
+				t.Fatalf("recovered claim was not published: %v", err)
+			}
+			if err := adapter.ReleaseAttemptWorktreeClaim(
+				context.Background(), claim,
+			); err != nil {
+				t.Fatalf("release recovered claim: %v", err)
+			}
+		})
+	}
+}
+
+func TestAttemptWorktreeClaimDoesNotReclaimActivePendingFile(t *testing.T) {
+	repositoryRoot := filepath.Join(t.TempDir(), "repository")
+	runGitSetup(t, "", "init", "--initial-branch=main", repositoryRoot)
+	base, err := workspace.ParseGitObjectID("sha1:" + strings.Repeat("a", 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree := filepath.Join(t.TempDir(), "attempt-worktree")
+	claim, err := workspace.NewAttemptWorktreeClaim(
+		workspace.MustID("attempt-active-pending"),
+		workspace.DigestBytes([]byte("active-pending-generation")),
+		base,
+		"mu/claim-active-pending-a1-123456789abc",
+		worktree,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := worktree + ".feature-attempt-claim.pending"
+	file, err := os.OpenFile(pending, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := file.Write([]byte(`{"schema_version":3`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	locked := true
+	defer func() {
+		if locked {
+			_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		}
+	}()
+
+	adapter := workspace.DefaultLocalAttemptGitAdapter()
+	if err := adapter.PrepareAttemptWorktree(
+		context.Background(), repositoryRoot, claim, false,
+	); err == nil || !strings.Contains(err.Error(), "pending attempt worktree claim") ||
+		!strings.Contains(err.Error(), "is active") {
+		t.Fatalf("active pending claim error = %v", err)
+	}
+	if _, err := os.Lstat(pending); err != nil {
+		t.Fatalf("active pending claim was removed: %v", err)
+	}
+	if _, err := os.Lstat(worktree + ".feature-attempt-claim"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("active pending claim was published: %v", err)
+	}
+
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	locked = false
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.PrepareAttemptWorktree(
+		context.Background(), repositoryRoot, claim, false,
+	); err != nil {
+		t.Fatalf("recover released pending claim: %v", err)
+	}
+	if err := adapter.ReleaseAttemptWorktreeClaim(
+		context.Background(), claim,
+	); err != nil {
+		t.Fatalf("release recovered active claim: %v", err)
+	}
+}
+
+func TestAttemptWorktreeCreationRejectsReplacedClaimParent(t *testing.T) {
+	parent := t.TempDir()
+	repositoryRoot := filepath.Join(parent, "repository")
+	runGitSetup(t, "", "init", "--initial-branch=main", repositoryRoot)
+	runGitSetup(t, repositoryRoot, "config", "user.name", "Attempt Test")
+	runGitSetup(t, repositoryRoot, "config", "user.email", "attempt@example.invalid")
+	if err := os.WriteFile(
+		filepath.Join(repositoryRoot, "tracked.txt"),
+		[]byte("committed\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	runGitSetup(t, repositoryRoot, "add", "tracked.txt")
+	runGitSetup(t, repositoryRoot, "commit", "-m", "initial")
+	baseText := strings.TrimSpace(string(runGitSetup(t, repositoryRoot, "rev-parse", "HEAD")))
+	base, err := workspace.ParseGitObjectID("sha1:" + baseText)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	worktreeParent := filepath.Join(parent, "attempts")
+	if err := os.Mkdir(worktreeParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	worktree := filepath.Join(worktreeParent, "attempt")
+	claim, err := workspace.NewAttemptWorktreeClaim(
+		workspace.MustID("attempt-parent-binding"),
+		workspace.DigestBytes([]byte("generation")),
+		base,
+		"mu/parent-binding-a1-123456789abc",
+		worktree,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := workspace.DefaultLocalAttemptGitAdapter()
+	if err := adapter.PrepareAttemptWorktree(
+		context.Background(), repositoryRoot, claim, false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	marker := worktree + ".feature-attempt-claim"
+	markerContent, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	movedParent := worktreeParent + "-moved"
+	if err := os.Rename(worktreeParent, movedParent); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(worktreeParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, markerContent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := adapter.CreateAttemptWorktree(
+		context.Background(), repositoryRoot, claim, true, false,
+	); err == nil || !strings.Contains(err.Error(), "does not bind the verified parent root") {
+		t.Fatalf("replaced claim parent creation error = %v", err)
+	}
+	if branches := strings.TrimSpace(string(
+		runGitSetup(t, repositoryRoot, "branch", "--list", claim.Branch()),
+	)); branches != "" {
+		t.Fatalf("replaced claim parent created branch: %q", branches)
+	}
+}
+
+func TestAttemptWorktreeAdmissionRejectsGitOwnedRootsBeforeMutation(t *testing.T) {
+	repositoryRoot, linkedRoot, base := newRealAttemptRepository(t)
+	fixture := newDefinitionFixture(t)
+	workspaceSource := strings.Split(string(fixture.sources.Workspace.Bytes), "\n")
+	for index, line := range workspaceSource {
+		if strings.HasPrefix(line, "  root: ") {
+			workspaceSource[index] = "  root: " + repositoryRoot
+		}
+	}
+	fixture.sources.Workspace.Bytes = []byte(strings.Join(workspaceSource, "\n"))
+	definition := mustDefinition(t, fixture.sources)
+	goal, err := workspace.NewGoalBinding(
+		workspace.MustID("root-admission-goal"), workspace.GoalScopeMergeUnit,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		"repository-root": repositoryRoot,
+		"git-common-root": filepath.Join(repositoryRoot, ".git"),
+		"linked-worktree": linkedRoot,
+	}
+	for name, worktreeRoot := range cases {
+		t.Run(name, func(t *testing.T) {
+			runtimeRoot := t.TempDir()
+			if _, err := workspace.InitializeWorkspaceV2(
+				runtimeRoot, definition, mustTime(t, "2026-07-21T10:15:00Z"),
+			); err != nil {
+				t.Fatal(err)
+			}
+			journal, err := workspace.OpenWorkspaceJournal(
+				runtimeRoot, workspace.JournalReadWrite,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer journal.Close()
+			beforeRecords := journalRecordCount(t, journal)
+			beforeEntries := directoryEntryNames(t, worktreeRoot)
+			originalInfo, err := os.Stat(worktreeRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(worktreeRoot, 0o555); err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := os.Chmod(worktreeRoot, originalInfo.Mode().Perm()); err != nil {
+					t.Errorf("restore worktree-root permissions: %v", err)
+				}
+			}()
+
+			faultFired := false
+			adapter := workspace.DefaultLocalAttemptGitAdapter().
+				WithAttemptWorktreeClaimFaultInjector(
+					func(workspace.AttemptWorktreeClaimFaultPoint) error {
+						faultFired = true
+						return errors.New("claim publication must not start")
+					},
+				)
+			if _, err := workspace.ReserveAttempt(
+				context.Background(), journal, definition, adapter,
+				workspace.ReserveAttemptRequest{
+					MergeUnit:     mustMergeUnitReference(t, "alpha-plan", "unit-one"),
+					AttemptNumber: 1,
+					Base:          base,
+					WorktreeRoot:  worktreeRoot,
+					Goal:          goal,
+					OccurredAt:    mustTime(t, "2026-07-21T10:16:00Z"),
+				},
+			); err == nil || !strings.Contains(err.Error(), "unsafe attempt worktree overlap") {
+				t.Fatalf("Git-owned worktree root reservation error = %v", err)
+			}
+			if afterRecords := journalRecordCount(t, journal); afterRecords != beforeRecords {
+				t.Fatalf(
+					"rejected worktree root journaled an attempt: before=%d after=%d",
+					beforeRecords, afterRecords,
+				)
+			}
+
+			worktree := filepath.Join(worktreeRoot, "rejected-attempt")
+			claim, err := workspace.NewAttemptWorktreeClaim(
+				workspace.MustID("rejected-"+name),
+				workspace.DigestBytes([]byte("root-admission-generation")),
+				base,
+				"mu/root-admission-"+name+"-a1",
+				worktree,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := adapter.PrepareAttemptWorktree(
+				context.Background(), repositoryRoot, claim, false,
+			); err == nil || !strings.Contains(err.Error(), "unsafe attempt worktree overlap") {
+				t.Fatalf("Git-owned worktree root preparation error = %v", err)
+			}
+			if faultFired {
+				t.Fatal("rejected worktree root reached claim publication")
+			}
+			if afterEntries := directoryEntryNames(t, worktreeRoot); !slices.Equal(
+				beforeEntries, afterEntries,
+			) {
+				t.Fatalf(
+					"rejected worktree root was mutated: before=%v after=%v",
+					beforeEntries, afterEntries,
+				)
+			}
+			for _, suffix := range []string{
+				".feature-attempt-claim",
+				".feature-attempt-claim.pending",
+			} {
+				if _, err := os.Lstat(worktree + suffix); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("rejected worktree root published %s: %v", suffix, err)
+				}
+			}
+		})
+	}
+}
+
+func TestAttemptWorktreeAdmissionAllowsSafeExternalRoot(t *testing.T) {
+	repositoryRoot, _, base := newRealAttemptRepository(t)
+	fixture := newDefinitionFixture(t)
+	workspaceSource := strings.Split(string(fixture.sources.Workspace.Bytes), "\n")
+	for index, line := range workspaceSource {
+		if strings.HasPrefix(line, "  root: ") {
+			workspaceSource[index] = "  root: " + repositoryRoot
+		}
+	}
+	fixture.sources.Workspace.Bytes = []byte(strings.Join(workspaceSource, "\n"))
+	definition := mustDefinition(t, fixture.sources)
+	runtimeRoot := t.TempDir()
+	if _, err := workspace.InitializeWorkspaceV2(
+		runtimeRoot, definition, mustTime(t, "2026-07-21T10:17:00Z"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := workspace.OpenWorkspaceJournal(
+		runtimeRoot, workspace.JournalReadWrite,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+	goal, err := workspace.NewGoalBinding(
+		workspace.MustID("safe-root-goal"), workspace.GoalScopeMergeUnit,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktreeRoot := t.TempDir()
+	adapter := workspace.DefaultLocalAttemptGitAdapter()
+	attempt, err := workspace.ReserveAttempt(
+		context.Background(), journal, definition, adapter,
+		workspace.ReserveAttemptRequest{
+			MergeUnit:     mustMergeUnitReference(t, "alpha-plan", "unit-one"),
+			AttemptNumber: 1,
+			Base:          base,
+			WorktreeRoot:  worktreeRoot,
+			Goal:          goal,
+			OccurredAt:    mustTime(t, "2026-07-21T10:18:00Z"),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := workspace.MaterializeAttempt(
+		context.Background(), journal, definition, adapter,
+		workspace.MaterializeAttemptRequest{
+			AttemptID:  attempt.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-21T10:19:00Z"),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started.Phase() != workspace.AttemptActive ||
+		filepath.Dir(started.Worktree()) != worktreeRoot {
+		t.Fatalf("safe external worktree root materialization = %#v", started)
 	}
 }
 
@@ -618,7 +1038,9 @@ func TestLocalGitAttemptMaterializationPreservesDirtyPrimaryCheckout(t *testing.
 	if err := os.WriteFile(unowned, []byte("must survive\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := adapter.PrepareAttemptWorktree(context.Background(), claim, true); err == nil ||
+	if err := adapter.PrepareAttemptWorktree(
+		context.Background(), repositoryRoot, claim, true,
+	); err == nil ||
 		!strings.Contains(err.Error(), "predates its ownership claim") {
 		t.Fatalf("unowned worktree path was accepted for recovery: %v", err)
 	}
@@ -628,7 +1050,9 @@ func TestLocalGitAttemptMaterializationPreservesDirtyPrimaryCheckout(t *testing.
 	if err := os.RemoveAll(attempt.Worktree()); err != nil {
 		t.Fatal(err)
 	}
-	if err := adapter.PrepareAttemptWorktree(context.Background(), claim, false); err != nil {
+	if err := adapter.PrepareAttemptWorktree(
+		context.Background(), repositoryRoot, claim, false,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(attempt.Worktree(), 0o755); err != nil {
@@ -637,7 +1061,9 @@ func TestLocalGitAttemptMaterializationPreservesDirtyPrimaryCheckout(t *testing.
 	if err := os.WriteFile(filepath.Join(attempt.Worktree(), "partial.txt"), []byte("partial\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := adapter.PrepareAttemptWorktree(context.Background(), claim, true); err != nil {
+	if err := adapter.PrepareAttemptWorktree(
+		context.Background(), repositoryRoot, claim, true,
+	); err != nil {
 		t.Fatalf("recover claimed partial worktree: %v", err)
 	}
 	if _, err := os.Lstat(attempt.Worktree()); !errors.Is(err, os.ErrNotExist) {
@@ -682,6 +1108,64 @@ func TestLocalGitAttemptMaterializationPreservesDirtyPrimaryCheckout(t *testing.
 	if got := strings.TrimSpace(string(runGitSetup(t, started.Worktree(), "rev-parse", "--abbrev-ref", "HEAD"))); got != started.Branch() {
 		t.Fatalf("attempt worktree branch = %q, expected %q", got, started.Branch())
 	}
+}
+
+func newRealAttemptRepository(
+	t *testing.T,
+) (repositoryRoot string, linkedRoot string, base workspace.GitObjectID) {
+	t.Helper()
+	parent := t.TempDir()
+	repositoryRoot = filepath.Join(parent, "repository")
+	remoteRoot := filepath.Join(parent, "remote.git")
+	linkedRoot = filepath.Join(parent, "linked")
+	runGitSetup(t, "", "init", "--initial-branch=main", repositoryRoot)
+	runGitSetup(t, "", "init", "--bare", remoteRoot)
+	runGitSetup(t, repositoryRoot, "config", "user.name", "Attempt Test")
+	runGitSetup(t, repositoryRoot, "config", "user.email", "attempt@example.invalid")
+	if err := os.WriteFile(
+		filepath.Join(repositoryRoot, "tracked.txt"),
+		[]byte("committed\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	runGitSetup(t, repositoryRoot, "add", "tracked.txt")
+	runGitSetup(t, repositoryRoot, "commit", "-m", "initial")
+	runGitSetup(t, repositoryRoot, "remote", "add", "origin", remoteRoot)
+	runGitSetup(t, repositoryRoot, "push", "-u", "origin", "main")
+	runGitSetup(t, repositoryRoot, "worktree", "add", "-b", "linked-fixture", linkedRoot, "main")
+	baseText := strings.TrimSpace(string(
+		runGitSetup(t, repositoryRoot, "rev-parse", "HEAD"),
+	))
+	var err error
+	base, err = workspace.ParseGitObjectID("sha1:" + baseText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repositoryRoot, linkedRoot, base
+}
+
+func directoryEntryNames(t *testing.T, root string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	slices.Sort(names)
+	return names
+}
+
+func journalRecordCount(t *testing.T, journal *workspace.WorkspaceJournal) int {
+	t.Helper()
+	snapshot, err := journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(snapshot.Records())
 }
 
 func TestPauseOnlyBoundaryAtomicallyPausesAndResumesSameGoal(t *testing.T) {

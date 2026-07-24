@@ -71,6 +71,9 @@ func ReserveAttempt(
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
+	if err := git.ValidateAttemptWorktreeRoot(ctx, manifest.repositoryRoot, worktree); err != nil {
+		return RuntimeAttemptProjection{}, err
+	}
 	snapshot, runtime, err := readAttemptRuntime(journal, definition)
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
@@ -231,7 +234,7 @@ func MaterializeAttempt(
 			return RuntimeAttemptProjection{}, fmt.Errorf("interrupted worktree registration does not match the attempt intent")
 		}
 		if err := git.CreateAttemptWorktree(
-			ctx, manifest.repositoryRoot, attempt.branch, attempt.worktree, attempt.base, false, true,
+			ctx, manifest.repositoryRoot, claim, false, true,
 		); err != nil {
 			return RuntimeAttemptProjection{}, err
 		}
@@ -243,7 +246,9 @@ func MaterializeAttempt(
 			return RuntimeAttemptProjection{}, err
 		}
 	} else if !inspection.worktreeRegistered {
-		if err := git.PrepareAttemptWorktree(ctx, claim, inspection.worktreeExists); err != nil {
+		if err := git.PrepareAttemptWorktree(
+			ctx, manifest.repositoryRoot, claim, inspection.worktreeExists,
+		); err != nil {
 			return RuntimeAttemptProjection{}, err
 		}
 		inspection, err = git.InspectAttemptWorktree(ctx, manifest.repositoryRoot, attempt.branch, attempt.worktree)
@@ -254,7 +259,7 @@ func MaterializeAttempt(
 			return RuntimeAttemptProjection{}, fmt.Errorf("attempt worktree recovery did not produce an absent unregistered target")
 		}
 		if err := git.CreateAttemptWorktree(
-			ctx, manifest.repositoryRoot, attempt.branch, attempt.worktree, attempt.base, !inspection.branchExists, false,
+			ctx, manifest.repositoryRoot, claim, !inspection.branchExists, false,
 		); err != nil {
 			return RuntimeAttemptProjection{}, err
 		}

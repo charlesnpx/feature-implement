@@ -15,7 +15,7 @@ import (
 )
 
 func TestDurableReplayStorePublishesOnceAndAcceptsExactRetry(t *testing.T) {
-	store := durableReplayStore{directory: filepath.Join(t.TempDir(), "replay")}
+	store := durableReplayStore{runtimeDirectory: filepath.Join(t.TempDir(), "runtime")}
 	claim := testControlPlaneReplayClaim(t, "same-nonce", "2026-07-23T12:00:00Z", 1)
 
 	const workers = 8
@@ -39,7 +39,10 @@ func TestDurableReplayStorePublishesOnceAndAcceptsExactRetry(t *testing.T) {
 		t.Fatalf("exact crash retry: %v", err)
 	}
 
-	entries, err := os.ReadDir(store.directory)
+	entries, err := os.ReadDir(filepath.Join(
+		workspace.WorkspaceStateDirectory(store.runtimeDirectory),
+		"control-plane-replay",
+	))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +52,7 @@ func TestDurableReplayStorePublishesOnceAndAcceptsExactRetry(t *testing.T) {
 }
 
 func TestDurableReplayStoreRejectsNonceBoundToDifferentTuple(t *testing.T) {
-	store := durableReplayStore{directory: filepath.Join(t.TempDir(), "replay")}
+	store := durableReplayStore{runtimeDirectory: filepath.Join(t.TempDir(), "runtime")}
 	first := testControlPlaneReplayClaim(t, "bound-nonce", "2026-07-23T12:00:00Z", 2)
 	different := testControlPlaneReplayClaim(t, "bound-nonce", "2026-07-23T13:00:00Z", 3)
 	if err := store.ClaimControlPlaneNonce(context.Background(), first); err != nil {

@@ -2,12 +2,13 @@ package workspace
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"time"
 )
 
-const WorkspaceRuntimeProjectionFileName = "runtime-projection.json"
+const WorkspaceRuntimeProjectionFileName = "runtime-projection.v3.json"
 
 type WorkspaceInitializationResult struct {
 	storedGeneration StoredGeneration
@@ -33,14 +34,37 @@ func InitializeWorkspaceV2(
 	workspaceDir string,
 	definition EffectiveWorkspaceDefinition,
 	occurredAt time.Time,
-) (WorkspaceInitializationResult, error) {
+) (result WorkspaceInitializationResult, resultErr error) {
 	if definition.generation.IsZero() || occurredAt.IsZero() {
 		return WorkspaceInitializationResult{}, fmt.Errorf("workspace initialization requires an effective definition and occurrence time")
 	}
+	roots, err := OpenWorkspaceInitializationRootGuard(
+		"", workspaceDir, definition.workspace.repositoryRoot,
+	)
+	if err != nil {
+		return WorkspaceInitializationResult{}, err
+	}
+	defer roots.Close()
+	if err := roots.VerifyBeforeRuntimeCreation(); err != nil {
+		return WorkspaceInitializationResult{}, err
+	}
+	defer func() {
+		var verifyErr error
+		if resultErr == nil {
+			verifyErr = roots.VerifyAfterRuntimeCreation()
+		} else {
+			verifyErr = roots.VerifyAfterEffects()
+		}
+		if verifyErr != nil {
+			result = WorkspaceInitializationResult{}
+			resultErr = errors.Join(resultErr, verifyErr)
+		}
+	}()
 	store, err := OpenGenerationStore(workspaceDir)
 	if err != nil {
 		return WorkspaceInitializationResult{}, err
 	}
+	defer store.Close()
 	journal, err := OpenWorkspaceJournal(workspaceDir, JournalReadWrite)
 	if err != nil {
 		return WorkspaceInitializationResult{}, err
@@ -112,14 +136,15 @@ func InitializeWorkspaceV2(
 	if runtime.workspaceID != definition.workspace.id || runtime.activeGeneration != definition.generation {
 		return WorkspaceInitializationResult{}, fmt.Errorf("initialized runtime does not match the effective definition")
 	}
-	projectionDigest, err := writeWorkspaceRuntimeProjection(workspaceDir, snapshot, runtime)
+	projectionDigest, err := writeWorkspaceRuntimeProjectionAt(journal.runtime, snapshot, runtime)
 	if err != nil {
 		return WorkspaceInitializationResult{}, err
 	}
-	return WorkspaceInitializationResult{
+	result = WorkspaceInitializationResult{
 		storedGeneration: stored, snapshot: snapshot,
 		runtime: runtime, projectionDigest: projectionDigest,
-	}, nil
+	}
+	return result, nil
 }
 
 func RebuildWorkspaceRuntimeProjectionFile(journal *WorkspaceJournal) (Digest, error) {
@@ -134,7 +159,7 @@ func RebuildWorkspaceRuntimeProjectionFile(journal *WorkspaceJournal) (Digest, e
 	if err != nil {
 		return Digest{}, err
 	}
-	return writeWorkspaceRuntimeProjection(journal.workspaceDir, snapshot, runtime)
+	return writeWorkspaceRuntimeProjectionAt(journal.runtime, snapshot, runtime)
 }
 
 func writeWorkspaceRuntimeProjection(
@@ -142,6 +167,22 @@ func writeWorkspaceRuntimeProjection(
 	snapshot JournalSnapshot,
 	runtime WorkspaceRuntimeProjection,
 ) (Digest, error) {
+	storage, err := OpenRuntimeStorage(workspaceDir, true)
+	if err != nil {
+		return Digest{}, err
+	}
+	defer storage.Close()
+	return writeWorkspaceRuntimeProjectionAt(storage, snapshot, runtime)
+}
+
+func writeWorkspaceRuntimeProjectionAt(
+	storage *RuntimeStorage,
+	snapshot JournalSnapshot,
+	runtime WorkspaceRuntimeProjection,
+) (Digest, error) {
+	if storage == nil {
+		return Digest{}, fmt.Errorf("runtime storage is required")
+	}
 	projectionBytes, err := canonicalWorkspaceRuntime(runtime)
 	if err != nil {
 		return Digest{}, err
@@ -166,7 +207,13 @@ func writeWorkspaceRuntimeProjection(
 	if err != nil {
 		return Digest{}, err
 	}
-	if err := atomicWriteSynchronized(WorkspaceRuntimeProjectionPath(workspaceDir), content, 0o644); err != nil {
+	if err := storage.state.PublishReplaceable(
+		WorkspaceRuntimeProjectionFileName,
+		content,
+		0o600,
+		MaxJournalBytes,
+		PublicationOptions{},
+	); err != nil {
 		return Digest{}, err
 	}
 	return conformanceDigest, nil

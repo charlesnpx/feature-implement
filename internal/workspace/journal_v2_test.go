@@ -100,6 +100,29 @@ func TestInitializeWorkspaceV2CreatesDurableJournalGenerationAndProjection(t *te
 	}
 }
 
+func TestInitializeWorkspaceV2RejectsRuntimeTargetOverlapBeforeMutation(t *testing.T) {
+	fixture := newDefinitionFixture(t)
+	definition := mustDefinition(t, fixture.sources)
+	target := definition.Workspace().RepositoryRoot()
+
+	if _, err := workspace.InitializeWorkspaceV2(
+		target,
+		definition,
+		mustTime(t, "2026-07-21T01:00:00Z"),
+	); err == nil || !strings.Contains(err.Error(), "unsafe workspace root overlap") {
+		t.Fatalf("runtime/target overlap error = %v", err)
+	}
+	for _, candidate := range []string{
+		filepath.Join(target, workspace.RuntimeFormatFileName),
+		filepath.Join(target, workspace.RuntimeInitializationLockName),
+		filepath.Join(target, workspace.WorkspaceStateDirectoryName),
+	} {
+		if _, err := os.Lstat(candidate); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("overlap admission mutated target path %s: %v", candidate, err)
+		}
+	}
+}
+
 func TestInitializationResumesAfterBootstrapTailRecovery(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)

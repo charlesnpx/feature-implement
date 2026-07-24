@@ -128,15 +128,23 @@ func SynchronizeMaterialization(
 	if err != nil {
 		return MaterializationResult{}, err
 	}
+	rootPath, err = canonicalizeTrustedRootPath(rootPath)
+	if err != nil {
+		return MaterializationResult{}, err
+	}
 
 	materializationProcessMutex.Lock()
 	defer materializationProcessMutex.Unlock()
 
-	adapter, err := openOrCreateRootedFilesystemAdapter(rootPath)
+	verifiedRoot, err := OpenVerifiedRoot(RootRolePlan, rootPath, true)
 	if err != nil {
 		return MaterializationResult{}, err
 	}
-	defer adapter.Close()
+	defer verifiedRoot.Close()
+	if err := verifiedRoot.ProbeDurability(); err != nil {
+		return MaterializationResult{}, fmt.Errorf("preflight plan materialization root capabilities: %w", err)
+	}
+	adapter := verifiedRoot.adapter
 
 	control, recovered, err := loadMaterializationControl(adapter, desired, options)
 	if err != nil {
@@ -158,6 +166,9 @@ func SynchronizeMaterialization(
 	if control.inventoryExists && control.inventoryHash == nextHash &&
 		len(comparison.createDirectories) == 0 && len(comparison.writes) == 0 &&
 		len(comparison.deletes) == 0 && len(comparison.removeDirectories) == 0 {
+		if err := verifiedRoot.VerifyPath(); err != nil {
+			return MaterializationResult{}, err
+		}
 		return MaterializationResult{inventory: comparison.nextInventory, recovered: recovered}, nil
 	}
 
@@ -199,6 +210,9 @@ func SynchronizeMaterialization(
 		return MaterializationResult{}, err
 	}
 
+	if err := verifiedRoot.VerifyPath(); err != nil {
+		return MaterializationResult{}, err
+	}
 	return resultFromPending(pending, comparison.nextInventory, recovered), nil
 }
 

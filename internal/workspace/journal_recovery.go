@@ -3,13 +3,14 @@ package workspace
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 )
 
-const WorkspaceJournalRecoveryFileName = "journal-recovery.pending.json"
+const WorkspaceJournalRecoveryFileName = "journal-recovery.v3.pending.json"
 
 type journalRecoveryIntentWire struct {
 	SchemaVersion int    `json:"schema_version"`
@@ -52,12 +53,18 @@ func workspaceJournalRecoveryPath(workspaceDir string) string {
 	return filepath.Join(WorkspaceStateDirectory(workspaceDir), WorkspaceJournalRecoveryFileName)
 }
 
-func journalRecoveryPending(workspaceDir string) (bool, error) {
-	_, err := os.Stat(workspaceJournalRecoveryPath(workspaceDir))
-	if err == nil {
+func journalRecoveryPending(journal *WorkspaceJournal) (bool, error) {
+	if journal == nil || journal.runtime == nil {
+		return false, fmt.Errorf("workspace journal is closed")
+	}
+	if err := journal.runtime.state.RecoverReplaceable(WorkspaceJournalRecoveryFileName); err != nil {
+		return false, err
+	}
+	_, exists, err := journal.runtime.state.adapter.inspectExact(WorkspaceJournalRecoveryFileName)
+	if err == nil && exists {
 		return true, nil
 	}
-	if os.IsNotExist(err) {
+	if err == nil {
 		return false, nil
 	}
 	return false, fmt.Errorf("inspect pending journal recovery: %w", err)
@@ -72,7 +79,7 @@ func (journal *WorkspaceJournal) RecoverIncompleteTail(workspaceID ID, occurredA
 	if workspaceID.IsZero() || occurredAt.IsZero() {
 		return JournalRecoveryReport{}, fmt.Errorf("journal recovery requires workspace identity and occurrence time")
 	}
-	intent, exists, err := loadJournalRecoveryIntent(journal.workspaceDir)
+	intent, exists, err := loadJournalRecoveryIntent(journal)
 	if err != nil {
 		return JournalRecoveryReport{}, err
 	}
@@ -110,14 +117,14 @@ func (journal *WorkspaceJournal) RecoverIncompleteTail(workspaceID ID, occurredA
 		discardOffset: tail.offset, discardSize: tail.size, discardDigest: tail.digest,
 		resultingHead: tail.resultingHead,
 	}
-	if err := writeJournalRecoveryIntent(journal.workspaceDir, intent); err != nil {
+	if err := writeJournalRecoveryIntent(journal, intent); err != nil {
 		return JournalRecoveryReport{}, err
 	}
 	return journal.completeJournalRecovery(intent, occurredAt.UTC())
 }
 
 func (journal *WorkspaceJournal) completeJournalRecovery(intent journalRecoveryIntent, occurredAt time.Time) (JournalRecoveryReport, error) {
-	content, err := readBoundedFile(journal.journalPath, MaxJournalBytes)
+	content, err := journal.runtime.state.ReadBounded(WorkspaceJournalFileName, MaxJournalBytes)
 	if err != nil {
 		return JournalRecoveryReport{}, err
 	}
@@ -126,10 +133,21 @@ func (journal *WorkspaceJournal) completeJournalRecovery(intent journalRecoveryI
 		return JournalRecoveryReport{}, err
 	}
 	if tail == nil && journalRecoveryAlreadyRecorded(snapshot, intent) {
-		if err := syncFileAndDirectory(journal.journalPath, journal.stateDir); err != nil {
+		file, _, err := journal.runtime.state.openOwnedRegularFile(
+			WorkspaceJournalFileName, os.O_RDWR, 0, false,
+		)
+		if err != nil {
 			return JournalRecoveryReport{}, err
 		}
-		if err := removeSynchronized(workspaceJournalRecoveryPath(journal.workspaceDir)); err != nil {
+		syncErr := journal.runtime.state.adapter.synchronizeOpenedFile(WorkspaceJournalFileName, file)
+		closeErr := file.Close()
+		if syncErr != nil {
+			return JournalRecoveryReport{}, syncErr
+		}
+		if closeErr != nil {
+			return JournalRecoveryReport{}, closeErr
+		}
+		if err := removeJournalRecoveryIntent(journal); err != nil {
 			return JournalRecoveryReport{}, err
 		}
 		return recoveryReportFromIntent(intent, snapshot.head), nil
@@ -144,11 +162,11 @@ func (journal *WorkspaceJournal) completeJournalRecovery(intent journalRecoveryI
 		if !intent.tailTruncated && (tail.size != intent.discardSize || tail.digest != intent.discardDigest) {
 			return JournalRecoveryReport{}, fmt.Errorf("incomplete journal tail changed after recovery was prepared")
 		}
-		if err := truncateJournalSynchronously(journal.journalPath, intent.discardOffset, journal.stateDir); err != nil {
+		if err := truncateJournalSynchronously(journal, intent.discardOffset); err != nil {
 			return JournalRecoveryReport{}, err
 		}
 		intent.tailTruncated = true
-		if err := writeJournalRecoveryIntent(journal.workspaceDir, intent); err != nil {
+		if err := writeJournalRecoveryIntent(journal, intent); err != nil {
 			return JournalRecoveryReport{}, err
 		}
 		snapshot, tail, err = journal.readSnapshotAllowTail()
@@ -160,7 +178,7 @@ func (journal *WorkspaceJournal) completeJournalRecovery(intent journalRecoveryI
 		}
 	} else if !intent.tailTruncated {
 		intent.tailTruncated = true
-		if err := writeJournalRecoveryIntent(journal.workspaceDir, intent); err != nil {
+		if err := writeJournalRecoveryIntent(journal, intent); err != nil {
 			return JournalRecoveryReport{}, err
 		}
 	}
@@ -205,7 +223,7 @@ func (journal *WorkspaceJournal) completeJournalRecovery(intent journalRecoveryI
 	if err != nil {
 		return JournalRecoveryReport{}, err
 	}
-	if err := removeSynchronized(workspaceJournalRecoveryPath(journal.workspaceDir)); err != nil {
+	if err := removeJournalRecoveryIntent(journal); err != nil {
 		return JournalRecoveryReport{}, err
 	}
 	return recoveryReportFromIntent(intent, record.eventHash), nil
@@ -216,6 +234,7 @@ func initialGenerationForRecovery(workspaceDir string, workspaceID ID) (Digest, 
 	if err != nil {
 		return Digest{}, err
 	}
+	defer store.Close()
 	generations, err := store.List()
 	if err != nil {
 		return Digest{}, err
@@ -250,9 +269,11 @@ func recoveryReportFromIntent(intent journalRecoveryIntent, journalHead Digest) 
 	}
 }
 
-func loadJournalRecoveryIntent(workspaceDir string) (journalRecoveryIntent, bool, error) {
-	path := workspaceJournalRecoveryPath(workspaceDir)
-	content, err := readBoundedFile(path, 64*1024)
+func loadJournalRecoveryIntent(journal *WorkspaceJournal) (journalRecoveryIntent, bool, error) {
+	if journal == nil || journal.runtime == nil {
+		return journalRecoveryIntent{}, false, fmt.Errorf("workspace journal is closed")
+	}
+	content, err := journal.runtime.state.ReadReplaceable(WorkspaceJournalRecoveryFileName, 64*1024)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return journalRecoveryIntent{}, false, nil
@@ -297,13 +318,13 @@ func loadJournalRecoveryIntent(workspaceDir string) (journalRecoveryIntent, bool
 	if intent.discardOffset < 0 || intent.discardSize <= 0 {
 		return journalRecoveryIntent{}, false, fmt.Errorf("pending journal recovery has invalid discarded range")
 	}
-	if err := syncFileAndDirectory(path, filepath.Dir(path)); err != nil {
+	if err := journal.runtime.state.Sync(); err != nil {
 		return journalRecoveryIntent{}, false, fmt.Errorf("synchronize pending journal recovery: %w", err)
 	}
 	return intent, true, nil
 }
 
-func writeJournalRecoveryIntent(workspaceDir string, intent journalRecoveryIntent) error {
+func writeJournalRecoveryIntent(journal *WorkspaceJournal, intent journalRecoveryIntent) error {
 	wire := journalRecoveryIntentWire{
 		SchemaVersion: JournalSchemaVersion, WorkspaceID: intent.workspaceID.String(),
 		Generation: intent.generation.String(), DiscardOffset: intent.discardOffset,
@@ -314,11 +335,19 @@ func writeJournalRecoveryIntent(workspaceDir string, intent journalRecoveryInten
 	if err != nil {
 		return err
 	}
-	return atomicWriteSynchronized(workspaceJournalRecoveryPath(workspaceDir), content, 0o600)
+	return journal.runtime.state.PublishReplaceable(
+		WorkspaceJournalRecoveryFileName,
+		content,
+		0o600,
+		64*1024,
+		PublicationOptions{},
+	)
 }
 
-func truncateJournalSynchronously(path string, size int64, stateDir string) error {
-	file, err := os.OpenFile(path, os.O_RDWR, 0)
+func truncateJournalSynchronously(journal *WorkspaceJournal, size int64) error {
+	file, _, err := journal.runtime.state.openOwnedRegularFile(
+		WorkspaceJournalFileName, os.O_RDWR, 0, false,
+	)
 	if err != nil {
 		return err
 	}
@@ -330,8 +359,35 @@ func truncateJournalSynchronously(path string, size int64, stateDir string) erro
 		_ = file.Close()
 		return err
 	}
+	if err := journal.runtime.state.verifyOwnedRegularFile(WorkspaceJournalFileName, file); err != nil {
+		_ = file.Close()
+		return err
+	}
 	if err := file.Close(); err != nil {
 		return err
 	}
-	return syncDirectory(stateDir)
+	return journal.runtime.state.Sync()
+}
+
+func removeJournalRecoveryIntent(journal *WorkspaceJournal) error {
+	content, err := journal.runtime.state.ReadReplaceable(WorkspaceJournalRecoveryFileName, 64*1024)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	removed, err := journal.runtime.state.adapter.removeFileContentExact(
+		WorkspaceJournalRecoveryFileName,
+		content,
+		64*1024,
+		journal.runtime.Verify,
+	)
+	if err != nil {
+		return err
+	}
+	if !removed {
+		return fmt.Errorf("pending journal recovery disappeared")
+	}
+	return nil
 }

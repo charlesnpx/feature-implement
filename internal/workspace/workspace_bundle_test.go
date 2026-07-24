@@ -188,6 +188,31 @@ func TestWorkspaceBundleGeneratedLocksAreImmutableOwnedProjections(t *testing.T)
 	}
 }
 
+func TestWorkspaceBundleRetainsAndRevalidatesPlanRootIdentity(t *testing.T) {
+	fixture := newDefinitionFixture(t)
+	root := writeDefinitionBundle(t, fixture, nil)
+	bundle, err := workspace.LoadWorkspaceBundle(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.RootIdentity().Device == 0 || bundle.RootIdentity().Inode == 0 {
+		t.Fatalf("bundle root identity = %#v", bundle.RootIdentity())
+	}
+	if err := bundle.VerifyRoot(); err != nil {
+		t.Fatal(err)
+	}
+	moved := root + "-moved"
+	if err := os.Rename(root, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := bundle.VerifyRoot(); err == nil || !strings.Contains(err.Error(), "was replaced") {
+		t.Fatalf("bundle root replacement error = %v", err)
+	}
+}
+
 func TestWorkspaceBundleBindsDescriptorAndControlPlaneAuthorityIntoGeneration(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	root := writeDefinitionBundle(t, fixture, nil)

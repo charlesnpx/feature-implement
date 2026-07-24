@@ -1,0 +1,549 @@
+package workspace
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+)
+
+func TestRuntimeStorageCreatesV3IdentityMarkersAndRejectsLegacyV2WithoutMutation(t *testing.T) {
+	parent := canonicalRuntimeTestTempDir(t)
+	legacy := filepath.Join(parent, "legacy")
+	if err := os.MkdirAll(filepath.Join(legacy, WorkspaceStateDirectoryName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacyJournal := filepath.Join(
+		legacy,
+		WorkspaceStateDirectoryName,
+		"journal.v2.jsonl",
+	)
+	legacyContent := []byte("provider-oriented-v2-state\n")
+	if err := os.WriteFile(legacyJournal, legacyContent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenRuntimeStorage(legacy, true); err == nil ||
+		!strings.Contains(err.Error(), "provider-oriented draft-v2") ||
+		!strings.Contains(err.Error(), "regenerate in a new runtime directory") ||
+		!strings.Contains(err.Error(), "existing state was preserved") {
+		t.Fatalf("legacy runtime error = %v", err)
+	}
+	if content, err := os.ReadFile(legacyJournal); err != nil || string(content) != string(legacyContent) {
+		t.Fatalf("legacy runtime changed: %q, %v", content, err)
+	}
+	if _, err := os.Lstat(filepath.Join(legacy, RuntimeFormatFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy runtime acquired v3 marker: %v", err)
+	}
+
+	fresh := filepath.Join(parent, "fresh")
+	storage, err := OpenRuntimeStorage(fresh, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Verify(); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{
+		filepath.Join(fresh, RuntimeFormatFileName),
+		filepath.Join(fresh, WorkspaceStateDirectoryName, RuntimeStateIdentityFileName),
+	} {
+		if info, err := os.Lstat(marker); err != nil || !info.Mode().IsRegular() {
+			t.Fatalf("runtime marker %s = %v, %v", marker, info, err)
+		}
+	}
+}
+
+func TestRuntimeStorageFailsClosedOnRootStateAndMarkerReplacement(t *testing.T) {
+	parent := canonicalRuntimeTestTempDir(t)
+
+	t.Run("runtime root", func(t *testing.T) {
+		runtimePath := filepath.Join(parent, "root-replacement")
+		storage, err := OpenRuntimeStorage(runtimePath, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer storage.Close()
+		moved := runtimePath + "-moved"
+		if err := os.Rename(runtimePath, moved); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(runtimePath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.Verify(); err == nil || !strings.Contains(err.Error(), "was replaced") {
+			t.Fatalf("runtime root replacement error = %v", err)
+		}
+	})
+
+	t.Run("state root", func(t *testing.T) {
+		runtimePath := filepath.Join(parent, "state-replacement")
+		storage, err := OpenRuntimeStorage(runtimePath, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer storage.Close()
+		state := filepath.Join(runtimePath, WorkspaceStateDirectoryName)
+		moved := state + "-moved"
+		if err := os.Rename(state, moved); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(state, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.Verify(); err == nil || !strings.Contains(err.Error(), "was replaced") {
+			t.Fatalf("runtime state replacement error = %v", err)
+		}
+	})
+
+	t.Run("hard-linked marker", func(t *testing.T) {
+		runtimePath := filepath.Join(parent, "marker-links")
+		storage, err := OpenRuntimeStorage(runtimePath, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.Close(); err != nil {
+			t.Fatal(err)
+		}
+		marker := filepath.Join(runtimePath, RuntimeFormatFileName)
+		link := filepath.Join(runtimePath, "copied-runtime-marker")
+		if err := os.Link(marker, link); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := OpenRuntimeStorage(runtimePath, false); err == nil ||
+			!strings.Contains(err.Error(), "hard links") {
+			t.Fatalf("hard-linked runtime marker error = %v", err)
+		}
+	})
+}
+
+func TestRuntimeStorageRejectsCompleteStateRootSwapAcrossRuntimes(t *testing.T) {
+	parent := canonicalRuntimeTestTempDir(t)
+	firstPath := filepath.Join(parent, "first")
+	secondPath := filepath.Join(parent, "second")
+	for _, runtimePath := range []string{firstPath, secondPath} {
+		storage, err := OpenRuntimeStorage(runtimePath, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	firstState := filepath.Join(firstPath, WorkspaceStateDirectoryName)
+	secondState := filepath.Join(secondPath, WorkspaceStateDirectoryName)
+	quarantine := filepath.Join(parent, "state-swap")
+	if err := os.Rename(firstState, quarantine); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(secondState, firstState); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(quarantine, secondState); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, runtimePath := range []string{firstPath, secondPath} {
+		if _, err := OpenRuntimeStorage(runtimePath, false); err == nil ||
+			!strings.Contains(err.Error(), "do not share one immutable runtime binding") {
+			t.Fatalf("swapped state root %s error = %v", runtimePath, err)
+		}
+	}
+}
+
+func TestRuntimeCapabilityFailureOccursBeforeMarkersOrStateUse(t *testing.T) {
+	runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "unsupported")
+	_, err := openRuntimeStorageWithProbe(
+		runtimePath,
+		true,
+		func(*VerifiedRoot, string) error { return errors.New("locking unsupported") },
+	)
+	if err == nil || !strings.Contains(err.Error(), "preflight runtime state capabilities") ||
+		!strings.Contains(err.Error(), "locking unsupported") {
+		t.Fatalf("capability error = %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(runtimePath, RuntimeFormatFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runtime marker was published before preflight: %v", err)
+	}
+	state := filepath.Join(runtimePath, WorkspaceStateDirectoryName)
+	entries, err := os.ReadDir(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("runtime state used before preflight: %v", entries)
+	}
+}
+
+func TestRuntimeInitializationRecoversAuthenticatedCapabilityProbeDebris(t *testing.T) {
+	runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "runtime")
+	runtimeRoot, err := OpenVerifiedRoot(RootRoleRuntime, runtimePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtimeRoot.WriteExclusive(RuntimeInitializationLockName, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtimeRoot.EnsureDirectory(WorkspaceStateDirectoryName, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stateRoot, err := OpenVerifiedRoot(
+		RootRoleRuntime,
+		filepath.Join(runtimePath, WorkspaceStateDirectoryName),
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := prepareRuntimeCapabilityProbe(runtimeRoot, stateRoot, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := stateRoot.EnsureDirectory(RuntimeCapabilityProbeDirectoryName, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := stateRoot.WriteExclusive(
+		RuntimeCapabilityProbeDirectoryName+"/source",
+		[]byte("interrupted probe\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := stateRoot.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtimeRoot.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	storage, err := OpenRuntimeStorage(runtimePath, true)
+	if err != nil {
+		t.Fatalf("recover interrupted capability probe: %v", err)
+	}
+	defer storage.Close()
+	for _, candidate := range []string{
+		filepath.Join(
+			runtimePath,
+			WorkspaceStateDirectoryName,
+			RuntimeCapabilityProbeIntentFileName,
+		),
+		filepath.Join(
+			runtimePath,
+			WorkspaceStateDirectoryName,
+			RuntimeCapabilityProbeDirectoryName,
+		),
+	} {
+		if _, err := os.Lstat(candidate); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("capability probe debris survived recovery at %s: %v", candidate, err)
+		}
+	}
+}
+
+func TestRuntimeInitializationDetectsLockReplacementAfterCapabilityProbe(t *testing.T) {
+	runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "runtime")
+	_, err := openRuntimeStorageWithProbe(
+		runtimePath,
+		true,
+		func(root *VerifiedRoot, directory string) error {
+			if err := root.probeDurabilityAt(directory); err != nil {
+				return err
+			}
+			lockPath := filepath.Join(runtimePath, RuntimeInitializationLockName)
+			if err := os.Rename(lockPath, lockPath+".replaced"); err != nil {
+				return err
+			}
+			return os.WriteFile(lockPath, []byte("replacement\n"), 0o600)
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "initialization lock") {
+		t.Fatalf("initialization lock replacement error = %v", err)
+	}
+	if _, markerErr := os.Lstat(
+		filepath.Join(runtimePath, RuntimeFormatFileName),
+	); !errors.Is(markerErr, os.ErrNotExist) {
+		t.Fatalf("replaced initialization lock allowed root marker publication: %v", markerErr)
+	}
+}
+
+func TestConcurrentRuntimeInitializationPublishesOneBoundRuntime(t *testing.T) {
+	runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "runtime")
+	const contenders = 8
+	start := make(chan struct{})
+	results := make(chan error, contenders)
+	var group sync.WaitGroup
+	for range contenders {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			storage, err := OpenRuntimeStorage(runtimePath, true)
+			if err != nil {
+				results <- err
+				return
+			}
+			if err := storage.Verify(); err != nil {
+				_ = storage.Close()
+				results <- err
+				return
+			}
+			results <- storage.Close()
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(results)
+	for err := range results {
+		if err != nil {
+			t.Fatalf("concurrent runtime initialization: %v", err)
+		}
+	}
+	storage, err := OpenRuntimeStorage(runtimePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	if err := storage.Verify(); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(runtimePath, WorkspaceStateDirectoryName)
+	for _, candidate := range []string{
+		filepath.Join(statePath, RuntimeCapabilityProbeIntentFileName),
+		filepath.Join(statePath, RuntimeCapabilityProbeIntentFileName+".pending"),
+		filepath.Join(statePath, RuntimeCapabilityProbeDirectoryName),
+	} {
+		if _, err := os.Lstat(candidate); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("concurrent initialization left transient %s: %v", candidate, err)
+		}
+	}
+}
+
+func TestRuntimeInitializationCandidateWaitsForInProgressLock(t *testing.T) {
+	runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "runtime")
+	root, err := OpenVerifiedRoot(RootRoleRuntime, runtimePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := root.WriteExclusive(RuntimeInitializationLockName, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.EnsureDirectory(WorkspaceStateDirectoryName, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state, err := OpenVerifiedRoot(
+		RootRoleRuntime,
+		filepath.Join(runtimePath, WorkspaceStateDirectoryName),
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	if err := state.EnsureDirectory(RuntimeCapabilityProbeDirectoryName, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if initializable, err := runtimeRootInitializable(root); err != nil {
+		t.Fatal(err)
+	} else if !initializable {
+		t.Fatal("recognized transient runtime state did not reach locked recovery")
+	}
+	if err := requireRuntimeInitializationCandidate(root, runtimePath, true); err != nil {
+		t.Fatalf("in-progress initialization candidate: %v", err)
+	}
+	if _, err := OpenRuntimeStorage(runtimePath, true); err == nil ||
+		!strings.Contains(err.Error(), "no authenticated intent") {
+		t.Fatalf("unauthenticated capability probe debris error = %v", err)
+	}
+}
+
+func TestRuntimeInitializationRecoversPartialMarkerPublication(t *testing.T) {
+	for _, location := range []string{"runtime", "state"} {
+		t.Run(location, func(t *testing.T) {
+			runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "runtime")
+			statePath := filepath.Join(runtimePath, WorkspaceStateDirectoryName)
+			if err := os.MkdirAll(statePath, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(
+				filepath.Join(runtimePath, RuntimeInitializationLockName),
+				nil,
+				0o600,
+			); err != nil {
+				t.Fatal(err)
+			}
+			pending := filepath.Join(runtimePath, RuntimeFormatFileName+".pending")
+			if location == "state" {
+				pending = filepath.Join(statePath, RuntimeStateIdentityFileName+".pending")
+			}
+			if err := os.WriteFile(pending, []byte(`{"partial":`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			storage, err := OpenRuntimeStorage(runtimePath, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer storage.Close()
+			if _, err := os.Lstat(pending); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("partial marker staging path survived recovery: %v", err)
+			}
+			if err := storage.Verify(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestReplaceablePublicationRecoversEveryDurableBoundary(t *testing.T) {
+	for _, point := range []PublicationFaultPoint{
+		PublicationFaultAfterIntent,
+		PublicationFaultAfterPending,
+		PublicationFaultAfterQuarantine,
+		PublicationFaultAfterPublish,
+	} {
+		t.Run(string(point), func(t *testing.T) {
+			rootPath := filepath.Join(canonicalRuntimeTestTempDir(t), "root")
+			root, err := OpenVerifiedRoot(RootRoleRuntime, rootPath, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			target := "projection.json"
+			oldContent := []byte("old projection\n")
+			newContent := []byte("new projection\n")
+			if err := root.PublishReplaceable(
+				target, oldContent, 0o600, 1024, PublicationOptions{},
+			); err != nil {
+				t.Fatal(err)
+			}
+			err = root.PublishReplaceable(
+				target,
+				newContent,
+				0o600,
+				1024,
+				PublicationOptions{FaultInjector: func(observed PublicationFaultPoint) error {
+					if observed == point {
+						return errors.New("simulated crash")
+					}
+					return nil
+				}},
+			)
+			if err == nil || !strings.Contains(err.Error(), "simulated crash") {
+				t.Fatalf("publication fault = %v", err)
+			}
+			stable, err := root.ReadReplaceable(target, 1024)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if point == PublicationFaultAfterIntent {
+				if string(stable) != string(oldContent) {
+					t.Fatalf("intent-only recovery = %q", stable)
+				}
+			} else if string(stable) != string(newContent) {
+				t.Fatalf("completed recovery = %q", stable)
+			}
+			if err := root.PublishReplaceable(
+				target, newContent, 0o600, 1024, PublicationOptions{},
+			); err != nil {
+				t.Fatal(err)
+			}
+			entries, err := root.adapter.readDirectory(".")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.name, "runtime-publication-") {
+					t.Fatalf("publication recovery left control file %s", entry.name)
+				}
+			}
+		})
+	}
+}
+
+func TestReplaceablePublicationRaceLeavesOneCompleteStableObject(t *testing.T) {
+	rootPath := filepath.Join(canonicalRuntimeTestTempDir(t), "root")
+	root, err := OpenVerifiedRoot(RootRoleRuntime, rootPath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := root.PublishReplaceable(
+		"projection.json",
+		[]byte("initial\n"),
+		0o600,
+		1024,
+		PublicationOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	candidates := [][]byte{[]byte("candidate-a\n"), []byte("candidate-b\n")}
+	start := make(chan struct{})
+	results := make(chan error, len(candidates))
+	var group sync.WaitGroup
+	for _, candidate := range candidates {
+		candidate := append([]byte(nil), candidate...)
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			results <- root.PublishReplaceable(
+				"projection.json",
+				candidate,
+				0o600,
+				1024,
+				PublicationOptions{},
+			)
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(results)
+	successes := 0
+	for err := range results {
+		if err == nil {
+			successes++
+		}
+	}
+	if successes == 0 {
+		t.Fatal("concurrent publications produced no stable winner")
+	}
+	content, err := root.ReadReplaceable("projection.json", 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != string(candidates[0]) && string(content) != string(candidates[1]) {
+		t.Fatalf("concurrent publication content = %q", content)
+	}
+}
+
+func TestWorkspaceJournalDetectsLockPathReplacement(t *testing.T) {
+	runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "runtime")
+	journal, err := OpenWorkspaceJournal(runtimePath, JournalReadWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+	lockPath := WorkspaceJournalLockPath(runtimePath)
+	if err := os.Rename(lockPath, lockPath+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lockPath, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.ReadSnapshot(); err == nil ||
+		!strings.Contains(err.Error(), "lock was replaced") {
+		t.Fatalf("lock replacement error = %v", err)
+	}
+}
+
+func canonicalRuntimeTestTempDir(t *testing.T) string {
+	t.Helper()
+	canonical, err := canonicalizeTrustedRootPath(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical
+}
