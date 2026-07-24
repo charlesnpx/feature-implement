@@ -292,6 +292,11 @@ func validateBoundLocalTargetStorageAncestors(
 	candidate string,
 	label string,
 ) error {
+	if err := validateBoundLocalTargetStorageDirectory(
+		commonRoot, ".", label,
+	); err != nil {
+		return err
+	}
 	ancestor := ""
 	for _, component := range strings.Split(path.Dir(candidate), "/") {
 		ancestor = path.Join(ancestor, component)
@@ -311,8 +316,95 @@ func validateBoundLocalTargetStorageAncestors(
 				label, ancestor,
 			)
 		}
+		if err := validateBoundLocalTargetStorageDirectory(
+			commonRoot, ancestor, label,
+		); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func validateBoundLocalTargetStorageDirectory(
+	commonRoot *VerifiedRoot,
+	relative string,
+	label string,
+) error {
+	directory, err := commonRoot.adapter.openDirectoryExact(relative)
+	if err != nil {
+		return fmt.Errorf(
+			"open bound local target %s storage ancestor %s: %w",
+			label, relative, err,
+		)
+	}
+	info, statErr := directory.Stat(".")
+	closeErr := directory.Close()
+	if statErr != nil || closeErr != nil {
+		return fmt.Errorf(
+			"inspect bound local target %s storage ancestor %s: %w",
+			label, relative, errors.Join(statErr, closeErr),
+		)
+	}
+	identity, err := platformFileIdentity(info)
+	if err != nil {
+		return fmt.Errorf(
+			"identify bound local target %s storage ancestor %s: %w",
+			label, relative, err,
+		)
+	}
+	if identity.Owner != commonRoot.identity.Owner {
+		return fmt.Errorf(
+			"bound local target %s storage ancestor %s owner %d does not match common-root owner %d",
+			label, relative, identity.Owner, commonRoot.identity.Owner,
+		)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf(
+			"bound local target %s storage ancestor %s permissions %04o allow non-owner writes",
+			label, relative, info.Mode().Perm(),
+		)
+	}
+	return nil
+}
+
+func (session *localTargetGitSession) ensureFeatureRefStorageAncestors() error {
+	if err := validateBoundLocalTargetFeatureRefStorage(
+		session.common.root,
+		session.binding.featureRef,
+	); err != nil {
+		return err
+	}
+	seen := make(map[string]struct{})
+	for _, candidate := range []string{
+		session.binding.featureRef,
+		path.Join("logs", session.binding.featureRef),
+	} {
+		ancestor := ""
+		for _, component := range strings.Split(path.Dir(candidate), "/") {
+			ancestor = path.Join(ancestor, component)
+			if _, ok := seen[ancestor]; ok {
+				continue
+			}
+			seen[ancestor] = struct{}{}
+			if _, err := session.common.root.adapter.makeDirectory(
+				ancestor, 0o700,
+			); err != nil {
+				return fmt.Errorf(
+					"prepare bound local target feature-ref storage ancestor %s: %w",
+					ancestor, err,
+				)
+			}
+			if err := validateBoundLocalTargetStorageDirectory(
+				session.common.root, ancestor, "feature ref",
+			); err != nil {
+				return err
+			}
+		}
+	}
+	return validateBoundLocalTargetFeatureRefStorage(
+		session.common.root,
+		session.binding.featureRef,
+	)
 }
 
 func (session *localTargetGitSession) Close() error {
@@ -623,6 +715,9 @@ func (session *localTargetGitSession) createFeatureRef(
 			"create feature ref %s with expected-absent CAS: ref already exists",
 			session.binding.featureRef,
 		)
+	}
+	if err := session.ensureFeatureRefStorageAncestors(); err != nil {
+		return LocalTargetInspection{}, err
 	}
 	message := localTargetReflogMessage(intentDigest)
 	transaction := []byte(fmt.Sprintf(

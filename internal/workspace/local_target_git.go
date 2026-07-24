@@ -526,7 +526,8 @@ func (adapter LocalTargetGitAdapter) readConfigScope(
 		}
 		keyBytes, valueBytes, found := bytes.Cut(record, []byte{'\n'})
 		if !found {
-			return nil, fmt.Errorf("Git returned malformed configuration")
+			keyBytes = record
+			valueBytes = []byte("true")
 		}
 		key := strings.ToLower(strings.TrimSpace(string(keyBytes)))
 		if key == "" {
@@ -672,8 +673,23 @@ func rejectUnsupportedLocalTargetConfiguration(
 
 func configTrue(values []string) bool {
 	for _, value := range values {
-		switch strings.ToLower(strings.TrimSpace(value)) {
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		switch normalized {
 		case "true", "yes", "on", "1":
+			return true
+		case "", "false", "no", "off", "0":
+			continue
+		}
+		numeric := normalized
+		if strings.HasSuffix(numeric, "k") ||
+			strings.HasSuffix(numeric, "m") ||
+			strings.HasSuffix(numeric, "g") {
+			numeric = numeric[:len(numeric)-1]
+		}
+		parsed, err := strconv.ParseInt(numeric, 10, 64)
+		if err != nil || parsed != 0 {
+			// Git rejects malformed booleans. Treat them as active here so
+			// repository admission remains fail-closed.
 			return true
 		}
 	}

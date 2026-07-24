@@ -414,6 +414,137 @@ func TestLocalTargetRefCreationRejectsExternalRefAndReflogStorage(t *testing.T) 
 	}
 }
 
+func TestLocalTargetRefCreationRejectsUnsafeStorageAncestorPermissions(
+	t *testing.T,
+) {
+	tests := []struct {
+		name     string
+		ancestor func(string) string
+	}{
+		{
+			name: "ref",
+			ancestor: func(featureRef string) string {
+				return filepath.Dir(filepath.FromSlash(featureRef))
+			},
+		},
+		{
+			name: "reflog",
+			ancestor: func(featureRef string) string {
+				return filepath.Dir(
+					filepath.Join("logs", filepath.FromSlash(featureRef)),
+				)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root, base := initializeTargetRepository(t, workspace.GitHashSHA1)
+			definition := localTargetDefinition(
+				t, root, base, "feature/unsafe-storage-ancestor",
+			)
+			commonDirectory := filepath.Join(root, ".git")
+			featureRef := definition.Workspace().FeatureRef()
+			refPath := filepath.Join(
+				commonDirectory, filepath.FromSlash(featureRef),
+			)
+			reflogPath := filepath.Join(
+				commonDirectory, "logs", filepath.FromSlash(featureRef),
+			)
+			externalDirectory := canonicalTestDirectory(t)
+			externalVictim := filepath.Join(externalDirectory, "victim")
+			original := []byte("external victim must remain unchanged\n")
+			if err := os.WriteFile(externalVictim, original, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			changed := false
+			_, err := workspace.InitializeWorkspaceV2WithOptions(
+				context.Background(),
+				canonicalTestDirectory(t),
+				definition,
+				mustTime(t, "2026-07-24T12:25:50Z"),
+				workspace.WorkspaceInitializationOptions{
+					TargetFault: func(
+						point workspace.LocalTargetInitializationFaultPoint,
+					) error {
+						if point != workspace.LocalTargetFaultBeforeRefUpdate ||
+							changed {
+							return nil
+						}
+						changed = true
+						ancestor := filepath.Join(
+							commonDirectory, test.ancestor(featureRef),
+						)
+						if err := os.MkdirAll(ancestor, 0o700); err != nil {
+							return err
+						}
+						return os.Chmod(ancestor, 0o777)
+					},
+				},
+			)
+			if err == nil || !changed ||
+				!strings.Contains(err.Error(), "permissions") ||
+				!strings.Contains(err.Error(), "non-owner writes") {
+				t.Fatalf(
+					"unsafe %s ancestor error = %v changed=%t",
+					test.name, err, changed,
+				)
+			}
+			for _, candidate := range []string{refPath, reflogPath} {
+				if _, statErr := os.Lstat(candidate); !errors.Is(
+					statErr, os.ErrNotExist,
+				) {
+					t.Fatalf(
+						"unsafe %s ancestor allowed target write %s: %v",
+						test.name, candidate, statErr,
+					)
+				}
+			}
+			content, readErr := os.ReadFile(externalVictim)
+			if readErr != nil || string(content) != string(original) {
+				t.Fatalf(
+					"unsafe %s ancestor allowed external write: %v %q",
+					test.name, readErr, content,
+				)
+			}
+		})
+	}
+}
+
+func TestLocalTargetCreatesSecureFeatureStorageAncestors(t *testing.T) {
+	root, base := initializeTargetRepository(t, workspace.GitHashSHA1)
+	definition := localTargetDefinition(
+		t, root, base, "feature/secure-storage-ancestors",
+	)
+	if _, err := workspace.InitializeWorkspaceV2(
+		canonicalTestDirectory(t),
+		definition,
+		mustTime(t, "2026-07-24T12:25:55Z"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	commonDirectory := filepath.Join(root, ".git")
+	featureRef := definition.Workspace().FeatureRef()
+	for _, ancestor := range []string{
+		filepath.Dir(filepath.Join(
+			commonDirectory, filepath.FromSlash(featureRef),
+		)),
+		filepath.Dir(filepath.Join(
+			commonDirectory, "logs", filepath.FromSlash(featureRef),
+		)),
+	} {
+		info, err := os.Stat(ancestor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+			t.Fatalf(
+				"created feature storage ancestor %s permissions = %04o",
+				ancestor, info.Mode().Perm(),
+			)
+		}
+	}
+}
+
 func TestLocalTargetInitializationReadinessBarrierAtEveryFault(t *testing.T) {
 	for _, faultPoint := range []workspace.LocalTargetInitializationFaultPoint{
 		workspace.LocalTargetFaultAfterIntentSynced,
@@ -1237,6 +1368,99 @@ func TestLocalTargetRejectsUnsupportedPinnedBaseTreeProfiles(t *testing.T) {
 			)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("unsupported pinned-base tree error = %v", err)
+			}
+		})
+	}
+}
+
+func TestLocalTargetReadsGitCompatibleWorktreeConfigurationBooleans(
+	t *testing.T,
+) {
+	tests := []struct {
+		name       string
+		boolean    string
+		valueless  bool
+		hostileKey string
+		want       string
+	}{
+		{
+			name:       "positive numeric signature program",
+			boolean:    "2",
+			hostileKey: "gpg.ssh.program",
+			want:       "external signature program",
+		},
+		{
+			name:       "negative numeric filter process",
+			boolean:    "-7",
+			hostileKey: "filter.hostile.process",
+			want:       "active Git filter",
+		},
+		{
+			name:       "valueless signature program",
+			valueless:  true,
+			hostileKey: "gpg.ssh.program",
+			want:       "external signature program",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root, base := initializeTargetRepository(t, workspace.GitHashSHA1)
+			probeDirectory := canonicalTestDirectory(t)
+			probe := filepath.Join(probeDirectory, "hostile-program")
+			marker := filepath.Join(probeDirectory, "hostile-program-invoked")
+			script := "#!/bin/sh\nmkdir " + shellSingleQuote(marker) + "\nexit 1\n"
+			if err := os.WriteFile(probe, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			runTargetGitTest(
+				t, root, "config", "core.repositoryFormatVersion", "1",
+			)
+			runTargetGitTest(
+				t, root, "config", "extensions.worktreeConfig", "true",
+			)
+			runTargetGitTest(
+				t, root, "config", "--worktree", test.hostileKey, probe,
+			)
+			if test.valueless {
+				runTargetGitTest(
+					t, root, "config", "--unset-all",
+					"extensions.worktreeConfig",
+				)
+				config, err := os.OpenFile(
+					filepath.Join(root, ".git", "config"),
+					os.O_WRONLY|os.O_APPEND,
+					0,
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, writeErr := config.WriteString(
+					"\n[extensions]\n\tworktreeConfig\n",
+				)
+				syncErr := config.Sync()
+				closeErr := config.Close()
+				if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				runTargetGitTest(
+					t, root, "config", "extensions.worktreeConfig",
+					test.boolean,
+				)
+			}
+			definition := localTargetDefinition(
+				t, root, base, "feature/worktree-config-boolean",
+			)
+			_, err := workspace.ValidateLocalTarget(
+				context.Background(), definition.Workspace(),
+			)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("worktree configuration error = %v", err)
+			}
+			if _, statErr := os.Lstat(marker); !errors.Is(
+				statErr, os.ErrNotExist,
+			) {
+				t.Fatalf("hostile worktree program was invoked: %v", statErr)
 			}
 		})
 	}
