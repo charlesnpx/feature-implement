@@ -137,9 +137,10 @@ func (claim AttemptWorktreeClaim) Worktree() string   { return claim.worktree }
 
 type AttemptGitPort interface {
 	ValidateAttemptBranch(context.Context, string, string) error
+	ValidateAttemptWorktreeRoot(context.Context, string, string) error
 	InspectAttemptRefs(context.Context, string, string) (AttemptRefInventory, error)
 	InspectAttemptWorktree(context.Context, string, string, string) (AttemptGitInspection, error)
-	PrepareAttemptWorktree(context.Context, AttemptWorktreeClaim, bool) error
+	PrepareAttemptWorktree(context.Context, string, AttemptWorktreeClaim, bool) error
 	ReleaseAttemptWorktreeClaim(context.Context, AttemptWorktreeClaim) error
 	CreateAttemptWorktree(context.Context, string, AttemptWorktreeClaim, bool, bool) error
 }
@@ -516,25 +517,34 @@ func (adapter LocalAttemptGitAdapter) CreateAttemptWorktree(
 
 func (adapter LocalAttemptGitAdapter) PrepareAttemptWorktree(
 	ctx context.Context,
+	repositoryRoot string,
 	claim AttemptWorktreeClaim,
 	recoverUnregistered bool,
 ) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	marker := attemptWorktreeClaimPath(claim.worktree)
-	parentPath, err := canonicalizeTrustedRootPath(filepath.Dir(marker))
+	guard, err := adapter.openAttemptWorktreeRootGuard(
+		ctx, repositoryRoot, claim.worktree, true,
+	)
 	if err != nil {
 		return err
 	}
-	parent, err := OpenVerifiedRoot(RootRoleWorktree, parentPath, true)
-	if err != nil {
-		return fmt.Errorf("open attempt worktree root: %w", err)
+	defer guard.Close()
+	parent := guard.worktree
+	if err := guard.Verify(ctx, adapter); err != nil {
+		return fmt.Errorf("verify attempt worktree roots before capability probe: %w", err)
 	}
-	defer parent.Close()
-	if err := parent.ProbeDurability(); err != nil {
-		return fmt.Errorf("preflight attempt worktree root capabilities: %w", err)
+	if effectErr := parent.ProbeDurability(); effectErr != nil {
+		return errors.Join(
+			fmt.Errorf("preflight attempt worktree root capabilities: %w", effectErr),
+			guard.verifyAfterEffect(ctx, adapter, "capability probe"),
+		)
 	}
+	if err := guard.Verify(ctx, adapter); err != nil {
+		return fmt.Errorf("verify attempt worktree roots after capability probe: %w", err)
+	}
+	marker := attemptWorktreeClaimPath(claim.worktree)
 	worktreeName := filepath.Base(filepath.Clean(claim.worktree))
 	markerName := filepath.Base(marker)
 	canonicalWorktree := filepath.Join(parent.Path(), worktreeName)
@@ -542,21 +552,34 @@ func (adapter LocalAttemptGitAdapter) PrepareAttemptWorktree(
 	if err != nil {
 		return err
 	}
-	created, err := createOrVerifyAttemptWorktreeClaim(
+	created, effectErr := createOrVerifyAttemptWorktreeClaim(
 		parent, markerName, worktreeName, payload, adapter.worktreeClaimFault,
 	)
-	if err != nil {
-		return err
+	if effectErr != nil {
+		return errors.Join(
+			effectErr,
+			guard.verifyAfterEffect(ctx, adapter, "claim publication"),
+		)
+	}
+	if err := guard.Verify(ctx, adapter); err != nil {
+		return fmt.Errorf("verify attempt worktree roots after claim publication: %w", err)
 	}
 	info, worktreeExists, err := parent.adapter.inspectExact(worktreeName)
 	if err != nil {
 		return fmt.Errorf("inspect claimed attempt worktree: %w", err)
 	}
 	if created && worktreeExists {
-		_, _ = parent.adapter.removeFileContentExact(
+		_, removeErr := parent.adapter.removeFileContentExact(
 			markerName, payload, int64(len(payload)), parent.VerifyPath,
 		)
-		return fmt.Errorf("attempt worktree path %s appeared while ownership was being claimed", canonicalWorktree)
+		return errors.Join(
+			fmt.Errorf(
+				"attempt worktree path %s appeared while ownership was being claimed",
+				canonicalWorktree,
+			),
+			removeErr,
+			guard.verifyAfterEffect(ctx, adapter, "raced claim cleanup"),
+		)
 	}
 	if !worktreeExists {
 		return nil
@@ -567,11 +590,17 @@ func (adapter LocalAttemptGitAdapter) PrepareAttemptWorktree(
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return fmt.Errorf("claimed attempt worktree path %s is not a recoverable directory", canonicalWorktree)
 	}
-	if err := parent.adapter.removeDirectoryTreeExact(worktreeName); err != nil {
-		return fmt.Errorf("remove partial attempt worktree %s: %w", canonicalWorktree, err)
+	if err := guard.Verify(ctx, adapter); err != nil {
+		return fmt.Errorf("verify attempt worktree roots before partial recovery: %w", err)
 	}
-	if err := parent.VerifyPath(); err != nil {
-		return fmt.Errorf("synchronize recovered attempt worktree parent: %w", err)
+	if effectErr := parent.adapter.removeDirectoryTreeExact(worktreeName); effectErr != nil {
+		return errors.Join(
+			fmt.Errorf("remove partial attempt worktree %s: %w", canonicalWorktree, effectErr),
+			guard.verifyAfterEffect(ctx, adapter, "partial recovery"),
+		)
+	}
+	if err := guard.Verify(ctx, adapter); err != nil {
+		return fmt.Errorf("synchronize recovered attempt worktree roots: %w", err)
 	}
 	return nil
 }
