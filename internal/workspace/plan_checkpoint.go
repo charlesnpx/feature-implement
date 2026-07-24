@@ -54,7 +54,9 @@ const (
 	PlanCheckpointFaultBeforeRefCAS                  PlanCheckpointFaultPoint = "before_ref_cas"
 	PlanCheckpointFaultAfterRefCAS                   PlanCheckpointFaultPoint = "after_ref_cas"
 	PlanCheckpointFaultAfterIndexLock                PlanCheckpointFaultPoint = "after_index_lock"
+	PlanCheckpointFaultAfterIndexRecoveryLock        PlanCheckpointFaultPoint = "after_index_recovery_lock"
 	PlanCheckpointFaultAfterIndexQuarantine          PlanCheckpointFaultPoint = "after_index_quarantine"
+	PlanCheckpointFaultAfterIndexPublication         PlanCheckpointFaultPoint = "after_index_publication"
 	PlanCheckpointFaultAfterIndexSynchronization     PlanCheckpointFaultPoint = "after_index_synchronization"
 )
 
@@ -230,6 +232,8 @@ func VerifyPlanLockCheckpoint(
 	if err != nil {
 		return VerifiedPlanLockCheckpoint{}, err
 	}
+	planCheckpointProcessMutex.Lock()
+	defer planCheckpointProcessMutex.Unlock()
 	return adapter.verifyLockCheckpoint(ctx, bundle)
 }
 

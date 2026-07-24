@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"syscall"
 )
 
 const (
@@ -19,6 +20,7 @@ const (
 	planIndexSyncSchemaVersion = 1
 	maxPlanIndexBytes          = 64 << 20
 	maxPlanIndexIntentBytes    = 16 << 10
+	planIndexRecoveryLockText  = "feature-plan-index-recovery-lock:v1\n"
 )
 
 type planIndexSyncIntentWire struct {
@@ -43,6 +45,12 @@ type planIndexSnapshot struct {
 	digest  Digest
 }
 
+type planIndexExclusion struct {
+	root   *VerifiedRoot
+	file   *os.File
+	marker bool
+}
+
 func (snapshot planIndexSnapshot) matches(exists bool, digest Digest) bool {
 	if snapshot.exists != exists {
 		return false
@@ -53,12 +61,17 @@ func (snapshot planIndexSnapshot) matches(exists bool, digest Digest) bool {
 	return snapshot.digest == digest
 }
 
+func (snapshot planIndexSnapshot) equal(other planIndexSnapshot) bool {
+	return snapshot.exists == other.exists &&
+		(!snapshot.exists || snapshot.digest == other.digest)
+}
+
 func (adapter planCheckpointGitAdapter) synchronizeIndex(
 	ctx context.Context,
 	commit planCheckpointCommit,
 	fault PlanCheckpointFaultInjector,
-) error {
-	if err := adapter.recoverIndexSynchronization(ctx); err != nil {
+) (resultErr error) {
+	if err := adapter.recoverIndexSynchronization(ctx, nil); err != nil {
 		return err
 	}
 	current, err := adapter.inspectHead(ctx)
@@ -126,6 +139,13 @@ func (adapter planCheckpointGitAdapter) synchronizeIndex(
 			cleanupErr,
 		)
 	}
+	exclusion, err := acquirePlanIndexExclusion(gitRoot, intent.desiredDigest)
+	if err != nil {
+		return errors.Join(err, cleanupPlanIndexBeforeEffect(gitRoot, intent))
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, exclusion.Close())
+	}()
 	lockedPrior, err := readPlanIndexSnapshot(gitRoot, planIndexFileName)
 	if err != nil {
 		return errors.Join(err, cleanupPlanIndexBeforeEffect(gitRoot, intent))
@@ -187,12 +207,18 @@ func (adapter planCheckpointGitAdapter) synchronizeIndex(
 		if err == nil {
 			err = fmt.Errorf("plan repository HEAD moved during index publication")
 		}
-		recoveryErr := adapter.recoverIndexSynchronization(ctx)
+		recoveryErr := adapter.recoverIndexSynchronization(ctx, nil)
 		return errors.Join(err, recoveryErr)
 	}
 	if err := gitRoot.adapter.renameFileNoReplace(
 		planIndexLockFileName,
 		planIndexFileName,
+	); err != nil {
+		return err
+	}
+	if err := injectPlanCheckpointFault(
+		fault,
+		PlanCheckpointFaultAfterIndexPublication,
 	); err != nil {
 		return err
 	}
@@ -472,7 +498,8 @@ func parsePlanIndexSyncIntent(content []byte) (planIndexSyncIntent, error) {
 
 func (adapter planCheckpointGitAdapter) recoverIndexSynchronization(
 	ctx context.Context,
-) error {
+	fault PlanCheckpointFaultInjector,
+) (resultErr error) {
 	if adapter.gitDirectory == nil {
 		return fmt.Errorf("retained plan Git directory is required")
 	}
@@ -491,7 +518,7 @@ func (adapter planCheckpointGitAdapter) recoverIndexSynchronization(
 				"plan index previous file exists without a synchronization intent",
 			)
 		}
-		return nil
+		return recoverAbandonedPlanIndexExclusion(gitRoot)
 	}
 	if err != nil {
 		return fmt.Errorf("read plan index synchronization intent: %w", err)
@@ -499,6 +526,22 @@ func (adapter planCheckpointGitAdapter) recoverIndexSynchronization(
 	intent, err := parsePlanIndexSyncIntent(content)
 	if err != nil {
 		return fmt.Errorf("decode plan index synchronization intent: %w", err)
+	}
+	exclusion, err := acquirePlanIndexExclusion(
+		gitRoot,
+		intent.desiredDigest,
+	)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, exclusion.Close())
+	}()
+	if err := injectPlanCheckpointFault(
+		fault,
+		PlanCheckpointFaultAfterIndexRecoveryLock,
+	); err != nil {
+		return err
 	}
 	index, err := readPlanIndexSnapshot(gitRoot, planIndexFileName)
 	if err != nil {
@@ -512,21 +555,32 @@ func (adapter planCheckpointGitAdapter) recoverIndexSynchronization(
 	if err != nil {
 		return err
 	}
-	current, err := adapter.inspectHead(ctx)
+	current, err := adapter.inspectHeadID(ctx)
 	if err != nil {
 		return err
 	}
-	targetIsHead := current.id == intent.target
+	targetIsHead := current == intent.target
 	indexPrior := index.matches(intent.priorExists, intent.priorDigest)
 	indexDesired := index.matches(true, intent.desiredDigest)
 	lockDesired := lock.matches(true, intent.desiredDigest)
 	previousPrior := previous.matches(intent.priorExists, intent.priorDigest)
+	lockMarker := lock.matches(
+		true,
+		DigestBytes([]byte(planIndexRecoveryLockText)),
+	)
+	if exclusion.marker {
+		if !lockMarker {
+			return fmt.Errorf("plan index recovery exclusion changed while held")
+		}
+	} else if !lockDesired {
+		return fmt.Errorf("plan index synchronization lock changed while held")
+	}
 
 	if targetIsHead {
 		switch {
 		case indexDesired && !previous.exists &&
-			(!lock.exists || lockDesired):
-			if lock.exists {
+			(lockMarker || lockDesired):
+			if lockDesired {
 				if err := removePlanIndexHash(
 					gitRoot,
 					planIndexLockFileName,
@@ -536,7 +590,7 @@ func (adapter planCheckpointGitAdapter) recoverIndexSynchronization(
 				}
 			}
 			return removePlanIndexIntent(gitRoot, intent)
-		case indexDesired && previousPrior && !lock.exists:
+		case indexDesired && previousPrior && lockMarker:
 			return finishPlanIndexSynchronization(gitRoot, intent)
 		case indexPrior && lockDesired && !previous.exists:
 			if intent.priorExists {
@@ -562,9 +616,11 @@ func (adapter planCheckpointGitAdapter) recoverIndexSynchronization(
 				return err
 			}
 			return finishPlanIndexSynchronization(gitRoot, intent)
-		case indexPrior && !lock.exists && !previous.exists:
+		case indexPrior && lockMarker && !previous.exists:
 			return removePlanIndexIntent(gitRoot, intent)
-		case previousPrior && !lock.exists && index.exists:
+		case lockMarker && !previous.exists && index.exists:
+			return removePlanIndexIntent(gitRoot, intent)
+		case previousPrior && lockMarker && index.exists:
 			return finishPlanIndexSynchronization(gitRoot, intent)
 		default:
 			return fmt.Errorf(
@@ -573,66 +629,210 @@ func (adapter planCheckpointGitAdapter) recoverIndexSynchronization(
 		}
 	}
 
-	switch {
-	case indexPrior && lockDesired && !previous.exists:
-		if err := removePlanIndexHash(
-			gitRoot,
-			planIndexLockFileName,
-			intent.desiredDigest,
-		); err != nil {
-			return err
+	if index.exists {
+		if previous.exists && !previousPrior {
+			return fmt.Errorf(
+				"plan index previous snapshot changed after HEAD moved",
+			)
 		}
-		return removePlanIndexIntent(gitRoot, intent)
-	case indexPrior && !lock.exists && !previous.exists:
-		return removePlanIndexIntent(gitRoot, intent)
-	case !index.exists && lockDesired && previousPrior:
-		if intent.priorExists {
-			if err := gitRoot.adapter.renameFileNoReplace(
-				planIndexPreviousFileName,
-				planIndexFileName,
+		if lockDesired {
+			if err := removePlanIndexHash(
+				gitRoot,
+				planIndexLockFileName,
+				intent.desiredDigest,
 			); err != nil {
 				return err
 			}
 		}
-		if err := removePlanIndexHash(
-			gitRoot,
-			planIndexLockFileName,
-			intent.desiredDigest,
-		); err != nil {
-			return err
+		if previous.exists {
+			return finishPlanIndexSynchronization(gitRoot, intent)
 		}
 		return removePlanIndexIntent(gitRoot, intent)
-	case indexDesired && !lock.exists &&
-		(previousPrior || (!intent.priorExists && !previous.exists)):
+	}
+
+	if previous.exists {
+		if !previousPrior {
+			return fmt.Errorf(
+				"plan index previous snapshot changed after HEAD moved",
+			)
+		}
 		if err := gitRoot.adapter.renameFileNoReplace(
+			planIndexPreviousFileName,
 			planIndexFileName,
-			planIndexLockFileName,
 		); err != nil {
 			return err
 		}
-		if intent.priorExists {
-			if err := gitRoot.adapter.renameFileNoReplace(
-				planIndexPreviousFileName,
-				planIndexFileName,
+		if lockDesired {
+			if err := removePlanIndexHash(
+				gitRoot,
+				planIndexLockFileName,
+				intent.desiredDigest,
 			); err != nil {
 				return err
 			}
 		}
-		if err := removePlanIndexHash(
-			gitRoot,
-			planIndexLockFileName,
-			intent.desiredDigest,
-		); err != nil {
-			return err
-		}
 		return removePlanIndexIntent(gitRoot, intent)
-	case previousPrior && !lock.exists && index.exists:
-		return finishPlanIndexSynchronization(gitRoot, intent)
-	default:
+	}
+
+	if intent.priorExists {
 		return fmt.Errorf(
-			"plan index synchronization recovery state is unsafe after HEAD moved",
+			"plan index synchronization lost its prior index after HEAD moved",
 		)
 	}
+	if lockDesired {
+		if err := removePlanIndexHash(
+			gitRoot,
+			planIndexLockFileName,
+			intent.desiredDigest,
+		); err != nil {
+			return err
+		}
+	}
+	return removePlanIndexIntent(gitRoot, intent)
+}
+
+func acquirePlanIndexExclusion(
+	root *VerifiedRoot,
+	desired Digest,
+) (*planIndexExclusion, error) {
+	lock, err := readPlanIndexSnapshot(root, planIndexLockFileName)
+	if err != nil {
+		return nil, err
+	}
+	markerContent := []byte(planIndexRecoveryLockText)
+	markerDigest := DigestBytes(markerContent)
+	marker := false
+	switch {
+	case !lock.exists:
+		if err := root.WriteExclusive(
+			planIndexLockFileName,
+			markerContent,
+			0o600,
+		); err != nil {
+			return nil, fmt.Errorf(
+				"acquire plan index recovery exclusion: %w",
+				err,
+			)
+		}
+		marker = true
+	case lock.digest == markerDigest:
+		marker = true
+	case !desired.IsZero() && lock.digest == desired:
+	default:
+		return nil, fmt.Errorf(
+			"plan repository index is locked by another Git operation",
+		)
+	}
+
+	file, _, err := root.adapter.openRegularFileExact(
+		planIndexLockFileName,
+		os.O_RDWR,
+		0,
+		false,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(
+		int(file.Fd()),
+		syscall.LOCK_EX|syscall.LOCK_NB,
+	); err != nil {
+		_ = file.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) ||
+			errors.Is(err, syscall.EAGAIN) {
+			return nil, fmt.Errorf(
+				"plan repository index recovery is active in another process",
+			)
+		}
+		return nil, fmt.Errorf("lock plan repository index: %w", err)
+	}
+	fail := func(lockErr error) (*planIndexExclusion, error) {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+		return nil, lockErr
+	}
+	if err := root.verifyOwnedRegularFile(
+		planIndexLockFileName,
+		file,
+	); err != nil {
+		return fail(err)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return fail(err)
+	}
+	content, err := io.ReadAll(io.LimitReader(file, maxPlanIndexBytes+1))
+	if err != nil {
+		return fail(err)
+	}
+	observed := DigestBytes(content)
+	if marker {
+		if !bytes.Equal(content, markerContent) {
+			return fail(fmt.Errorf(
+				"plan index recovery exclusion content changed",
+			))
+		}
+	} else if observed != desired {
+		return fail(fmt.Errorf(
+			"plan index synchronization lock content changed",
+		))
+	}
+	return &planIndexExclusion{
+		root: root, file: file, marker: marker,
+	}, nil
+}
+
+func recoverAbandonedPlanIndexExclusion(
+	root *VerifiedRoot,
+) (resultErr error) {
+	lock, err := readPlanIndexSnapshot(root, planIndexLockFileName)
+	if err != nil {
+		return err
+	}
+	if !lock.exists {
+		return nil
+	}
+	if lock.digest != DigestBytes([]byte(planIndexRecoveryLockText)) {
+		return fmt.Errorf(
+			"plan repository index is locked by another Git operation",
+		)
+	}
+	exclusion, err := acquirePlanIndexExclusion(root, Digest{})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, exclusion.Close())
+	}()
+	return nil
+}
+
+func (exclusion *planIndexExclusion) Close() error {
+	if exclusion == nil || exclusion.file == nil {
+		return nil
+	}
+	var removeErr error
+	if exclusion.marker {
+		removed, err := exclusion.root.adapter.removeFileContentExact(
+			planIndexLockFileName,
+			[]byte(planIndexRecoveryLockText),
+			int64(len(planIndexRecoveryLockText)),
+			exclusion.root.VerifyPath,
+		)
+		if err != nil {
+			removeErr = err
+		} else if !removed {
+			removeErr = fmt.Errorf(
+				"plan index recovery exclusion is missing",
+			)
+		}
+	}
+	unlockErr := syscall.Flock(
+		int(exclusion.file.Fd()),
+		syscall.LOCK_UN,
+	)
+	closeErr := exclusion.file.Close()
+	exclusion.file = nil
+	return errors.Join(removeErr, unlockErr, closeErr)
 }
 
 func readPlanIndexSnapshot(

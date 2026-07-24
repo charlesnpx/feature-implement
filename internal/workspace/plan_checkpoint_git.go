@@ -85,7 +85,11 @@ func (adapter planCheckpointGitAdapter) checkpoint(
 	}
 	defer gitDirectory.Close()
 	adapter.gitDirectory = gitDirectory
-	head, err := adapter.prepareRepository(ctx, kind == PlanCheckpointInitial)
+	head, err := adapter.prepareRepository(
+		ctx,
+		kind == PlanCheckpointInitial,
+		fault,
+	)
 	if err != nil {
 		return PlanCheckpointResult{}, err
 	}
@@ -93,6 +97,9 @@ func (adapter planCheckpointGitAdapter) checkpoint(
 		return PlanCheckpointResult{}, err
 	}
 	if err := verifyCheckpointBundleRoot(root, bundle); err != nil {
+		return PlanCheckpointResult{}, err
+	}
+	if err := adapter.reconcilePreparedPlanLockInventory(ctx, root, head); err != nil {
 		return PlanCheckpointResult{}, err
 	}
 
@@ -500,11 +507,15 @@ func (adapter planCheckpointGitAdapter) verifyLockCheckpoint(
 	if err := adapter.verifyTrackedTree(ctx, head.tree, tracked); err != nil {
 		return VerifiedPlanLockCheckpoint{}, err
 	}
-	if err := adapter.requireCleanIndex(ctx, head); err != nil {
-		return VerifiedPlanLockCheckpoint{}, err
-	}
-	if _, err := adapter.readExactCheckpointWorktree(
-		root, bundle, locks, administrative, inventory, inventoryBytes,
+	if err := adapter.requireStableLockVerification(
+		ctx,
+		root,
+		bundle,
+		head,
+		locks,
+		administrative,
+		inventory,
+		inventoryBytes,
 	); err != nil {
 		return VerifiedPlanLockCheckpoint{}, err
 	}
@@ -513,6 +524,102 @@ func (adapter planCheckpointGitAdapter) verifyLockCheckpoint(
 		sourceDigest: identity.source, semanticDigest: identity.semantic,
 		generation: identity.generation, lockDigest: locks.digest,
 	}, nil
+}
+
+func (adapter planCheckpointGitAdapter) requireStableLockVerification(
+	ctx context.Context,
+	root *VerifiedRoot,
+	bundle WorkspaceBundle,
+	head planCheckpointCommit,
+	locks planLockFiles,
+	administrative []string,
+	inventory planRepositoryInventory,
+	inventoryBytes []byte,
+) error {
+	if adapter.gitDirectory == nil {
+		return fmt.Errorf("retained plan Git directory is required")
+	}
+	indexBefore, err := readPlanIndexSnapshot(
+		adapter.gitDirectory.root,
+		planIndexFileName,
+	)
+	if err != nil {
+		return err
+	}
+	headBefore, err := adapter.inspectHead(ctx)
+	if err != nil {
+		return err
+	}
+	if headBefore.id != head.id {
+		return fmt.Errorf("plan repository HEAD changed during lock verification")
+	}
+	clean, err := adapter.planIndexSnapshotMatchesCommit(
+		ctx,
+		indexBefore,
+		head.id,
+	)
+	if err != nil {
+		return err
+	}
+	if !clean {
+		return fmt.Errorf("plan repository requires a clean index")
+	}
+	if _, err := adapter.readExactCheckpointWorktree(
+		root,
+		bundle,
+		locks,
+		administrative,
+		inventory,
+		inventoryBytes,
+	); err != nil {
+		return err
+	}
+	headAfter, err := adapter.inspectHead(ctx)
+	if err != nil {
+		return err
+	}
+	indexAfter, err := readPlanIndexSnapshot(
+		adapter.gitDirectory.root,
+		planIndexFileName,
+	)
+	if err != nil {
+		return err
+	}
+	if headAfter.id != head.id {
+		return fmt.Errorf("plan repository HEAD changed during lock verification")
+	}
+	if !indexBefore.equal(indexAfter) {
+		return fmt.Errorf("plan repository index changed during lock verification")
+	}
+	clean, err = adapter.planIndexSnapshotMatchesCommit(
+		ctx,
+		indexAfter,
+		head.id,
+	)
+	if err != nil {
+		return err
+	}
+	if !clean {
+		return fmt.Errorf("plan repository requires a clean index")
+	}
+	finalHead, err := adapter.inspectHead(ctx)
+	if err != nil {
+		return err
+	}
+	if finalHead.id != head.id {
+		return fmt.Errorf("plan repository HEAD changed during lock verification")
+	}
+	finalIndex, err := readPlanIndexSnapshot(
+		adapter.gitDirectory.root,
+		planIndexFileName,
+	)
+	if err != nil {
+		return err
+	}
+	if !indexAfter.equal(finalIndex) {
+		return fmt.Errorf("plan repository index changed during lock verification")
+	}
+	return adapter.gitDirectory.Verify()
 }
 
 func (adapter planCheckpointGitAdapter) verifyTrackedTree(
@@ -575,6 +682,7 @@ func (adapter planCheckpointGitAdapter) verifyTrackedTree(
 func (adapter planCheckpointGitAdapter) prepareRepository(
 	ctx context.Context,
 	allowInitialize bool,
+	fault PlanCheckpointFaultInjector,
 ) (planCheckpointCommit, error) {
 	if adapter.gitDirectory == nil {
 		return planCheckpointCommit{}, fmt.Errorf("retained plan Git directory is required")
@@ -605,21 +713,21 @@ func (adapter planCheckpointGitAdapter) prepareRepository(
 	if err := adapter.verifyRepositoryLayout(ctx); err != nil {
 		return planCheckpointCommit{}, err
 	}
-	head, err := adapter.inspectHead(ctx)
+	headID, err := adapter.inspectHeadID(ctx)
 	if err != nil {
 		return planCheckpointCommit{}, err
 	}
-	repairMetadata := allowInitialize && head.id.IsZero()
+	repairMetadata := allowInitialize && headID.IsZero()
 	if err := adapter.verifyOrConfigureRepository(ctx, repairMetadata); err != nil {
 		return planCheckpointCommit{}, err
 	}
 	if err := adapter.verifyOrPublishExclude(ctx, repairMetadata); err != nil {
 		return planCheckpointCommit{}, err
 	}
-	if err := adapter.recoverIndexSynchronization(ctx); err != nil {
+	if err := adapter.recoverIndexSynchronization(ctx, fault); err != nil {
 		return planCheckpointCommit{}, err
 	}
-	head, err = adapter.inspectHead(ctx)
+	head, err := adapter.inspectHead(ctx)
 	if err != nil {
 		return planCheckpointCommit{}, err
 	}
@@ -693,20 +801,16 @@ func (adapter planCheckpointGitAdapter) inspectPreparedRepository(
 	if err := adapter.verifyRepositoryLayout(ctx); err != nil {
 		return planCheckpointCommit{}, err
 	}
-	head, err := adapter.inspectHead(ctx)
-	if err != nil {
-		return planCheckpointCommit{}, err
-	}
 	if err := adapter.verifyOrConfigureRepository(ctx, false); err != nil {
 		return planCheckpointCommit{}, err
 	}
 	if err := adapter.verifyOrPublishExclude(ctx, false); err != nil {
 		return planCheckpointCommit{}, err
 	}
-	if err := adapter.recoverIndexSynchronization(ctx); err != nil {
+	if err := adapter.recoverIndexSynchronization(ctx, nil); err != nil {
 		return planCheckpointCommit{}, err
 	}
-	head, err = adapter.inspectHead(ctx)
+	head, err := adapter.inspectHead(ctx)
 	if err != nil {
 		return planCheckpointCommit{}, err
 	}
@@ -969,9 +1073,19 @@ func (adapter planCheckpointGitAdapter) verifyRepositoryRefs(
 }
 
 func (adapter planCheckpointGitAdapter) inspectHead(ctx context.Context) (planCheckpointCommit, error) {
+	id, err := adapter.inspectHeadID(ctx)
+	if err != nil || id.IsZero() {
+		return planCheckpointCommit{}, err
+	}
+	return adapter.readCommit(ctx, id)
+}
+
+func (adapter planCheckpointGitAdapter) inspectHeadID(
+	ctx context.Context,
+) (GitObjectID, error) {
 	algorithm, err := adapter.objectFormat(ctx)
 	if err != nil {
-		return planCheckpointCommit{}, err
+		return GitObjectID{}, err
 	}
 	stdout, stderr, exitCode, err := adapter.run(
 		ctx,
@@ -979,13 +1093,13 @@ func (adapter planCheckpointGitAdapter) inspectHead(ctx context.Context) (planCh
 		"rev-parse", "--verify", "--quiet", "HEAD",
 	)
 	if err != nil {
-		return planCheckpointCommit{}, err
+		return GitObjectID{}, err
 	}
 	if exitCode == 1 {
-		return planCheckpointCommit{}, nil
+		return GitObjectID{}, nil
 	}
 	if exitCode != 0 {
-		return planCheckpointCommit{}, fmt.Errorf(
+		return GitObjectID{}, fmt.Errorf(
 			"inspect plan repository HEAD: Git exited with status %d: %s",
 			exitCode,
 			strings.TrimSpace(string(stderr)),
@@ -993,9 +1107,9 @@ func (adapter planCheckpointGitAdapter) inspectHead(ctx context.Context) (planCh
 	}
 	id, err := parseRawPlanGitObject(algorithm, stdout)
 	if err != nil {
-		return planCheckpointCommit{}, err
+		return GitObjectID{}, err
 	}
-	return adapter.readCommit(ctx, id)
+	return id, nil
 }
 
 func (adapter planCheckpointGitAdapter) verifyCheckpointHistory(
