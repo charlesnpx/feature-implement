@@ -411,10 +411,67 @@ func (root *VerifiedRoot) probeDurabilityAt(probeDirectory string) error {
 		_ = file.Close()
 		return fail("advisory locking", err)
 	}
+	contender, _, err := root.adapter.openRegularFileExact(
+		source, os.O_RDWR, 0, false,
+	)
+	if err != nil {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+		return fail("competing advisory lock opening", err)
+	}
+	if err := root.verifyOwnedRegularFile(source, contender); err != nil {
+		_ = contender.Close()
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+		return fail("competing advisory lock ownership", err)
+	}
+	contenderLockErr := syscall.Flock(
+		int(contender.Fd()), syscall.LOCK_EX|syscall.LOCK_NB,
+	)
+	if contenderLockErr == nil {
+		contenderUnlockErr := syscall.Flock(int(contender.Fd()), syscall.LOCK_UN)
+		contenderCloseErr := contender.Close()
+		unlockErr := syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		closeErr := file.Close()
+		return fail(
+			"advisory lock exclusion",
+			errors.Join(
+				fmt.Errorf("an independently opened contender acquired the held lock"),
+				contenderUnlockErr,
+				contenderCloseErr,
+				unlockErr,
+				closeErr,
+			),
+		)
+	}
+	if !errors.Is(contenderLockErr, syscall.EWOULDBLOCK) &&
+		!errors.Is(contenderLockErr, syscall.EAGAIN) {
+		_ = contender.Close()
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+		return fail("competing advisory locking", contenderLockErr)
+	}
 	unlockErr := syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
-	closeErr := file.Close()
 	if unlockErr != nil {
+		_ = contender.Close()
+		_ = file.Close()
 		return fail("advisory unlocking", unlockErr)
+	}
+	if err := syscall.Flock(
+		int(contender.Fd()), syscall.LOCK_EX|syscall.LOCK_NB,
+	); err != nil {
+		_ = contender.Close()
+		_ = file.Close()
+		return fail("advisory lock handoff", err)
+	}
+	contenderUnlockErr := syscall.Flock(int(contender.Fd()), syscall.LOCK_UN)
+	contenderCloseErr := contender.Close()
+	closeErr := file.Close()
+	if contenderUnlockErr != nil {
+		return fail("competing advisory unlocking", contenderUnlockErr)
+	}
+	if contenderCloseErr != nil {
+		return fail("competing lock file closure", contenderCloseErr)
 	}
 	if closeErr != nil {
 		return fail("file closure", closeErr)

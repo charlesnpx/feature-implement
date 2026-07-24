@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/charlesnpx/feature-implement/internal/workspace"
@@ -554,6 +555,161 @@ func TestAttemptWorktreeClaimPublicationIsAtomicAcrossCrashPoints(t *testing.T) 
 				t.Fatalf("claim marker remained after retry at %s: %v", point, err)
 			}
 		})
+	}
+}
+
+func TestAttemptWorktreeClaimRecoversCrashStrandedPendingFile(t *testing.T) {
+	const (
+		pendingPathEnvironment = "FEATURE_TEST_ATTEMPT_CLAIM_PENDING_PATH"
+		pendingModeEnvironment = "FEATURE_TEST_ATTEMPT_CLAIM_PENDING_MODE"
+	)
+	if pending := os.Getenv(pendingPathEnvironment); pending != "" {
+		file, err := os.OpenFile(pending, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "create crash-stranded pending claim: %v\n", err)
+			os.Exit(2)
+		}
+		if os.Getenv(pendingModeEnvironment) == "partial" {
+			if _, err := file.Write([]byte(`{"schema_version":3,"kind":"attempt_`)); err != nil {
+				_, _ = fmt.Fprintf(os.Stderr, "write partial pending claim: %v\n", err)
+				os.Exit(2)
+			}
+		}
+		if err := file.Sync(); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "synchronize crash-stranded pending claim: %v\n", err)
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
+
+	repositoryRoot := filepath.Join(t.TempDir(), "repository")
+	runGitSetup(t, "", "init", "--initial-branch=main", repositoryRoot)
+	base, err := workspace.ParseGitObjectID("sha1:" + strings.Repeat("a", 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"empty", "partial"} {
+		t.Run(mode, func(t *testing.T) {
+			worktree := filepath.Join(t.TempDir(), "attempt-worktree")
+			claim, err := workspace.NewAttemptWorktreeClaim(
+				workspace.MustID("attempt-crash-pending-"+mode),
+				workspace.DigestBytes([]byte("generation-"+mode)),
+				base,
+				"mu/claim-crash-pending-"+mode+"-a1-123456789abc",
+				worktree,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pending := worktree + ".feature-attempt-claim.pending"
+			command := exec.Command(
+				os.Args[0],
+				"-test.run=^TestAttemptWorktreeClaimRecoversCrashStrandedPendingFile$",
+			)
+			command.Env = append(
+				os.Environ(),
+				pendingPathEnvironment+"="+pending,
+				pendingModeEnvironment+"="+mode,
+			)
+			if output, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("crash helper: %v\n%s", err, output)
+			}
+			if _, err := os.Lstat(pending); err != nil {
+				t.Fatalf("crash helper did not leave pending claim: %v", err)
+			}
+
+			adapter := workspace.DefaultLocalAttemptGitAdapter()
+			if err := adapter.PrepareAttemptWorktree(
+				context.Background(), repositoryRoot, claim, false,
+			); err != nil {
+				t.Fatalf("recover %s pending claim: %v", mode, err)
+			}
+			if _, err := os.Lstat(pending); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("recovered pending claim remains: %v", err)
+			}
+			marker := worktree + ".feature-attempt-claim"
+			if _, err := os.Lstat(marker); err != nil {
+				t.Fatalf("recovered claim was not published: %v", err)
+			}
+			if err := adapter.ReleaseAttemptWorktreeClaim(
+				context.Background(), claim,
+			); err != nil {
+				t.Fatalf("release recovered claim: %v", err)
+			}
+		})
+	}
+}
+
+func TestAttemptWorktreeClaimDoesNotReclaimActivePendingFile(t *testing.T) {
+	repositoryRoot := filepath.Join(t.TempDir(), "repository")
+	runGitSetup(t, "", "init", "--initial-branch=main", repositoryRoot)
+	base, err := workspace.ParseGitObjectID("sha1:" + strings.Repeat("a", 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree := filepath.Join(t.TempDir(), "attempt-worktree")
+	claim, err := workspace.NewAttemptWorktreeClaim(
+		workspace.MustID("attempt-active-pending"),
+		workspace.DigestBytes([]byte("active-pending-generation")),
+		base,
+		"mu/claim-active-pending-a1-123456789abc",
+		worktree,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := worktree + ".feature-attempt-claim.pending"
+	file, err := os.OpenFile(pending, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := file.Write([]byte(`{"schema_version":3`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	locked := true
+	defer func() {
+		if locked {
+			_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		}
+	}()
+
+	adapter := workspace.DefaultLocalAttemptGitAdapter()
+	if err := adapter.PrepareAttemptWorktree(
+		context.Background(), repositoryRoot, claim, false,
+	); err == nil || !strings.Contains(err.Error(), "pending attempt worktree claim") ||
+		!strings.Contains(err.Error(), "is active") {
+		t.Fatalf("active pending claim error = %v", err)
+	}
+	if _, err := os.Lstat(pending); err != nil {
+		t.Fatalf("active pending claim was removed: %v", err)
+	}
+	if _, err := os.Lstat(worktree + ".feature-attempt-claim"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("active pending claim was published: %v", err)
+	}
+
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	locked = false
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.PrepareAttemptWorktree(
+		context.Background(), repositoryRoot, claim, false,
+	); err != nil {
+		t.Fatalf("recover released pending claim: %v", err)
+	}
+	if err := adapter.ReleaseAttemptWorktreeClaim(
+		context.Background(), claim,
+	); err != nil {
+		t.Fatalf("release recovered active claim: %v", err)
 	}
 }
 

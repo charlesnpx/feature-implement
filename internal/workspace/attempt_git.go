@@ -11,9 +11,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 const maxAttemptGitOutputBytes = 8 * 1024 * 1024
+const maxAttemptWorktreeClaimBytes = 16 * 1024
 
 type AttemptRefInventory struct {
 	local  []string
@@ -690,100 +692,157 @@ func createOrVerifyAttemptWorktreeClaim(
 	payload []byte,
 	fault AttemptWorktreeClaimFaultInjector,
 ) (bool, error) {
+	for {
+		published, retry, err := createOrVerifyAttemptWorktreeClaimOnce(
+			root, marker, worktree, payload, fault,
+		)
+		if retry {
+			continue
+		}
+		return published, err
+	}
+}
+
+func createOrVerifyAttemptWorktreeClaimOnce(
+	root *VerifiedRoot,
+	marker, worktree string,
+	payload []byte,
+	fault AttemptWorktreeClaimFaultInjector,
+) (bool, bool, error) {
 	if root == nil {
-		return false, fmt.Errorf("attempt worktree claim requires a verified root")
+		return false, false, fmt.Errorf("attempt worktree claim requires a verified root")
 	}
 	if _, exists, err := root.adapter.inspectExact(marker); err != nil {
-		return false, fmt.Errorf("inspect attempt worktree claim: %w", err)
+		return false, false, fmt.Errorf("inspect attempt worktree claim: %w", err)
 	} else if exists {
 		existing, readErr := readAttemptWorktreeClaim(root, marker)
 		if readErr != nil {
-			return false, readErr
+			return false, false, readErr
 		}
 		if !bytes.Equal(existing, payload) {
-			return false, fmt.Errorf("attempt worktree claim %s belongs to different immutable bindings", marker)
+			return false, false, fmt.Errorf("attempt worktree claim %s belongs to different immutable bindings", marker)
 		}
 		if err := root.Sync(); err != nil {
-			return false, fmt.Errorf("synchronize existing attempt worktree claim: %w", err)
+			return false, false, fmt.Errorf("synchronize existing attempt worktree claim: %w", err)
 		}
-		return false, nil
+		return false, false, nil
 	}
 	if _, exists, err := root.adapter.inspectExact(worktree); err != nil {
-		return false, fmt.Errorf("inspect attempt worktree before claim: %w", err)
+		return false, false, fmt.Errorf("inspect attempt worktree before claim: %w", err)
 	} else if exists {
-		return false, fmt.Errorf("attempt worktree path %s predates its ownership claim", worktree)
+		return false, false, fmt.Errorf("attempt worktree path %s predates its ownership claim", worktree)
 	}
 
 	pending := marker + ".pending"
-	if _, exists, err := root.adapter.inspectExact(pending); err != nil {
-		return false, err
-	} else if exists {
-		existing, readErr := root.ReadBounded(pending, 16*1024)
-		if readErr != nil {
-			return false, fmt.Errorf("read pending attempt worktree claim: %w", readErr)
-		}
-		if !bytes.Equal(existing, payload) {
-			return false, fmt.Errorf("pending attempt worktree claim has unexpected content")
-		}
-	}
 	file, created, err := root.adapter.openRegularFileExact(
-		pending, os.O_WRONLY, 0o600, true,
+		pending, os.O_RDWR, 0o600, true,
 	)
 	if err != nil {
-		return false, fmt.Errorf("create pending attempt worktree claim: %w", err)
+		return false, false, fmt.Errorf("open pending attempt worktree claim: %w", err)
 	}
-	if err := root.verifyOwnedRegularFile(pending, file); err != nil {
-		_ = file.Close()
-		return false, err
-	}
-	var createdInfo os.FileInfo
-	if created {
-		createdInfo, err = file.Stat()
-		if err != nil {
-			_ = file.Close()
-			return false, fmt.Errorf("inspect pending attempt worktree claim: %w", err)
+	fileOpen := true
+	locked := false
+	defer func() {
+		if locked {
+			_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
 		}
+		if fileOpen {
+			_ = file.Close()
+		}
+	}()
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return false, false, fmt.Errorf("pending attempt worktree claim %s is active", pending)
+		}
+		return false, false, fmt.Errorf("lock pending attempt worktree claim: %w", err)
+	}
+	locked = true
+	if err := root.verifyOwnedRegularFile(pending, file); err != nil {
+		return false, false, err
+	}
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return false, false, fmt.Errorf("inspect pending attempt worktree claim: %w", err)
+	}
+	if err := root.adapter.verifyOpenedFileExact(pending, file); err != nil {
+		return false, false, err
 	}
 	if !created {
-		_ = file.Close()
-		file, _, err = root.adapter.openRegularFileExact(pending, os.O_RDONLY, 0, false)
-		if err != nil {
-			return false, err
+		existing, readErr := readOpenedFileBounded(file, maxAttemptWorktreeClaimBytes)
+		if readErr != nil {
+			return false, false, fmt.Errorf("read pending attempt worktree claim: %w", readErr)
 		}
-		if err := root.verifyOwnedRegularFile(pending, file); err != nil {
-			_ = file.Close()
-			return false, err
+		if !bytes.Equal(existing, payload) {
+			if json.Valid(existing) {
+				return false, false, fmt.Errorf(
+					"pending attempt worktree claim belongs to different immutable bindings",
+				)
+			}
+			removed, removeErr := root.adapter.removeFileIdentityExact(
+				pending,
+				openedInfo,
+				func() error {
+					if err := root.VerifyPath(); err != nil {
+						return err
+					}
+					if _, exists, err := root.adapter.inspectExact(marker); err != nil {
+						return err
+					} else if exists {
+						return fmt.Errorf("attempt worktree claim appeared during pending recovery")
+					}
+					if _, exists, err := root.adapter.inspectExact(worktree); err != nil {
+						return err
+					} else if exists {
+						return fmt.Errorf("attempt worktree appeared during pending recovery")
+					}
+					return root.adapter.verifyOpenedFileExact(pending, file)
+				},
+			)
+			if removeErr != nil {
+				return false, false, fmt.Errorf(
+					"recover partial pending attempt worktree claim: %w", removeErr,
+				)
+			}
+			if !removed {
+				return false, false, fmt.Errorf(
+					"recover partial pending attempt worktree claim: staging file disappeared",
+				)
+			}
+			if err := root.Sync(); err != nil {
+				return false, false, fmt.Errorf(
+					"synchronize recovered pending attempt worktree claim: %w", err,
+				)
+			}
+			return false, true, nil
 		}
 	}
 	removeOnFailure := true
 	defer func() {
-		_ = file.Close()
-		if removeOnFailure && createdInfo != nil {
-			_, _ = root.adapter.removeFileIdentityExact(pending, createdInfo, nil)
+		if removeOnFailure && created {
+			_, _ = root.adapter.removeFileIdentityExact(pending, openedInfo, nil)
 		}
 	}()
 	if created {
 		if err := injectAttemptWorktreeClaimFault(fault, AttemptWorktreeClaimFaultAfterTemporaryCreated); err != nil {
-			return false, err
+			return false, false, err
 		}
 		if err := writeAll(file, payload); err != nil {
-			return false, fmt.Errorf("write pending attempt worktree claim: %w", err)
+			return false, false, fmt.Errorf("write pending attempt worktree claim: %w", err)
 		}
 		if err := injectAttemptWorktreeClaimFault(fault, AttemptWorktreeClaimFaultAfterTemporaryWritten); err != nil {
-			return false, err
-		}
-		if err := file.Sync(); err != nil {
-			return false, fmt.Errorf("synchronize pending attempt worktree claim: %w", err)
-		}
-		if err := root.adapter.verifyOpenedFileExact(pending, file); err != nil {
-			return false, err
-		}
-		if err := injectAttemptWorktreeClaimFault(fault, AttemptWorktreeClaimFaultAfterTemporarySynced); err != nil {
-			return false, err
+			return false, false, err
 		}
 	}
-	if err := file.Close(); err != nil {
-		return false, fmt.Errorf("close pending attempt worktree claim: %w", err)
+	if err := file.Sync(); err != nil {
+		return false, false, fmt.Errorf("synchronize pending attempt worktree claim: %w", err)
+	}
+	if err := root.adapter.verifyOpenedFileExact(pending, file); err != nil {
+		return false, false, err
+	}
+	if created {
+		if err := injectAttemptWorktreeClaimFault(fault, AttemptWorktreeClaimFaultAfterTemporarySynced); err != nil {
+			return false, false, err
+		}
 	}
 	if err := root.adapter.renameFileNoReplace(pending, marker); err != nil {
 		if existing, readErr := readAttemptWorktreeClaim(root, marker); readErr == nil &&
@@ -792,18 +851,26 @@ func createOrVerifyAttemptWorktreeClaim(
 				pending, payload, int64(len(payload)), nil,
 			)
 			removeOnFailure = false
-			return false, root.Sync()
+			return false, false, root.Sync()
 		}
-		return false, fmt.Errorf("publish attempt worktree claim without replacement: %w", err)
+		return false, false, fmt.Errorf("publish attempt worktree claim without replacement: %w", err)
 	}
 	removeOnFailure = false
 	if err := injectAttemptWorktreeClaimFault(fault, AttemptWorktreeClaimFaultAfterPublished); err != nil {
-		return false, err
+		return false, false, err
 	}
 	if err := root.Sync(); err != nil {
-		return false, fmt.Errorf("publish attempt worktree claim: %w", err)
+		return false, false, fmt.Errorf("publish attempt worktree claim: %w", err)
 	}
-	return true, nil
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_UN); err != nil {
+		return false, false, fmt.Errorf("unlock published attempt worktree claim: %w", err)
+	}
+	locked = false
+	if err := file.Close(); err != nil {
+		return false, false, fmt.Errorf("close published attempt worktree claim: %w", err)
+	}
+	fileOpen = false
+	return true, false, nil
 }
 
 func injectAttemptWorktreeClaimFault(
@@ -820,7 +887,7 @@ func injectAttemptWorktreeClaimFault(
 }
 
 func readAttemptWorktreeClaim(root *VerifiedRoot, marker string) ([]byte, error) {
-	content, err := root.ReadBounded(marker, 16*1024)
+	content, err := root.ReadBounded(marker, maxAttemptWorktreeClaimBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read attempt worktree claim: %w", err)
 	}
