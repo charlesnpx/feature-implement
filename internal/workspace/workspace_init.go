@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -33,10 +34,32 @@ func InitializeWorkspaceV2(
 	workspaceDir string,
 	definition EffectiveWorkspaceDefinition,
 	occurredAt time.Time,
-) (WorkspaceInitializationResult, error) {
+) (result WorkspaceInitializationResult, resultErr error) {
 	if definition.generation.IsZero() || occurredAt.IsZero() {
 		return WorkspaceInitializationResult{}, fmt.Errorf("workspace initialization requires an effective definition and occurrence time")
 	}
+	roots, err := OpenWorkspaceInitializationRootGuard(
+		"", workspaceDir, definition.workspace.repositoryRoot,
+	)
+	if err != nil {
+		return WorkspaceInitializationResult{}, err
+	}
+	defer roots.Close()
+	if err := roots.VerifyBeforeRuntimeCreation(); err != nil {
+		return WorkspaceInitializationResult{}, err
+	}
+	defer func() {
+		var verifyErr error
+		if resultErr == nil {
+			verifyErr = roots.VerifyAfterRuntimeCreation()
+		} else {
+			verifyErr = roots.VerifyAfterEffects()
+		}
+		if verifyErr != nil {
+			result = WorkspaceInitializationResult{}
+			resultErr = errors.Join(resultErr, verifyErr)
+		}
+	}()
 	store, err := OpenGenerationStore(workspaceDir)
 	if err != nil {
 		return WorkspaceInitializationResult{}, err
@@ -117,10 +140,11 @@ func InitializeWorkspaceV2(
 	if err != nil {
 		return WorkspaceInitializationResult{}, err
 	}
-	return WorkspaceInitializationResult{
+	result = WorkspaceInitializationResult{
 		storedGeneration: stored, snapshot: snapshot,
 		runtime: runtime, projectionDigest: projectionDigest,
-	}, nil
+	}
+	return result, nil
 }
 
 func RebuildWorkspaceRuntimeProjectionFile(journal *WorkspaceJournal) (Digest, error) {

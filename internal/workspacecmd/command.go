@@ -2,6 +2,7 @@ package workspacecmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -370,7 +371,10 @@ type initializeRequest struct {
 	OccurredAt    string `json:"occurred_at"`
 }
 
-func initializeWorkspace(bundle workspace.WorkspaceBundle, options Options) (InitializationResult, error) {
+func initializeWorkspace(
+	bundle workspace.WorkspaceBundle,
+	options Options,
+) (result InitializationResult, resultErr error) {
 	workspaceDir, err := absoluteDirectory(options.WorkspaceDir, "workspace")
 	if err != nil {
 		return InitializationResult{}, err
@@ -383,6 +387,29 @@ func initializeWorkspace(bundle workspace.WorkspaceBundle, options Options) (Ini
 	if err != nil {
 		return InitializationResult{}, err
 	}
+	definition := bundle.Definition()
+	roots, err := workspace.OpenWorkspaceInitializationRootGuard(
+		bundle.Root(), workspaceDir, definition.Workspace().RepositoryRoot(),
+	)
+	if err != nil {
+		return InitializationResult{}, err
+	}
+	defer roots.Close()
+	if err := roots.VerifyBeforeRuntimeCreation(); err != nil {
+		return InitializationResult{}, err
+	}
+	defer func() {
+		var verifyErr error
+		if resultErr == nil {
+			verifyErr = roots.VerifyAfterRuntimeCreation()
+		} else {
+			verifyErr = roots.VerifyAfterEffects()
+		}
+		if verifyErr != nil {
+			result = InitializationResult{}
+			resultErr = errors.Join(resultErr, verifyErr)
+		}
+	}()
 	if err := bundle.VerifyRoot(); err != nil {
 		return InitializationResult{}, err
 	}
@@ -392,19 +419,29 @@ func initializeWorkspace(bundle workspace.WorkspaceBundle, options Options) (Ini
 	if err := bundle.VerifyRoot(); err != nil {
 		return InitializationResult{}, err
 	}
-	initialized, err := workspace.InitializeWorkspaceV2(workspaceDir, bundle.Definition(), occurredAt)
+	if err := roots.VerifyBeforeRuntimeCreation(); err != nil {
+		return InitializationResult{}, err
+	}
+	initialized, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, occurredAt)
 	if err != nil {
 		return InitializationResult{}, err
 	}
-	report, err := workspace.RebuildWorkspaceReport(initialized.Snapshot(), bundle.Definition())
+	if err := roots.VerifyAfterRuntimeCreation(); err != nil {
+		return InitializationResult{}, err
+	}
+	if err := bundle.VerifyRoot(); err != nil {
+		return InitializationResult{}, err
+	}
+	report, err := workspace.RebuildWorkspaceReport(initialized.Snapshot(), definition)
 	if err != nil {
 		return InitializationResult{}, err
 	}
-	return InitializationResult{
+	result = InitializationResult{
 		SchemaVersion: requestSchemaVersion, Status: "initialized", WorkspaceDir: workspaceDir,
 		WorkspaceID: initialized.Runtime().WorkspaceID().String(), Generation: initialized.Runtime().ActiveGeneration().String(),
 		JournalHead: initialized.Snapshot().Head().String(), ProjectionDigest: initialized.ProjectionDigest().String(), Report: report,
-	}, nil
+	}
+	return result, nil
 }
 
 func readReport(bundle workspace.WorkspaceBundle, workspaceDir string) (workspace.WorkspaceReport, error) {

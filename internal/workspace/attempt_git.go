@@ -141,7 +141,7 @@ type AttemptGitPort interface {
 	InspectAttemptWorktree(context.Context, string, string, string) (AttemptGitInspection, error)
 	PrepareAttemptWorktree(context.Context, AttemptWorktreeClaim, bool) error
 	ReleaseAttemptWorktreeClaim(context.Context, AttemptWorktreeClaim) error
-	CreateAttemptWorktree(context.Context, string, string, string, GitObjectID, bool, bool) error
+	CreateAttemptWorktree(context.Context, string, AttemptWorktreeClaim, bool, bool) error
 }
 
 type AttemptWorktreeClaimFaultPoint string
@@ -391,40 +391,108 @@ func (adapter LocalAttemptGitAdapter) InspectAttemptWorktree(
 
 func (adapter LocalAttemptGitAdapter) CreateAttemptWorktree(
 	ctx context.Context,
-	repositoryRoot, branch, worktree string,
-	base GitObjectID,
+	repositoryRoot string,
+	claim AttemptWorktreeClaim,
 	createBranch, recoverRegistered bool,
 ) error {
-	if base.IsZero() || !filepath.IsAbs(worktree) {
+	if claim.base.IsZero() || !filepath.IsAbs(claim.worktree) {
 		return fmt.Errorf("attempt worktree creation requires an exact base and absolute path")
 	}
-	if err := os.MkdirAll(filepath.Dir(filepath.Clean(worktree)), 0o755); err != nil {
-		return fmt.Errorf("create attempt worktree parent: %w", err)
+	marker := attemptWorktreeClaimPath(claim.worktree)
+	parentPath, err := canonicalizeTrustedRootPath(filepath.Dir(marker))
+	if err != nil {
+		return err
+	}
+	parent, err := OpenVerifiedRoot(RootRoleWorktree, parentPath, false)
+	if err != nil {
+		return fmt.Errorf("reopen claimed attempt worktree root: %w", err)
+	}
+	defer parent.Close()
+	worktree := filepath.Join(
+		parent.Path(), filepath.Base(filepath.Clean(claim.worktree)),
+	)
+	expectedClaim, err := canonicalAttemptWorktreeClaim(
+		claim, worktree, parent.Identity(),
+	)
+	if err != nil {
+		return err
+	}
+	markerName := filepath.Base(marker)
+	durableClaim, err := readAttemptWorktreeClaim(parent, markerName)
+	if err != nil {
+		return fmt.Errorf("reopen durable attempt worktree claim: %w", err)
+	}
+	if !bytes.Equal(durableClaim, expectedClaim) {
+		return fmt.Errorf(
+			"attempt worktree claim %s does not bind the verified parent root",
+			marker,
+		)
+	}
+	if err := parent.VerifyPath(); err != nil {
+		return fmt.Errorf("verify claimed attempt worktree root before Git creation: %w", err)
 	}
 	commitAdapter := LocalCommitGitAdapter{git: adapter}
 	binding, err := commitAdapter.captureTrustedWorktreeBinding(ctx, repositoryRoot)
 	if err != nil {
 		return fmt.Errorf("inspect attempt materialization Git binding: %w", err)
 	}
-	baseText := strings.TrimPrefix(base.String(), string(base.algorithm)+":")
+	baseText := strings.TrimPrefix(
+		claim.base.String(), string(claim.base.algorithm)+":",
+	)
 	arguments := []string{"worktree", "add"}
 	if createBranch {
 		if recoverRegistered {
 			return fmt.Errorf("new attempt branch cannot recover an existing worktree registration")
 		}
-		arguments = append(arguments, "--no-track", "-b", branch, worktree, baseText)
+		arguments = append(
+			arguments, "--no-track", "-b", claim.branch, worktree, baseText,
+		)
 	} else {
 		if recoverRegistered {
 			arguments = append(arguments, "--force")
 		}
-		arguments = append(arguments, worktree, branch)
+		arguments = append(arguments, worktree, claim.branch)
 	}
-	_, exitCode, err := adapter.run(ctx, repositoryRoot, arguments...)
+	if err := parent.VerifyPath(); err != nil {
+		return fmt.Errorf("revalidate claimed attempt worktree root before Git effect: %w", err)
+	}
+	preEffectClaim, err := readAttemptWorktreeClaim(parent, markerName)
 	if err != nil {
-		return fmt.Errorf("create attempt worktree: %w", err)
+		return fmt.Errorf("revalidate durable attempt worktree claim before Git effect: %w", err)
 	}
-	if exitCode != 0 {
-		return fmt.Errorf("create attempt worktree: Git exited with status %d", exitCode)
+	if !bytes.Equal(preEffectClaim, expectedClaim) {
+		return fmt.Errorf("durable attempt worktree claim changed before Git creation")
+	}
+	_, exitCode, gitErr := adapter.run(ctx, repositoryRoot, arguments...)
+	var effectErr error
+	if gitErr != nil {
+		effectErr = fmt.Errorf("create attempt worktree: %w", gitErr)
+	} else if exitCode != 0 {
+		effectErr = fmt.Errorf(
+			"create attempt worktree: Git exited with status %d", exitCode,
+		)
+	}
+	if err := parent.VerifyPath(); err != nil {
+		return errors.Join(
+			effectErr,
+			fmt.Errorf("verify claimed attempt worktree root after Git creation: %w", err),
+		)
+	}
+	confirmedClaim, err := readAttemptWorktreeClaim(parent, markerName)
+	if err != nil {
+		return errors.Join(
+			effectErr,
+			fmt.Errorf("confirm durable attempt worktree claim: %w", err),
+		)
+	}
+	if !bytes.Equal(confirmedClaim, expectedClaim) {
+		return errors.Join(
+			effectErr,
+			fmt.Errorf("durable attempt worktree claim changed during Git creation"),
+		)
+	}
+	if effectErr != nil {
+		return effectErr
 	}
 	confirmed, err := commitAdapter.captureTrustedWorktreeBinding(ctx, binding.root)
 	if err != nil {
@@ -432,6 +500,16 @@ func (adapter LocalAttemptGitAdapter) CreateAttemptWorktree(
 	}
 	if confirmed != binding {
 		return fmt.Errorf("Git worktree administration changed during attempt materialization")
+	}
+	if err := parent.VerifyPath(); err != nil {
+		return fmt.Errorf("finalize claimed attempt worktree root verification: %w", err)
+	}
+	finalClaim, err := readAttemptWorktreeClaim(parent, markerName)
+	if err != nil {
+		return fmt.Errorf("finalize durable attempt worktree claim verification: %w", err)
+	}
+	if !bytes.Equal(finalClaim, expectedClaim) {
+		return fmt.Errorf("durable attempt worktree claim changed after Git creation")
 	}
 	return nil
 }

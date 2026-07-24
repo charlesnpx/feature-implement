@@ -91,10 +91,11 @@ func (git *fakeAttemptGit) ReleaseAttemptWorktreeClaim(
 func (git *fakeAttemptGit) CreateAttemptWorktree(
 	_ context.Context,
 	_ string,
-	branch, _ string,
-	base workspace.GitObjectID,
+	claim workspace.AttemptWorktreeClaim,
 	createBranch, _ bool,
 ) error {
+	branch := claim.Branch()
+	base := claim.Base()
 	if git.createErr != nil {
 		if git.partialOnCreateError {
 			git.local = append(git.local, branch)
@@ -541,6 +542,74 @@ func TestAttemptWorktreeClaimPublicationIsAtomicAcrossCrashPoints(t *testing.T) 
 				t.Fatalf("claim marker remained after retry at %s: %v", point, err)
 			}
 		})
+	}
+}
+
+func TestAttemptWorktreeCreationRejectsReplacedClaimParent(t *testing.T) {
+	parent := t.TempDir()
+	repositoryRoot := filepath.Join(parent, "repository")
+	runGitSetup(t, "", "init", "--initial-branch=main", repositoryRoot)
+	runGitSetup(t, repositoryRoot, "config", "user.name", "Attempt Test")
+	runGitSetup(t, repositoryRoot, "config", "user.email", "attempt@example.invalid")
+	if err := os.WriteFile(
+		filepath.Join(repositoryRoot, "tracked.txt"),
+		[]byte("committed\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	runGitSetup(t, repositoryRoot, "add", "tracked.txt")
+	runGitSetup(t, repositoryRoot, "commit", "-m", "initial")
+	baseText := strings.TrimSpace(string(runGitSetup(t, repositoryRoot, "rev-parse", "HEAD")))
+	base, err := workspace.ParseGitObjectID("sha1:" + baseText)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	worktreeParent := filepath.Join(parent, "attempts")
+	if err := os.Mkdir(worktreeParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	worktree := filepath.Join(worktreeParent, "attempt")
+	claim, err := workspace.NewAttemptWorktreeClaim(
+		workspace.MustID("attempt-parent-binding"),
+		workspace.DigestBytes([]byte("generation")),
+		base,
+		"mu/parent-binding-a1-123456789abc",
+		worktree,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := workspace.DefaultLocalAttemptGitAdapter()
+	if err := adapter.PrepareAttemptWorktree(context.Background(), claim, false); err != nil {
+		t.Fatal(err)
+	}
+	marker := worktree + ".feature-attempt-claim"
+	markerContent, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	movedParent := worktreeParent + "-moved"
+	if err := os.Rename(worktreeParent, movedParent); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(worktreeParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, markerContent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := adapter.CreateAttemptWorktree(
+		context.Background(), repositoryRoot, claim, true, false,
+	); err == nil || !strings.Contains(err.Error(), "does not bind the verified parent root") {
+		t.Fatalf("replaced claim parent creation error = %v", err)
+	}
+	if branches := strings.TrimSpace(string(
+		runGitSetup(t, repositoryRoot, "branch", "--list", claim.Branch()),
+	)); branches != "" {
+		t.Fatalf("replaced claim parent created branch: %q", branches)
 	}
 }
 

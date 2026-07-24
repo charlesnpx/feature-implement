@@ -103,6 +103,26 @@ func TestVerifiedRootDurabilityProbeCleansItsArtifacts(t *testing.T) {
 	}
 }
 
+func TestWorkspaceInitializationAdmissionRejectsPlanRuntimeOverlap(t *testing.T) {
+	parent := canonicalVerifiedRootTempDir(t)
+	planPath := filepath.Join(parent, "plan")
+	targetPath := filepath.Join(parent, "target")
+	for _, candidate := range []string{planPath, targetPath} {
+		if err := os.Mkdir(candidate, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtimePath := filepath.Join(planPath, "runtime")
+	if _, err := workspace.OpenWorkspaceInitializationRootGuard(
+		planPath, runtimePath, targetPath,
+	); err == nil || !strings.Contains(err.Error(), "unsafe workspace root overlap") {
+		t.Fatalf("plan/runtime admission error = %v", err)
+	}
+	if _, err := os.Lstat(runtimePath); !os.IsNotExist(err) {
+		t.Fatalf("plan/runtime overlap admission created runtime path: %v", err)
+	}
+}
+
 func TestWorkspaceRootLayoutAllowsOnlyGitStructuralOverlap(t *testing.T) {
 	parent := canonicalVerifiedRootTempDir(t)
 	paths := map[workspace.RootRole]string{

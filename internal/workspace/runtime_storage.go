@@ -2,21 +2,29 @@ package workspace
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"syscall"
 )
 
 const (
-	RuntimeFormatSchemaVersion    = 3
-	RuntimeFormatFileName         = "feature.runtime.v3.json"
-	RuntimeStateIdentityFileName  = "runtime-root.v3.json"
-	RuntimeInitializationLockName = "runtime-initialize.v3.lock"
-	MaxRuntimeIdentityMarkerBytes = 16 * 1024
+	RuntimeFormatSchemaVersion             = 3
+	RuntimeFormatFileName                  = "feature.runtime.v3.json"
+	RuntimeStateIdentityFileName           = "runtime-root.v3.json"
+	RuntimeInitializationLockName          = "runtime-initialize.v3.lock"
+	RuntimeCapabilityProbeIntentFileName   = "runtime-capability-probe.v3.intent.json"
+	RuntimeCapabilityProbeDirectoryName    = "runtime-capability-probe.v3"
+	MaxRuntimeIdentityMarkerBytes          = 16 * 1024
+	maxRuntimeCapabilityProbeIntentBytes   = 16 * 1024
+	runtimeCapabilityProbeIntentKind       = "runtime_capability_probe"
+	runtimeInstanceIdentifierEncodedLength = 32
 )
 
 const localRuntimeFormatKind = "feature_workspace_local_runtime"
@@ -32,11 +40,30 @@ var requiredRuntimeCapabilities = []string{
 }
 
 type runtimeRootIdentityWire struct {
-	SchemaVersion int                  `json:"schema_version"`
-	Kind          string               `json:"kind"`
-	Role          RootRole             `json:"role"`
-	Identity      PlatformFileIdentity `json:"identity"`
-	Capabilities  []string             `json:"capabilities"`
+	SchemaVersion   int                  `json:"schema_version"`
+	Kind            string               `json:"kind"`
+	Boundary        string               `json:"boundary"`
+	Role            RootRole             `json:"role"`
+	Identity        PlatformFileIdentity `json:"identity"`
+	RuntimeInstance string               `json:"runtime_instance"`
+	RuntimeIdentity PlatformFileIdentity `json:"runtime_identity"`
+	StateIdentity   PlatformFileIdentity `json:"state_identity"`
+	Capabilities    []string             `json:"capabilities"`
+}
+
+type runtimeIdentityBinding struct {
+	instanceID      string
+	runtimeIdentity PlatformFileIdentity
+	stateIdentity   PlatformFileIdentity
+}
+
+type runtimeCapabilityProbeIntentWire struct {
+	SchemaVersion   int                  `json:"schema_version"`
+	Kind            string               `json:"kind"`
+	RuntimeInstance string               `json:"runtime_instance"`
+	RuntimeIdentity PlatformFileIdentity `json:"runtime_identity"`
+	StateIdentity   PlatformFileIdentity `json:"state_identity"`
+	Directory       string               `json:"directory"`
 }
 
 // RuntimeStorage retains independently verified handles for the selected
@@ -51,14 +78,16 @@ func OpenRuntimeStorage(workspaceDir string, create bool) (*RuntimeStorage, erro
 	return openRuntimeStorageWithProbe(
 		workspaceDir,
 		create,
-		func(root *VerifiedRoot) error { return root.ProbeDurability() },
+		func(root *VerifiedRoot, directory string) error {
+			return root.probeDurabilityAt(directory)
+		},
 	)
 }
 
 func openRuntimeStorageWithProbe(
 	workspaceDir string,
 	create bool,
-	probe func(*VerifiedRoot) error,
+	probe func(*VerifiedRoot, string) error,
 ) (*RuntimeStorage, error) {
 	if probe == nil {
 		return nil, fmt.Errorf("runtime storage capability probe is required")
@@ -82,15 +111,47 @@ func openRuntimeStorageWithProbe(
 		}
 	}()
 
-	rootMarker, markerExists, err := loadRuntimeIdentityMarker(runtimeRoot, RuntimeFormatFileName)
+	rootMarker, rootMarkerWire, markerExists, err := loadRuntimeIdentityMarker(
+		runtimeRoot, RuntimeFormatFileName,
+	)
 	if err != nil {
 		return nil, err
+	}
+	var initializationLock *os.File
+	verifyInitializationLock := func(boundary string) error {
+		if initializationLock == nil {
+			return nil
+		}
+		if err := runtimeRoot.verifyOwnedRegularFile(
+			RuntimeInitializationLockName, initializationLock,
+		); err != nil {
+			return fmt.Errorf(
+				"verify local runtime initialization lock %s: %w",
+				boundary, err,
+			)
+		}
+		if err := runtimeRoot.VerifyPath(); err != nil {
+			return fmt.Errorf(
+				"verify local runtime root at initialization boundary %s: %w",
+				boundary, err,
+			)
+		}
+		return nil
+	}
+	runInitializationBoundary := func(boundary string, effect func() error) error {
+		if err := verifyInitializationLock("before " + boundary); err != nil {
+			return err
+		}
+		if err := effect(); err != nil {
+			return err
+		}
+		return verifyInitializationLock("after " + boundary)
 	}
 	if !markerExists {
 		if err := requireRuntimeInitializationCandidate(runtimeRoot, canonical, create); err != nil {
 			return nil, err
 		}
-		initializationLock, _, err := runtimeRoot.openOwnedRegularFile(
+		initializationLock, _, err = runtimeRoot.openOwnedRegularFile(
 			RuntimeInitializationLockName, os.O_RDWR, 0o600, true,
 		)
 		if err != nil {
@@ -101,10 +162,12 @@ func openRuntimeStorageWithProbe(
 			return nil, fmt.Errorf("acquire local runtime initialization lock: %w", err)
 		}
 		defer syscall.Flock(int(initializationLock.Fd()), syscall.LOCK_UN)
-		if err := runtimeRoot.verifyOwnedRegularFile(RuntimeInitializationLockName, initializationLock); err != nil {
-			return nil, fmt.Errorf("verify local runtime initialization lock: %w", err)
+		if err := verifyInitializationLock("after acquisition"); err != nil {
+			return nil, err
 		}
-		rootMarker, markerExists, err = loadRuntimeIdentityMarker(runtimeRoot, RuntimeFormatFileName)
+		rootMarker, rootMarkerWire, markerExists, err = loadRuntimeIdentityMarker(
+			runtimeRoot, RuntimeFormatFileName,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -117,14 +180,12 @@ func openRuntimeStorageWithProbe(
 				return nil, incompatibleRuntimeFormatError(canonical)
 			}
 		}
-	} else if err := validateRuntimeIdentityMarker(runtimeRoot, rootMarker); err != nil {
-		return nil, err
-	} else if err := publishRuntimeIdentityMarker(runtimeRoot, RuntimeFormatFileName, rootMarker); err != nil {
-		return nil, err
 	}
 
 	if create {
-		if err := runtimeRoot.EnsureDirectory(WorkspaceStateDirectoryName, 0o700); err != nil {
+		if err := runInitializationBoundary("runtime state root creation", func() error {
+			return runtimeRoot.EnsureDirectory(WorkspaceStateDirectoryName, 0o700)
+		}); err != nil {
 			return nil, fmt.Errorf("create runtime state root: %w", err)
 		}
 	}
@@ -140,7 +201,9 @@ func openRuntimeStorageWithProbe(
 		}
 	}()
 
-	stateMarker, stateMarkerExists, err := loadRuntimeIdentityMarker(stateRoot, RuntimeStateIdentityFileName)
+	stateMarker, stateMarkerWire, stateMarkerExists, err := loadRuntimeIdentityMarker(
+		stateRoot, RuntimeStateIdentityFileName,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -156,35 +219,89 @@ func openRuntimeStorageWithProbe(
 			)
 		}
 	}
-	if !markerExists || !stateMarkerExists {
-		if err := probe(stateRoot); err != nil {
+
+	var binding runtimeIdentityBinding
+	switch {
+	case markerExists && stateMarkerExists:
+		binding, err = validateRuntimeIdentityMarkerPair(
+			runtimeRoot, rootMarkerWire, stateRoot, stateMarkerWire,
+		)
+		if err != nil {
+			return nil, err
+		}
+	case markerExists:
+		return nil, fmt.Errorf(
+			"local v3 runtime state root %s has no identity marker; existing state was preserved",
+			statePath,
+		)
+	case stateMarkerExists:
+		binding = runtimeIdentityBindingFromWire(stateMarkerWire)
+		if err := validateRuntimeIdentityBinding(runtimeRoot, stateRoot, binding); err != nil {
+			return nil, err
+		}
+	default:
+		if initializationLock == nil {
+			return nil, fmt.Errorf("fresh local runtime initialization requires its held initialization lock")
+		}
+		binding, err = runRuntimeCapabilityProbe(
+			runtimeRoot,
+			stateRoot,
+			probe,
+			verifyInitializationLock,
+		)
+		if err != nil {
 			return nil, fmt.Errorf("preflight runtime state capabilities: %w", err)
 		}
 	}
+
 	if !stateMarkerExists {
-		stateMarker, err = marshalRuntimeIdentityMarker(stateRoot)
+		stateMarker, err = marshalRuntimeIdentityMarker(
+			stateRoot, RuntimeStateIdentityFileName, binding,
+		)
 		if err != nil {
 			return nil, err
 		}
 		if err := publishRuntimeIdentityMarker(
-			stateRoot, RuntimeStateIdentityFileName, stateMarker,
+			stateRoot,
+			RuntimeStateIdentityFileName,
+			stateMarker,
+			verifyInitializationLock,
 		); err != nil {
 			return nil, fmt.Errorf("publish runtime state identity marker: %w", err)
 		}
-	} else if err := validateRuntimeIdentityMarker(stateRoot, stateMarker); err != nil {
-		return nil, err
-	} else if err := publishRuntimeIdentityMarker(stateRoot, RuntimeStateIdentityFileName, stateMarker); err != nil {
+		stateMarker, stateMarkerWire, stateMarkerExists, err = loadRuntimeIdentityMarker(
+			stateRoot, RuntimeStateIdentityFileName,
+		)
+		if err != nil || !stateMarkerExists {
+			if err == nil {
+				err = fmt.Errorf("runtime state identity marker publication disappeared")
+			}
+			return nil, err
+		}
+	} else if err := publishRuntimeIdentityMarker(
+		stateRoot,
+		RuntimeStateIdentityFileName,
+		stateMarker,
+		verifyInitializationLock,
+	); err != nil {
 		return nil, err
 	}
 	if !markerExists {
-		rootMarker, err = marshalRuntimeIdentityMarker(runtimeRoot)
+		rootMarker, err = marshalRuntimeIdentityMarker(
+			runtimeRoot, RuntimeFormatFileName, binding,
+		)
 		if err != nil {
 			return nil, err
 		}
 		if publishErr := publishRuntimeIdentityMarker(
-			runtimeRoot, RuntimeFormatFileName, rootMarker,
+			runtimeRoot,
+			RuntimeFormatFileName,
+			rootMarker,
+			verifyInitializationLock,
 		); publishErr != nil {
-			rootMarker, markerExists, err = loadRuntimeIdentityMarker(runtimeRoot, RuntimeFormatFileName)
+			rootMarker, rootMarkerWire, markerExists, err = loadRuntimeIdentityMarker(
+				runtimeRoot, RuntimeFormatFileName,
+			)
 			if err != nil {
 				return nil, fmt.Errorf("publish local runtime format marker: %w", errors.Join(publishErr, err))
 			}
@@ -192,6 +309,30 @@ func openRuntimeStorageWithProbe(
 				return nil, fmt.Errorf("publish local runtime format marker: %w", publishErr)
 			}
 		}
+		rootMarker, rootMarkerWire, markerExists, err = loadRuntimeIdentityMarker(
+			runtimeRoot, RuntimeFormatFileName,
+		)
+		if err != nil || !markerExists {
+			if err == nil {
+				err = fmt.Errorf("local runtime format marker publication disappeared")
+			}
+			return nil, err
+		}
+	} else if err := publishRuntimeIdentityMarker(
+		runtimeRoot,
+		RuntimeFormatFileName,
+		rootMarker,
+		verifyInitializationLock,
+	); err != nil {
+		return nil, err
+	}
+	if _, err := validateRuntimeIdentityMarkerPair(
+		runtimeRoot, rootMarkerWire, stateRoot, stateMarkerWire,
+	); err != nil {
+		return nil, err
+	}
+	if err := verifyInitializationLock("before successful initialization"); err != nil {
+		return nil, err
 	}
 	storage := &RuntimeStorage{
 		workspaceDir: canonical,
@@ -199,6 +340,9 @@ func openRuntimeStorageWithProbe(
 		state:        stateRoot,
 	}
 	if err := storage.Verify(); err != nil {
+		return nil, err
+	}
+	if err := verifyInitializationLock("at successful initialization return"); err != nil {
 		return nil, err
 	}
 	closeRoot = false
@@ -246,6 +390,26 @@ func (storage *RuntimeStorage) Verify() error {
 		return err
 	}
 	if err := storage.state.VerifyPath(); err != nil {
+		return err
+	}
+	_, rootMarker, rootMarkerExists, err := loadRuntimeIdentityMarker(
+		storage.root, RuntimeFormatFileName,
+	)
+	if err != nil {
+		return err
+	}
+	_, stateMarker, stateMarkerExists, err := loadRuntimeIdentityMarker(
+		storage.state, RuntimeStateIdentityFileName,
+	)
+	if err != nil {
+		return err
+	}
+	if !rootMarkerExists || !stateMarkerExists {
+		return fmt.Errorf("runtime storage identity markers are incomplete")
+	}
+	if _, err := validateRuntimeIdentityMarkerPair(
+		storage.root, rootMarker, storage.state, stateMarker,
+	); err != nil {
 		return err
 	}
 	return nil
@@ -353,11 +517,22 @@ func runtimeStateRootInitializable(state *VerifiedRoot) (bool, error) {
 				RuntimeStateIdentityFileName,
 				MaxRuntimeIdentityMarkerBytes,
 			)
-			if err != nil || validateRuntimeIdentityMarker(state, content) != nil {
+			if err != nil {
 				return false, err
 			}
-		case RuntimeStateIdentityFileName + ".pending":
+			if _, err := validateRuntimeIdentityMarker(
+				state, RuntimeStateIdentityFileName, content,
+			); err != nil {
+				return false, nil
+			}
+		case RuntimeStateIdentityFileName + ".pending",
+			RuntimeCapabilityProbeIntentFileName,
+			RuntimeCapabilityProbeIntentFileName + ".pending":
 			if entry.info.Mode()&os.ModeSymlink != 0 || !entry.info.Mode().IsRegular() {
+				return false, nil
+			}
+		case RuntimeCapabilityProbeDirectoryName:
+			if entry.info.Mode()&os.ModeSymlink != 0 || !entry.info.IsDir() {
 				return false, nil
 			}
 		default:
@@ -375,56 +550,105 @@ func incompatibleRuntimeFormatError(runtimePath string) error {
 	)
 }
 
-func loadRuntimeIdentityMarker(root *VerifiedRoot, name string) ([]byte, bool, error) {
+func loadRuntimeIdentityMarker(
+	root *VerifiedRoot,
+	name string,
+) ([]byte, runtimeRootIdentityWire, bool, error) {
 	content, err := root.ReadBounded(name, MaxRuntimeIdentityMarkerBytes)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, false, nil
+		return nil, runtimeRootIdentityWire{}, false, nil
 	}
 	if err != nil {
-		return nil, false, fmt.Errorf("read %s identity marker: %w", root.Role(), err)
+		return nil, runtimeRootIdentityWire{}, false, fmt.Errorf(
+			"read %s identity marker: %w", root.Role(), err,
+		)
 	}
-	if err := validateRuntimeIdentityMarker(root, content); err != nil {
-		return nil, false, err
+	wire, err := validateRuntimeIdentityMarker(root, name, content)
+	if err != nil {
+		return nil, runtimeRootIdentityWire{}, false, err
 	}
-	return content, true, nil
+	return content, wire, true, nil
 }
 
-func marshalRuntimeIdentityMarker(root *VerifiedRoot) ([]byte, error) {
+func marshalRuntimeIdentityMarker(
+	root *VerifiedRoot,
+	name string,
+	binding runtimeIdentityBinding,
+) ([]byte, error) {
 	if root == nil {
 		return nil, fmt.Errorf("runtime identity marker requires a verified root")
 	}
+	if err := validateRuntimeInstanceIdentifier(binding.instanceID); err != nil {
+		return nil, err
+	}
+	expectedIdentity, err := runtimeMarkerBoundaryIdentity(name, binding)
+	if err != nil {
+		return nil, err
+	}
+	if root.Identity() != expectedIdentity {
+		return nil, fmt.Errorf("runtime identity marker boundary does not match its verified root")
+	}
 	return json.Marshal(runtimeRootIdentityWire{
-		SchemaVersion: RuntimeFormatSchemaVersion,
-		Kind:          localRuntimeFormatKind,
-		Role:          root.Role(),
-		Identity:      root.Identity(),
-		Capabilities:  append([]string(nil), requiredRuntimeCapabilities...),
+		SchemaVersion:   RuntimeFormatSchemaVersion,
+		Kind:            localRuntimeFormatKind,
+		Boundary:        name,
+		Role:            root.Role(),
+		Identity:        root.Identity(),
+		RuntimeInstance: binding.instanceID,
+		RuntimeIdentity: binding.runtimeIdentity,
+		StateIdentity:   binding.stateIdentity,
+		Capabilities:    append([]string(nil), requiredRuntimeCapabilities...),
 	})
 }
 
-func validateRuntimeIdentityMarker(root *VerifiedRoot, content []byte) error {
+func validateRuntimeIdentityMarker(
+	root *VerifiedRoot,
+	name string,
+	content []byte,
+) (runtimeRootIdentityWire, error) {
 	var wire runtimeRootIdentityWire
 	if err := decodeStrictJSON(content, &wire); err != nil {
-		return fmt.Errorf("decode %s root identity marker: %w", root.Role(), err)
+		return runtimeRootIdentityWire{}, fmt.Errorf(
+			"decode %s root identity marker: %w", root.Role(), err,
+		)
 	}
 	canonical, err := json.Marshal(wire)
 	if err != nil {
-		return err
+		return runtimeRootIdentityWire{}, err
 	}
 	if !bytes.Equal(canonical, content) {
-		return fmt.Errorf("%s root identity marker is not canonical JSON", root.Role())
+		return runtimeRootIdentityWire{}, fmt.Errorf(
+			"%s root identity marker is not canonical JSON", root.Role(),
+		)
 	}
 	if wire.SchemaVersion != RuntimeFormatSchemaVersion ||
 		wire.Kind != localRuntimeFormatKind ||
+		wire.Boundary != name ||
 		wire.Role != root.Role() ||
 		!slices.Equal(wire.Capabilities, requiredRuntimeCapabilities) {
-		return fmt.Errorf(
+		return runtimeRootIdentityWire{}, fmt.Errorf(
 			"%s root identity marker is not local runtime format v%d",
 			root.Role(), RuntimeFormatSchemaVersion,
 		)
 	}
+	if err := validateRuntimeInstanceIdentifier(wire.RuntimeInstance); err != nil {
+		return runtimeRootIdentityWire{}, fmt.Errorf(
+			"%s root identity marker runtime instance: %w", root.Role(), err,
+		)
+	}
+	binding := runtimeIdentityBindingFromWire(wire)
+	expectedIdentity, err := runtimeMarkerBoundaryIdentity(name, binding)
+	if err != nil {
+		return runtimeRootIdentityWire{}, err
+	}
+	if wire.Identity != expectedIdentity {
+		return runtimeRootIdentityWire{}, fmt.Errorf(
+			"%s root identity marker does not match its declared runtime boundary",
+			root.Role(),
+		)
+	}
 	if wire.Identity != root.Identity() {
-		return fmt.Errorf(
+		return runtimeRootIdentityWire{}, fmt.Errorf(
 			"%s root identity does not match its local v3 marker "+
 				"(expected device=%d inode=%d owner=%d, observed device=%d inode=%d owner=%d)",
 			root.Role(),
@@ -432,20 +656,430 @@ func validateRuntimeIdentityMarker(root *VerifiedRoot, content []byte) error {
 			root.Identity().Device, root.Identity().Inode, root.Identity().Owner,
 		)
 	}
+	if wire.RuntimeIdentity == wire.StateIdentity ||
+		wire.RuntimeIdentity.Owner != wire.StateIdentity.Owner {
+		return runtimeRootIdentityWire{}, fmt.Errorf(
+			"%s root identity marker has invalid runtime/state bindings", root.Role(),
+		)
+	}
+	return wire, nil
+}
+
+func runtimeMarkerBoundaryIdentity(
+	name string,
+	binding runtimeIdentityBinding,
+) (PlatformFileIdentity, error) {
+	switch name {
+	case RuntimeFormatFileName:
+		return binding.runtimeIdentity, nil
+	case RuntimeStateIdentityFileName:
+		return binding.stateIdentity, nil
+	default:
+		return PlatformFileIdentity{}, fmt.Errorf(
+			"unsupported runtime identity marker boundary %s", name,
+		)
+	}
+}
+
+func runtimeIdentityBindingFromWire(wire runtimeRootIdentityWire) runtimeIdentityBinding {
+	return runtimeIdentityBinding{
+		instanceID:      wire.RuntimeInstance,
+		runtimeIdentity: wire.RuntimeIdentity,
+		stateIdentity:   wire.StateIdentity,
+	}
+}
+
+func validateRuntimeIdentityBinding(
+	runtimeRoot *VerifiedRoot,
+	stateRoot *VerifiedRoot,
+	binding runtimeIdentityBinding,
+) error {
+	if runtimeRoot == nil || stateRoot == nil {
+		return fmt.Errorf("runtime identity binding requires both verified roots")
+	}
+	if err := validateRuntimeInstanceIdentifier(binding.instanceID); err != nil {
+		return err
+	}
+	if binding.runtimeIdentity != runtimeRoot.Identity() ||
+		binding.stateIdentity != stateRoot.Identity() {
+		return fmt.Errorf(
+			"runtime and state roots do not match their immutable runtime binding",
+		)
+	}
+	if binding.runtimeIdentity == binding.stateIdentity ||
+		binding.runtimeIdentity.Owner != binding.stateIdentity.Owner {
+		return fmt.Errorf("runtime identity binding has invalid root identities")
+	}
 	return nil
 }
 
-func publishRuntimeIdentityMarker(root *VerifiedRoot, name string, expected []byte) error {
+func validateRuntimeIdentityMarkerPair(
+	runtimeRoot *VerifiedRoot,
+	runtimeMarker runtimeRootIdentityWire,
+	stateRoot *VerifiedRoot,
+	stateMarker runtimeRootIdentityWire,
+) (runtimeIdentityBinding, error) {
+	runtimeBinding := runtimeIdentityBindingFromWire(runtimeMarker)
+	stateBinding := runtimeIdentityBindingFromWire(stateMarker)
+	if runtimeMarker.Boundary != RuntimeFormatFileName ||
+		stateMarker.Boundary != RuntimeStateIdentityFileName ||
+		runtimeBinding != stateBinding {
+		return runtimeIdentityBinding{}, fmt.Errorf(
+			"runtime and state identity markers do not share one immutable runtime binding",
+		)
+	}
+	if err := validateRuntimeIdentityBinding(
+		runtimeRoot, stateRoot, runtimeBinding,
+	); err != nil {
+		return runtimeIdentityBinding{}, err
+	}
+	return runtimeBinding, nil
+}
+
+func validateRuntimeInstanceIdentifier(value string) error {
+	if len(value) != runtimeInstanceIdentifierEncodedLength ||
+		value != strings.ToLower(value) {
+		return fmt.Errorf("runtime instance identifier is invalid")
+	}
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded)*2 != runtimeInstanceIdentifierEncodedLength {
+		return fmt.Errorf("runtime instance identifier is invalid")
+	}
+	return nil
+}
+
+func newRuntimeIdentityBinding(
+	runtimeRoot *VerifiedRoot,
+	stateRoot *VerifiedRoot,
+) (runtimeIdentityBinding, error) {
+	random := make([]byte, runtimeInstanceIdentifierEncodedLength/2)
+	if _, err := rand.Read(random); err != nil {
+		return runtimeIdentityBinding{}, fmt.Errorf(
+			"create runtime instance identifier: %w", err,
+		)
+	}
+	binding := runtimeIdentityBinding{
+		instanceID:      hex.EncodeToString(random),
+		runtimeIdentity: runtimeRoot.Identity(),
+		stateIdentity:   stateRoot.Identity(),
+	}
+	if err := validateRuntimeIdentityBinding(runtimeRoot, stateRoot, binding); err != nil {
+		return runtimeIdentityBinding{}, err
+	}
+	return binding, nil
+}
+
+func runRuntimeCapabilityProbe(
+	runtimeRoot *VerifiedRoot,
+	stateRoot *VerifiedRoot,
+	probe func(*VerifiedRoot, string) error,
+	verifyInitializationLock func(string) error,
+) (runtimeIdentityBinding, error) {
+	binding, intent, err := prepareRuntimeCapabilityProbe(
+		runtimeRoot, stateRoot, verifyInitializationLock,
+	)
+	if err != nil {
+		return runtimeIdentityBinding{}, err
+	}
+	if _, exists, err := stateRoot.adapter.inspectExact(
+		RuntimeCapabilityProbeDirectoryName,
+	); err != nil {
+		return runtimeIdentityBinding{}, err
+	} else if exists {
+		if err := runRuntimeStorageInitializationBoundary(
+			verifyInitializationLock,
+			"recovery of interrupted runtime capability probe",
+			func() error {
+				return stateRoot.adapter.removeDirectoryTreeExact(
+					RuntimeCapabilityProbeDirectoryName,
+				)
+			},
+		); err != nil {
+			return runtimeIdentityBinding{}, err
+		}
+	}
+	if verifyInitializationLock != nil {
+		if err := verifyInitializationLock("before runtime capability probe"); err != nil {
+			return runtimeIdentityBinding{}, err
+		}
+	}
+	if probeErr := probe(stateRoot, RuntimeCapabilityProbeDirectoryName); probeErr != nil {
+		cleanupErr := cleanupRuntimeCapabilityProbe(
+			stateRoot, intent, verifyInitializationLock,
+		)
+		return runtimeIdentityBinding{}, errors.Join(probeErr, cleanupErr)
+	}
+	if verifyInitializationLock != nil {
+		if err := verifyInitializationLock("after runtime capability probe"); err != nil {
+			return runtimeIdentityBinding{}, err
+		}
+	}
+	if err := cleanupRuntimeCapabilityProbe(
+		stateRoot, intent, verifyInitializationLock,
+	); err != nil {
+		return runtimeIdentityBinding{}, err
+	}
+	return binding, nil
+}
+
+func prepareRuntimeCapabilityProbe(
+	runtimeRoot *VerifiedRoot,
+	stateRoot *VerifiedRoot,
+	verifyInitializationLock func(string) error,
+) (runtimeIdentityBinding, []byte, error) {
+	if content, wire, exists, err := loadRuntimeCapabilityProbeIntent(
+		runtimeRoot, stateRoot, RuntimeCapabilityProbeIntentFileName,
+	); err != nil {
+		return runtimeIdentityBinding{}, nil, err
+	} else if exists {
+		return runtimeIdentityBinding{
+			instanceID:      wire.RuntimeInstance,
+			runtimeIdentity: wire.RuntimeIdentity,
+			stateIdentity:   wire.StateIdentity,
+		}, content, nil
+	}
+
+	pending := RuntimeCapabilityProbeIntentFileName + ".pending"
+	if _, exists, err := stateRoot.adapter.inspectExact(pending); err != nil {
+		return runtimeIdentityBinding{}, nil, err
+	} else if exists {
+		content, wire, valid, readErr := loadRuntimeCapabilityProbeIntent(
+			runtimeRoot, stateRoot, pending,
+		)
+		if readErr == nil && valid {
+			if err := runRuntimeStorageInitializationBoundary(
+				verifyInitializationLock,
+				"recovery publication of runtime capability probe intent",
+				func() error {
+					return stateRoot.adapter.renameFileNoReplace(
+						pending, RuntimeCapabilityProbeIntentFileName,
+					)
+				},
+			); err != nil {
+				return runtimeIdentityBinding{}, nil, err
+			}
+			return runtimeIdentityBinding{
+				instanceID:      wire.RuntimeInstance,
+				runtimeIdentity: wire.RuntimeIdentity,
+				stateIdentity:   wire.StateIdentity,
+			}, content, nil
+		}
+		if err := removePartialRuntimeCapabilityProbeIntent(
+			stateRoot, pending, verifyInitializationLock,
+		); err != nil {
+			return runtimeIdentityBinding{}, nil, errors.Join(readErr, err)
+		}
+	}
+
+	if _, exists, err := stateRoot.adapter.inspectExact(
+		RuntimeCapabilityProbeDirectoryName,
+	); err != nil {
+		return runtimeIdentityBinding{}, nil, err
+	} else if exists {
+		return runtimeIdentityBinding{}, nil, fmt.Errorf(
+			"runtime capability probe directory has no authenticated intent; existing state was preserved",
+		)
+	}
+
+	binding, err := newRuntimeIdentityBinding(runtimeRoot, stateRoot)
+	if err != nil {
+		return runtimeIdentityBinding{}, nil, err
+	}
+	intent, err := json.Marshal(runtimeCapabilityProbeIntentWire{
+		SchemaVersion:   RuntimeFormatSchemaVersion,
+		Kind:            runtimeCapabilityProbeIntentKind,
+		RuntimeInstance: binding.instanceID,
+		RuntimeIdentity: binding.runtimeIdentity,
+		StateIdentity:   binding.stateIdentity,
+		Directory:       RuntimeCapabilityProbeDirectoryName,
+	})
+	if err != nil {
+		return runtimeIdentityBinding{}, nil, err
+	}
+	if err := runRuntimeStorageInitializationBoundary(
+		verifyInitializationLock,
+		"write of runtime capability probe intent staging path",
+		func() error {
+			return stateRoot.adapter.writeFileExclusive(pending, intent, 0o600)
+		},
+	); err != nil {
+		return runtimeIdentityBinding{}, nil, err
+	}
+	if err := runRuntimeStorageInitializationBoundary(
+		verifyInitializationLock,
+		"publication of runtime capability probe intent",
+		func() error {
+			return stateRoot.adapter.renameFileNoReplace(
+				pending, RuntimeCapabilityProbeIntentFileName,
+			)
+		},
+	); err != nil {
+		return runtimeIdentityBinding{}, nil, err
+	}
+	published, _, exists, err := loadRuntimeCapabilityProbeIntent(
+		runtimeRoot, stateRoot, RuntimeCapabilityProbeIntentFileName,
+	)
+	if err != nil {
+		return runtimeIdentityBinding{}, nil, err
+	}
+	if !exists || !bytes.Equal(published, intent) {
+		return runtimeIdentityBinding{}, nil, fmt.Errorf(
+			"runtime capability probe intent publication did not match",
+		)
+	}
+	return binding, intent, nil
+}
+
+func loadRuntimeCapabilityProbeIntent(
+	runtimeRoot *VerifiedRoot,
+	stateRoot *VerifiedRoot,
+	name string,
+) ([]byte, runtimeCapabilityProbeIntentWire, bool, error) {
+	content, err := stateRoot.ReadBounded(name, maxRuntimeCapabilityProbeIntentBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, runtimeCapabilityProbeIntentWire{}, false, nil
+	}
+	if err != nil {
+		return nil, runtimeCapabilityProbeIntentWire{}, false, fmt.Errorf(
+			"read runtime capability probe intent: %w", err,
+		)
+	}
+	var wire runtimeCapabilityProbeIntentWire
+	if err := decodeStrictJSON(content, &wire); err != nil {
+		return content, runtimeCapabilityProbeIntentWire{}, false, fmt.Errorf(
+			"decode runtime capability probe intent: %w", err,
+		)
+	}
+	canonical, err := json.Marshal(wire)
+	if err != nil {
+		return content, runtimeCapabilityProbeIntentWire{}, false, err
+	}
+	binding := runtimeIdentityBinding{
+		instanceID:      wire.RuntimeInstance,
+		runtimeIdentity: wire.RuntimeIdentity,
+		stateIdentity:   wire.StateIdentity,
+	}
+	if !bytes.Equal(canonical, content) ||
+		wire.SchemaVersion != RuntimeFormatSchemaVersion ||
+		wire.Kind != runtimeCapabilityProbeIntentKind ||
+		wire.Directory != RuntimeCapabilityProbeDirectoryName {
+		return content, runtimeCapabilityProbeIntentWire{}, false, fmt.Errorf(
+			"runtime capability probe intent is invalid",
+		)
+	}
+	if err := validateRuntimeIdentityBinding(
+		runtimeRoot, stateRoot, binding,
+	); err != nil {
+		return content, runtimeCapabilityProbeIntentWire{}, false, fmt.Errorf(
+			"runtime capability probe intent: %w", err,
+		)
+	}
+	return content, wire, true, nil
+}
+
+func removePartialRuntimeCapabilityProbeIntent(
+	stateRoot *VerifiedRoot,
+	name string,
+	verifyInitializationLock func(string) error,
+) error {
+	file, _, err := stateRoot.openOwnedRegularFile(name, os.O_RDONLY, 0, false)
+	if err != nil {
+		return err
+	}
+	if err := stateRoot.verifyOwnedRegularFile(name, file); err != nil {
+		_ = file.Close()
+		return err
+	}
+	info, err := file.Stat()
+	closeErr := file.Close()
+	if err != nil || closeErr != nil {
+		return errors.Join(err, closeErr)
+	}
+	var removed bool
+	if err := runRuntimeStorageInitializationBoundary(
+		verifyInitializationLock,
+		"cleanup of partial runtime capability probe intent",
+		func() error {
+			var removeErr error
+			removed, removeErr = stateRoot.adapter.removeFileIdentityExact(
+				name, info, stateRoot.VerifyPath,
+			)
+			return removeErr
+		},
+	); err != nil {
+		return err
+	}
+	if !removed {
+		return fmt.Errorf("partial runtime capability probe intent disappeared")
+	}
+	return nil
+}
+
+func cleanupRuntimeCapabilityProbe(
+	stateRoot *VerifiedRoot,
+	intent []byte,
+	verifyInitializationLock func(string) error,
+) error {
+	if _, exists, err := stateRoot.adapter.inspectExact(
+		RuntimeCapabilityProbeDirectoryName,
+	); err != nil {
+		return err
+	} else if exists {
+		if err := runRuntimeStorageInitializationBoundary(
+			verifyInitializationLock,
+			"cleanup of runtime capability probe directory",
+			func() error {
+				return stateRoot.adapter.removeDirectoryTreeExact(
+					RuntimeCapabilityProbeDirectoryName,
+				)
+			},
+		); err != nil {
+			return err
+		}
+	}
+	var removed bool
+	if err := runRuntimeStorageInitializationBoundary(
+		verifyInitializationLock,
+		"cleanup of runtime capability probe intent",
+		func() error {
+			var removeErr error
+			removed, removeErr = stateRoot.adapter.removeFileContentExact(
+				RuntimeCapabilityProbeIntentFileName,
+				intent,
+				int64(len(intent)),
+				stateRoot.VerifyPath,
+			)
+			return removeErr
+		},
+	); err != nil {
+		return err
+	}
+	if !removed {
+		return fmt.Errorf("runtime capability probe intent disappeared")
+	}
+	return nil
+}
+
+func publishRuntimeIdentityMarker(
+	root *VerifiedRoot,
+	name string,
+	expected []byte,
+	verifyInitializationLock func(string) error,
+) error {
 	if int64(len(expected)) > MaxRuntimeIdentityMarkerBytes {
 		return fmt.Errorf("runtime identity marker %s exceeds its bound", name)
 	}
-	if current, exists, err := loadRuntimeIdentityMarker(root, name); err != nil {
+	if current, _, exists, err := loadRuntimeIdentityMarker(root, name); err != nil {
 		return err
 	} else if exists {
 		if !bytes.Equal(current, expected) {
 			return fmt.Errorf("runtime identity marker %s has unexpected canonical bytes", name)
 		}
-		return removeRuntimeMarkerPending(root, name+".pending")
+		return runRuntimeStorageInitializationBoundary(
+			verifyInitializationLock,
+			"cleanup of "+name+" staging path",
+			func() error { return removeRuntimeMarkerPending(root, name+".pending") },
+		)
 	}
 
 	pending := name + ".pending"
@@ -466,17 +1100,41 @@ func publishRuntimeIdentityMarker(root *VerifiedRoot, name string, expected []by
 		}
 		current, readErr := root.ReadBounded(pending, MaxRuntimeIdentityMarkerBytes)
 		if readErr == nil && bytes.Equal(current, expected) {
-			if err := root.adapter.renameFileNoReplace(pending, name); err != nil {
-				if published, publishedExists, loadErr := loadRuntimeIdentityMarker(root, name); loadErr == nil &&
+			if err := runRuntimeStorageInitializationBoundary(
+				verifyInitializationLock,
+				"recovery publication of "+name,
+				func() error { return root.adapter.renameFileNoReplace(pending, name) },
+			); err != nil {
+				if published, _, publishedExists, loadErr := loadRuntimeIdentityMarker(root, name); loadErr == nil &&
 					publishedExists && bytes.Equal(published, expected) {
-					_, _ = root.adapter.removeFileIdentityExact(pending, info, root.VerifyPath)
+					_ = runRuntimeStorageInitializationBoundary(
+						verifyInitializationLock,
+						"cleanup of concurrently published "+name,
+						func() error {
+							_, removeErr := root.adapter.removeFileIdentityExact(
+								pending, info, root.VerifyPath,
+							)
+							return removeErr
+						},
+					)
 					return root.VerifyPath()
 				}
 				return err
 			}
 			return root.VerifyPath()
 		}
-		removed, removeErr := root.adapter.removeFileIdentityExact(pending, info, root.VerifyPath)
+		var removed bool
+		removeErr := runRuntimeStorageInitializationBoundary(
+			verifyInitializationLock,
+			"cleanup of partial "+name,
+			func() error {
+				var removeErr error
+				removed, removeErr = root.adapter.removeFileIdentityExact(
+					pending, info, root.VerifyPath,
+				)
+				return removeErr
+			},
+		)
 		if removeErr != nil {
 			return errors.Join(readErr, removeErr)
 		}
@@ -484,13 +1142,23 @@ func publishRuntimeIdentityMarker(root *VerifiedRoot, name string, expected []by
 			return fmt.Errorf("partial runtime identity marker %s disappeared", pending)
 		}
 	}
-	if err := root.adapter.writeFileExclusive(pending, expected, 0o600); err != nil {
+	if err := runRuntimeStorageInitializationBoundary(
+		verifyInitializationLock,
+		"write of "+name+" staging path",
+		func() error {
+			return root.adapter.writeFileExclusive(pending, expected, 0o600)
+		},
+	); err != nil {
 		return err
 	}
-	if err := root.adapter.renameFileNoReplace(pending, name); err != nil {
+	if err := runRuntimeStorageInitializationBoundary(
+		verifyInitializationLock,
+		"publication of "+name,
+		func() error { return root.adapter.renameFileNoReplace(pending, name) },
+	); err != nil {
 		return err
 	}
-	published, exists, err := loadRuntimeIdentityMarker(root, name)
+	published, _, exists, err := loadRuntimeIdentityMarker(root, name)
 	if err != nil {
 		return err
 	}
@@ -498,6 +1166,25 @@ func publishRuntimeIdentityMarker(root *VerifiedRoot, name string, expected []by
 		return fmt.Errorf("runtime identity marker %s publication did not match", name)
 	}
 	return root.VerifyPath()
+}
+
+func runRuntimeStorageInitializationBoundary(
+	verifyInitializationLock func(string) error,
+	boundary string,
+	effect func() error,
+) error {
+	if verifyInitializationLock != nil {
+		if err := verifyInitializationLock("before " + boundary); err != nil {
+			return err
+		}
+	}
+	if err := effect(); err != nil {
+		return err
+	}
+	if verifyInitializationLock != nil {
+		return verifyInitializationLock("after " + boundary)
+	}
+	return nil
 }
 
 func removeRuntimeMarkerPending(root *VerifiedRoot, pending string) error {

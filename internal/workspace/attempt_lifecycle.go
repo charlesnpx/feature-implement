@@ -231,7 +231,7 @@ func MaterializeAttempt(
 			return RuntimeAttemptProjection{}, fmt.Errorf("interrupted worktree registration does not match the attempt intent")
 		}
 		if err := git.CreateAttemptWorktree(
-			ctx, manifest.repositoryRoot, attempt.branch, attempt.worktree, attempt.base, false, true,
+			ctx, manifest.repositoryRoot, claim, false, true,
 		); err != nil {
 			return RuntimeAttemptProjection{}, err
 		}
@@ -254,7 +254,7 @@ func MaterializeAttempt(
 			return RuntimeAttemptProjection{}, fmt.Errorf("attempt worktree recovery did not produce an absent unregistered target")
 		}
 		if err := git.CreateAttemptWorktree(
-			ctx, manifest.repositoryRoot, attempt.branch, attempt.worktree, attempt.base, !inspection.branchExists, false,
+			ctx, manifest.repositoryRoot, claim, !inspection.branchExists, false,
 		); err != nil {
 			return RuntimeAttemptProjection{}, err
 		}

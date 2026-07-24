@@ -327,14 +327,26 @@ func (root *VerifiedRoot) verifyOwnedRegularFile(relative string, file *os.File)
 }
 
 func (root *VerifiedRoot) ProbeDurability() error {
-	if err := root.VerifyPath(); err != nil {
-		return err
-	}
 	random := make([]byte, 12)
 	if _, err := rand.Read(random); err != nil {
 		return fmt.Errorf("create %s root capability nonce: %w", root.role, err)
 	}
 	probeDirectory := "runtime-capability-" + hex.EncodeToString(random)
+	return root.probeDurabilityAt(probeDirectory)
+}
+
+func (root *VerifiedRoot) probeDurabilityAt(probeDirectory string) error {
+	if err := root.VerifyPath(); err != nil {
+		return err
+	}
+	rootedProbe, err := NewRootedPath(root.path, probeDirectory)
+	if err != nil {
+		return fmt.Errorf("validate %s root capability probe path: %w", root.role, err)
+	}
+	probeDirectory = rootedProbe.Relative()
+	if path.Dir(probeDirectory) != "." {
+		return fmt.Errorf("%s root capability probe must use one owned directory", root.role)
+	}
 	source := probeDirectory + "/source"
 	linked := probeDirectory + "/linked"
 	renamed := probeDirectory + "/renamed"
