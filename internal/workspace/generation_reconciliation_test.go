@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -389,6 +390,148 @@ func TestActivatedCandidateCannotBeReactivated(t *testing.T) {
 	if _, err := workspace.DryRunReconciliation(third, second, snapshot, state); err == nil ||
 		!strings.Contains(err.Error(), "pending activation") {
 		t.Fatalf("reactivated candidate dry-run error = %v", err)
+	}
+}
+
+func TestReconciliationRejectsImmutableLocalTargetAuthorityChanges(t *testing.T) {
+	fixture := newDefinitionFixture(t)
+	active := mustDefinition(t, fixture.sources)
+	safeCandidate := mustProspectiveCandidate(t, fixture)
+
+	baseSources := cloneDefinitionSources(fixture.sources)
+	baseSources.Workspace.Bytes = []byte(strings.Replace(
+		string(baseSources.Workspace.Bytes),
+		"base_commit: "+fixture.base.String(),
+		"base_commit: sha1:"+strings.Repeat("2", 40),
+		1,
+	))
+	branchSources := cloneDefinitionSources(fixture.sources)
+	branchSources.Workspace.Bytes = []byte(strings.Replace(
+		string(branchSources.Workspace.Bytes),
+		"feature_branch: feature/example-workspace",
+		"feature_branch: feature/reconciliation-authority-change",
+		1,
+	))
+	candidates := []struct {
+		name       string
+		definition workspace.EffectiveWorkspaceDefinition
+	}{
+		{name: "base-commit", definition: mustDefinition(t, baseSources)},
+		{name: "feature-branch", definition: mustDefinition(t, branchSources)},
+	}
+
+	workspaceDir := t.TempDir()
+	if _, err := workspace.InitializeWorkspaceV2(
+		workspaceDir, active, mustTime(t, "2026-07-21T02:00:00Z"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	store, err := workspace.OpenGenerationStore(workspaceDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := workspace.OpenWorkspaceJournal(
+		workspaceDir, workspace.JournalReadWrite,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+	if _, err := store.StageCandidate(
+		journal, safeCandidate, mustTime(t, "2026-07-21T02:01:00Z"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	for index, candidate := range candidates {
+		if _, err := store.StageCandidate(
+			journal,
+			candidate.definition,
+			mustTime(t, fmt.Sprintf("2026-07-21T02:0%d:00Z", index+2)),
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := workspace.NewReconciliationState(
+		snapshot, nil, nil, nil, nil, workspace.EmptyRuntimeHistoryBinding(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	safePlan, err := workspace.DryRunReconciliation(
+		active, safeCandidate, snapshot, state,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := activationReceipt(
+		t, active, safeCandidate, safePlan,
+		"unchanged-authority-receipt", "2026-07-21T03:00:00Z",
+	)
+	beforeHead := snapshot.Head()
+	beforeRecords := len(snapshot.Records())
+
+	for _, candidate := range candidates {
+		t.Run(candidate.name, func(t *testing.T) {
+			if _, err := workspace.DryRunReconciliation(
+				active, candidate.definition, snapshot, state,
+			); err == nil || !strings.Contains(err.Error(), "structural changes") {
+				t.Fatalf("immutable local-target authority dry-run error = %v", err)
+			}
+			forgedPlan := mustForgeReconciliationPlan(
+				t,
+				snapshot,
+				active,
+				candidate.definition,
+				safePlan.StateDigest(),
+				safePlan.StructuralDigest(),
+			)
+			if _, err := workspace.ReconciliationControlPlaneBinding(
+				active, candidate.definition, forgedPlan,
+			); err == nil || !strings.Contains(err.Error(), "immutable local-target authority") {
+				t.Fatalf("immutable local-target receipt binding error = %v", err)
+			}
+			verifier := &activationVerifier{
+				workspaceID: active.Workspace().ID(),
+				generation:  candidate.definition.Generation(),
+				request:     forgedPlan.ComparisonDigest(),
+			}
+			if _, err := workspace.ActivateCandidateGeneration(
+				context.Background(),
+				journal,
+				store,
+				active,
+				candidate.definition,
+				forgedPlan,
+				state,
+				receipt,
+				verifier,
+				mustTime(t, "2026-07-21T02:05:00Z"),
+			); err == nil || !strings.Contains(err.Error(), "immutable local-target authority") {
+				t.Fatalf("immutable local-target activation error = %v", err)
+			}
+			if verifier.calls != 0 {
+				t.Fatal("immutable local-target change reached owner verifier")
+			}
+			after, err := journal.ReadSnapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Head() != beforeHead || len(after.Records()) != beforeRecords {
+				t.Fatalf(
+					"rejected local-target activation changed journal: head %s records %d",
+					after.Head(), len(after.Records()),
+				)
+			}
+			for _, record := range after.Records() {
+				if record.EventType() == workspace.JournalEventGenerationActivated {
+					t.Fatal("rejected local-target activation appended an activation event")
+				}
+			}
+		})
 	}
 }
 
