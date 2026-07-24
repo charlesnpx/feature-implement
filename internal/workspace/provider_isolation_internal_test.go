@@ -52,6 +52,7 @@ func TestNonProviderProcessEnvironmentScrubsCredentialsAndDisablesGitCredentialP
 	for name, expected := range map[string]string{
 		"PATH": "/usr/bin:/bin", "FEATURE_SAFE_VALUE": "present",
 		"HOME": os.DevNull, "XDG_CONFIG_HOME": os.DevNull,
+		"GIT_ATTR_NOSYSTEM":   "1",
 		"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.DevNull,
 		"GIT_CONFIG_SYSTEM": os.DevNull, "GIT_TERMINAL_PROMPT": "0",
 		"GCM_INTERACTIVE": "Never", "GIT_ASKPASS": os.DevNull,
@@ -81,6 +82,7 @@ func TestTrustedGitArgumentsDisableHooksHelpersPromptsAndAmbientHeaders(t *testi
 		"credential.interactive=false",
 		"core.askPass=" + os.DevNull,
 		"http.extraHeader=",
+		"log.showSignature=false",
 	} {
 		if !strings.Contains(joined, required) {
 			t.Fatalf("trusted Git arguments do not enforce %q: %#v", required, arguments)

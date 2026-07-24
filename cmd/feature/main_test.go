@@ -308,6 +308,7 @@ func writeWorkspaceBundleFixture(t *testing.T) string {
 	t.Helper()
 	root := canonicalFeatureTestTempDir(t)
 	repository := canonicalFeatureTestTempDir(t)
+	baseCommit := initializeWorkspaceTargetFixture(t, repository)
 	files := map[string]string{
 		"feature.workspace.bundle.json": `{
   "schema_version": 2,
@@ -319,21 +320,19 @@ func writeWorkspaceBundleFixture(t *testing.T) string {
 `,
 		"feature.workspace.yaml": fmt.Sprintf(`schema_version: 2
 id: example-workspace
+mode: local
 repository:
   root: %s
-  identity: https://github.com/example/project.git
-provider:
-  kind: github
-  repository: example/project
-base_ref: main
-remote: origin
+base_ref: refs/heads/main
+base_commit: %s
+feature_branch: feature/example-workspace
 execution_config: config/execution.yaml
 plans:
   - id: alpha-plan
     source: plans/alpha.yaml
 dependencies: []
 authority_sources: []
-`, repository),
+`, repository, baseCommit),
 		"plans/alpha.yaml": `schema_version: 2
 id: alpha-plan
 title: Alpha Plan
@@ -397,6 +396,42 @@ merge_units:
 		}
 	}
 	return root
+}
+
+func initializeWorkspaceTargetFixture(t *testing.T, root string) string {
+	t.Helper()
+	run := func(arguments ...string) string {
+		t.Helper()
+		command := exec.Command(
+			"git", append([]string{"-C", root}, arguments...)...,
+		)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf(
+				"git %s: %v\n%s",
+				strings.Join(arguments, " "), err, output,
+			)
+		}
+		return string(output)
+	}
+	run(
+		"init", "--quiet", "--initial-branch=main",
+		"--object-format=sha1", ".",
+	)
+	if err := os.WriteFile(
+		filepath.Join(root, "seed.txt"),
+		[]byte("local target seed\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "--", "seed.txt")
+	run(
+		"-c", "user.name=Feature Implement Test",
+		"-c", "user.email=feature-implement@localhost",
+		"commit", "--quiet", "-m", "seed local target",
+	)
+	return "sha1:" + strings.TrimSpace(run("rev-parse", "HEAD"))
 }
 
 func writeJSONInput(t *testing.T, value any) string {

@@ -34,6 +34,7 @@ const (
 	JournalResourceCommitStep     JournalResourceKind = "commit_step"
 	JournalResourceCheck          JournalResourceKind = "check"
 	JournalResourceControlReceipt JournalResourceKind = "control_receipt"
+	JournalResourceFeatureRef     JournalResourceKind = "feature_ref"
 )
 
 func (kind JournalResourceKind) valid() bool {
@@ -44,7 +45,8 @@ func (kind JournalResourceKind) valid() bool {
 		JournalResourceSerialSegment, JournalResourceProviderIntent, JournalResourceQueueEntry,
 		JournalResourceBudget, JournalResourceApproval, JournalResourceEvidence,
 		JournalResourceCommitProtocol, JournalResourceReviewFix, JournalResourceCommitStep,
-		JournalResourceReview, JournalResourceReviewProfile, JournalResourceCheck, JournalResourceControlReceipt:
+		JournalResourceReview, JournalResourceReviewProfile, JournalResourceCheck,
+		JournalResourceControlReceipt, JournalResourceFeatureRef:
 		return true
 	default:
 		return false
@@ -112,6 +114,8 @@ type JournalEventType string
 
 const (
 	JournalEventWorkspaceInitialized           JournalEventType = "workspace.initialized.v2"
+	JournalEventFeatureRefCreationIntended     JournalEventType = "feature_ref_creation_intended"
+	JournalEventFeatureRefCreated              JournalEventType = "feature_ref_created"
 	JournalEventCandidateStored                JournalEventType = "generation.candidate_stored.v2"
 	JournalEventGenerationActivated            JournalEventType = "generation.activated.v2"
 	JournalEventTailRecovered                  JournalEventType = "journal.tail_recovered.v2"
@@ -408,6 +412,10 @@ func newJournalAppend(
 			return JournalAppend{}, fmt.Errorf("owner responses must use the verifier-backed response workflow")
 		case AttemptResumedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("attempt resume must use the verified resume workflow")
+		case FeatureRefCreationIntendedJournalEvent, FeatureRefCreatedJournalEvent:
+			return JournalAppend{}, fmt.Errorf(
+				"feature-ref events must use the recoverable local target initialization workflow",
+			)
 		case AttemptReservedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("attempt reservation must use the ref-verified reservation workflow")
 		case AttemptMaterializationIntendedJournalEvent:
@@ -469,7 +477,8 @@ func newJournalAppend(
 func supportedWorkspaceJournalEvent(event WorkspaceJournalEvent) bool {
 	switch event.(type) {
 	case WorkspaceInitializedJournalEvent, CandidateGenerationStoredJournalEvent,
-		GenerationActivatedJournalEvent, JournalTailRecoveredEvent:
+		GenerationActivatedJournalEvent, JournalTailRecoveredEvent,
+		FeatureRefCreationIntendedJournalEvent, FeatureRefCreatedJournalEvent:
 		return true
 	default:
 		return isAttemptJournalEvent(event) || isCommitJournalEvent(event) || isAuthorizationJournalEvent(event) ||
@@ -510,7 +519,10 @@ func validateJournalEventResources(
 		expectedWrites = append([]JournalResource(nil), expectedReads...)
 	default:
 		var ok bool
-		expectedReads, expectedWrites, ok = attemptJournalEventResources(event)
+		expectedReads, expectedWrites, ok = localTargetJournalEventResources(event)
+		if !ok {
+			expectedReads, expectedWrites, ok = attemptJournalEventResources(event)
+		}
 		if !ok {
 			expectedReads, expectedWrites, ok = commitJournalEventResources(event)
 		}
@@ -643,6 +655,9 @@ func cloneWorkspaceJournalEvent(event WorkspaceJournalEvent) WorkspaceJournalEve
 	case JournalTailRecoveredEvent:
 		return value
 	default:
+		if cloned := cloneLocalTargetJournalEvent(event); cloned != nil {
+			return cloned
+		}
 		if cloned := cloneAttemptJournalEvent(event); cloned != nil {
 			return cloned
 		}

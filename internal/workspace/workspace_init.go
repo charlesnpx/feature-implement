@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,22 +31,56 @@ func WorkspaceRuntimeProjectionPath(workspaceDir string) string {
 	return filepath.Join(WorkspaceStateDirectory(workspaceDir), WorkspaceRuntimeProjectionFileName)
 }
 
+type WorkspaceInitializationOptions struct {
+	PlanCheckpoint *VerifiedPlanLockCheckpoint
+	TargetGit      *LocalTargetGitAdapter
+	TargetFault    LocalTargetInitializationFaultInjector
+}
+
 func InitializeWorkspaceV2(
 	workspaceDir string,
 	definition EffectiveWorkspaceDefinition,
 	occurredAt time.Time,
 	planCheckpoint ...VerifiedPlanLockCheckpoint,
 ) (result WorkspaceInitializationResult, resultErr error) {
+	if len(planCheckpoint) > 1 {
+		return WorkspaceInitializationResult{}, fmt.Errorf(
+			"workspace initialization accepts one plan checkpoint",
+		)
+	}
+	options := WorkspaceInitializationOptions{}
+	if len(planCheckpoint) == 1 {
+		options.PlanCheckpoint = &planCheckpoint[0]
+	}
+	return InitializeWorkspaceV2WithOptions(
+		context.Background(),
+		workspaceDir,
+		definition,
+		occurredAt,
+		options,
+	)
+}
+
+func InitializeWorkspaceV2WithOptions(
+	ctx context.Context,
+	workspaceDir string,
+	definition EffectiveWorkspaceDefinition,
+	occurredAt time.Time,
+	options WorkspaceInitializationOptions,
+) (result WorkspaceInitializationResult, resultErr error) {
+	if ctx == nil {
+		return WorkspaceInitializationResult{}, fmt.Errorf(
+			"workspace initialization requires context",
+		)
+	}
 	if definition.generation.IsZero() || occurredAt.IsZero() {
 		return WorkspaceInitializationResult{}, fmt.Errorf("workspace initialization requires an effective definition and occurrence time")
 	}
-	if len(planCheckpoint) > 1 {
-		return WorkspaceInitializationResult{}, fmt.Errorf("workspace initialization accepts one plan checkpoint")
-	}
 	checkpoint := VerifiedPlanLockCheckpoint{}
 	checkpointID := GitObjectID{}
-	if len(planCheckpoint) == 1 {
-		checkpoint = planCheckpoint[0]
+	hasPlanCheckpoint := options.PlanCheckpoint != nil
+	if hasPlanCheckpoint {
+		checkpoint = *options.PlanCheckpoint
 		if checkpoint.root == "" ||
 			checkpoint.commit.IsZero() ||
 			checkpoint.tree.IsZero() ||
@@ -78,11 +113,15 @@ func InitializeWorkspaceV2(
 			break
 		}
 	}
-	if requiresCheckpoint && len(planCheckpoint) != 1 {
+	if requiresCheckpoint && !hasPlanCheckpoint {
 		return WorkspaceInitializationResult{}, fmt.Errorf("workspace bundle initialization requires a verified plan lock checkpoint")
 	}
+	planRoot := ""
+	if hasPlanCheckpoint {
+		planRoot = checkpoint.root
+	}
 	roots, err := OpenWorkspaceInitializationRootGuard(
-		"", workspaceDir, definition.workspace.repositoryRoot,
+		planRoot, workspaceDir, definition.workspace.repositoryRoot,
 	)
 	if err != nil {
 		return WorkspaceInitializationResult{}, err
@@ -103,11 +142,58 @@ func InitializeWorkspaceV2(
 			resultErr = errors.Join(resultErr, verifyErr)
 		}
 	}()
+	targetGit := DefaultLocalTargetGitAdapter()
+	if options.TargetGit != nil {
+		targetGit = *options.TargetGit
+	}
+	if targetGit.git.executable == "" {
+		return WorkspaceInitializationResult{}, fmt.Errorf(
+			"workspace initialization requires a local target Git adapter",
+		)
+	}
+	preflightSnapshot := JournalSnapshot{}
+	preflightSnapshotKnown := false
+	runtimeInitialized := false
+	if roots.runtime != nil {
+		_, runtimeInitialized, err = roots.runtime.adapter.inspectExact(
+			RuntimeFormatFileName,
+		)
+		if err != nil {
+			return WorkspaceInitializationResult{}, fmt.Errorf(
+				"inspect workspace runtime initialization marker: %w", err,
+			)
+		}
+	}
+	if runtimeInitialized {
+		preflightSnapshot, err = ReadWorkspaceJournalSnapshot(workspaceDir)
+		if err != nil {
+			return WorkspaceInitializationResult{}, err
+		}
+		preflightSnapshotKnown = true
+	}
+	targetInspection, err := inspectLocalTargetForInitializationAdmission(
+		ctx,
+		targetGit,
+		definition,
+		preflightSnapshot,
+	)
+	if err != nil {
+		return WorkspaceInitializationResult{}, err
+	}
+	if err := roots.bindLocalTarget(ctx, targetGit, targetInspection); err != nil {
+		return WorkspaceInitializationResult{}, err
+	}
+	if err := roots.VerifyBeforeRuntimeCreation(); err != nil {
+		return WorkspaceInitializationResult{}, err
+	}
 	store, err := OpenGenerationStore(workspaceDir)
 	if err != nil {
 		return WorkspaceInitializationResult{}, err
 	}
 	defer store.Close()
+	if err := roots.VerifyAfterEffects(); err != nil {
+		return WorkspaceInitializationResult{}, err
+	}
 	journal, err := OpenWorkspaceJournal(workspaceDir, JournalReadWrite)
 	if err != nil {
 		return WorkspaceInitializationResult{}, err
@@ -116,6 +202,13 @@ func InitializeWorkspaceV2(
 	snapshot, err := journal.ReadSnapshot()
 	if err != nil {
 		return WorkspaceInitializationResult{}, err
+	}
+	if preflightSnapshotKnown &&
+		(snapshot.head != preflightSnapshot.head ||
+			snapshot.byteLength != preflightSnapshot.byteLength) {
+		return WorkspaceInitializationResult{}, fmt.Errorf(
+			"workspace journal changed during local target root admission",
+		)
 	}
 	needsInitialization := len(snapshot.records) == 0
 	if len(snapshot.records) != 0 {
@@ -154,7 +247,7 @@ func InitializeWorkspaceV2(
 	}
 	if needsInitialization {
 		eventCheckpoint := []GitObjectID(nil)
-		if len(planCheckpoint) == 1 {
+		if hasPlanCheckpoint {
 			eventCheckpoint = append(eventCheckpoint, checkpointID)
 		}
 		event, err := NewWorkspaceInitializedJournalEvent(
@@ -186,6 +279,26 @@ func InitializeWorkspaceV2(
 			return WorkspaceInitializationResult{}, err
 		}
 	}
+	targetFault := func(point LocalTargetInitializationFaultPoint) error {
+		if options.TargetFault != nil {
+			if err := options.TargetFault(point); err != nil {
+				return err
+			}
+		}
+		return roots.VerifyAfterEffects()
+	}
+	snapshot, err = initializeLocalTarget(
+		ctx,
+		journal,
+		snapshot,
+		definition,
+		occurredAt,
+		targetGit,
+		targetFault,
+	)
+	if err != nil {
+		return WorkspaceInitializationResult{}, err
+	}
 	runtime, err := RebuildWorkspaceRuntime(snapshot)
 	if err != nil {
 		return WorkspaceInitializationResult{}, err
@@ -196,6 +309,16 @@ func InitializeWorkspaceV2(
 	if requiresCheckpoint && runtime.planCheckpoint != checkpointID {
 		return WorkspaceInitializationResult{}, fmt.Errorf("initialized runtime does not match the verified plan checkpoint")
 	}
+	targetRuntime, ok := runtime.LocalTarget()
+	if !ok || !targetRuntime.Created() ||
+		targetRuntime.binding.root != definition.workspace.target.root ||
+		targetRuntime.binding.baseRef != definition.workspace.target.baseRef ||
+		targetRuntime.binding.baseCommit != definition.workspace.target.baseCommit ||
+		targetRuntime.binding.featureBranch != definition.workspace.target.featureBranch {
+		return WorkspaceInitializationResult{}, fmt.Errorf(
+			"initialized runtime does not match the verified local target",
+		)
+	}
 	projectionDigest, err := writeWorkspaceRuntimeProjectionAt(journal.runtime, snapshot, runtime)
 	if err != nil {
 		return WorkspaceInitializationResult{}, err
@@ -205,6 +328,47 @@ func InitializeWorkspaceV2(
 		runtime: runtime, projectionDigest: projectionDigest,
 	}
 	return result, nil
+}
+
+func inspectLocalTargetForInitializationAdmission(
+	ctx context.Context,
+	adapter LocalTargetGitAdapter,
+	definition EffectiveWorkspaceDefinition,
+	snapshot JournalSnapshot,
+) (LocalTargetInspection, error) {
+	if len(snapshot.records) == 0 {
+		return adapter.inspectUncreatedTarget(ctx, definition.workspace.target)
+	}
+	runtime, err := RebuildWorkspaceRuntime(snapshot)
+	if err != nil {
+		return LocalTargetInspection{}, err
+	}
+	if runtime.workspaceID != definition.workspace.id {
+		return LocalTargetInspection{}, fmt.Errorf(
+			"workspace journal does not match local target admission workspace %s",
+			definition.workspace.id,
+		)
+	}
+	target, ok := runtime.LocalTarget()
+	if !ok {
+		return adapter.inspectUncreatedTarget(ctx, definition.workspace.target)
+	}
+	if target.binding.root != definition.workspace.target.root ||
+		target.binding.baseRef != definition.workspace.target.baseRef ||
+		target.binding.baseCommit != definition.workspace.target.baseCommit ||
+		target.binding.featureBranch != definition.workspace.target.featureBranch {
+		return LocalTargetInspection{}, fmt.Errorf(
+			"durable local target binding does not match the active workspace definition",
+		)
+	}
+	if target.Created() {
+		return adapter.verifyOwnedFeatureRef(
+			ctx, target.binding, target.intentDigest,
+		)
+	}
+	return adapter.inspectIntendedTarget(
+		ctx, target.binding, target.intentDigest,
+	)
 }
 
 func RebuildWorkspaceRuntimeProjectionFile(journal *WorkspaceJournal) (Digest, error) {

@@ -288,10 +288,11 @@ func validateWorkspaceMergeUnitGraph(workspace WorkspaceManifest, plans []Plan) 
 type canonicalWorkspace struct {
 	SchemaVersion    int                            `json:"schema_version"`
 	ID               string                         `json:"id"`
+	Mode             WorkspaceMode                  `json:"mode"`
 	Repository       canonicalRepository            `json:"repository"`
-	Provider         canonicalProvider              `json:"provider"`
 	BaseRef          string                         `json:"base_ref"`
-	Remote           string                         `json:"remote"`
+	BaseCommit       string                         `json:"base_commit"`
+	FeatureBranch    string                         `json:"feature_branch"`
 	ExecutionConfig  string                         `json:"execution_config"`
 	Plans            []canonicalPlanReference       `json:"plans"`
 	Dependencies     []canonicalWorkspaceDependency `json:"dependencies"`
@@ -299,12 +300,7 @@ type canonicalWorkspace struct {
 }
 
 type canonicalRepository struct {
-	Root     string `json:"root"`
-	Identity string `json:"identity"`
-}
-type canonicalProvider struct {
-	Kind       string `json:"kind"`
-	Repository string `json:"repository"`
+	Root string `json:"root"`
 }
 type canonicalPlanReference struct {
 	ID     string `json:"id"`
@@ -327,9 +323,11 @@ type canonicalAuthorityReference struct {
 func canonicalWorkspaceBytes(workspace WorkspaceManifest) ([]byte, error) {
 	value := canonicalWorkspace{
 		SchemaVersion: 2, ID: workspace.id.String(),
-		Repository: canonicalRepository{Root: workspace.repositoryRoot, Identity: workspace.repository.String()},
-		Provider:   canonicalProvider{Kind: workspace.provider.kind.String(), Repository: workspace.provider.repository},
-		BaseRef:    workspace.baseRef, Remote: workspace.remote, ExecutionConfig: workspace.executionConfig,
+		Mode:       workspace.mode,
+		Repository: canonicalRepository{Root: workspace.repositoryRoot},
+		BaseRef:    workspace.target.baseRef, BaseCommit: workspace.target.baseCommit.String(),
+		FeatureBranch:    workspace.target.featureBranch,
+		ExecutionConfig:  workspace.executionConfig,
 		Plans:            make([]canonicalPlanReference, 0, len(workspace.plans)),
 		Dependencies:     make([]canonicalWorkspaceDependency, 0, len(workspace.dependencies)),
 		AuthoritySources: make([]canonicalAuthorityReference, 0, len(workspace.authoritySources)),

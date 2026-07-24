@@ -60,7 +60,7 @@ func TestWorkspaceInitializationRequiresExactLockCheckpoint(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read initialized journal: %v", err)
 		}
-		if len(snapshot.Records()) != 1 {
+		if len(snapshot.Records()) != 3 {
 			t.Fatalf("initialized journal records = %d", len(snapshot.Records()))
 		}
 		event, ok := snapshot.Records()[0].Event().(workspace.WorkspaceInitializedJournalEvent)

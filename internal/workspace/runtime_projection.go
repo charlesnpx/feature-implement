@@ -118,10 +118,41 @@ func (recovery RuntimeRecoveryProjection) DiscardSize() int64    { return recove
 func (recovery RuntimeRecoveryProjection) DiscardDigest() Digest { return recovery.discardDigest }
 func (recovery RuntimeRecoveryProjection) ResultingHead() Digest { return recovery.resultingHead }
 
+type RuntimeLocalTargetProjection struct {
+	binding       LocalTargetBinding
+	intentDigest  Digest
+	intentRecord  uint64
+	createdHead   GitObjectID
+	createdRecord uint64
+}
+
+func (projection RuntimeLocalTargetProjection) Binding() LocalTargetBinding {
+	return projection.binding
+}
+func (projection RuntimeLocalTargetProjection) IntentDigest() Digest {
+	return projection.intentDigest
+}
+func (projection RuntimeLocalTargetProjection) IntentRecord() uint64 {
+	return projection.intentRecord
+}
+func (projection RuntimeLocalTargetProjection) Created() bool {
+	return projection.createdRecord != 0
+}
+func (projection RuntimeLocalTargetProjection) CreatedHead() GitObjectID {
+	return projection.createdHead
+}
+func (projection RuntimeLocalTargetProjection) CreatedRecord() uint64 {
+	return projection.createdRecord
+}
+func (projection RuntimeLocalTargetProjection) IsZero() bool {
+	return projection.binding.IsZero()
+}
+
 type WorkspaceRuntimeProjection struct {
 	workspaceID       ID
 	activeGeneration  Digest
 	planCheckpoint    GitObjectID
+	localTarget       RuntimeLocalTargetProjection
 	generationHistory []Digest
 	candidates        []RuntimeCandidateProjection
 	activations       []RuntimeActivationProjection
@@ -135,6 +166,15 @@ func (projection WorkspaceRuntimeProjection) ActiveGeneration() Digest {
 }
 func (projection WorkspaceRuntimeProjection) PlanCheckpoint() GitObjectID {
 	return projection.planCheckpoint
+}
+func (projection WorkspaceRuntimeProjection) LocalTarget() (
+	RuntimeLocalTargetProjection,
+	bool,
+) {
+	if projection.localTarget.IsZero() {
+		return RuntimeLocalTargetProjection{}, false
+	}
+	return projection.localTarget, true
 }
 func (projection WorkspaceRuntimeProjection) GenerationHistory() []Digest {
 	return append([]Digest(nil), projection.generationHistory...)
@@ -187,10 +227,28 @@ func VerifyWorkspaceRuntimeConformance(snapshot JournalSnapshot, expectedGenerat
 
 func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRecord) (WorkspaceRuntimeProjection, error) {
 	next := cloneWorkspaceRuntime(current)
+	if !current.activeGeneration.IsZero() {
+		target, hasTarget := current.LocalTarget()
+		ready := hasTarget && target.Created()
+		switch record.event.(type) {
+		case FeatureRefCreationIntendedJournalEvent,
+			FeatureRefCreatedJournalEvent,
+			JournalTailRecoveredEvent:
+			// Initialization and journal-tail recovery are the only transitions
+			// admitted before durable feature-ref completion.
+		default:
+			if !ready {
+				return WorkspaceRuntimeProjection{}, fmt.Errorf(
+					"workspace runtime is not ready until feature_ref_created is durable",
+				)
+			}
+		}
+	}
 	switch event := record.event.(type) {
 	case WorkspaceInitializedJournalEvent:
 		if !current.activeGeneration.IsZero() || len(current.generationHistory) != 0 ||
-			len(current.candidates) != 0 || len(current.activations) != 0 || len(current.attempts) != 0 {
+			!current.localTarget.IsZero() || len(current.candidates) != 0 ||
+			len(current.activations) != 0 || len(current.attempts) != 0 {
 			return WorkspaceRuntimeProjection{}, fmt.Errorf("workspace initialization must be the first and only initialization event")
 		}
 		if current.workspaceID.IsZero() {
@@ -211,6 +269,41 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 		next.activeGeneration = event.generation
 		next.planCheckpoint = event.planCheckpoint
 		next.generationHistory = []Digest{event.generation}
+	case FeatureRefCreationIntendedJournalEvent:
+		if current.workspaceID != event.workspaceID ||
+			current.activeGeneration != event.generation {
+			return WorkspaceRuntimeProjection{}, fmt.Errorf(
+				"feature-ref creation intent has stale workspace bindings",
+			)
+		}
+		if !current.localTarget.IsZero() {
+			return WorkspaceRuntimeProjection{}, fmt.Errorf(
+				"feature-ref creation intent is already recorded",
+			)
+		}
+		next.localTarget = RuntimeLocalTargetProjection{
+			binding: event.binding, intentDigest: event.intentDigest,
+			intentRecord: record.sequence,
+		}
+	case FeatureRefCreatedJournalEvent:
+		if current.workspaceID != event.workspaceID ||
+			current.activeGeneration != event.generation ||
+			current.localTarget.IsZero() ||
+			current.localTarget.createdRecord != 0 {
+			return WorkspaceRuntimeProjection{}, fmt.Errorf(
+				"feature-ref creation completion has stale or duplicate workspace bindings",
+			)
+		}
+		target := current.localTarget
+		if target.intentDigest != event.intentDigest ||
+			target.binding.featureRef != event.featureRef ||
+			target.binding.baseCommit != event.head {
+			return WorkspaceRuntimeProjection{}, fmt.Errorf(
+				"feature-ref creation completion does not match its exact intent",
+			)
+		}
+		next.localTarget.createdHead = event.head
+		next.localTarget.createdRecord = record.sequence
 	case CandidateGenerationStoredJournalEvent:
 		if current.workspaceID != event.workspaceID || current.activeGeneration != event.activeGeneration {
 			return WorkspaceRuntimeProjection{}, fmt.Errorf("candidate generation is not based on the active workspace generation")
@@ -304,6 +397,16 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 	return next, nil
 }
 
+func requireReadyLocalTarget(runtime WorkspaceRuntimeProjection) error {
+	target, ok := runtime.LocalTarget()
+	if !ok || !target.Created() {
+		return fmt.Errorf(
+			"workspace runtime is not ready until feature_ref_created is durable",
+		)
+	}
+	return nil
+}
+
 func reduceReviewHeadAdoption(
 	current WorkspaceRuntimeProjection,
 	next *WorkspaceRuntimeProjection,
@@ -374,11 +477,21 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 		DiscardDigest string `json:"discard_digest"`
 		ResultingHead string `json:"resulting_head"`
 	}
+	type localTargetJSON struct {
+		Binding       localTargetBindingWire `json:"binding"`
+		BindingDigest string                 `json:"binding_digest"`
+		IntentDigest  string                 `json:"intent_digest"`
+		IntentRecord  uint64                 `json:"intent_record"`
+		Created       bool                   `json:"created"`
+		CreatedHead   string                 `json:"created_head,omitempty"`
+		CreatedRecord uint64                 `json:"created_record,omitempty"`
+	}
 	type runtimeJSON struct {
 		SchemaVersion     int               `json:"schema_version"`
 		WorkspaceID       string            `json:"workspace_id"`
 		ActiveGeneration  string            `json:"active_generation"`
 		PlanCheckpoint    string            `json:"plan_checkpoint,omitempty"`
+		LocalTarget       *localTargetJSON  `json:"local_target,omitempty"`
 		GenerationHistory []string          `json:"generation_history"`
 		Candidates        []candidateJSON   `json:"candidates"`
 		Activations       []activationJSON  `json:"activations"`
@@ -394,6 +507,19 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 		Activations:       make([]activationJSON, 0, len(projection.activations)),
 		Recoveries:        make([]recoveryJSON, 0, len(projection.recoveries)),
 		Attempts:          make([]json.RawMessage, 0, len(projection.attempts)),
+	}
+	if !projection.localTarget.IsZero() {
+		value.LocalTarget = &localTargetJSON{
+			Binding: localTargetBindingToWire(
+				projection.localTarget.binding,
+			),
+			BindingDigest: projection.localTarget.binding.digest.String(),
+			IntentDigest:  projection.localTarget.intentDigest.String(),
+			IntentRecord:  projection.localTarget.intentRecord,
+			Created:       projection.localTarget.createdRecord != 0,
+			CreatedHead:   projection.localTarget.createdHead.String(),
+			CreatedRecord: projection.localTarget.createdRecord,
+		}
 	}
 	for _, generation := range projection.generationHistory {
 		value.GenerationHistory = append(value.GenerationHistory, generation.String())

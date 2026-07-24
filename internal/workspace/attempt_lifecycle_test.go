@@ -791,6 +791,9 @@ func TestAttemptWorktreeAdmissionRejectsGitOwnedRootsBeforeMutation(t *testing.T
 		if strings.HasPrefix(line, "  root: ") {
 			workspaceSource[index] = "  root: " + repositoryRoot
 		}
+		if strings.HasPrefix(line, "base_commit: ") {
+			workspaceSource[index] = "base_commit: " + base.String()
+		}
 	}
 	fixture.sources.Workspace.Bytes = []byte(strings.Join(workspaceSource, "\n"))
 	definition := mustDefinition(t, fixture.sources)
@@ -805,14 +808,14 @@ func TestAttemptWorktreeAdmissionRejectsGitOwnedRootsBeforeMutation(t *testing.T
 		"git-common-root": filepath.Join(repositoryRoot, ".git"),
 		"linked-worktree": linkedRoot,
 	}
+	runtimeRoot := t.TempDir()
+	if _, err := workspace.InitializeWorkspaceV2(
+		runtimeRoot, definition, mustTime(t, "2026-07-21T10:15:00Z"),
+	); err != nil {
+		t.Fatal(err)
+	}
 	for name, worktreeRoot := range cases {
 		t.Run(name, func(t *testing.T) {
-			runtimeRoot := t.TempDir()
-			if _, err := workspace.InitializeWorkspaceV2(
-				runtimeRoot, definition, mustTime(t, "2026-07-21T10:15:00Z"),
-			); err != nil {
-				t.Fatal(err)
-			}
 			journal, err := workspace.OpenWorkspaceJournal(
 				runtimeRoot, workspace.JournalReadWrite,
 			)
@@ -910,6 +913,9 @@ func TestAttemptWorktreeAdmissionAllowsSafeExternalRoot(t *testing.T) {
 		if strings.HasPrefix(line, "  root: ") {
 			workspaceSource[index] = "  root: " + repositoryRoot
 		}
+		if strings.HasPrefix(line, "base_commit: ") {
+			workspaceSource[index] = "base_commit: " + base.String()
+		}
 	}
 	fixture.sources.Workspace.Bytes = []byte(strings.Join(workspaceSource, "\n"))
 	definition := mustDefinition(t, fixture.sources)
@@ -1000,6 +1006,9 @@ func TestLocalGitAttemptMaterializationPreservesDirtyPrimaryCheckout(t *testing.
 	for index, line := range workspaceSource {
 		if strings.HasPrefix(line, "  root: ") {
 			workspaceSource[index] = "  root: " + repositoryRoot
+		}
+		if strings.HasPrefix(line, "base_commit: ") {
+			workspaceSource[index] = "base_commit: " + base.String()
 		}
 	}
 	fixture.sources.Workspace.Bytes = []byte(strings.Join(workspaceSource, "\n"))
@@ -1107,6 +1116,99 @@ func TestLocalGitAttemptMaterializationPreservesDirtyPrimaryCheckout(t *testing.
 	}
 	if got := strings.TrimSpace(string(runGitSetup(t, started.Worktree(), "rev-parse", "--abbrev-ref", "HEAD"))); got != started.Branch() {
 		t.Fatalf("attempt worktree branch = %q, expected %q", got, started.Branch())
+	}
+}
+
+func TestAttemptWorktreeRejectsLateConfiguredSmudgeFilterWithoutInvocation(t *testing.T) {
+	repositoryRoot := canonicalTestDirectory(t)
+	runGitSetup(t, repositoryRoot, "init", "--initial-branch=main", ".")
+	payload := filepath.Join(repositoryRoot, "payload.txt")
+	if err := os.WriteFile(payload, []byte("raw payload\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(repositoryRoot, ".gitattributes"),
+		[]byte("payload.txt filter=hostile\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	runGitSetup(t, repositoryRoot, "add", "--", ".gitattributes", "payload.txt")
+	runGitSetup(
+		t, repositoryRoot,
+		"-c", "user.name=Attempt Test",
+		"-c", "user.email=attempt@example.invalid",
+		"commit", "-m", "add later hostile attributes",
+	)
+	baseText := strings.TrimSpace(string(
+		runGitSetup(t, repositoryRoot, "rev-parse", "HEAD"),
+	))
+	base, err := workspace.ParseGitObjectID("sha1:" + baseText)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	probeDirectory := canonicalTestDirectory(t)
+	probe := filepath.Join(probeDirectory, "smudge-probe")
+	marker := filepath.Join(probeDirectory, "smudge-filter-invoked")
+	if err := os.WriteFile(
+		probe,
+		[]byte("#!/bin/sh\n: > "+shellSingleQuote(marker)+"\ncat\n"),
+		0o700,
+	); err != nil {
+		t.Fatal(err)
+	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper := filepath.Join(probeDirectory, "git-wrapper")
+	wrapperScript := "#!/bin/sh\n" +
+		"repository=\n" +
+		"previous=\n" +
+		"late_config=false\n" +
+		"for argument in \"$@\"; do\n" +
+		"  if [ \"$previous\" = \"-C\" ]; then repository=$argument; fi\n" +
+		"  if [ \"$previous\" = \"worktree\" ] && [ \"$argument\" = \"add\" ]; then late_config=true; fi\n" +
+		"  previous=$argument\n" +
+		"done\n" +
+		"if [ \"$late_config\" = \"true\" ]; then\n" +
+		"  " + shellSingleQuote(realGit) + " -C \"$repository\" config filter.hostile.smudge " +
+		shellSingleQuote(probe) + "\n" +
+		"fi\n" +
+		"exec " + shellSingleQuote(realGit) + " \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(wrapperScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	adapter, err := workspace.NewLocalAttemptGitAdapter(wrapper, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree := filepath.Join(canonicalTestDirectory(t), "attempt")
+	claim, err := workspace.NewAttemptWorktreeClaim(
+		workspace.MustID("late-filter-attempt"),
+		workspace.DigestBytes([]byte("late-filter-generation")),
+		base,
+		"mu/late-filter-attempt",
+		worktree,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.PrepareAttemptWorktree(
+		context.Background(), repositoryRoot, claim, false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	err = adapter.CreateAttemptWorktree(
+		context.Background(), repositoryRoot, claim, true, false,
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "repository-defined Git attributes") {
+		t.Fatalf("late smudge-filter checkout error = %v", err)
+	}
+	if _, statErr := os.Lstat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("late configured smudge filter was invoked: %v", statErr)
 	}
 }
 

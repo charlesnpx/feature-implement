@@ -19,6 +19,7 @@ const (
 	RootRolePlan               RootRole = "plan"
 	RootRoleRuntime            RootRole = "runtime"
 	RootRoleTarget             RootRole = "target"
+	RootRoleGitDirectory       RootRole = "git-directory"
 	RootRoleGitCommon          RootRole = "git-common"
 	RootRoleWorktree           RootRole = "worktree"
 	RootRoleRegisteredWorktree RootRole = "registered-worktree"
@@ -26,7 +27,7 @@ const (
 
 func (role RootRole) valid() bool {
 	switch role {
-	case RootRolePlan, RootRoleRuntime, RootRoleTarget, RootRoleGitCommon,
+	case RootRolePlan, RootRoleRuntime, RootRoleTarget, RootRoleGitDirectory, RootRoleGitCommon,
 		RootRoleWorktree, RootRoleRegisteredWorktree:
 		return true
 	default:

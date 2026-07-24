@@ -411,6 +411,11 @@ func DryRunReconciliation(
 	if err := validateReconciliationSafety(state, runtime, completedAttempts); err != nil {
 		return ReconciliationPlan{}, err
 	}
+	if !sameImmutableLocalTargetAuthority(active.workspace, candidate.workspace) {
+		return ReconciliationPlan{}, fmt.Errorf(
+			"candidate contains structural changes to immutable local-target authority and requires a new workspace",
+		)
+	}
 	activeStructure, err := canonicalDefinitionStructure(active)
 	if err != nil {
 		return ReconciliationPlan{}, err
@@ -538,8 +543,16 @@ func ReconciliationControlPlaneBinding(
 ) (ControlPlaneBinding, error) {
 	if active.workspace.id.IsZero() || candidate.workspace.id.IsZero() ||
 		active.workspace.id != candidate.workspace.id || active.workspace.id != plan.workspaceID ||
-		active.generation != plan.activeGeneration || candidate.generation != plan.candidateGeneration ||
-		active.workspace.repository != candidate.workspace.repository || active.workspace.remote != candidate.workspace.remote {
+		active.generation != plan.activeGeneration || candidate.generation != plan.candidateGeneration {
+		return ControlPlaneBinding{}, fmt.Errorf("reconciliation receipt definition does not match the dry-run plan")
+	}
+	if !sameImmutableLocalTargetAuthority(active.workspace, candidate.workspace) {
+		return ControlPlaneBinding{}, fmt.Errorf(
+			"reconciliation receipt requires matching immutable local-target authority",
+		)
+	}
+	if active.workspace.repository != candidate.workspace.repository ||
+		active.workspace.remote != candidate.workspace.remote {
 		return ControlPlaneBinding{}, fmt.Errorf("reconciliation receipt definition does not match the dry-run plan")
 	}
 	return NewControlPlaneBinding(ControlPlaneBindingOptions{
@@ -567,6 +580,11 @@ func ActivateCandidateGeneration(
 	if plan.workspaceID.IsZero() || plan.activeGeneration.IsZero() || plan.candidateGeneration.IsZero() || plan.comparisonDigest.IsZero() {
 		return JournalRecord{}, fmt.Errorf("candidate activation requires a complete dry-run plan")
 	}
+	if !sameImmutableLocalTargetAuthority(active.workspace, candidate.workspace) {
+		return JournalRecord{}, fmt.Errorf(
+			"candidate activation requires matching immutable local-target authority",
+		)
+	}
 	if receipt.ReceiptDigest().IsZero() {
 		return JournalRecord{}, fmt.Errorf("candidate activation requires an owner receipt")
 	}
@@ -590,6 +608,13 @@ func ActivateCandidateGeneration(
 	}
 	if runtime.workspaceID != plan.workspaceID || runtime.activeGeneration != plan.activeGeneration || !runtime.HasActivatableCandidate(plan.candidateGeneration) {
 		return JournalRecord{}, fmt.Errorf("stale reconciliation token: generation state changed")
+	}
+	target, ok := runtime.LocalTarget()
+	if !ok || !target.Created() ||
+		!localTargetMatchesBinding(active.workspace.target, target.binding) {
+		return JournalRecord{}, fmt.Errorf(
+			"durable local-target binding does not match reconciliation authority",
+		)
 	}
 	authorization, err := RebuildAuthorizationRuntime(snapshot, active)
 	if err != nil {
@@ -838,11 +863,14 @@ func canonicalDefinitionStructure(definition EffectiveWorkspaceDefinition) ([]by
 	type structureJSON struct {
 		SchemaVersion   int                            `json:"schema_version"`
 		WorkspaceID     string                         `json:"workspace_id"`
+		Mode            WorkspaceMode                  `json:"mode"`
 		RepositoryRoot  string                         `json:"repository_root"`
 		Repository      string                         `json:"repository"`
 		ProviderKind    string                         `json:"provider_kind"`
 		ProviderRepo    string                         `json:"provider_repository"`
 		BaseRef         string                         `json:"base_ref"`
+		BaseCommit      string                         `json:"base_commit"`
+		FeatureBranch   string                         `json:"feature_branch"`
 		Remote          string                         `json:"remote"`
 		ExecutionConfig string                         `json:"execution_config"`
 		Plans           []planJSON                     `json:"plans"`
@@ -855,9 +883,14 @@ func canonicalDefinitionStructure(definition EffectiveWorkspaceDefinition) ([]by
 	}
 	value := structureJSON{
 		SchemaVersion: JournalSchemaVersion, WorkspaceID: definition.workspace.id.String(),
-		RepositoryRoot: definition.workspace.repositoryRoot, Repository: definition.workspace.repository.String(),
-		ProviderKind: definition.workspace.provider.kind.String(), ProviderRepo: definition.workspace.provider.repository,
-		BaseRef: definition.workspace.baseRef, Remote: definition.workspace.remote,
+		Mode:           definition.workspace.mode,
+		RepositoryRoot: definition.workspace.target.root,
+		Repository:     definition.workspace.repository.String(),
+		ProviderKind:   definition.workspace.provider.kind.String(), ProviderRepo: definition.workspace.provider.repository,
+		BaseRef:         definition.workspace.target.baseRef,
+		BaseCommit:      definition.workspace.target.baseCommit.String(),
+		FeatureBranch:   definition.workspace.target.featureBranch,
+		Remote:          definition.workspace.remote,
 		ExecutionConfig: definition.workspace.executionConfig,
 		Plans:           make([]planJSON, 0, len(definition.plans)),
 		Dependencies:    make([]canonicalWorkspaceDependency, 0, len(definition.workspace.dependencies)),
@@ -893,6 +926,20 @@ func canonicalDefinitionStructure(definition EffectiveWorkspaceDefinition) ([]by
 		})
 	}
 	return json.Marshal(value)
+}
+
+func sameImmutableLocalTargetAuthority(left, right WorkspaceManifest) bool {
+	return left.mode == right.mode &&
+		left.repositoryRoot == right.repositoryRoot &&
+		left.baseRef == right.baseRef &&
+		left.target == right.target
+}
+
+func localTargetMatchesBinding(target LocalTarget, binding LocalTargetBinding) bool {
+	return target.root == binding.root &&
+		target.baseRef == binding.baseRef &&
+		target.baseCommit == binding.baseCommit &&
+		target.featureBranch == binding.featureBranch
 }
 
 func definitionUnitFingerprints(definition EffectiveWorkspaceDefinition) (map[string]Digest, map[string]MergeUnitReference, error) {

@@ -205,7 +205,11 @@ func marshalWorkspaceJournalEvent(event WorkspaceJournalEvent) (json.RawMessage,
 			DiscardDigest: event.discardDigest.String(), ResultingHead: event.resultingHead.String(),
 		}
 	default:
-		payload, supported, err := marshalAttemptJournalEvent(event)
+		payload, supported, err := marshalLocalTargetJournalEvent(event)
+		if supported {
+			return payload, err
+		}
+		payload, supported, err = marshalAttemptJournalEvent(event)
 		if supported {
 			return payload, err
 		}
@@ -458,7 +462,11 @@ func decodeWorkspaceJournalEvent(eventType JournalEventType, payload json.RawMes
 		}
 		return NewJournalTailRecoveredEvent(workspaceID, generation, wire.DiscardOffset, wire.DiscardSize, discardDigest, resultingHead)
 	default:
-		event, supported, err := decodeAttemptJournalEvent(eventType, payload)
+		event, supported, err := decodeLocalTargetJournalEvent(eventType, payload)
+		if supported {
+			return event, err
+		}
+		event, supported, err = decodeAttemptJournalEvent(eventType, payload)
 		if supported {
 			return event, err
 		}

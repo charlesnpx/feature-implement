@@ -214,7 +214,7 @@ func (adapter LocalAttemptGitAdapter) ValidateAttemptBranch(ctx context.Context,
 
 func (adapter LocalAttemptGitAdapter) InspectAttemptRefs(
 	ctx context.Context,
-	repositoryRoot, remote string,
+	repositoryRoot, _ string,
 ) (AttemptRefInventory, error) {
 	localOutput, exitCode, err := adapter.run(ctx, repositoryRoot, "for-each-ref", "--format=%(refname)", "refs/heads")
 	if err != nil || exitCode != 0 {
@@ -223,26 +223,11 @@ func (adapter LocalAttemptGitAdapter) InspectAttemptRefs(
 		}
 		return AttemptRefInventory{}, fmt.Errorf("inspect local branches: %w", err)
 	}
-	remote = strings.TrimSpace(remote)
-	if remote == "" || strings.HasPrefix(remote, "-") || strings.IndexByte(remote, 0) >= 0 {
-		return AttemptRefInventory{}, fmt.Errorf("attempt ref inspection requires a remote")
-	}
-	remoteOutput, exitCode, err := adapter.run(ctx, repositoryRoot, "ls-remote", "--heads", "--refs", "--", remote)
-	if err != nil || exitCode != 0 {
-		if err == nil {
-			err = fmt.Errorf("Git exited with status %d", exitCode)
-		}
-		return AttemptRefInventory{}, fmt.Errorf("inspect remote branches: %w", err)
-	}
 	local, err := parseLocalHeadRefs(localOutput)
 	if err != nil {
 		return AttemptRefInventory{}, err
 	}
-	remoteRefs, err := parseRemoteHeadRefs(remoteOutput)
-	if err != nil {
-		return AttemptRefInventory{}, err
-	}
-	return NewAttemptRefInventory(local, remoteRefs)
+	return NewAttemptRefInventory(local, nil)
 }
 
 func (adapter LocalAttemptGitAdapter) InspectAttemptWorktree(
@@ -459,6 +444,14 @@ func (adapter LocalAttemptGitAdapter) CreateAttemptWorktree(
 	if err := parent.VerifyPath(); err != nil {
 		return fmt.Errorf("revalidate claimed attempt worktree root before Git effect: %w", err)
 	}
+	if err := adapter.validateAttemptCheckoutProfile(
+		ctx, binding, claim.base,
+	); err != nil {
+		return err
+	}
+	if err := parent.VerifyPath(); err != nil {
+		return fmt.Errorf("revalidate claimed attempt worktree root after checkout-profile inspection: %w", err)
+	}
 	preEffectClaim, err := readAttemptWorktreeClaim(parent, markerName)
 	if err != nil {
 		return fmt.Errorf("revalidate durable attempt worktree claim before Git effect: %w", err)
@@ -513,6 +506,43 @@ func (adapter LocalAttemptGitAdapter) CreateAttemptWorktree(
 	}
 	if !bytes.Equal(finalClaim, expectedClaim) {
 		return fmt.Errorf("durable attempt worktree claim changed after Git creation")
+	}
+	return nil
+}
+
+func (adapter LocalAttemptGitAdapter) validateAttemptCheckoutProfile(
+	ctx context.Context,
+	binding trustedWorktreeBinding,
+	base GitObjectID,
+) (resultErr error) {
+	if binding.root == "" || binding.commonDir == "" || base.IsZero() {
+		return fmt.Errorf("attempt checkout profile requires bound Git administration and an exact base")
+	}
+	target := LocalTargetGitAdapter{git: adapter}
+	if err := target.inspectBaseTree(ctx, binding.root, base); err != nil {
+		return fmt.Errorf("inspect exact attempt checkout tree: %w", err)
+	}
+	commonRoot, err := OpenVerifiedRoot(
+		RootRoleGitCommon, binding.commonDir, false,
+	)
+	if err != nil {
+		return fmt.Errorf("open attempt checkout Git common directory: %w", err)
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, commonRoot.Close())
+	}()
+	_, exists, err := commonRoot.adapter.inspectExact("info/attributes")
+	if err != nil {
+		return fmt.Errorf("inspect attempt checkout Git attributes: %w", err)
+	}
+	if exists {
+		return fmt.Errorf(
+			"external Git attributes metadata %s is not supported during attempt checkout",
+			filepath.Join(binding.commonDir, "info", "attributes"),
+		)
+	}
+	if err := commonRoot.VerifyPath(); err != nil {
+		return fmt.Errorf("verify attempt checkout Git common directory: %w", err)
 	}
 	return nil
 }
@@ -1095,8 +1125,10 @@ func mergeProcessEnvironment(base []string, additions []EnvironmentVariable) []s
 		values[variable.name] = variable.value
 	}
 	values["GIT_NO_REPLACE_OBJECTS"] = "1"
+	values["GIT_NO_LAZY_FETCH"] = "1"
 	values["GIT_GRAFT_FILE"] = os.DevNull
 	values["GIT_OPTIONAL_LOCKS"] = "0"
+	values["GIT_ATTR_NOSYSTEM"] = "1"
 	values["GIT_CONFIG_NOSYSTEM"] = "1"
 	values["GIT_CONFIG_GLOBAL"] = os.DevNull
 	values["GIT_CONFIG_SYSTEM"] = os.DevNull
@@ -1157,6 +1189,7 @@ func unsafeAttemptGitEnvironment(name string) bool {
 	case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
 		"GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
 		"GIT_NO_REPLACE_OBJECTS", "GIT_GRAFT_FILE", "GIT_OPTIONAL_LOCKS",
+		"GIT_ATTR_NOSYSTEM",
 		"GIT_ASKPASS", "GIT_TERMINAL_PROMPT", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT",
 		"SSH_ASKPASS", "SSH_AUTH_SOCK", "SSH_AGENT_PID", "GCM_INTERACTIVE",
 		"GIT_PROXY_COMMAND", "GIT_EXEC_PATH", "GIT_TEMPLATE_DIR":
@@ -1205,8 +1238,16 @@ func trustedGitArguments(repositoryRoot string, arguments ...string) []string {
 		"-c", "credential.interactive=false",
 		"-c", "core.askPass=" + os.DevNull,
 		"-c", "http.extraHeader=",
+		"-c", "protocol.allow=never",
+		"-c", "protocol.file.allow=never",
+		"-c", "submodule.recurse=false",
+		"-c", "fetch.recurseSubmodules=false",
+		"-c", "core.attributesFile=" + os.DevNull,
 		"-c", "core.fsmonitor=false",
+		"-c", "log.showSignature=false",
 		"-c", "core.untrackedCache=false",
+		"-c", "maintenance.auto=false",
+		"-c", "gc.auto=0",
 		"-C", repositoryRoot,
 	}
 	return append(prefix, arguments...)

@@ -560,9 +560,18 @@ func TestProviderMergePreflightRejectsWrongIdentityHeadAndTreeBeforeEffect(t *te
 	}
 	t.Run("wrong pull request identity", func(t *testing.T) {
 		scenario := newProviderOpenScenario(t, "13", workspace.GitHashSHA1, 171)
-		other := newProviderOpenScenario(t, "14", workspace.GitHashSHA1, 172)
+		other, err := workspace.NewProviderPullRequestObservation(
+			scenario.harness.definition.Workspace().Provider().Kind(),
+			scenario.harness.definition.Workspace().Repository(),
+			172,
+			scenario.head,
+			workspace.DigestBytes([]byte("wrong-pull-request-identity")),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
 		wrong := providerPRState(
-			t, scenario.harness, scenario.attempt, other.pull, scenario.head, scenario.tree, scenario.base,
+			t, scenario.harness, scenario.attempt, other.PullRequest(), scenario.head, scenario.tree, scenario.base,
 			workspace.GitObjectID{}, false,
 		)
 		_, execution, err := scenario.executeMerge(t, wrong, mustProviderGitObject(t, workspace.GitHashSHA1, 'c'))
@@ -975,8 +984,17 @@ func TestProviderIntentAfterOpenPRMustBindSoleDerivedIdentity(t *testing.T) {
 	); err == nil || !strings.Contains(err.Error(), "provider-derived pull request") {
 		t.Fatalf("post-PR push without identity error = %v", err)
 	}
-	other := newProviderOpenScenario(t, "14", workspace.GitHashSHA1, 172)
-	wrongMerge := scenario.mergeIntent(t, other.pull)
+	other, err := workspace.NewProviderPullRequestObservation(
+		scenario.harness.definition.Workspace().Provider().Kind(),
+		scenario.harness.definition.Workspace().Repository(),
+		172,
+		scenario.head,
+		workspace.DigestBytes([]byte("foreign-pull-request-identity")),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongMerge := scenario.mergeIntent(t, other.PullRequest())
 	if _, _, err := workspace.ReserveProviderIntent(
 		scenario.harness.journal, scenario.harness.definition, scenario.evaluator,
 		workspace.ReserveProviderIntentRequest{Intent: wrongMerge, OccurredAt: mustTime(t, "2026-07-21T13:07:02Z")},

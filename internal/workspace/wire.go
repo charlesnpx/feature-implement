@@ -3,10 +3,11 @@ package workspace
 type workspaceWire struct {
 	SchemaVersion    int                        `yaml:"schema_version"`
 	ID               string                     `yaml:"id"`
+	Mode             string                     `yaml:"mode"`
 	Repository       repositoryWire             `yaml:"repository"`
-	Provider         providerWire               `yaml:"provider"`
 	BaseRef          string                     `yaml:"base_ref"`
-	Remote           string                     `yaml:"remote"`
+	BaseCommit       string                     `yaml:"base_commit"`
+	FeatureBranch    string                     `yaml:"feature_branch"`
 	ExecutionConfig  string                     `yaml:"execution_config"`
 	Plans            []workspacePlanWire        `yaml:"plans"`
 	Dependencies     *[]workspaceDependencyWire `yaml:"dependencies"`
@@ -14,13 +15,7 @@ type workspaceWire struct {
 }
 
 type repositoryWire struct {
-	Root     string `yaml:"root"`
-	Identity string `yaml:"identity"`
-}
-
-type providerWire struct {
-	Kind       string `yaml:"kind"`
-	Repository string `yaml:"repository"`
+	Root string `yaml:"root"`
 }
 
 type workspacePlanWire struct {
