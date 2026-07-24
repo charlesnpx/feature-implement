@@ -222,23 +222,12 @@ type WorkspaceReport struct {
 }
 
 func RebuildSchedulerView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefinition) (SchedulerView, error) {
-	core, reviews, providers, _, err := rebuildViewProjections(snapshot, definition)
+	core, reviews, _, _, err := rebuildViewProjections(snapshot, definition)
 	if err != nil {
 		return SchedulerView{}, err
 	}
 	dependencies, references := definitionDependencyGraph(definition)
 	attempts := latestAttemptsByMergeUnit(core)
-	completions, err := completionsByMergeUnit(providers)
-	if err != nil {
-		return SchedulerView{}, err
-	}
-	completed := make(map[string]bool, len(completions))
-	for key, receipt := range completions {
-		attempt, exists := attempts[key]
-		if exists && attempt.attemptID == receipt.attemptID && attemptCompletionBoundaryResolved(attempt) {
-			completed[key] = true
-		}
-	}
 
 	view := SchedulerView{
 		SchemaVersion: JournalSchemaVersion, WorkspaceID: core.workspaceID.String(),
@@ -254,24 +243,16 @@ func RebuildSchedulerView(snapshot JournalSnapshot, definition EffectiveWorkspac
 		}
 		for _, dependency := range dependencies[key] {
 			unit.Dependencies = append(unit.Dependencies, dependency.String())
-			if !completed[dependency.key()] {
-				unit.Blockers = append(unit.Blockers, "dependency:"+dependency.String())
-			}
+			unit.Blockers = append(unit.Blockers, "dependency:"+dependency.String())
 		}
-		if receipt, ok := completions[key]; ok && completed[key] {
-			unit.Status = SchedulerUnitCompleted
-			unit.AttemptID = receipt.AttemptID().String()
-			unit.Head = receipt.Head().String()
-			unit.Blockers = []string{}
-		} else if attempt, ok := attempts[key]; ok {
-			_, completedByProvider := completions[key]
+		if attempt, ok := attempts[key]; ok {
 			unit.Status = schedulerStatusForAttempt(attempt)
 			unit.AttemptID = attempt.attemptID.String()
 			unit.AttemptNumber = attempt.attemptNumber
 			unit.Branch = attempt.branch
 			unit.Worktree = attempt.worktree
 			unit.Head = attempt.verifiedHead.String()
-			unit.BoundaryPending, unit.BoundaryReason, unit.PendingDirectives = attemptBoundaryStatus(core, attempt, completedByProvider)
+			unit.BoundaryPending, unit.BoundaryReason, unit.PendingDirectives = attemptBoundaryStatus(core, attempt)
 			if state, exists := reviews.State(attempt.attemptID); exists {
 				if _, exhausted := state.Exhaustion(); exhausted {
 					unit.Status = SchedulerUnitReviewExhausted
@@ -288,7 +269,7 @@ func RebuildSchedulerView(snapshot JournalSnapshot, definition EffectiveWorkspac
 }
 
 func RebuildGateView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefinition) (GateView, error) {
-	core, reviews, providers, _, err := rebuildViewProjections(snapshot, definition)
+	core, reviews, _, _, err := rebuildViewProjections(snapshot, definition)
 	if err != nil {
 		return GateView{}, err
 	}
@@ -298,10 +279,6 @@ func RebuildGateView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefi
 	}
 	attempts := latestAttemptsByMergeUnit(core)
 	unitExecution := unitExecutionsByMergeUnit(definition)
-	completed, err := completionsByMergeUnit(providers)
-	if err != nil {
-		return GateView{}, err
-	}
 	view := GateView{
 		SchemaVersion: JournalSchemaVersion, WorkspaceID: core.workspaceID.String(),
 		Generation: core.activeGeneration.String(), JournalHead: snapshot.head.String(),
@@ -361,7 +338,7 @@ func RebuildGateView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefi
 		unit.Checks = append(unit.Checks, reviewGate)
 
 		integrationGate := GateCheckView{Name: "integration", Generation: definition.generation.String()}
-		if _, exists := completed[key]; exists {
+		if scheduled.Status == SchedulerUnitCompleted {
 			integrationGate.Status, integrationGate.Reason = GatePassed, "merge_unit_integrated"
 		} else {
 			integrationGate.Status, integrationGate.Reason = GatePending, "not_integrated"
@@ -730,22 +707,13 @@ func RebuildReconciliationState(snapshot JournalSnapshot, definition EffectiveWo
 	)
 }
 
-func attemptCompletionBoundaryResolved(attempt RuntimeAttemptProjection) bool {
-	pending, _, _ := attemptBoundaryStatus(WorkspaceRuntimeProjection{workspaceID: ID{}}, attempt, true)
-	return !pending
-}
-
 func attemptBoundaryStatus(
 	core WorkspaceRuntimeProjection,
 	attempt RuntimeAttemptProjection,
-	completionRecorded bool,
 ) (bool, string, []BoundaryDirectiveView) {
 	directives := []BoundaryDirectiveView{}
 	boundary, exists := attempt.CurrentBoundary()
 	if !exists {
-		if completionRecorded {
-			return true, "completion_boundary_not_recorded", directives
-		}
 		return false, "", directives
 	}
 	view := func(kind string, goal GoalBinding, idempotency Digest, choices []string) BoundaryDirectiveView {
@@ -864,18 +832,6 @@ func latestAttemptsByMergeUnit(core WorkspaceRuntimeProjection) map[string]Runti
 		}
 	}
 	return result
-}
-
-func completionsByMergeUnit(providers ProviderRuntimeProjection) (map[string]ProviderCompletionReceipt, error) {
-	result := make(map[string]ProviderCompletionReceipt)
-	for _, receipt := range providers.completionReceipts {
-		key := receipt.mergeUnit.key()
-		if existing, exists := result[key]; exists && existing.digest != receipt.digest {
-			return nil, fmt.Errorf("merge unit %s has multiple provider completion receipts", receipt.mergeUnit)
-		}
-		result[key] = receipt
-	}
-	return result, nil
 }
 
 func schedulerStatusForAttempt(attempt RuntimeAttemptProjection) SchedulerUnitStatus {
