@@ -34,9 +34,27 @@ func InitializeWorkspaceV2(
 	workspaceDir string,
 	definition EffectiveWorkspaceDefinition,
 	occurredAt time.Time,
+	planCheckpoint ...GitObjectID,
 ) (result WorkspaceInitializationResult, resultErr error) {
 	if definition.generation.IsZero() || occurredAt.IsZero() {
 		return WorkspaceInitializationResult{}, fmt.Errorf("workspace initialization requires an effective definition and occurrence time")
+	}
+	if len(planCheckpoint) > 1 {
+		return WorkspaceInitializationResult{}, fmt.Errorf("workspace initialization accepts one plan checkpoint")
+	}
+	checkpoint := GitObjectID{}
+	if len(planCheckpoint) == 1 {
+		checkpoint = planCheckpoint[0]
+	}
+	requiresCheckpoint := false
+	for _, artifact := range definition.artifacts {
+		if artifact.kind == ArtifactWorkspaceBundle {
+			requiresCheckpoint = true
+			break
+		}
+	}
+	if requiresCheckpoint && checkpoint.IsZero() {
+		return WorkspaceInitializationResult{}, fmt.Errorf("workspace bundle initialization requires a verified plan lock checkpoint")
 	}
 	roots, err := OpenWorkspaceInitializationRootGuard(
 		"", workspaceDir, definition.workspace.repositoryRoot,
@@ -98,6 +116,11 @@ func InitializeWorkspaceV2(
 				"workspace is already initialized as %s at generation %s",
 				existing.workspaceID, existing.activeGeneration,
 			)
+		} else if requiresCheckpoint && existing.planCheckpoint != checkpoint {
+			return WorkspaceInitializationResult{}, fmt.Errorf(
+				"workspace is already initialized at plan checkpoint %s",
+				existing.planCheckpoint,
+			)
 		}
 	}
 	stored, err := store.Store(definition)
@@ -105,7 +128,12 @@ func InitializeWorkspaceV2(
 		return WorkspaceInitializationResult{}, err
 	}
 	if needsInitialization {
-		event, err := NewWorkspaceInitializedJournalEvent(definition.workspace.id, definition.generation, stored.definitionDigest)
+		event, err := NewWorkspaceInitializedJournalEvent(
+			definition.workspace.id,
+			definition.generation,
+			stored.definitionDigest,
+			planCheckpoint...,
+		)
 		if err != nil {
 			return WorkspaceInitializationResult{}, err
 		}
@@ -135,6 +163,9 @@ func InitializeWorkspaceV2(
 	}
 	if runtime.workspaceID != definition.workspace.id || runtime.activeGeneration != definition.generation {
 		return WorkspaceInitializationResult{}, fmt.Errorf("initialized runtime does not match the effective definition")
+	}
+	if requiresCheckpoint && runtime.planCheckpoint != checkpoint {
+		return WorkspaceInitializationResult{}, fmt.Errorf("initialized runtime does not match the verified plan checkpoint")
 	}
 	projectionDigest, err := writeWorkspaceRuntimeProjectionAt(journal.runtime, snapshot, runtime)
 	if err != nil {

@@ -47,6 +47,7 @@ type InitializationResult struct {
 	WorkspaceDir     string                    `json:"workspace_dir"`
 	WorkspaceID      string                    `json:"workspace_id"`
 	Generation       string                    `json:"generation"`
+	PlanCheckpoint   string                    `json:"plan_checkpoint"`
 	JournalHead      string                    `json:"journal_head"`
 	ProjectionDigest string                    `json:"projection_digest"`
 	Report           workspace.WorkspaceReport `json:"report"`
@@ -110,7 +111,7 @@ func Execute(ctx context.Context, options Options) (any, error) {
 	case "validate":
 		return validateBundle(bundle, options)
 	case "init":
-		return initializeWorkspace(bundle, options)
+		return initializeWorkspace(ctx, bundle, options)
 	case "status", "report":
 		return readReport(bundle, options.WorkspaceDir)
 	case "scheduler":
@@ -372,6 +373,7 @@ type initializeRequest struct {
 }
 
 func initializeWorkspace(
+	ctx context.Context,
 	bundle workspace.WorkspaceBundle,
 	options Options,
 ) (result InitializationResult, resultErr error) {
@@ -413,7 +415,8 @@ func initializeWorkspace(
 	if err := bundle.VerifyRoot(); err != nil {
 		return InitializationResult{}, err
 	}
-	if _, err := validateBundle(bundle, Options{WriteLocks: true, GeneratorVersion: options.GeneratorVersion}); err != nil {
+	checkpoint, err := workspace.VerifyPlanLockCheckpoint(ctx, bundle)
+	if err != nil {
 		return InitializationResult{}, err
 	}
 	if err := bundle.VerifyRoot(); err != nil {
@@ -422,7 +425,12 @@ func initializeWorkspace(
 	if err := roots.VerifyBeforeRuntimeCreation(); err != nil {
 		return InitializationResult{}, err
 	}
-	initialized, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, occurredAt)
+	initialized, err := workspace.InitializeWorkspaceV2(
+		workspaceDir,
+		definition,
+		occurredAt,
+		checkpoint.Commit(),
+	)
 	if err != nil {
 		return InitializationResult{}, err
 	}
@@ -439,7 +447,8 @@ func initializeWorkspace(
 	result = InitializationResult{
 		SchemaVersion: requestSchemaVersion, Status: "initialized", WorkspaceDir: workspaceDir,
 		WorkspaceID: initialized.Runtime().WorkspaceID().String(), Generation: initialized.Runtime().ActiveGeneration().String(),
-		JournalHead: initialized.Snapshot().Head().String(), ProjectionDigest: initialized.ProjectionDigest().String(), Report: report,
+		PlanCheckpoint: initialized.Runtime().PlanCheckpoint().String(),
+		JournalHead:    initialized.Snapshot().Head().String(), ProjectionDigest: initialized.ProjectionDigest().String(), Report: report,
 	}
 	return result, nil
 }

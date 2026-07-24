@@ -164,10 +164,23 @@ type WorkspaceInitializedJournalEvent struct {
 	workspaceID      ID
 	generation       Digest
 	definitionDigest Digest
+	planCheckpoint   GitObjectID
 }
 
-func NewWorkspaceInitializedJournalEvent(workspaceID ID, generation, definitionDigest Digest) (WorkspaceInitializedJournalEvent, error) {
-	event := WorkspaceInitializedJournalEvent{workspaceID: workspaceID, generation: generation, definitionDigest: definitionDigest}
+func NewWorkspaceInitializedJournalEvent(
+	workspaceID ID,
+	generation, definitionDigest Digest,
+	planCheckpoint ...GitObjectID,
+) (WorkspaceInitializedJournalEvent, error) {
+	if len(planCheckpoint) > 1 {
+		return WorkspaceInitializedJournalEvent{}, fmt.Errorf("workspace initialization accepts one plan checkpoint")
+	}
+	event := WorkspaceInitializedJournalEvent{
+		workspaceID: workspaceID, generation: generation, definitionDigest: definitionDigest,
+	}
+	if len(planCheckpoint) == 1 {
+		event.planCheckpoint = planCheckpoint[0]
+	}
 	if err := event.validate(); err != nil {
 		return WorkspaceInitializedJournalEvent{}, err
 	}
@@ -189,6 +202,9 @@ func (event WorkspaceInitializedJournalEvent) WorkspaceID() ID    { return event
 func (event WorkspaceInitializedJournalEvent) Generation() Digest { return event.generation }
 func (event WorkspaceInitializedJournalEvent) DefinitionDigest() Digest {
 	return event.definitionDigest
+}
+func (event WorkspaceInitializedJournalEvent) PlanCheckpoint() GitObjectID {
+	return event.planCheckpoint
 }
 
 type CandidateGenerationStoredJournalEvent struct {
