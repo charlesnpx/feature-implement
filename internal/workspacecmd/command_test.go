@@ -105,6 +105,19 @@ func TestLocalCommandDecodersRequireExactReceiptFreeFields(t *testing.T) {
 			want:   "unknown field",
 		},
 		{
+			name: "non-applying review fix rejects body",
+			source: `{
+  "schema_version": 2,
+  "occurred_at": "2026-07-22T10:00:00Z",
+  "attempt_id": "attempt-one",
+  "ordinal": 1,
+  "accepted_finding_ids": [],
+  "body": "ignored"
+}`,
+			target: func() any { return &reviewFixInput{} },
+			want:   "unknown field",
+		},
+		{
 			name: "integration requires attempt",
 			source: `{
   "schema_version": 2,
@@ -189,6 +202,19 @@ func TestRequestSchemasExposeOnlySupportedLocalMutations(t *testing.T) {
 	if len(schemas) != 20 {
 		t.Fatalf("request schema count = %d: %+v", len(schemas), schemas)
 	}
+	for _, action := range []string{
+		"review.reserve-fix",
+		"review.record-fix",
+	} {
+		properties := schemas[action].(map[string]any)["properties"].(map[string]any)
+		if _, exists := properties["body"]; exists {
+			t.Fatalf("%s schema accepts ignored body: %+v", action, properties)
+		}
+	}
+	applyProperties := schemas["review.apply-fix"].(map[string]any)["properties"].(map[string]any)
+	if _, exists := applyProperties["body"]; !exists {
+		t.Fatalf("review.apply-fix schema omits body: %+v", applyProperties)
+	}
 }
 
 func TestDecodeRequestKeepsSchemaOptionalFieldsOptional(t *testing.T) {
@@ -199,6 +225,38 @@ func TestDecodeRequestKeepsSchemaOptionalFieldsOptional(t *testing.T) {
   "attempt_id": "attempt-one"
 }`), &input); err != nil {
 		t.Fatalf("optional commit body was required: %v", err)
+	}
+	var reviewFix applyReviewFixInput
+	if err := decodeRequest([]byte(`{
+  "schema_version": 2,
+  "occurred_at": "2026-07-22T10:00:00Z",
+  "attempt_id": "attempt-one",
+  "ordinal": 1,
+  "accepted_finding_ids": [],
+  "body": "apply the accepted fixes"
+}`), &reviewFix); err != nil {
+		t.Fatalf("valid review fix body: %v", err)
+	}
+}
+
+func TestReportDirectiveSchemaKeepsChoicesOptional(t *testing.T) {
+	reports := ReportSchemas()["reports"].(map[string]any)
+	scheduler := reports["scheduler"].(map[string]any)
+	properties := scheduler["properties"].(map[string]any)
+	units := properties["units"].(map[string]any)
+	unit := units["items"].(map[string]any)
+	unitProperties := unit["properties"].(map[string]any)
+	directives := unitProperties["pending_directives"].(map[string]any)
+	directive := directives["items"].(map[string]any)
+	required := directive["required"].([]string)
+	for _, name := range required {
+		if name == "choices" {
+			t.Fatalf("directive schema still requires omitted empty choices: %+v", required)
+		}
+	}
+	directiveProperties := directive["properties"].(map[string]any)
+	if _, exists := directiveProperties["choices"]; !exists {
+		t.Fatalf("directive schema no longer describes choices: %+v", directiveProperties)
 	}
 }
 

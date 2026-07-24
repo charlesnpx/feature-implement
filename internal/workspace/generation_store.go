@@ -128,6 +128,18 @@ func (store *GenerationStore) Store(definition EffectiveWorkspaceDefinition) (St
 	if err := store.verify(); err != nil {
 		return StoredGeneration{}, err
 	}
+	generations, err := store.List()
+	if err != nil {
+		return StoredGeneration{}, err
+	}
+	if len(generations) != 0 &&
+		(len(generations) != 1 || generations[0] != definition.generation) {
+		return StoredGeneration{}, fmt.Errorf(
+			"runtime generation store is already bound to %s; generation %s requires a fresh runtime directory",
+			generations[0],
+			definition.generation,
+		)
+	}
 	canonical, err := marshalStoredGeneration(definition)
 	if err != nil {
 		return StoredGeneration{}, err

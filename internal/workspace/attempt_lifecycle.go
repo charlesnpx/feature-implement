@@ -890,15 +890,6 @@ func ResumeAttempt(
 	if !exists {
 		return RuntimeAttemptProjection{}, fmt.Errorf("attempt %s is not reserved", request.AttemptID)
 	}
-	providerRuntime, err := RebuildProviderRuntime(snapshot, definition)
-	if err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	for _, receipt := range providerRuntime.CompletionReceipts() {
-		if receipt.AttemptID() == attempt.attemptID {
-			return RuntimeAttemptProjection{}, fmt.Errorf("completed attempt %s cannot resume", attempt.attemptID)
-		}
-	}
 	if attempt.phase == AttemptActive && len(attempt.boundaries) > 0 && attempt.boundaries[len(attempt.boundaries)-1].resumedRecord != 0 {
 		return attempt, nil
 	}

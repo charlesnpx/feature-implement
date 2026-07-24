@@ -53,6 +53,31 @@ func TestGenerationStoreDetectsCanonicalTampering(t *testing.T) {
 	}
 }
 
+func TestGenerationStoreRequiresFreshRuntimeForAnotherGeneration(t *testing.T) {
+	fixture := newDefinitionFixture(t)
+	definition := mustDefinition(t, fixture.sources)
+	other := mustProspectiveCandidate(t, fixture)
+	workspaceDir := t.TempDir()
+	store, err := workspace.OpenGenerationStore(workspaceDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.Store(definition); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Store(other); err == nil ||
+		!strings.Contains(err.Error(), "requires a fresh runtime directory") {
+		t.Fatalf("second generation store error = %v", err)
+	}
+	generations, err := store.List()
+	if err != nil ||
+		len(generations) != 1 ||
+		generations[0] != definition.Generation() {
+		t.Fatalf("stored generations = %v, %v", generations, err)
+	}
+}
+
 func mustProspectiveCandidate(
 	t *testing.T,
 	fixture definitionFixture,

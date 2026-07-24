@@ -52,3 +52,37 @@ func TestTransitionCodecsRejectReceiptFields(t *testing.T) {
 		})
 	}
 }
+
+func TestReviewIsolationCodecContainsNoProviderBrokerField(t *testing.T) {
+	proof := StrictReviewIsolationProof()
+	result, err := NewReviewResultSubmission(ReviewResultSubmissionOptions{
+		RequestDigest:    DigestBytes([]byte("local-review-request")),
+		ReviewerInstance: MustID("local-reviewer"),
+		Status:           ReviewResultCompleted,
+		Isolation:        proof,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(reviewResultToWire(result))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "provider_broker") {
+		t.Fatalf("local review wire retains provider field: %s", encoded)
+	}
+	var isolation reviewIsolationPayloadWire
+	err = decodeStrictJSON([]byte(`{
+		"repository_read_only": true,
+		"scratch_ephemeral": true,
+		"credentials_available": false,
+		"repository_hooks": false,
+		"write_network": false,
+		"provider_broker": false,
+		"external_write": false,
+		"digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	}`), &isolation)
+	if err == nil || !strings.Contains(err.Error(), `unknown field "provider_broker"`) {
+		t.Fatalf("provider-bearing review isolation error = %v", err)
+	}
+}

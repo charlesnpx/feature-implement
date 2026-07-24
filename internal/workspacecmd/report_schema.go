@@ -40,7 +40,7 @@ func ReportSchemas() map[string]any {
 		[]string{
 			"kind", "workspace_id", "generation", "attempt_id",
 			"boundary_id", "goal_id", "goal_scope", "head",
-			"directive_digest", "choices",
+			"directive_digest",
 		},
 		map[string]any{
 			"kind":             nonEmptyText(),

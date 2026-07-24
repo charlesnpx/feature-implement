@@ -140,7 +140,7 @@ func TestAuthorizationSafetyChangesRequireExactSignedDurableReceipt(t *testing.T
 		nonce string,
 	) (workspace.ControlPlaneBinding, workspace.ControlPlaneReceiptV2) {
 		t.Helper()
-		binding, bindingErr := workspace.AuthorizationSafetyChangeControlPlaneBinding(state, nil, target)
+		binding, bindingErr := workspace.AuthorizationSafetyChangeControlPlaneBinding(state, target)
 		if bindingErr != nil {
 			t.Fatal(bindingErr)
 		}

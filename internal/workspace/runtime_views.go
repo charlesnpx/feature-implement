@@ -184,7 +184,7 @@ type WorkspaceReport struct {
 }
 
 func RebuildSchedulerView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefinition) (SchedulerView, error) {
-	core, reviews, _, _, err := rebuildViewProjections(snapshot, definition)
+	core, reviews, err := rebuildViewProjections(snapshot, definition)
 	if err != nil {
 		return SchedulerView{}, err
 	}
@@ -231,7 +231,7 @@ func RebuildSchedulerView(snapshot JournalSnapshot, definition EffectiveWorkspac
 }
 
 func RebuildGateView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefinition) (GateView, error) {
-	core, reviews, _, _, err := rebuildViewProjections(snapshot, definition)
+	core, reviews, err := rebuildViewProjections(snapshot, definition)
 	if err != nil {
 		return GateView{}, err
 	}
@@ -341,7 +341,7 @@ func RebuildCompletionView(snapshot JournalSnapshot, definition EffectiveWorkspa
 }
 
 func RebuildWorkspaceReport(snapshot JournalSnapshot, definition EffectiveWorkspaceDefinition) (WorkspaceReport, error) {
-	core, reviews, _, _, err := rebuildViewProjections(snapshot, definition)
+	core, reviews, err := rebuildViewProjections(snapshot, definition)
 	if err != nil {
 		return WorkspaceReport{}, err
 	}
@@ -569,31 +569,23 @@ func attemptBoundaryStatus(
 func rebuildViewProjections(
 	snapshot JournalSnapshot,
 	definition EffectiveWorkspaceDefinition,
-) (WorkspaceRuntimeProjection, ReviewRuntimeProjection, ProviderRuntimeProjection, AuthorizationRuntimeProjection, error) {
+) (WorkspaceRuntimeProjection, ReviewRuntimeProjection, error) {
 	core, err := RebuildWorkspaceRuntime(snapshot)
 	if err != nil {
-		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, ProviderRuntimeProjection{}, AuthorizationRuntimeProjection{}, err
+		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, err
 	}
 	if core.workspaceID != definition.workspace.id || core.activeGeneration != definition.generation {
-		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, ProviderRuntimeProjection{}, AuthorizationRuntimeProjection{},
+		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{},
 			fmt.Errorf("workspace report definition does not match active journal generation")
 	}
 	if err := requireReadyLocalTarget(core); err != nil {
-		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, ProviderRuntimeProjection{}, AuthorizationRuntimeProjection{}, err
+		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, err
 	}
 	reviews, err := RebuildReviewRuntime(snapshot, definition)
 	if err != nil {
-		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, ProviderRuntimeProjection{}, AuthorizationRuntimeProjection{}, err
+		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, err
 	}
-	providers, err := RebuildProviderRuntime(snapshot, definition)
-	if err != nil {
-		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, ProviderRuntimeProjection{}, AuthorizationRuntimeProjection{}, err
-	}
-	authorization, err := RebuildAuthorizationRuntime(snapshot, definition)
-	if err != nil {
-		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, ProviderRuntimeProjection{}, AuthorizationRuntimeProjection{}, err
-	}
-	return core, reviews, providers, authorization, nil
+	return core, reviews, nil
 }
 
 func definitionDependencyGraph(definition EffectiveWorkspaceDefinition) (map[string][]MergeUnitReference, []MergeUnitReference) {

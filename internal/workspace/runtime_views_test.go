@@ -233,6 +233,23 @@ func TestWorkspaceRuntimeViewsDoNotTreatProviderCompletionAsLocalIntegration(
 			report.Integration, report.Completion,
 		)
 	}
+	resumed, err := workspace.ResumeAttempt(
+		context.Background(),
+		scenario.harness.journal,
+		scenario.harness.definition,
+		scenario.harness.git,
+		workspace.ResumeAttemptRequest{
+			AttemptID:  scenario.attempt.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-21T19:12:00Z"),
+		},
+	)
+	if err != nil || resumed.Phase() != workspace.AttemptActive {
+		t.Fatalf(
+			"provider completion changed local resume: phase=%s err=%v",
+			resumed.Phase(),
+			err,
+		)
+	}
 }
 
 func schedulerUnitByID(

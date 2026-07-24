@@ -611,7 +611,7 @@ func TestReviewRunnerRejectsRepositoryMutationAndWeakIsolation(t *testing.T) {
 	if err != nil || !ok || weakRequest.Invocation() != 3 {
 		t.Fatalf("weak-isolation retry request = %#v ok=%v err=%v", weakRequest, ok, err)
 	}
-	weakIsolation := workspace.NewReviewIsolationProof(true, true, false, false, true, false, false)
+	weakIsolation := workspace.NewReviewIsolationProof(true, true, false, false, true, false)
 	weakSubmission, err := workspace.NewReviewResultSubmission(workspace.ReviewResultSubmissionOptions{
 		RequestDigest: weakRequest.Digest(), ReviewerInstance: workspace.MustID("security-one"),
 		Status: workspace.ReviewResultCompleted, Isolation: weakIsolation,

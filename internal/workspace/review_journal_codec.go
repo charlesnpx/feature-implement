@@ -35,7 +35,6 @@ type reviewIsolationPayloadWire struct {
 	CredentialsAvailable bool   `json:"credentials_available"`
 	RepositoryHooks      bool   `json:"repository_hooks"`
 	WriteNetwork         bool   `json:"write_network"`
-	ProviderBroker       bool   `json:"provider_broker"`
 	ExternalWrite        bool   `json:"external_write"`
 	Digest               string `json:"digest"`
 }
@@ -628,8 +627,8 @@ func reviewResultToWire(result ReviewResultSubmission) reviewResultPayloadWire {
 		Isolation: reviewIsolationPayloadWire{
 			RepositoryReadOnly: result.isolation.repositoryReadOnly, ScratchEphemeral: result.isolation.scratchEphemeral,
 			CredentialsAvailable: result.isolation.credentialsAvailable, RepositoryHooks: result.isolation.repositoryHooks,
-			WriteNetwork: result.isolation.writeNetwork, ProviderBroker: result.isolation.providerBroker,
-			ExternalWrite: result.isolation.externalWrite, Digest: result.isolation.digest.String(),
+			WriteNetwork: result.isolation.writeNetwork, ExternalWrite: result.isolation.externalWrite,
+			Digest: result.isolation.digest.String(),
 		},
 		Digest: result.digest.String(),
 	}
@@ -677,7 +676,7 @@ func reviewResultFromWire(wire reviewResultPayloadWire) (ReviewResultSubmission,
 	isolation := NewReviewIsolationProof(
 		wire.Isolation.RepositoryReadOnly, wire.Isolation.ScratchEphemeral,
 		wire.Isolation.CredentialsAvailable, wire.Isolation.RepositoryHooks,
-		wire.Isolation.WriteNetwork, wire.Isolation.ProviderBroker, wire.Isolation.ExternalWrite,
+		wire.Isolation.WriteNetwork, wire.Isolation.ExternalWrite,
 	)
 	isolationDigest, err := ParseDigest(wire.Isolation.Digest)
 	if err != nil || isolationDigest != isolation.digest {
