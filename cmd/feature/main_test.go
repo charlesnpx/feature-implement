@@ -171,6 +171,27 @@ func TestWorkspaceSchemaExampleAndJournalBackedStatus(t *testing.T) {
 	}
 
 	bundleDir := writeWorkspaceBundleFixture(t)
+	initialCheckpointInput := writeJSONInput(t, map[string]any{
+		"schema_version": 2,
+		"occurred_at":    "2026-07-22T11:58:00Z",
+	})
+	initialCheckpoint := runFeatureOutput(
+		t,
+		"plan", "checkpoint",
+		"--root", bundleDir,
+		"--kind", "initial",
+		"--input", initialCheckpointInput,
+		"--json",
+	)
+	var initialCheckpointResult struct {
+		Status string `json:"status"`
+		Commit string `json:"commit"`
+	}
+	if err := json.Unmarshal([]byte(initialCheckpoint), &initialCheckpointResult); err != nil ||
+		initialCheckpointResult.Status != "checkpointed" ||
+		initialCheckpointResult.Commit == "" {
+		t.Fatalf("initial plan checkpoint failed: err=%v output=%s", err, initialCheckpoint)
+	}
 	stdout = runFeatureOutput(t, "workspace", "validate", "--bundle", bundleDir, "--write-locks", "--json")
 	var validation struct {
 		Status   string `json:"status"`
@@ -191,13 +212,35 @@ func TestWorkspaceSchemaExampleAndJournalBackedStatus(t *testing.T) {
 			t.Fatalf("expected generated projection %s: %v", path, err)
 		}
 	}
+	lockCheckpointInput := writeJSONInput(t, map[string]any{
+		"schema_version": 2,
+		"occurred_at":    "2026-07-22T11:59:00Z",
+	})
+	lockCheckpoint := runFeatureOutput(
+		t,
+		"plan", "checkpoint",
+		"--root", bundleDir,
+		"--kind", "lock",
+		"--input", lockCheckpointInput,
+		"--json",
+	)
+	var lockCheckpointResult struct {
+		Commit     string `json:"commit"`
+		LockDigest string `json:"lock_digest"`
+	}
+	if err := json.Unmarshal([]byte(lockCheckpoint), &lockCheckpointResult); err != nil ||
+		lockCheckpointResult.Commit == "" ||
+		lockCheckpointResult.LockDigest == "" {
+		t.Fatalf("lock plan checkpoint failed: err=%v output=%s", err, lockCheckpoint)
+	}
 
 	workspaceDir := filepath.Join(canonicalFeatureTestTempDir(t), "workspace-state")
 	input := writeJSONInput(t, map[string]any{"schema_version": 2, "occurred_at": "2026-07-22T12:00:00Z"})
 	stdout = runFeatureOutput(t, "workspace", "init", "--bundle", bundleDir, "--workspace", workspaceDir, "--input", input, "--json")
 	var initialized struct {
-		Status string `json:"status"`
-		Report struct {
+		Status         string `json:"status"`
+		PlanCheckpoint string `json:"plan_checkpoint"`
+		Report         struct {
 			Scheduler struct {
 				Units []struct {
 					Status string `json:"status"`
@@ -207,6 +250,9 @@ func TestWorkspaceSchemaExampleAndJournalBackedStatus(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(stdout), &initialized); err != nil || initialized.Status != "initialized" {
 		t.Fatalf("workspace init failed: err=%v output=%s", err, stdout)
+	}
+	if initialized.PlanCheckpoint != lockCheckpointResult.Commit {
+		t.Fatalf("workspace plan checkpoint = %q, want %q", initialized.PlanCheckpoint, lockCheckpointResult.Commit)
 	}
 	if len(initialized.Report.Scheduler.Units) != 1 || initialized.Report.Scheduler.Units[0].Status != "ready" {
 		t.Fatalf("unexpected initialized scheduler: %+v", initialized.Report.Scheduler.Units)

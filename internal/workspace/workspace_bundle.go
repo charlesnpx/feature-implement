@@ -42,6 +42,8 @@ type WorkspaceBundle struct {
 	root                  string
 	rootIdentity          PlatformFileIdentity
 	descriptorDigest      Digest
+	sourcePaths           []string
+	sourceFiles           map[string][]byte
 	sources               DefinitionSources
 	definition            EffectiveWorkspaceDefinition
 	controlPlaneAuthority ID
@@ -51,6 +53,9 @@ func (bundle WorkspaceBundle) Root() string                             { return
 func (bundle WorkspaceBundle) RootIdentity() PlatformFileIdentity       { return bundle.rootIdentity }
 func (bundle WorkspaceBundle) DescriptorDigest() Digest                 { return bundle.descriptorDigest }
 func (bundle WorkspaceBundle) Definition() EffectiveWorkspaceDefinition { return bundle.definition }
+func (bundle WorkspaceBundle) SourcePaths() []string {
+	return append([]string(nil), bundle.sourcePaths...)
+}
 func (bundle WorkspaceBundle) Sources() DefinitionSources {
 	return cloneDefinitionSources(bundle.sources)
 }
@@ -223,9 +228,28 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 	if err := filesystem.VerifyPath(); err != nil {
 		return WorkspaceBundle{}, fmt.Errorf("revalidate workspace bundle root: %w", err)
 	}
+	sourcePaths := make([]string, 0, len(sourceOwners)+1)
+	sourcePaths = append(sourcePaths, WorkspaceBundleFileName)
+	for sourcePath := range sourceOwners {
+		sourcePaths = append(sourcePaths, sourcePath)
+	}
+	sort.Strings(sourcePaths)
+	sourceFiles := make(map[string][]byte, len(sourcePaths))
+	sourceFiles[WorkspaceBundleFileName] = append([]byte(nil), descriptor...)
+	sourceFiles[workspacePath] = append([]byte(nil), workspaceBytes...)
+	sourceFiles[executionPath] = append([]byte(nil), executionBytes...)
+	for _, plan := range plans {
+		sourceFiles[plan.Path] = append([]byte(nil), plan.Bytes...)
+	}
+	for _, authority := range authorities {
+		contentPath := authorityContentPaths[authority.ID]
+		sourceFiles[contentPath] = append([]byte(nil), authority.Content...)
+	}
 	return WorkspaceBundle{
 		root: filesystem.Path(), rootIdentity: filesystem.Identity(),
 		descriptorDigest: DigestBytes(descriptor),
+		sourcePaths:      sourcePaths,
+		sourceFiles:      sourceFiles,
 		sources:          cloneDefinitionSources(sources), definition: definition,
 		controlPlaneAuthority: controlPlaneAuthority,
 	}, nil

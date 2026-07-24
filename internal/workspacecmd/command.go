@@ -47,6 +47,7 @@ type InitializationResult struct {
 	WorkspaceDir     string                    `json:"workspace_dir"`
 	WorkspaceID      string                    `json:"workspace_id"`
 	Generation       string                    `json:"generation"`
+	PlanCheckpoint   string                    `json:"plan_checkpoint"`
 	JournalHead      string                    `json:"journal_head"`
 	ProjectionDigest string                    `json:"projection_digest"`
 	Report           workspace.WorkspaceReport `json:"report"`
@@ -110,7 +111,7 @@ func Execute(ctx context.Context, options Options) (any, error) {
 	case "validate":
 		return validateBundle(bundle, options)
 	case "init":
-		return initializeWorkspace(bundle, options)
+		return initializeWorkspace(ctx, bundle, options)
 	case "status", "report":
 		return readReport(bundle, options.WorkspaceDir)
 	case "scheduler":
@@ -351,7 +352,10 @@ func validateBundle(bundle workspace.WorkspaceBundle, options Options) (Validati
 	}
 	lockRoot := filepath.Join(bundle.Root(), workspace.WorkspaceGeneratedDirectory)
 	materialized, err := workspace.SynchronizeMaterialization(
-		lockRoot, options.GeneratorVersion, artifacts, workspace.MaterializationOptions{},
+		lockRoot,
+		workspace.PlanCheckpointGeneratorVersion,
+		artifacts,
+		workspace.MaterializationOptions{},
 	)
 	if err != nil {
 		return ValidationResult{}, err
@@ -372,6 +376,7 @@ type initializeRequest struct {
 }
 
 func initializeWorkspace(
+	ctx context.Context,
 	bundle workspace.WorkspaceBundle,
 	options Options,
 ) (result InitializationResult, resultErr error) {
@@ -413,16 +418,27 @@ func initializeWorkspace(
 	if err := bundle.VerifyRoot(); err != nil {
 		return InitializationResult{}, err
 	}
-	if _, err := validateBundle(bundle, Options{WriteLocks: true, GeneratorVersion: options.GeneratorVersion}); err != nil {
-		return InitializationResult{}, err
-	}
-	if err := bundle.VerifyRoot(); err != nil {
-		return InitializationResult{}, err
-	}
-	if err := roots.VerifyBeforeRuntimeCreation(); err != nil {
-		return InitializationResult{}, err
-	}
-	initialized, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, occurredAt)
+	var initialized workspace.WorkspaceInitializationResult
+	_, err = workspace.WithVerifiedPlanLockCheckpoint(
+		ctx,
+		bundle,
+		func(checkpoint workspace.VerifiedPlanLockCheckpoint) error {
+			if err := bundle.VerifyRoot(); err != nil {
+				return err
+			}
+			if err := roots.VerifyBeforeRuntimeCreation(); err != nil {
+				return err
+			}
+			var initializeErr error
+			initialized, initializeErr = workspace.InitializeWorkspaceV2(
+				workspaceDir,
+				definition,
+				occurredAt,
+				checkpoint,
+			)
+			return initializeErr
+		},
+	)
 	if err != nil {
 		return InitializationResult{}, err
 	}
@@ -439,7 +455,8 @@ func initializeWorkspace(
 	result = InitializationResult{
 		SchemaVersion: requestSchemaVersion, Status: "initialized", WorkspaceDir: workspaceDir,
 		WorkspaceID: initialized.Runtime().WorkspaceID().String(), Generation: initialized.Runtime().ActiveGeneration().String(),
-		JournalHead: initialized.Snapshot().Head().String(), ProjectionDigest: initialized.ProjectionDigest().String(), Report: report,
+		PlanCheckpoint: initialized.Runtime().PlanCheckpoint().String(),
+		JournalHead:    initialized.Snapshot().Head().String(), ProjectionDigest: initialized.ProjectionDigest().String(), Report: report,
 	}
 	return result, nil
 }

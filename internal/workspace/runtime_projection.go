@@ -121,6 +121,7 @@ func (recovery RuntimeRecoveryProjection) ResultingHead() Digest { return recove
 type WorkspaceRuntimeProjection struct {
 	workspaceID       ID
 	activeGeneration  Digest
+	planCheckpoint    GitObjectID
 	generationHistory []Digest
 	candidates        []RuntimeCandidateProjection
 	activations       []RuntimeActivationProjection
@@ -131,6 +132,9 @@ type WorkspaceRuntimeProjection struct {
 func (projection WorkspaceRuntimeProjection) WorkspaceID() ID { return projection.workspaceID }
 func (projection WorkspaceRuntimeProjection) ActiveGeneration() Digest {
 	return projection.activeGeneration
+}
+func (projection WorkspaceRuntimeProjection) PlanCheckpoint() GitObjectID {
+	return projection.planCheckpoint
 }
 func (projection WorkspaceRuntimeProjection) GenerationHistory() []Digest {
 	return append([]Digest(nil), projection.generationHistory...)
@@ -205,6 +209,7 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 		}
 		next.workspaceID = event.workspaceID
 		next.activeGeneration = event.generation
+		next.planCheckpoint = event.planCheckpoint
 		next.generationHistory = []Digest{event.generation}
 	case CandidateGenerationStoredJournalEvent:
 		if current.workspaceID != event.workspaceID || current.activeGeneration != event.activeGeneration {
@@ -373,6 +378,7 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 		SchemaVersion     int               `json:"schema_version"`
 		WorkspaceID       string            `json:"workspace_id"`
 		ActiveGeneration  string            `json:"active_generation"`
+		PlanCheckpoint    string            `json:"plan_checkpoint,omitempty"`
 		GenerationHistory []string          `json:"generation_history"`
 		Candidates        []candidateJSON   `json:"candidates"`
 		Activations       []activationJSON  `json:"activations"`
@@ -382,6 +388,7 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 	value := runtimeJSON{
 		SchemaVersion: JournalSchemaVersion, WorkspaceID: projection.workspaceID.String(),
 		ActiveGeneration:  projection.activeGeneration.String(),
+		PlanCheckpoint:    projection.planCheckpoint.String(),
 		GenerationHistory: make([]string, 0, len(projection.generationHistory)),
 		Candidates:        make([]candidateJSON, 0, len(projection.candidates)),
 		Activations:       make([]activationJSON, 0, len(projection.activations)),

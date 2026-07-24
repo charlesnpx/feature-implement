@@ -49,6 +49,7 @@ type workspaceInitializedPayloadWire struct {
 	WorkspaceID      string `json:"workspace_id"`
 	Generation       string `json:"generation"`
 	DefinitionDigest string `json:"definition_digest"`
+	PlanCheckpoint   string `json:"plan_checkpoint,omitempty"`
 }
 
 type candidateStoredPayloadWire struct {
@@ -178,7 +179,7 @@ func marshalWorkspaceJournalEvent(event WorkspaceJournalEvent) (json.RawMessage,
 	case WorkspaceInitializedJournalEvent:
 		value = workspaceInitializedPayloadWire{
 			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
-			DefinitionDigest: event.definitionDigest.String(),
+			DefinitionDigest: event.definitionDigest.String(), PlanCheckpoint: event.planCheckpoint.String(),
 		}
 	case CandidateGenerationStoredJournalEvent:
 		value = candidateStoredPayloadWire{
@@ -352,7 +353,15 @@ func decodeWorkspaceJournalEvent(eventType JournalEventType, payload json.RawMes
 		if err != nil {
 			return nil, err
 		}
-		return NewWorkspaceInitializedJournalEvent(workspaceID, generation, definitionDigest)
+		var checkpoint []GitObjectID
+		if strings.TrimSpace(wire.PlanCheckpoint) != "" {
+			parsed, err := ParseGitObjectID(wire.PlanCheckpoint)
+			if err != nil {
+				return nil, fmt.Errorf("plan checkpoint: %w", err)
+			}
+			checkpoint = append(checkpoint, parsed)
+		}
+		return NewWorkspaceInitializedJournalEvent(workspaceID, generation, definitionDigest, checkpoint...)
 	case JournalEventCandidateStored:
 		var wire candidateStoredPayloadWire
 		if err := decodeStrictJSON(payload, &wire); err != nil {
