@@ -243,14 +243,19 @@ func executeCheckpointBundleInitializationWithRuntime(
 	root string,
 ) (any, string, error) {
 	t.Helper()
+	runtimeRoot := filepath.Join(
+		canonicalMaterializationTestTempDir(t), "runtime",
+	)
 	request, err := json.Marshal(map[string]any{
 		"schema_version": 2,
 		"occurred_at":    "2026-07-23T14:03:00Z",
+		"worktree_root": workspaceTestWorktreeRoot(
+			t, runtimeRoot,
+		),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtimeRoot := filepath.Join(canonicalMaterializationTestTempDir(t), "runtime")
 	result, err := workspacecmd.Execute(context.Background(), workspacecmd.Options{
 		Action: "init", BundleDir: root, WorkspaceDir: runtimeRoot, Input: request,
 	})

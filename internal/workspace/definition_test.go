@@ -22,9 +22,16 @@ type definitionFixture struct {
 }
 
 func newDefinitionFixture(t *testing.T) definitionFixture {
+	return newDefinitionFixtureForHash(t, workspace.GitHashSHA1)
+}
+
+func newDefinitionFixtureForHash(
+	t *testing.T,
+	algorithm workspace.GitHashAlgorithm,
+) definitionFixture {
 	t.Helper()
 	repositoryRoot, baseCommit := initializeTargetRepository(
-		t, workspace.GitHashSHA1,
+		t, algorithm,
 	)
 	gitData := []byte("owner-policy: strict\n")
 	externalData := []byte("organization-policy: strict\n")

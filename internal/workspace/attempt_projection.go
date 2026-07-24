@@ -5,13 +5,83 @@ import (
 	"fmt"
 )
 
+type AttemptRuntimePhase string
+
+const (
+	AttemptReserved        AttemptRuntimePhase = "reserved"
+	AttemptMaterializing   AttemptRuntimePhase = "materializing"
+	AttemptActive          AttemptRuntimePhase = "active"
+	AttemptPaused          AttemptRuntimePhase = "paused"
+	AttemptReviewExhausted AttemptRuntimePhase = "review_exhausted"
+	AttemptCompleted       AttemptRuntimePhase = "completed"
+	AttemptFailed          AttemptRuntimePhase = "failed"
+	AttemptAbandoned       AttemptRuntimePhase = "abandoned"
+)
+
+func (phase AttemptRuntimePhase) valid() bool {
+	switch phase {
+	case AttemptReserved, AttemptMaterializing, AttemptActive, AttemptPaused,
+		AttemptReviewExhausted, AttemptCompleted, AttemptFailed, AttemptAbandoned:
+		return true
+	default:
+		return false
+	}
+}
+
+func (phase AttemptRuntimePhase) nonterminal() bool {
+	return phase == AttemptReserved || phase == AttemptMaterializing ||
+		phase == AttemptActive || phase == AttemptPaused ||
+		phase == AttemptReviewExhausted
+}
+
+type AttemptGenerationBinding struct {
+	attemptID  ID
+	mergeUnit  MergeUnitReference
+	generation Digest
+	phase      AttemptRuntimePhase
+}
+
+func NewAttemptGenerationBinding(
+	attemptID ID,
+	mergeUnit MergeUnitReference,
+	generation Digest,
+	phase AttemptRuntimePhase,
+) (AttemptGenerationBinding, error) {
+	if attemptID.IsZero() || mergeUnit.planID.IsZero() ||
+		mergeUnit.mergeUnitID.IsZero() || generation.IsZero() ||
+		!phase.valid() {
+		return AttemptGenerationBinding{}, fmt.Errorf(
+			"attempt requires identity, merge unit, exact generation, and valid phase",
+		)
+	}
+	return AttemptGenerationBinding{
+		attemptID: attemptID, mergeUnit: mergeUnit,
+		generation: generation, phase: phase,
+	}, nil
+}
+
+func (attempt AttemptGenerationBinding) AttemptID() ID {
+	return attempt.attemptID
+}
+
+func (attempt AttemptGenerationBinding) MergeUnit() MergeUnitReference {
+	return attempt.mergeUnit
+}
+
+func (attempt AttemptGenerationBinding) Generation() Digest {
+	return attempt.generation
+}
+
+func (attempt AttemptGenerationBinding) Phase() AttemptRuntimePhase {
+	return attempt.phase
+}
+
 type RuntimeOrchestrationAcknowledgement struct {
 	record         uint64
 	kind           OrchestrationAcknowledgementKind
 	goal           GoalBinding
 	idempotencyKey Digest
 	requestDigest  Digest
-	receiptDigest  Digest
 }
 
 func (acknowledgement RuntimeOrchestrationAcknowledgement) Record() uint64 {
@@ -29,15 +99,11 @@ func (acknowledgement RuntimeOrchestrationAcknowledgement) IdempotencyKey() Dige
 func (acknowledgement RuntimeOrchestrationAcknowledgement) RequestDigest() Digest {
 	return acknowledgement.requestDigest
 }
-func (acknowledgement RuntimeOrchestrationAcknowledgement) ReceiptDigest() Digest {
-	return acknowledgement.receiptDigest
-}
 
 type RuntimeOwnerBoundaryResponse struct {
 	record        uint64
 	response      OwnerBoundaryResponse
 	requestDigest Digest
-	receiptDigest Digest
 }
 
 func (response RuntimeOwnerBoundaryResponse) Record() uint64 { return response.record }
@@ -45,7 +111,6 @@ func (response RuntimeOwnerBoundaryResponse) Response() OwnerBoundaryResponse {
 	return response.response
 }
 func (response RuntimeOwnerBoundaryResponse) RequestDigest() Digest { return response.requestDigest }
-func (response RuntimeOwnerBoundaryResponse) ReceiptDigest() Digest { return response.receiptDigest }
 
 type RuntimeNextGoalIntent struct {
 	record         uint64
@@ -327,64 +392,99 @@ func reduceAttemptRuntime(
 		updated.nextGoalIntentOK = true
 		return nil
 	case AttemptOrchestrationAcknowledgedJournalEvent:
-		index, attempt, boundaryIndex, boundary, err := requireCurrentRuntimeBoundary(
-			current, event.workspaceID, event.generation, event.attemptID, event.boundaryID,
+		index, _, boundaryIndex, boundary, err := requireCurrentRuntimeBoundary(
+			current, event.workspaceID, event.generation, event.attemptID,
+			event.boundaryID,
 		)
 		if err != nil {
 			return err
 		}
 		if boundary.mode != AttemptBoundaryCompleteGoalAndWait {
-			return fmt.Errorf("pause-only boundary %s cannot acknowledge goal completion or creation", boundary.boundaryID)
+			return fmt.Errorf(
+				"pause-only boundary %s cannot acknowledge goal completion or creation",
+				boundary.boundaryID,
+			)
+		}
+		if event.directiveDigest != boundary.directiveDigest {
+			return fmt.Errorf(
+				"acknowledgement does not match the exact boundary directive",
+			)
 		}
 		expectedRequest, err := deriveOrchestrationAcknowledgementRequestDigest(
 			event.workspaceID, event.generation, event.attemptID, boundary,
 			event.kind, event.goal, event.idempotencyKey,
 		)
 		if err != nil || expectedRequest != event.requestDigest {
-			return fmt.Errorf("orchestration acknowledgement has an invalid request digest")
+			return fmt.Errorf(
+				"acknowledgement has an invalid request digest",
+			)
 		}
 		acknowledgement := RuntimeOrchestrationAcknowledgement{
 			record: record.sequence, kind: event.kind, goal: event.goal,
-			idempotencyKey: event.idempotencyKey, requestDigest: event.requestDigest, receiptDigest: event.receiptDigest,
+			idempotencyKey: event.idempotencyKey,
+			requestDigest:  event.requestDigest,
 		}
 		updated := &next.attempts[index].boundaries[boundaryIndex]
 		switch event.kind {
 		case AcknowledgementGoalCompleted:
-			if boundary.goalCompletedOK || event.goal != boundary.goal || event.idempotencyKey != boundary.idempotencyKey {
-				return fmt.Errorf("goal-completion acknowledgement does not match the pending boundary directive")
+			if boundary.goalCompletedOK || event.goal != boundary.goal ||
+				event.idempotencyKey != boundary.idempotencyKey {
+				return fmt.Errorf(
+					"goal-completion acknowledgement does not match the pending boundary directive",
+				)
 			}
-			updated.goalCompleted, updated.goalCompletedOK = acknowledgement, true
+			updated.goalCompleted, updated.goalCompletedOK =
+				acknowledgement, true
 		case AcknowledgementNextGoalCreated:
 			if boundary.nextGoalOK || !boundary.nextGoalIntentOK ||
-				event.goal != boundary.nextGoalIntent.goal || event.idempotencyKey != boundary.nextGoalIntent.idempotencyKey {
-				return fmt.Errorf("next-goal acknowledgement does not match the durable creation intent")
+				event.goal != boundary.nextGoalIntent.goal ||
+				event.idempotencyKey != boundary.nextGoalIntent.idempotencyKey {
+				return fmt.Errorf(
+					"next-goal acknowledgement does not match the durable creation intent",
+				)
 			}
 			updated.nextGoal, updated.nextGoalOK = acknowledgement, true
 		default:
-			return fmt.Errorf("unsupported orchestration acknowledgement %q", event.kind)
+			return fmt.Errorf(
+				"unsupported acknowledgement %q", event.kind,
+			)
 		}
-		_ = attempt
 		return nil
 	case AttemptOwnerResponseJournalEvent:
 		index, _, boundaryIndex, boundary, err := requireCurrentRuntimeBoundary(
-			current, event.workspaceID, event.generation, event.attemptID, event.boundaryID,
+			current, event.workspaceID, event.generation, event.attemptID,
+			event.boundaryID,
 		)
 		if err != nil {
 			return err
 		}
-		if boundary.ownerResponseOK || boundary.mode == AttemptBoundaryCompleteGoalAndWait && !boundary.goalCompletedOK {
-			return fmt.Errorf("owner response is duplicate or precedes goal-completion acknowledgement")
+		if boundary.ownerResponseOK ||
+			boundary.mode == AttemptBoundaryCompleteGoalAndWait &&
+				!boundary.goalCompletedOK {
+			return fmt.Errorf(
+				"owner response is duplicate or precedes goal-completion acknowledgement",
+			)
+		}
+		if event.directiveDigest != boundary.directiveDigest ||
+			event.goal != boundary.goal ||
+			event.expectedHead != boundary.head {
+			return fmt.Errorf(
+				"owner response does not match the exact boundary directive, goal, and head",
+			)
 		}
 		expected, err := deriveOwnerResponseRequestDigest(
-			event.workspaceID, event.generation, event.attemptID, boundary, event.response,
+			event.workspaceID, event.generation, event.attemptID, boundary,
+			event.response,
 		)
 		if err != nil || expected != event.requestDigest {
-			return fmt.Errorf("owner response request digest does not match its boundary")
+			return fmt.Errorf(
+				"owner response request digest does not match its boundary",
+			)
 		}
 		updated := &next.attempts[index].boundaries[boundaryIndex]
 		updated.ownerResponse = RuntimeOwnerBoundaryResponse{
 			record: record.sequence, response: event.response,
-			requestDigest: event.requestDigest, receiptDigest: event.receiptDigest,
+			requestDigest: event.requestDigest,
 		}
 		updated.ownerResponseOK = true
 		return nil
@@ -531,13 +631,11 @@ func canonicalAttemptRuntime(attempt RuntimeAttemptProjection) (json.RawMessage,
 		GoalScope      GoalScope                        `json:"goal_scope"`
 		IdempotencyKey string                           `json:"idempotency_key"`
 		RequestDigest  string                           `json:"request_digest"`
-		ReceiptDigest  string                           `json:"receipt_digest"`
 	}
 	type ownerJSON struct {
 		Record        uint64                `json:"record"`
 		Response      OwnerBoundaryResponse `json:"response"`
 		RequestDigest string                `json:"request_digest"`
-		ReceiptDigest string                `json:"receipt_digest"`
 	}
 	type nextGoalIntentJSON struct {
 		Record         uint64    `json:"record"`
@@ -596,7 +694,6 @@ func canonicalAttemptRuntime(attempt RuntimeAttemptProjection) (json.RawMessage,
 		return &acknowledgementJSON{
 			Record: value.record, Kind: value.kind, GoalID: value.goal.id.String(), GoalScope: value.goal.scope,
 			IdempotencyKey: value.idempotencyKey.String(), RequestDigest: value.requestDigest.String(),
-			ReceiptDigest: value.receiptDigest.String(),
 		}
 	}
 	value := attemptJSON{
@@ -641,7 +738,7 @@ func canonicalAttemptRuntime(attempt RuntimeAttemptProjection) (json.RawMessage,
 		if boundary.ownerResponseOK {
 			item.OwnerResponse = &ownerJSON{
 				Record: boundary.ownerResponse.record, Response: boundary.ownerResponse.response,
-				RequestDigest: boundary.ownerResponse.requestDigest.String(), ReceiptDigest: boundary.ownerResponse.receiptDigest.String(),
+				RequestDigest: boundary.ownerResponse.requestDigest.String(),
 			}
 		}
 		if boundary.nextGoalIntentOK {

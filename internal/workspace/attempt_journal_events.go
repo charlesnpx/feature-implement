@@ -392,28 +392,30 @@ func (event AttemptNextGoalIntendedJournalEvent) Goal() GoalBinding      { retur
 func (event AttemptNextGoalIntendedJournalEvent) IdempotencyKey() Digest { return event.idempotencyKey }
 
 type AttemptOrchestrationAcknowledgedJournalEvent struct {
-	workspaceID    ID
-	generation     Digest
-	attemptID      ID
-	boundaryID     ID
-	kind           OrchestrationAcknowledgementKind
-	goal           GoalBinding
-	idempotencyKey Digest
-	requestDigest  Digest
-	receiptDigest  Digest
+	workspaceID     ID
+	generation      Digest
+	attemptID       ID
+	boundaryID      ID
+	kind            OrchestrationAcknowledgementKind
+	directiveDigest Digest
+	goal            GoalBinding
+	idempotencyKey  Digest
+	requestDigest   Digest
 }
 
 func NewAttemptOrchestrationAcknowledgedJournalEvent(
 	workspaceID, attemptID, boundaryID ID,
 	generation Digest,
 	kind OrchestrationAcknowledgementKind,
+	directiveDigest Digest,
 	goal GoalBinding,
-	idempotencyKey, requestDigest, receiptDigest Digest,
+	idempotencyKey, requestDigest Digest,
 ) (AttemptOrchestrationAcknowledgedJournalEvent, error) {
 	event := AttemptOrchestrationAcknowledgedJournalEvent{
 		workspaceID: workspaceID, generation: generation, attemptID: attemptID,
-		boundaryID: boundaryID, kind: kind, goal: goal,
-		idempotencyKey: idempotencyKey, requestDigest: requestDigest, receiptDigest: receiptDigest,
+		boundaryID: boundaryID, kind: kind, directiveDigest: directiveDigest,
+		goal: goal, idempotencyKey: idempotencyKey,
+		requestDigest: requestDigest,
 	}
 	if err := event.validate(); err != nil {
 		return AttemptOrchestrationAcknowledgedJournalEvent{}, err
@@ -431,8 +433,11 @@ func (event AttemptOrchestrationAcknowledgedJournalEvent) boundGeneration() Dige
 func (event AttemptOrchestrationAcknowledgedJournalEvent) validate() error {
 	if event.workspaceID.IsZero() || event.generation.IsZero() || event.attemptID.IsZero() ||
 		event.boundaryID.IsZero() || !event.kind.valid() || event.goal.IsZero() ||
-		event.idempotencyKey.IsZero() || event.requestDigest.IsZero() || event.receiptDigest.IsZero() {
-		return fmt.Errorf("orchestration acknowledgement requires boundary, kind, goal, idempotency, request, and receipt bindings")
+		event.directiveDigest.IsZero() || event.idempotencyKey.IsZero() ||
+		event.requestDigest.IsZero() {
+		return fmt.Errorf(
+			"acknowledgement requires exact attempt, boundary, directive, goal, idempotency, and request bindings",
+		)
 	}
 	return nil
 }
@@ -445,6 +450,9 @@ func (event AttemptOrchestrationAcknowledgedJournalEvent) BoundaryID() ID { retu
 func (event AttemptOrchestrationAcknowledgedJournalEvent) Kind() OrchestrationAcknowledgementKind {
 	return event.kind
 }
+func (event AttemptOrchestrationAcknowledgedJournalEvent) DirectiveDigest() Digest {
+	return event.directiveDigest
+}
 func (event AttemptOrchestrationAcknowledgedJournalEvent) Goal() GoalBinding { return event.goal }
 func (event AttemptOrchestrationAcknowledgedJournalEvent) IdempotencyKey() Digest {
 	return event.idempotencyKey
@@ -452,30 +460,32 @@ func (event AttemptOrchestrationAcknowledgedJournalEvent) IdempotencyKey() Diges
 func (event AttemptOrchestrationAcknowledgedJournalEvent) RequestDigest() Digest {
 	return event.requestDigest
 }
-func (event AttemptOrchestrationAcknowledgedJournalEvent) ReceiptDigest() Digest {
-	return event.receiptDigest
-}
 
 type AttemptOwnerResponseJournalEvent struct {
-	workspaceID   ID
-	generation    Digest
-	attemptID     ID
-	boundaryID    ID
-	response      OwnerBoundaryResponse
-	requestDigest Digest
-	receiptDigest Digest
+	workspaceID     ID
+	generation      Digest
+	attemptID       ID
+	boundaryID      ID
+	directiveDigest Digest
+	goal            GoalBinding
+	expectedHead    GitObjectID
+	response        OwnerBoundaryResponse
+	requestDigest   Digest
 }
 
 func NewAttemptOwnerResponseJournalEvent(
 	workspaceID, attemptID, boundaryID ID,
-	generation Digest,
+	generation, directiveDigest Digest,
+	goal GoalBinding,
+	expectedHead GitObjectID,
 	response OwnerBoundaryResponse,
-	requestDigest, receiptDigest Digest,
+	requestDigest Digest,
 ) (AttemptOwnerResponseJournalEvent, error) {
 	event := AttemptOwnerResponseJournalEvent{
 		workspaceID: workspaceID, generation: generation, attemptID: attemptID,
-		boundaryID: boundaryID, response: response,
-		requestDigest: requestDigest, receiptDigest: receiptDigest,
+		boundaryID: boundaryID, directiveDigest: directiveDigest, goal: goal,
+		expectedHead: expectedHead, response: response,
+		requestDigest: requestDigest,
 	}
 	if err := event.validate(); err != nil {
 		return AttemptOwnerResponseJournalEvent{}, err
@@ -489,19 +499,44 @@ func (AttemptOwnerResponseJournalEvent) eventType() JournalEventType {
 }
 func (event AttemptOwnerResponseJournalEvent) boundGeneration() Digest { return event.generation }
 func (event AttemptOwnerResponseJournalEvent) validate() error {
-	if event.workspaceID.IsZero() || event.generation.IsZero() || event.attemptID.IsZero() ||
-		event.boundaryID.IsZero() || !event.response.valid() || event.requestDigest.IsZero() || event.receiptDigest.IsZero() {
-		return fmt.Errorf("owner response requires boundary, closed response, request, and receipt bindings")
+	if event.workspaceID.IsZero() || event.generation.IsZero() ||
+		event.attemptID.IsZero() || event.boundaryID.IsZero() ||
+		event.directiveDigest.IsZero() || event.goal.IsZero() ||
+		event.expectedHead.IsZero() || !event.response.valid() ||
+		event.requestDigest.IsZero() {
+		return fmt.Errorf(
+			"owner response requires exact attempt, boundary, directive, goal, head, response, and request bindings",
+		)
 	}
 	return nil
 }
-func (event AttemptOwnerResponseJournalEvent) WorkspaceID() ID                 { return event.workspaceID }
-func (event AttemptOwnerResponseJournalEvent) Generation() Digest              { return event.generation }
-func (event AttemptOwnerResponseJournalEvent) AttemptID() ID                   { return event.attemptID }
-func (event AttemptOwnerResponseJournalEvent) BoundaryID() ID                  { return event.boundaryID }
-func (event AttemptOwnerResponseJournalEvent) Response() OwnerBoundaryResponse { return event.response }
-func (event AttemptOwnerResponseJournalEvent) RequestDigest() Digest           { return event.requestDigest }
-func (event AttemptOwnerResponseJournalEvent) ReceiptDigest() Digest           { return event.receiptDigest }
+func (event AttemptOwnerResponseJournalEvent) WorkspaceID() ID {
+	return event.workspaceID
+}
+func (event AttemptOwnerResponseJournalEvent) Generation() Digest {
+	return event.generation
+}
+func (event AttemptOwnerResponseJournalEvent) AttemptID() ID {
+	return event.attemptID
+}
+func (event AttemptOwnerResponseJournalEvent) BoundaryID() ID {
+	return event.boundaryID
+}
+func (event AttemptOwnerResponseJournalEvent) DirectiveDigest() Digest {
+	return event.directiveDigest
+}
+func (event AttemptOwnerResponseJournalEvent) Goal() GoalBinding {
+	return event.goal
+}
+func (event AttemptOwnerResponseJournalEvent) ExpectedHead() GitObjectID {
+	return event.expectedHead
+}
+func (event AttemptOwnerResponseJournalEvent) Response() OwnerBoundaryResponse {
+	return event.response
+}
+func (event AttemptOwnerResponseJournalEvent) RequestDigest() Digest {
+	return event.requestDigest
+}
 
 type AttemptResumedJournalEvent struct {
 	workspaceID      ID
@@ -620,7 +655,9 @@ func isAttemptJournalEvent(event WorkspaceJournalEvent) bool {
 	switch event.(type) {
 	case AttemptReservedJournalEvent, AttemptMaterializationIntendedJournalEvent,
 		AttemptStartedJournalEvent, AttemptBoundaryReachedJournalEvent,
-		AttemptNextGoalIntendedJournalEvent, AttemptOrchestrationAcknowledgedJournalEvent, AttemptOwnerResponseJournalEvent,
+		AttemptNextGoalIntendedJournalEvent,
+		AttemptOrchestrationAcknowledgedJournalEvent,
+		AttemptOwnerResponseJournalEvent,
 		AttemptResumedJournalEvent:
 		return true
 	default:
@@ -687,7 +724,10 @@ func attemptJournalEventResources(event WorkspaceJournalEvent) ([]JournalResourc
 	case AttemptOwnerResponseJournalEvent:
 		workspaceID, generation = event.workspaceID, event.generation
 		approval := OwnerResponseJournalResource(event.boundaryID)
-		reads = []JournalResource{AttemptJournalResource(event.attemptID), approval}
+		reads = []JournalResource{
+			AttemptJournalResource(event.attemptID), approval,
+			GoalJournalResource(event.goal),
+		}
 		writes = append([]JournalResource(nil), reads...)
 	case AttemptResumedJournalEvent:
 		workspaceID, generation = event.workspaceID, event.generation
@@ -838,43 +878,52 @@ func deriveOwnerResponseRequestDigest(
 	boundary RuntimeBoundaryProjection,
 	response OwnerBoundaryResponse,
 ) (Digest, error) {
-	if workspaceID.IsZero() || generation.IsZero() || attemptID.IsZero() || boundary.boundaryID.IsZero() ||
-		!response.valid() || boundary.head.IsZero() ||
-		boundary.directiveDigest.IsZero() && boundary.mode == AttemptBoundaryCompleteGoalAndWait {
-		return Digest{}, fmt.Errorf("owner response request requires a complete boundary and closed response")
+	if workspaceID.IsZero() || generation.IsZero() || attemptID.IsZero() ||
+		boundary.boundaryID.IsZero() || boundary.directiveDigest.IsZero() ||
+		boundary.goal.IsZero() || boundary.head.IsZero() ||
+		boundary.evidenceDigest.IsZero() || !response.valid() {
+		return Digest{}, fmt.Errorf(
+			"owner response requires a complete exact boundary and closed response",
+		)
 	}
-	if boundary.mode == AttemptBoundaryCompleteGoalAndWait && (!boundary.goalCompletedOK ||
-		boundary.goalCompleted.record == 0 || boundary.goalCompleted.idempotencyKey.IsZero() ||
-		boundary.goalCompleted.receiptDigest.IsZero()) {
-		return Digest{}, fmt.Errorf("owner response request requires the durable goal-completion acknowledgement")
+	if boundary.mode == AttemptBoundaryCompleteGoalAndWait &&
+		(!boundary.goalCompletedOK ||
+			boundary.goalCompleted.requestDigest.IsZero()) {
+		return Digest{}, fmt.Errorf(
+			"owner response requires the durable goal-completion acknowledgement",
+		)
 	}
 	type requestJSON struct {
-		SchemaVersion    int                   `json:"schema_version"`
-		Kind             string                `json:"kind"`
-		WorkspaceID      string                `json:"workspace_id"`
-		Generation       string                `json:"generation"`
-		AttemptID        string                `json:"attempt_id"`
-		BoundaryID       string                `json:"boundary_id"`
-		Mode             AttemptBoundaryMode   `json:"mode"`
-		Response         OwnerBoundaryResponse `json:"response"`
-		GoalID           string                `json:"goal_id"`
-		GoalScope        GoalScope             `json:"goal_scope"`
-		Head             string                `json:"head"`
-		Evidence         string                `json:"evidence_digest"`
-		Directive        string                `json:"directive_digest,omitempty"`
-		CompletionRecord uint64                `json:"completion_record,omitempty"`
-		CompletionKey    string                `json:"completion_idempotency_key,omitempty"`
-		CompletionAck    string                `json:"completion_acknowledgement_digest,omitempty"`
+		SchemaVersion int                   `json:"schema_version"`
+		Kind          string                `json:"kind"`
+		WorkspaceID   string                `json:"workspace_id"`
+		Generation    string                `json:"generation"`
+		AttemptID     string                `json:"attempt_id"`
+		BoundaryID    string                `json:"boundary_id"`
+		Mode          AttemptBoundaryMode   `json:"mode"`
+		Directive     string                `json:"directive_digest"`
+		GoalID        string                `json:"goal_id"`
+		GoalScope     GoalScope             `json:"goal_scope"`
+		ExpectedHead  string                `json:"expected_head"`
+		Evidence      string                `json:"evidence_digest"`
+		CompletionAck string                `json:"completion_acknowledgement_digest,omitempty"`
+		Response      OwnerBoundaryResponse `json:"response"`
 	}
 	content, err := json.Marshal(requestJSON{
-		SchemaVersion: JournalSchemaVersion, Kind: "attempt_owner_response", WorkspaceID: workspaceID.String(),
-		Generation: generation.String(), AttemptID: attemptID.String(),
-		BoundaryID: boundary.boundaryID.String(), Mode: boundary.mode, Response: response,
-		GoalID: boundary.goal.id.String(), GoalScope: boundary.goal.scope,
-		Head: boundary.head.String(), Evidence: boundary.evidenceDigest.String(), Directive: boundary.directiveDigest.String(),
-		CompletionRecord: boundary.goalCompleted.record,
-		CompletionKey:    boundary.goalCompleted.idempotencyKey.String(),
-		CompletionAck:    boundary.goalCompleted.receiptDigest.String(),
+		SchemaVersion: JournalSchemaVersion,
+		Kind:          "attempt_owner_response",
+		WorkspaceID:   workspaceID.String(),
+		Generation:    generation.String(),
+		AttemptID:     attemptID.String(),
+		BoundaryID:    boundary.boundaryID.String(),
+		Mode:          boundary.mode,
+		Directive:     boundary.directiveDigest.String(),
+		GoalID:        boundary.goal.id.String(),
+		GoalScope:     boundary.goal.scope,
+		ExpectedHead:  boundary.head.String(),
+		Evidence:      boundary.evidenceDigest.String(),
+		CompletionAck: boundary.goalCompleted.requestDigest.String(),
+		Response:      response,
 	})
 	if err != nil {
 		return Digest{}, err

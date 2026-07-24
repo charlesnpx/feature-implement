@@ -103,22 +103,22 @@ func (invocation ReviewInvocation) Branch() string                 { return invo
 
 type ReviewRunnerOutput struct {
 	submission ReviewResultSubmission
-	receipt    ControlPlaneReceiptV2
 }
 
 func NewReviewRunnerOutput(
-	submission ReviewResultSubmission, receipt ControlPlaneReceiptV2,
+	submission ReviewResultSubmission,
 ) (ReviewRunnerOutput, error) {
-	if submission.digest.IsZero() || receipt.ReceiptDigest().IsZero() {
-		return ReviewRunnerOutput{}, fmt.Errorf("review runner output requires result and signed receipt")
+	if submission.digest.IsZero() {
+		return ReviewRunnerOutput{}, fmt.Errorf(
+			"review runner output requires a canonical result",
+		)
 	}
-	return ReviewRunnerOutput{submission: cloneReviewResult(submission), receipt: receipt}, nil
+	return ReviewRunnerOutput{submission: cloneReviewResult(submission)}, nil
 }
 
 func (output ReviewRunnerOutput) Submission() ReviewResultSubmission {
 	return cloneReviewResult(output.submission)
 }
-func (output ReviewRunnerOutput) Receipt() ControlPlaneReceiptV2 { return output.receipt }
 
 // ReviewRunnerPort is a capability boundary, not a generic process or agent
 // port. Implementations must materialize request.Head/Tree as read-only input,
@@ -497,25 +497,7 @@ type RecordAttemptReviewResultRequest struct {
 	AttemptID         ID
 	ReservationDigest Digest
 	Submission        ReviewResultSubmission
-	Receipt           ControlPlaneReceiptV2
 	OccurredAt        time.Time
-}
-
-func ReviewResultControlPlaneBinding(
-	definition EffectiveWorkspaceDefinition,
-	request ReviewRequest,
-	submission ReviewResultSubmission,
-) (ControlPlaneBinding, error) {
-	if request.workspaceID != definition.workspace.id || request.generation != definition.generation ||
-		submission.requestDigest != request.digest || submission.digest.IsZero() {
-		return ControlPlaneBinding{}, fmt.Errorf("review evidence binding requires exact request and result")
-	}
-	return NewControlPlaneBinding(ControlPlaneBindingOptions{
-		Kind: ControlPlaneReceiptReviewEvidence, WorkspaceID: request.workspaceID,
-		Generation: request.generation, RequestDigest: submission.digest,
-		Repository: definition.workspace.repository, Remote: definition.workspace.remote,
-		Head: request.head, Tree: request.tree,
-	})
 }
 
 func RecordAttemptReviewResult(
@@ -523,13 +505,14 @@ func RecordAttemptReviewResult(
 	journal *WorkspaceJournal,
 	definition EffectiveWorkspaceDefinition,
 	repository ReviewRepositoryPort,
-	verifier ControlPlaneVerifierPort,
 	request RecordAttemptReviewResultRequest,
 ) (VerifiedReviewResult, JournalRecord, error) {
-	if journal == nil || repository == nil || verifier == nil || request.AttemptID.IsZero() ||
+	if journal == nil || repository == nil || request.AttemptID.IsZero() ||
 		request.ReservationDigest.IsZero() || request.Submission.digest.IsZero() ||
-		request.Receipt.ReceiptDigest().IsZero() || request.OccurredAt.IsZero() {
-		return VerifiedReviewResult{}, JournalRecord{}, fmt.Errorf("record review result requires journal, repository, verifier, attempt, result, receipt, and occurrence time")
+		request.OccurredAt.IsZero() {
+		return VerifiedReviewResult{}, JournalRecord{}, fmt.Errorf(
+			"record review result requires journal, repository, attempt, reservation, result, and occurrence time",
+		)
 	}
 	snapshot, projection, err := readReviewRuntime(journal, definition)
 	if err != nil {
@@ -544,8 +527,7 @@ func RecordAttemptReviewResult(
 			if existing.reservationDigest != request.ReservationDigest {
 				continue
 			}
-			if existing.submission.digest == request.Submission.digest &&
-				existing.receiptDigest == request.Receipt.ReceiptDigest() {
+			if existing.submission.digest == request.Submission.digest {
 				return existing, JournalRecord{}, nil
 			}
 			return VerifiedReviewResult{}, JournalRecord{}, fmt.Errorf("review request already has different durable evidence")
@@ -583,20 +565,9 @@ func RecordAttemptReviewResult(
 	if !repositorySnapshot.clean || repositorySnapshot.head != pending.head || repositorySnapshot.tree != pending.tree {
 		return VerifiedReviewResult{}, JournalRecord{}, fmt.Errorf("reviewer changed or no longer matches the exact clean head/tree")
 	}
-	binding, err := ReviewResultControlPlaneBinding(definition, pending, request.Submission)
-	if err != nil {
-		return VerifiedReviewResult{}, JournalRecord{}, err
-	}
-	verification, err := NewControlPlaneVerification(binding)
-	if err != nil {
-		return VerifiedReviewResult{}, JournalRecord{}, err
-	}
-	if err := verifier.Verify(ctx, verification, request.Receipt); err != nil {
-		return VerifiedReviewResult{}, JournalRecord{}, fmt.Errorf("verify signed review result: %w", err)
-	}
 	domain, err := NewRecordReviewResult(
 		pending.round, pending.profileOrdinal, pending.invocation,
-		request.ReservationDigest, request.Submission, request.Receipt.ReceiptDigest(),
+		request.ReservationDigest, request.Submission,
 	)
 	if err != nil {
 		return VerifiedReviewResult{}, JournalRecord{}, err
@@ -616,7 +587,7 @@ func RecordAttemptReviewResult(
 	}
 	return VerifiedReviewResult{
 		request: pending, submission: cloneReviewResult(request.Submission),
-		reservationDigest: request.ReservationDigest, receiptDigest: request.Receipt.ReceiptDigest(),
+		reservationDigest: request.ReservationDigest,
 	}, record, nil
 }
 
@@ -705,12 +676,13 @@ func ExecuteNextReviewProfile(
 	definition EffectiveWorkspaceDefinition,
 	repository ReviewRepositoryPort,
 	runner ReviewRunnerPort,
-	verifier ControlPlaneVerifierPort,
 	request ExecuteNextReviewProfileRequest,
 ) (VerifiedReviewResult, JournalRecord, error) {
-	if runner == nil || repository == nil || verifier == nil || request.AttemptID.IsZero() ||
+	if runner == nil || repository == nil || request.AttemptID.IsZero() ||
 		request.ReviewerInstance.IsZero() || request.IdempotencyKey.IsZero() || request.OccurredAt.IsZero() {
-		return VerifiedReviewResult{}, JournalRecord{}, fmt.Errorf("execute review profile requires isolated runner, repository, verifier, attempt, reviewer, idempotency, and occurrence time")
+		return VerifiedReviewResult{}, JournalRecord{}, fmt.Errorf(
+			"execute review profile requires isolated runner, repository, attempt, reviewer, idempotency, and occurrence time",
+		)
 	}
 	reserved, err := ReserveAttemptReviewInvocation(journal, definition, ReserveAttemptReviewInvocationRequest{
 		AttemptID: request.AttemptID, ReviewerInstance: request.ReviewerInstance,
@@ -805,9 +777,9 @@ func ExecuteNextReviewProfile(
 		}
 		return VerifiedReviewResult{}, JournalRecord{}, failure
 	}
-	return RecordAttemptReviewResult(ctx, journal, definition, repository, verifier, RecordAttemptReviewResultRequest{
+	return RecordAttemptReviewResult(ctx, journal, definition, repository, RecordAttemptReviewResultRequest{
 		AttemptID: request.AttemptID, ReservationDigest: reserved.reservation.digest,
-		Submission: output.submission, Receipt: output.receipt, OccurredAt: request.OccurredAt,
+		Submission: output.submission, OccurredAt: request.OccurredAt,
 	})
 }
 

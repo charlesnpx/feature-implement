@@ -371,10 +371,9 @@ func cloneAuthorizationJournalEvent(event WorkspaceJournalEvent) WorkspaceJourna
 }
 
 type AuthorizationRuntimeProjection struct {
-	initialized       bool
-	state             AuthorizationState
-	receipts          []Digest
-	pendingCandidates []Digest
+	initialized bool
+	state       AuthorizationState
+	receipts    []Digest
 }
 
 func (projection AuthorizationRuntimeProjection) State() AuthorizationState {
@@ -383,10 +382,6 @@ func (projection AuthorizationRuntimeProjection) State() AuthorizationState {
 func (projection AuthorizationRuntimeProjection) ReceiptDigests() []Digest {
 	return append([]Digest(nil), projection.receipts...)
 }
-func (projection AuthorizationRuntimeProjection) PendingCandidateGenerations() []Digest {
-	return append([]Digest(nil), projection.pendingCandidates...)
-}
-
 func RebuildAuthorizationRuntime(
 	snapshot JournalSnapshot,
 	definition EffectiveWorkspaceDefinition,
@@ -427,31 +422,6 @@ func reduceAuthorizationRuntime(
 			return AuthorizationRuntimeProjection{}, err
 		}
 		next.initialized, next.state = true, state
-	case CandidateGenerationStoredJournalEvent:
-		if !current.initialized || event.workspaceID != current.state.workspaceID ||
-			event.activeGeneration != current.state.generation {
-			return AuthorizationRuntimeProjection{}, fmt.Errorf("authorization projection candidate has stale bindings")
-		}
-		if !containsDigest(current.pendingCandidates, event.candidateGeneration) {
-			next.pendingCandidates = append(next.pendingCandidates, event.candidateGeneration)
-			sort.Slice(next.pendingCandidates, func(i, j int) bool {
-				return next.pendingCandidates[i].String() < next.pendingCandidates[j].String()
-			})
-		}
-		next.state.safety.reconciliationPending = true
-	case GenerationActivatedJournalEvent:
-		if !current.initialized || event.workspaceID != current.state.workspaceID ||
-			event.priorGeneration != current.state.generation || len(current.state.obligations) != 0 {
-			return AuthorizationRuntimeProjection{}, fmt.Errorf("authorization generation activation is stale or has reconciliation obligations")
-		}
-		next.state.generation = event.activeGeneration
-		next.state.epoch++
-		next.state.grants = nil
-		next.state.revokedGrantIDs = nil
-		next.state.completedSegments = nil
-		next.state.safety = AuthorizationSafetyState{}
-		next.pendingCandidates = removeDigest(next.pendingCandidates, event.activeGeneration)
-		next.state.safety.reconciliationPending = len(next.pendingCandidates) != 0
 	case AuthorizationGrantRecordedJournalEvent:
 		if !current.initialized || event.workspaceID != current.state.workspaceID || event.generation != current.state.generation {
 			return AuthorizationRuntimeProjection{}, fmt.Errorf("authorization grant journal event has stale bindings")
@@ -477,7 +447,7 @@ func reduceAuthorizationRuntime(
 			event.generation != current.state.generation || event.epoch != current.state.epoch {
 			return AuthorizationRuntimeProjection{}, fmt.Errorf("authorization safety journal event has stale bindings")
 		}
-		expectedRequest, err := authorizationSafetyChangeRequestDigest(current.state, current.pendingCandidates, event.safety)
+		expectedRequest, err := authorizationSafetyChangeRequestDigest(current.state, event.safety)
 		if err != nil || expectedRequest != event.requestDigest {
 			return AuthorizationRuntimeProjection{}, fmt.Errorf("authorization safety journal event has invalid prior-state bindings")
 		}
@@ -922,7 +892,7 @@ func RecordAuthorizationSafetyChange(
 	if projection.state.safety == safety {
 		return JournalRecord{}, fmt.Errorf("authorization safety already matches target without this durable receipt")
 	}
-	binding, err := AuthorizationSafetyChangeControlPlaneBinding(projection.state, projection.pendingCandidates, safety)
+	binding, err := AuthorizationSafetyChangeControlPlaneBinding(projection.state, safety)
 	if err != nil {
 		return JournalRecord{}, err
 	}
@@ -1074,21 +1044,10 @@ func cloneAuthorizationRuntime(source AuthorizationRuntimeProjection) Authorizat
 	result := source
 	result.state = cloneAuthorizationState(source.state)
 	result.receipts = append([]Digest(nil), source.receipts...)
-	result.pendingCandidates = append([]Digest(nil), source.pendingCandidates...)
 	return result
 }
 
 func cloneStandingGrant(grant StandingGrant) StandingGrant {
 	grant.scope = cloneStandingGrantScope(grant.scope)
 	return grant
-}
-
-func removeDigest(values []Digest, target Digest) []Digest {
-	result := make([]Digest, 0, len(values))
-	for _, value := range values {
-		if value != target {
-			result = append(result, value)
-		}
-	}
-	return result
 }

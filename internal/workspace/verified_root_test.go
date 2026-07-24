@@ -107,14 +107,15 @@ func TestWorkspaceInitializationAdmissionRejectsPlanRuntimeOverlap(t *testing.T)
 	parent := canonicalVerifiedRootTempDir(t)
 	planPath := filepath.Join(parent, "plan")
 	targetPath := filepath.Join(parent, "target")
-	for _, candidate := range []string{planPath, targetPath} {
+	worktreePath := filepath.Join(parent, "worktrees")
+	for _, candidate := range []string{planPath, targetPath, worktreePath} {
 		if err := os.Mkdir(candidate, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	runtimePath := filepath.Join(planPath, "runtime")
 	if _, err := workspace.OpenWorkspaceInitializationRootGuard(
-		planPath, runtimePath, targetPath,
+		planPath, runtimePath, targetPath, worktreePath,
 	); err == nil || !strings.Contains(err.Error(), "unsafe workspace root overlap") {
 		t.Fatalf("plan/runtime admission error = %v", err)
 	}

@@ -21,7 +21,7 @@ func TestAuthorizationJournalProtectedWorkflowsUseRealEd25519(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
@@ -95,7 +95,7 @@ func TestAuthorizationSafetyChangesRequireExactSignedDurableReceipt(t *testing.T
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
@@ -140,7 +140,7 @@ func TestAuthorizationSafetyChangesRequireExactSignedDurableReceipt(t *testing.T
 		nonce string,
 	) (workspace.ControlPlaneBinding, workspace.ControlPlaneReceiptV2) {
 		t.Helper()
-		binding, bindingErr := workspace.AuthorizationSafetyChangeControlPlaneBinding(state, nil, target)
+		binding, bindingErr := workspace.AuthorizationSafetyChangeControlPlaneBinding(state, target)
 		if bindingErr != nil {
 			t.Fatal(bindingErr)
 		}
@@ -258,89 +258,6 @@ func TestAuthorizationSafetyChangesRequireExactSignedDurableReceipt(t *testing.T
 	}
 }
 
-func TestAuthorizationSafetyReceiptsBindPendingCandidatesAndCannotClearThem(t *testing.T) {
-	fixture := newDefinitionFixture(t)
-	active := mustDefinition(t, fixture.sources)
-	firstCandidate := mustProspectiveCandidate(t, fixture)
-	secondSources := cloneDefinitionSources(fixture.sources)
-	secondSources.Plans[0].Bytes = []byte(strings.Replace(
-		string(secondSources.Plans[0].Bytes),
-		"The dependent contract is explicit.",
-		"The dependent contract is explicit, versioned, and independently reconciled.",
-		1,
-	))
-	secondCandidate := mustDefinition(t, secondSources)
-	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, active, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
-		t.Fatal(err)
-	}
-	store, err := workspace.OpenGenerationStore(workspaceDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer journal.Close()
-	if _, err := store.StageCandidate(journal, firstCandidate, mustTime(t, "2026-07-21T16:01:00Z")); err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := journal.ReadSnapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	projection, err := workspace.RebuildAuthorizationRuntime(snapshot, active)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pendingOne := projection.PendingCandidateGenerations()
-	if len(pendingOne) != 1 || !projection.State().Safety().ReconciliationPending() {
-		t.Fatalf("first pending authorization state = %#v", projection)
-	}
-	target := workspace.NewAuthorizationSafetyState(true, true, false, false)
-	oldBinding, err := workspace.AuthorizationSafetyChangeControlPlaneBinding(projection.State(), pendingOne, target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	oldReceipt := controlPlaneReceipt(t, oldBinding, "one-pending-candidate")
-	if _, err := store.StageCandidate(journal, secondCandidate, mustTime(t, "2026-07-21T16:02:00Z")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := workspace.RecordAuthorizationSafetyChange(
-		context.Background(), journal, active, &boundaryVerifier{expectedRequest: oldBinding.RequestDigest()},
-		target, oldReceipt, mustTime(t, "2026-07-21T16:03:00Z"),
-	); err == nil || !strings.Contains(err.Error(), "binding does not match verification") {
-		t.Fatalf("stale pending-candidate receipt error = %v", err)
-	}
-
-	state, _, err := workspace.ReadAuthorizationEvaluationSnapshot(journal, active)
-	if err != nil {
-		t.Fatal(err)
-	}
-	clear := workspace.NewAuthorizationSafetyState(false, false, false, false)
-	unsafeBinding, err := workspace.AuthorizationSafetyChangeControlPlaneBinding(state, nil, clear)
-	if err != nil {
-		t.Fatal(err)
-	}
-	unsafeReceipt := controlPlaneReceipt(t, unsafeBinding, "omitted-pending-candidates")
-	if _, err := workspace.RecordAuthorizationSafetyChange(
-		context.Background(), journal, active, &boundaryVerifier{expectedRequest: unsafeBinding.RequestDigest()},
-		clear, unsafeReceipt, mustTime(t, "2026-07-21T16:04:00Z"),
-	); err == nil || !strings.Contains(err.Error(), "candidate generations remain pending") {
-		t.Fatalf("pending-candidate safety clear error = %v", err)
-	}
-	after, err := journal.ReadSnapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	afterProjection, err := workspace.RebuildAuthorizationRuntime(after, active)
-	if err != nil || len(afterProjection.PendingCandidateGenerations()) != 2 ||
-		!afterProjection.State().Safety().ReconciliationPending() {
-		t.Fatalf("pending candidates were cleared = %#v, %v", afterProjection, err)
-	}
-}
-
 func (verifier *providerPullRequestVerifier) VerifyProviderPullRequest(
 	_ context.Context,
 	verification workspace.ProviderPullRequestVerification,
@@ -362,7 +279,7 @@ func TestAuthorizationJournalPersistsGrantsSegmentsRevocationsAndReceiptCAS(t *t
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
@@ -486,7 +403,7 @@ func TestAuthorizationJournalRejectsStaleEpochAndGeneration(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
@@ -519,7 +436,7 @@ func TestProviderDerivedStandingGrantIsVerifiedSingleUseAndDurable(t *testing.T)
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
@@ -640,7 +557,7 @@ func TestPullRequestStandingGrantFrontierAdvanceAuthorizesExactReviewFixPush(t *
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
@@ -881,7 +798,7 @@ func TestAuthorizationDispatchUsesTrustedClockAndDurableRevocationCAS(t *testing
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)

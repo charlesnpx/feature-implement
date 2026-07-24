@@ -144,7 +144,7 @@ func TestWithVerifiedPlanLockCheckpointExcludesGitMutationsThroughWorkspaceBindi
 				}
 			}
 			var initializeErr error
-			initialized, initializeErr = workspace.InitializeWorkspaceV2(
+			initialized, initializeErr = initializeWorkspaceV2(t,
 				runtimeRoot,
 				bundle.Definition(),
 				mustTime(t, "2026-07-23T10:04:00Z"),
@@ -215,7 +215,7 @@ func TestWithVerifiedPlanLockCheckpointExcludesGitMutationsThroughWorkspaceBindi
 			lock.Commit,
 		)
 	}
-	_, err = workspace.InitializeWorkspaceV2(
+	_, err = initializeWorkspaceV2(t,
 		filepath.Join(
 			canonicalMaterializationTestTempDir(t),
 			"stale-runtime",

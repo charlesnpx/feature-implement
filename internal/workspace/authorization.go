@@ -468,41 +468,26 @@ func (state AuthorizationSafetyState) AmbiguousEffect() bool { return state.ambi
 
 func authorizationSafetyChangeRequestDigest(
 	state AuthorizationState,
-	pendingCandidates []Digest,
 	safety AuthorizationSafetyState,
 ) (Digest, error) {
 	priorStateDigest := authorizationStateDigest(state)
 	if priorStateDigest.IsZero() || state.epoch == 0 {
 		return Digest{}, fmt.Errorf("authorization safety change requires initialized prior state")
 	}
-	candidates := append([]Digest(nil), pendingCandidates...)
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].String() < candidates[j].String() })
-	pending := make([]string, 0, len(candidates))
-	for index, candidate := range candidates {
-		if candidate.IsZero() || index > 0 && candidate == candidates[index-1] {
-			return Digest{}, fmt.Errorf("authorization safety change requires unique pending candidate generations")
-		}
-		pending = append(pending, candidate.String())
-	}
-	if len(pending) != 0 && !safety.reconciliationPending {
-		return Digest{}, fmt.Errorf("authorization safety cannot clear reconciliation while candidate generations remain pending")
-	}
 	type safetyChangeJSON struct {
-		SchemaVersion               int      `json:"schema_version"`
-		Kind                        string   `json:"kind"`
-		PriorStateDigest            string   `json:"prior_authorization_state_digest"`
-		Epoch                       uint64   `json:"epoch"`
-		PendingCandidateGenerations []string `json:"pending_candidate_generations"`
-		GatesBlocked                bool     `json:"gates_blocked"`
-		ReconciliationPending       bool     `json:"reconciliation_pending"`
-		DriftDetected               bool     `json:"drift_detected"`
-		AmbiguousEffect             bool     `json:"ambiguous_effect"`
+		SchemaVersion         int    `json:"schema_version"`
+		Kind                  string `json:"kind"`
+		PriorStateDigest      string `json:"prior_authorization_state_digest"`
+		Epoch                 uint64 `json:"epoch"`
+		GatesBlocked          bool   `json:"gates_blocked"`
+		ReconciliationPending bool   `json:"reconciliation_pending"`
+		DriftDetected         bool   `json:"drift_detected"`
+		AmbiguousEffect       bool   `json:"ambiguous_effect"`
 	}
 	canonical, err := json.Marshal(safetyChangeJSON{
 		SchemaVersion: JournalSchemaVersion, Kind: "authorization_safety_change",
 		PriorStateDigest: priorStateDigest.String(), Epoch: state.epoch,
-		PendingCandidateGenerations: pending,
-		GatesBlocked:                safety.gatesBlocked, ReconciliationPending: safety.reconciliationPending,
+		GatesBlocked: safety.gatesBlocked, ReconciliationPending: safety.reconciliationPending,
 		DriftDetected: safety.driftDetected, AmbiguousEffect: safety.ambiguousEffect,
 	})
 	if err != nil {
@@ -516,10 +501,9 @@ func authorizationSafetyChangeRequestDigest(
 // prevents a receipt from being reused after any authorization state change.
 func AuthorizationSafetyChangeControlPlaneBinding(
 	state AuthorizationState,
-	pendingCandidates []Digest,
 	safety AuthorizationSafetyState,
 ) (ControlPlaneBinding, error) {
-	requestDigest, err := authorizationSafetyChangeRequestDigest(state, pendingCandidates, safety)
+	requestDigest, err := authorizationSafetyChangeRequestDigest(state, safety)
 	if err != nil {
 		return ControlPlaneBinding{}, err
 	}

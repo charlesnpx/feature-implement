@@ -147,14 +147,13 @@ type ReviewIsolationProof struct {
 	credentialsAvailable bool
 	repositoryHooks      bool
 	writeNetwork         bool
-	providerBroker       bool
 	externalWrite        bool
 	digest               Digest
 }
 
 func NewReviewIsolationProof(
 	repositoryReadOnly, scratchEphemeral, credentialsAvailable, repositoryHooks,
-	writeNetwork, providerBroker, externalWrite bool,
+	writeNetwork, externalWrite bool,
 ) ReviewIsolationProof {
 	type proofJSON struct {
 		SchemaVersion        int  `json:"schema_version"`
@@ -163,25 +162,24 @@ func NewReviewIsolationProof(
 		CredentialsAvailable bool `json:"credentials_available"`
 		RepositoryHooks      bool `json:"repository_hooks"`
 		WriteNetwork         bool `json:"write_network"`
-		ProviderBroker       bool `json:"provider_broker"`
 		ExternalWrite        bool `json:"external_write"`
 	}
 	canonical, _ := json.Marshal(proofJSON{
 		SchemaVersion:      2,
 		RepositoryReadOnly: repositoryReadOnly, ScratchEphemeral: scratchEphemeral,
 		CredentialsAvailable: credentialsAvailable, RepositoryHooks: repositoryHooks,
-		WriteNetwork: writeNetwork, ProviderBroker: providerBroker, ExternalWrite: externalWrite,
+		WriteNetwork: writeNetwork, ExternalWrite: externalWrite,
 	})
 	return ReviewIsolationProof{
 		repositoryReadOnly: repositoryReadOnly, scratchEphemeral: scratchEphemeral,
 		credentialsAvailable: credentialsAvailable, repositoryHooks: repositoryHooks,
-		writeNetwork: writeNetwork, providerBroker: providerBroker, externalWrite: externalWrite,
+		writeNetwork: writeNetwork, externalWrite: externalWrite,
 		digest: DigestBytes(canonical),
 	}
 }
 
 func StrictReviewIsolationProof() ReviewIsolationProof {
-	return NewReviewIsolationProof(true, true, false, false, false, false, false)
+	return NewReviewIsolationProof(true, true, false, false, false, false)
 }
 
 func (proof ReviewIsolationProof) RepositoryReadOnly() bool   { return proof.repositoryReadOnly }
@@ -189,13 +187,12 @@ func (proof ReviewIsolationProof) ScratchEphemeral() bool     { return proof.scr
 func (proof ReviewIsolationProof) CredentialsAvailable() bool { return proof.credentialsAvailable }
 func (proof ReviewIsolationProof) RepositoryHooks() bool      { return proof.repositoryHooks }
 func (proof ReviewIsolationProof) WriteNetwork() bool         { return proof.writeNetwork }
-func (proof ReviewIsolationProof) ProviderBroker() bool       { return proof.providerBroker }
 func (proof ReviewIsolationProof) ExternalWrite() bool        { return proof.externalWrite }
 func (proof ReviewIsolationProof) Digest() Digest             { return proof.digest }
 func (proof ReviewIsolationProof) Strict() bool {
 	return !proof.digest.IsZero() && proof.repositoryReadOnly && proof.scratchEphemeral &&
 		!proof.credentialsAvailable && !proof.repositoryHooks && !proof.writeNetwork &&
-		!proof.providerBroker && !proof.externalWrite
+		!proof.externalWrite
 }
 
 type ReviewResultStatus string
@@ -408,7 +405,6 @@ type VerifiedReviewResult struct {
 	request           ReviewRequest
 	submission        ReviewResultSubmission
 	reservationDigest Digest
-	receiptDigest     Digest
 }
 
 func (result VerifiedReviewResult) Request() ReviewRequest { return result.request }
@@ -416,7 +412,6 @@ func (result VerifiedReviewResult) Submission() ReviewResultSubmission {
 	return cloneReviewResult(result.submission)
 }
 func (result VerifiedReviewResult) ReservationDigest() Digest { return result.reservationDigest }
-func (result VerifiedReviewResult) ReceiptDigest() Digest     { return result.receiptDigest }
 
 type ReviewRoundState struct {
 	ordinal      uint16
@@ -683,23 +678,23 @@ type RecordReviewResult struct {
 	invocation        uint16
 	reservationDigest Digest
 	result            ReviewResultSubmission
-	receiptDigest     Digest
 }
 
 func NewRecordReviewResult(
 	round, profileOrdinal, invocation uint16,
 	reservationDigest Digest,
 	result ReviewResultSubmission,
-	receiptDigest Digest,
 ) (RecordReviewResult, error) {
 	canonical, err := canonicalReviewResult(result)
 	if round == 0 || profileOrdinal == 0 || invocation == 0 || err != nil ||
-		reservationDigest.IsZero() || result.digest != DigestBytes(canonical) || receiptDigest.IsZero() {
-		return RecordReviewResult{}, fmt.Errorf("review result record requires canonical signed result bindings")
+		reservationDigest.IsZero() || result.digest != DigestBytes(canonical) {
+		return RecordReviewResult{}, fmt.Errorf(
+			"review result record requires canonical local result bindings",
+		)
 	}
 	return RecordReviewResult{
 		round: round, profileOrdinal: profileOrdinal, invocation: invocation, reservationDigest: reservationDigest,
-		result: cloneReviewResult(result), receiptDigest: receiptDigest,
+		result: cloneReviewResult(result),
 	}, nil
 }
 func (RecordReviewResult) isReviewEvent() {}
@@ -848,7 +843,7 @@ func ReduceReview(current ReviewState, event ReviewEvent) (ReviewState, error) {
 		}
 		verified := VerifiedReviewResult{
 			request: request, submission: cloneReviewResult(value.result),
-			reservationDigest: value.reservationDigest, receiptDigest: value.receiptDigest,
+			reservationDigest: value.reservationDigest,
 		}
 		round.attempts = append(round.attempts, verified)
 		if value.result.status == ReviewResultCompleted {

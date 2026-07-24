@@ -85,6 +85,69 @@ func TestRemovedMutablePlanLifecycleFailsClearly(t *testing.T) {
 	}
 }
 
+func TestRemovedWorkspaceCommandsAndWrongSubactionsFailClearly(
+	t *testing.T,
+) {
+	for _, args := range [][]string{
+		{"workspace", "queue"},
+		{"workspace", "receipts"},
+		{"workspace", "reconcile", "stage"},
+		{"workspace", "control", "grant"},
+		{"workspace", "provider", "dispatch"},
+		{"workspace", "commit", "rebase"},
+	} {
+		stdout, stderr, err := runFeature(t, args...)
+		if err == nil {
+			t.Fatalf(
+				"removed command feature %s unexpectedly succeeded: %s",
+				strings.Join(args, " "), stdout,
+			)
+		}
+		if !strings.Contains(stderr, "was removed") {
+			t.Fatalf(
+				"removed command feature %s failed unclearly: %s",
+				strings.Join(args, " "), stderr,
+			)
+		}
+	}
+	for _, args := range [][]string{
+		{"workspace", "attempt", "unknown"},
+		{"workspace", "review", "unknown"},
+		{"workspace", "integrate", "unknown"},
+		{"workspace", "complete", "unknown"},
+	} {
+		_, stderr, err := runFeature(t, args...)
+		if err == nil || !strings.Contains(stderr, "unsupported workspace") {
+			t.Fatalf(
+				"wrong subaction feature %s error = %v, %s",
+				strings.Join(args, " "), err, stderr,
+			)
+		}
+	}
+	_, stderr, err := runFeature(
+		t,
+		"workspace", "status",
+		"--candidate-bundle", canonicalFeatureTestTempDir(t),
+	)
+	if err == nil ||
+		!strings.Contains(stderr, "candidate-bundle") {
+		t.Fatalf("removed candidate-bundle flag error = %v, %s", err, stderr)
+	}
+
+	help := runFeatureOutput(t, "workspace", "--help")
+	for _, removed := range []string{
+		"queue", "receipts", "reconcile", "control",
+		"provider", "commit next|rebase", "candidate-bundle",
+	} {
+		if strings.Contains(help, removed) {
+			t.Fatalf(
+				"workspace help advertises removed surface %q:\n%s",
+				removed, help,
+			)
+		}
+	}
+}
+
 func TestPlanExampleSchemaAndImmutableLock(t *testing.T) {
 	stdout, stderr, err := runFeature(t, "plan", "example")
 	if err != nil {
@@ -136,8 +199,8 @@ func TestWorkspaceSchemaExampleAndJournalBackedStatus(t *testing.T) {
 		t.Fatalf("bundle schema is not JSON: %v\n%s", err, stdout)
 	}
 	properties := bundleSchema["properties"].(map[string]any)
-	if _, exists := properties["control_plane_authority"]; !exists {
-		t.Fatalf("bundle schema omits control-plane authority: %+v", bundleSchema)
+	if _, exists := properties["control_plane_authority"]; exists {
+		t.Fatalf("bundle schema exposes removed control-plane authority: %+v", bundleSchema)
 	}
 	stdout = runFeatureOutput(t, "workspace", "schema", "requests", "--json")
 	var requestSchema struct {
@@ -147,26 +210,45 @@ func TestWorkspaceSchemaExampleAndJournalBackedStatus(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &requestSchema); err != nil || requestSchema.SchemaVersion != 2 {
 		t.Fatalf("request schema is invalid: err=%v output=%s", err, stdout)
 	}
-	for _, name := range []string{"init", "attempt.reserve", "attempt.adopt-head", "review.record", "provider.dispatch", "complete.verify"} {
+	for _, name := range []string{
+		"init", "attempt.reserve", "attempt.adopt-head",
+		"review.record", "integrate.merge-unit", "complete.verify",
+	} {
 		if _, exists := requestSchema.Requests[name]; !exists {
 			t.Fatalf("request schema omits %s", name)
 		}
 	}
-	var providerReserve map[string]any
-	if err := json.Unmarshal(requestSchema.Requests["provider.reserve"], &providerReserve); err != nil {
-		t.Fatal(err)
-	}
-	providerProperties := providerReserve["properties"].(map[string]any)
-	providerKinds := providerProperties["kind"].(map[string]any)["enum"].([]any)
-	if fmt.Sprint(providerKinds) != "[push open_pull_request merge]" {
-		t.Fatalf("provider intent schema is not closed: %v", providerKinds)
-	}
-	for _, removed := range []string{"provider_command", "remote_delete", "no_merge", "local_only"} {
+	for _, removed := range []string{
+		`"receipt"`, `"reconcile.`, `"control.`, `"provider.`,
+		`"provider_broker"`, `"commit.rebase"`,
+	} {
 		if strings.Contains(stdout, removed) {
-			t.Fatalf("request schema exposes removed execution surface %q", removed)
+			t.Fatalf("request schema exposes removed surface %q", removed)
 		}
 	}
-	if example := runFeatureOutput(t, "workspace", "example"); !strings.Contains(example, `"schema_version": 2`) || !strings.Contains(example, `"workspace"`) {
+	reportSchema := runFeatureOutput(
+		t, "workspace", "schema", "reports", "--json",
+	)
+	for _, required := range []string{
+		`"status"`, `"scheduler"`, `"gates"`, `"report"`,
+		`"workflow"`, `"target"`, `"attempts"`, `"reviews"`,
+		`"integration"`, `"drift"`, `"completion"`,
+	} {
+		if !strings.Contains(reportSchema, required) {
+			t.Fatalf("report schema omits %s: %s", required, reportSchema)
+		}
+	}
+	for _, removed := range []string{
+		`provider`, `receipt`, `authorization`, `queue`, `reconciliation`,
+	} {
+		if strings.Contains(reportSchema, removed) {
+			t.Fatalf("report schema exposes removed term %q: %s", removed, reportSchema)
+		}
+	}
+	if example := runFeatureOutput(t, "workspace", "example"); !strings.Contains(example, `"schema_version": 2`) ||
+		!strings.Contains(example, `"workspace"`) ||
+		!strings.Contains(example, `"authorities": []`) ||
+		strings.Contains(example, "control_plane") {
 		t.Fatalf("workspace example is incomplete:\n%s", example)
 	}
 
@@ -235,7 +317,12 @@ func TestWorkspaceSchemaExampleAndJournalBackedStatus(t *testing.T) {
 	}
 
 	workspaceDir := filepath.Join(canonicalFeatureTestTempDir(t), "workspace-state")
-	input := writeJSONInput(t, map[string]any{"schema_version": 2, "occurred_at": "2026-07-22T12:00:00Z"})
+	worktreeRoot := canonicalFeatureTestTempDir(t)
+	input := writeJSONInput(t, map[string]any{
+		"schema_version": 2,
+		"occurred_at":    "2026-07-22T12:00:00Z",
+		"worktree_root":  worktreeRoot,
+	})
 	stdout = runFeatureOutput(t, "workspace", "init", "--bundle", bundleDir, "--workspace", workspaceDir, "--input", input, "--json")
 	var initialized struct {
 		Status         string `json:"status"`
@@ -262,6 +349,21 @@ func TestWorkspaceSchemaExampleAndJournalBackedStatus(t *testing.T) {
 	if err := json.Unmarshal([]byte(status), &report); err != nil || report["report_digest"] == "" {
 		t.Fatalf("journal-backed status is invalid: err=%v output=%s", err, status)
 	}
+	for _, required := range []string{
+		"workflow", "target", "attempts", "reviews",
+		"integration", "drift", "completion",
+	} {
+		if _, exists := report[required]; !exists {
+			t.Fatalf("journal-backed status omits %s: %s", required, status)
+		}
+	}
+	for _, removed := range []string{
+		"provider", "receipt", "authorization", "queue", "reconciliation",
+	} {
+		if strings.Contains(status, removed) {
+			t.Fatalf("journal-backed status exposes %q: %s", removed, status)
+		}
+	}
 }
 
 func TestWorkspaceMutationInputIsStrictAndDoesNotCreateStateOnFailure(t *testing.T) {
@@ -285,6 +387,34 @@ func TestWorkspaceMutationInputIsStrictAndDoesNotCreateStateOnFailure(t *testing
 	_, stderr, err = runFeature(t, "workspace", "init", "--bundle", bundleDir, "--workspace", workspaceDir, "--input", input)
 	if err == nil || !strings.Contains(stderr, "unknown field") {
 		t.Fatalf("unknown request field was not rejected: err=%v stderr=%s", err, stderr)
+	}
+
+	if err := os.WriteFile(input, []byte(`{
+  "schema_version": 2,
+  "occurred_at": "2026-07-22T12:00:00Z",
+  "worktree_root": "relative/attempts"
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err = runFeature(
+		t,
+		"workspace", "init",
+		"--bundle", bundleDir,
+		"--workspace", workspaceDir,
+		"--input", input,
+	)
+	if err == nil ||
+		!strings.Contains(stderr, "worktree_root must be absolute") {
+		t.Fatalf(
+			"relative worktree root error = %v stderr=%s",
+			err, stderr,
+		)
+	}
+	if _, statErr := os.Stat(workspaceDir); !os.IsNotExist(statErr) {
+		t.Fatalf(
+			"relative worktree root created workspace state: %v",
+			statErr,
+		)
 	}
 }
 

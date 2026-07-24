@@ -28,8 +28,6 @@ type AttemptLifecycleFaultInjector func(AttemptLifecycleFaultPoint) error
 type ReserveAttemptRequest struct {
 	MergeUnit     MergeUnitReference
 	AttemptNumber uint64
-	Base          GitObjectID
-	WorktreeRoot  string
 	Goal          GoalBinding
 	OccurredAt    time.Time
 	Fault         AttemptLifecycleFaultInjector
@@ -46,8 +44,10 @@ func ReserveAttempt(
 		return RuntimeAttemptProjection{}, fmt.Errorf("attempt reservation requires journal, Git adapter, and occurrence time")
 	}
 	if request.MergeUnit.planID.IsZero() || request.MergeUnit.mergeUnitID.IsZero() ||
-		request.AttemptNumber == 0 || request.Base.IsZero() || request.Goal.IsZero() {
-		return RuntimeAttemptProjection{}, fmt.Errorf("attempt reservation requires merge unit, attempt number, base, and goal")
+		request.AttemptNumber == 0 || request.Goal.IsZero() {
+		return RuntimeAttemptProjection{}, fmt.Errorf(
+			"attempt reservation requires merge unit, attempt number, and goal",
+		)
 	}
 	manifest := definition.workspace
 	if manifest.id.IsZero() || definition.generation.IsZero() {
@@ -63,15 +63,27 @@ func ReserveAttempt(
 			request.AttemptNumber, unitExecution.policy.maxAttempts, request.MergeUnit,
 		)
 	}
-	identity, err := DeriveAttemptIdentity(manifest.repository, request.MergeUnit, request.AttemptNumber, request.Base)
-	if err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	worktree, err := AttemptWorktreePath(request.WorktreeRoot, identity, request.MergeUnit, request.AttemptNumber)
-	if err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
 	snapshot, runtime, err := readAttemptRuntime(journal, definition)
+	if err != nil {
+		return RuntimeAttemptProjection{}, err
+	}
+	target, ok := runtime.LocalTarget()
+	if !ok || !target.Created() || target.CreatedHead().IsZero() {
+		return RuntimeAttemptProjection{}, fmt.Errorf(
+			"attempt reservation requires a durable local feature head",
+		)
+	}
+	base := target.CreatedHead()
+	identity, err := DeriveAttemptIdentity(
+		manifest.repository, request.MergeUnit, request.AttemptNumber, base,
+	)
+	if err != nil {
+		return RuntimeAttemptProjection{}, err
+	}
+	worktree, err := AttemptWorktreePath(
+		runtime.worktreeRoot.Path(), identity,
+		request.MergeUnit, request.AttemptNumber,
+	)
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
@@ -80,7 +92,7 @@ func ReserveAttempt(
 	}
 	if existing, exists := runtime.Attempt(identity.attemptID); exists {
 		if existing.mergeUnit != request.MergeUnit || existing.attemptNumber != request.AttemptNumber ||
-			existing.base != request.Base || existing.worktree != worktree || existing.goal != request.Goal {
+			existing.base != base || existing.worktree != worktree || existing.goal != request.Goal {
 			return RuntimeAttemptProjection{}, fmt.Errorf("attempt %s was reserved with different immutable bindings", identity.attemptID)
 		}
 		return existing, nil
@@ -133,7 +145,7 @@ func ReserveAttempt(
 	}
 	event, err := NewAttemptReservedJournalEvent(
 		manifest.id, definition.generation, manifest.repository, identity.attemptID,
-		request.MergeUnit, request.AttemptNumber, request.Base, identity.branch, worktree,
+		request.MergeUnit, request.AttemptNumber, base, identity.branch, worktree,
 		unitExecution.boundary.mode, unitExecution.boundary.serialSegment, request.Goal,
 	)
 	if err != nil {
@@ -574,34 +586,6 @@ func OwnerBoundaryResponseRequestDigest(
 	return deriveOwnerResponseRequestDigest(projection.workspaceID, attempt.generation, attempt.attemptID, boundary, response)
 }
 
-func OwnerBoundaryResponseControlPlaneBinding(
-	definition EffectiveWorkspaceDefinition,
-	projection WorkspaceRuntimeProjection,
-	attemptID ID,
-	response OwnerBoundaryResponse,
-) (ControlPlaneBinding, error) {
-	attempt, boundary, err := currentAttemptBoundary(projection, attemptID)
-	if err != nil {
-		return ControlPlaneBinding{}, err
-	}
-	if definition.workspace.id != projection.workspaceID || definition.generation != projection.activeGeneration ||
-		definition.workspace.repository != attempt.repository {
-		return ControlPlaneBinding{}, fmt.Errorf("owner decision definition does not match the active attempt")
-	}
-	requestDigest, err := deriveOwnerResponseRequestDigest(
-		projection.workspaceID, attempt.generation, attempt.attemptID, boundary, response,
-	)
-	if err != nil {
-		return ControlPlaneBinding{}, err
-	}
-	return NewControlPlaneBinding(ControlPlaneBindingOptions{
-		Kind: ControlPlaneReceiptOwnerDecision, WorkspaceID: projection.workspaceID,
-		Generation: attempt.generation, RequestDigest: requestDigest,
-		DirectiveDigest: boundary.directiveDigest, Repository: attempt.repository,
-		Remote: definition.workspace.remote, Base: attempt.base, Head: boundary.head,
-	})
-}
-
 func OrchestrationAcknowledgementRequestDigest(
 	projection WorkspaceRuntimeProjection,
 	attemptID ID,
@@ -620,40 +604,6 @@ func OrchestrationAcknowledgementRequestDigest(
 		projection.workspaceID, attempt.generation, attempt.attemptID,
 		boundary, kind, goal, idempotencyKey,
 	)
-}
-
-func OrchestrationAcknowledgementControlPlaneBinding(
-	definition EffectiveWorkspaceDefinition,
-	projection WorkspaceRuntimeProjection,
-	attemptID ID,
-	kind OrchestrationAcknowledgementKind,
-	goal GoalBinding,
-) (ControlPlaneBinding, error) {
-	attempt, boundary, err := currentAttemptBoundary(projection, attemptID)
-	if err != nil {
-		return ControlPlaneBinding{}, err
-	}
-	if definition.workspace.id != projection.workspaceID || definition.generation != projection.activeGeneration ||
-		definition.workspace.repository != attempt.repository {
-		return ControlPlaneBinding{}, fmt.Errorf("goal acknowledgement definition does not match the active attempt")
-	}
-	idempotencyKey, err := orchestrationAcknowledgementIdempotencyKey(boundary, kind, goal)
-	if err != nil {
-		return ControlPlaneBinding{}, err
-	}
-	requestDigest, err := deriveOrchestrationAcknowledgementRequestDigest(
-		projection.workspaceID, attempt.generation, attempt.attemptID,
-		boundary, kind, goal, idempotencyKey,
-	)
-	if err != nil {
-		return ControlPlaneBinding{}, err
-	}
-	return NewControlPlaneBinding(ControlPlaneBindingOptions{
-		Kind: ControlPlaneReceiptGoalAcknowledgment, WorkspaceID: projection.workspaceID,
-		Generation: attempt.generation, RequestDigest: requestDigest,
-		DirectiveDigest: boundary.directiveDigest, Repository: attempt.repository,
-		Remote: definition.workspace.remote, Base: attempt.base, Head: boundary.head,
-	})
 }
 
 type NextGoalCreationIntent struct {
@@ -702,7 +652,7 @@ func ReserveNextGoalCreation(
 		return NextGoalCreationIntent{}, err
 	}
 	if boundary.mode != AttemptBoundaryCompleteGoalAndWait || !boundary.goalCompletedOK || !boundary.ownerResponseOK {
-		return NextGoalCreationIntent{}, fmt.Errorf("next-goal intent requires completed-goal acknowledgement and verified owner response")
+		return NextGoalCreationIntent{}, fmt.Errorf("next-goal intent requires completed-goal acknowledgement and the exact owner response")
 	}
 	if boundary.nextGoalIntentOK {
 		if boundary.nextGoalIntent.goal != request.Goal {
@@ -756,24 +706,27 @@ func PendingNextGoalCreationIntent(
 }
 
 type RecordOrchestrationAcknowledgementRequest struct {
-	AttemptID  ID
-	Kind       OrchestrationAcknowledgementKind
-	Goal       GoalBinding
-	Receipt    ControlPlaneReceiptV2
-	OccurredAt time.Time
-	Fault      AttemptLifecycleFaultInjector
+	AttemptID       ID
+	Kind            OrchestrationAcknowledgementKind
+	DirectiveDigest Digest
+	Goal            GoalBinding
+	IdempotencyKey  Digest
+	OccurredAt      time.Time
+	Fault           AttemptLifecycleFaultInjector
 }
 
 func RecordOrchestrationAcknowledgement(
-	ctx context.Context,
 	journal *WorkspaceJournal,
 	definition EffectiveWorkspaceDefinition,
-	verifier ControlPlaneVerifierPort,
 	request RecordOrchestrationAcknowledgementRequest,
 ) (RuntimeOrchestrationAcknowledgement, error) {
-	if journal == nil || verifier == nil || request.AttemptID.IsZero() || !request.Kind.valid() ||
-		request.Goal.IsZero() || request.Receipt.ReceiptDigest().IsZero() || request.OccurredAt.IsZero() {
-		return RuntimeOrchestrationAcknowledgement{}, fmt.Errorf("orchestration acknowledgement requires journal, verifier, attempt, kind, goal, receipt, and occurrence time")
+	if journal == nil || request.AttemptID.IsZero() ||
+		!request.Kind.valid() || request.DirectiveDigest.IsZero() ||
+		request.Goal.IsZero() || request.IdempotencyKey.IsZero() ||
+		request.OccurredAt.IsZero() {
+		return RuntimeOrchestrationAcknowledgement{}, fmt.Errorf(
+			"acknowledgement requires journal, attempt, kind, directive, goal, idempotency, and occurrence time",
+		)
 	}
 	snapshot, runtime, err := readAttemptRuntime(journal, definition)
 	if err != nil {
@@ -786,9 +739,20 @@ func RecordOrchestrationAcknowledgement(
 	if boundary.mode == AttemptBoundaryPauseOnly {
 		return RuntimeOrchestrationAcknowledgement{}, fmt.Errorf("pause-only boundary %s cannot acknowledge broader goal lifecycle", boundary.boundaryID)
 	}
+	if request.DirectiveDigest != boundary.directiveDigest {
+		return RuntimeOrchestrationAcknowledgement{}, fmt.Errorf(
+			"acknowledgement directive does not match boundary %s",
+			boundary.boundaryID,
+		)
+	}
 	idempotencyKey, err := orchestrationAcknowledgementIdempotencyKey(boundary, request.Kind, request.Goal)
 	if err != nil {
 		return RuntimeOrchestrationAcknowledgement{}, err
+	}
+	if request.IdempotencyKey != idempotencyKey {
+		return RuntimeOrchestrationAcknowledgement{}, fmt.Errorf(
+			"acknowledgement idempotency key does not match the exact directive and goal",
+		)
 	}
 	requestDigest, err := deriveOrchestrationAcknowledgementRequestDigest(
 		runtime.workspaceID, attempt.generation, attempt.attemptID,
@@ -798,28 +762,17 @@ func RecordOrchestrationAcknowledgement(
 		return RuntimeOrchestrationAcknowledgement{}, err
 	}
 	if existing, ok := boundaryAcknowledgement(boundary, request.Kind); ok {
-		if existing.goal != request.Goal || existing.requestDigest != requestDigest ||
-			existing.receiptDigest != request.Receipt.ReceiptDigest() {
+		if existing.goal != request.Goal ||
+			existing.idempotencyKey != request.IdempotencyKey ||
+			existing.requestDigest != requestDigest {
 			return RuntimeOrchestrationAcknowledgement{}, fmt.Errorf("orchestration acknowledgement conflicts with durable acknowledgement at record %d", existing.record)
 		}
 		return existing, nil
 	}
-	binding, err := OrchestrationAcknowledgementControlPlaneBinding(
-		definition, runtime, request.AttemptID, request.Kind, request.Goal,
-	)
-	if err != nil {
-		return RuntimeOrchestrationAcknowledgement{}, err
-	}
-	verification, err := NewControlPlaneVerification(binding)
-	if err != nil {
-		return RuntimeOrchestrationAcknowledgement{}, err
-	}
-	if err := verifier.Verify(ctx, verification, request.Receipt); err != nil {
-		return RuntimeOrchestrationAcknowledgement{}, fmt.Errorf("verify orchestration acknowledgement: %w", err)
-	}
 	event, err := NewAttemptOrchestrationAcknowledgedJournalEvent(
 		runtime.workspaceID, attempt.attemptID, boundary.boundaryID, attempt.generation,
-		request.Kind, request.Goal, idempotencyKey, requestDigest, request.Receipt.ReceiptDigest(),
+		request.Kind, request.DirectiveDigest, request.Goal,
+		request.IdempotencyKey, requestDigest,
 	)
 	if err != nil {
 		return RuntimeOrchestrationAcknowledgement{}, err
@@ -839,23 +792,28 @@ func RecordOrchestrationAcknowledgement(
 }
 
 type RecordOwnerBoundaryResponseRequest struct {
-	AttemptID  ID
-	Response   OwnerBoundaryResponse
-	Receipt    ControlPlaneReceiptV2
-	OccurredAt time.Time
-	Fault      AttemptLifecycleFaultInjector
+	AttemptID       ID
+	BoundaryID      ID
+	DirectiveDigest Digest
+	Goal            GoalBinding
+	ExpectedHead    GitObjectID
+	Response        OwnerBoundaryResponse
+	OccurredAt      time.Time
+	Fault           AttemptLifecycleFaultInjector
 }
 
 func RecordOwnerBoundaryResponse(
-	ctx context.Context,
 	journal *WorkspaceJournal,
 	definition EffectiveWorkspaceDefinition,
-	verifier ControlPlaneVerifierPort,
 	request RecordOwnerBoundaryResponseRequest,
 ) (RuntimeOwnerBoundaryResponse, error) {
-	if journal == nil || verifier == nil || request.AttemptID.IsZero() ||
+	if journal == nil || request.AttemptID.IsZero() ||
+		request.BoundaryID.IsZero() || request.DirectiveDigest.IsZero() ||
+		request.Goal.IsZero() || request.ExpectedHead.IsZero() ||
 		!request.Response.valid() || request.OccurredAt.IsZero() {
-		return RuntimeOwnerBoundaryResponse{}, fmt.Errorf("owner response requires journal, verifier, attempt, response, and occurrence time")
+		return RuntimeOwnerBoundaryResponse{}, fmt.Errorf(
+			"owner response requires journal, attempt, boundary, directive, goal, expected head, response, and occurrence time",
+		)
 	}
 	snapshot, runtime, err := readAttemptRuntime(journal, definition)
 	if err != nil {
@@ -865,34 +823,32 @@ func RecordOwnerBoundaryResponse(
 	if err != nil {
 		return RuntimeOwnerBoundaryResponse{}, err
 	}
-	if boundary.ownerResponseOK {
-		receiptDigest := request.Receipt.ReceiptDigest()
-		if boundary.ownerResponse.response != request.Response || boundary.ownerResponse.receiptDigest != receiptDigest {
-			return RuntimeOwnerBoundaryResponse{}, fmt.Errorf("owner response conflicts with durable response at record %d", boundary.ownerResponse.record)
-		}
-		return boundary.ownerResponse, nil
+	if request.BoundaryID != boundary.boundaryID ||
+		request.DirectiveDigest != boundary.directiveDigest ||
+		request.Goal != boundary.goal ||
+		request.ExpectedHead != boundary.head {
+		return RuntimeOwnerBoundaryResponse{}, fmt.Errorf(
+			"owner response does not match the exact current boundary, directive, goal, and head",
+		)
 	}
 	requestDigest, err := deriveOwnerResponseRequestDigest(
-		runtime.workspaceID, attempt.generation, attempt.attemptID, boundary, request.Response,
+		runtime.workspaceID, attempt.generation, attempt.attemptID,
+		boundary, request.Response,
 	)
 	if err != nil {
 		return RuntimeOwnerBoundaryResponse{}, err
 	}
-	binding, err := OwnerBoundaryResponseControlPlaneBinding(definition, runtime, request.AttemptID, request.Response)
-	if err != nil {
-		return RuntimeOwnerBoundaryResponse{}, err
+	if boundary.ownerResponseOK {
+		if boundary.ownerResponse.response != request.Response ||
+			boundary.ownerResponse.requestDigest != requestDigest {
+			return RuntimeOwnerBoundaryResponse{}, fmt.Errorf("owner response conflicts with durable response at record %d", boundary.ownerResponse.record)
+		}
+		return boundary.ownerResponse, nil
 	}
-	verification, err := NewControlPlaneVerification(binding)
-	if err != nil {
-		return RuntimeOwnerBoundaryResponse{}, err
-	}
-	if err := verifier.Verify(ctx, verification, request.Receipt); err != nil {
-		return RuntimeOwnerBoundaryResponse{}, fmt.Errorf("verify owner boundary response: %w", err)
-	}
-	receiptDigest := request.Receipt.ReceiptDigest()
 	event, err := NewAttemptOwnerResponseJournalEvent(
 		runtime.workspaceID, attempt.attemptID, boundary.boundaryID, attempt.generation,
-		request.Response, requestDigest, receiptDigest,
+		request.DirectiveDigest, request.Goal, request.ExpectedHead,
+		request.Response, requestDigest,
 	)
 	if err != nil {
 		return RuntimeOwnerBoundaryResponse{}, err
@@ -934,15 +890,6 @@ func ResumeAttempt(
 	if !exists {
 		return RuntimeAttemptProjection{}, fmt.Errorf("attempt %s is not reserved", request.AttemptID)
 	}
-	providerRuntime, err := RebuildProviderRuntime(snapshot, definition)
-	if err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	for _, receipt := range providerRuntime.CompletionReceipts() {
-		if receipt.AttemptID() == attempt.attemptID {
-			return RuntimeAttemptProjection{}, fmt.Errorf("completed attempt %s cannot resume", attempt.attemptID)
-		}
-	}
 	if attempt.phase == AttemptActive && len(attempt.boundaries) > 0 && attempt.boundaries[len(attempt.boundaries)-1].resumedRecord != 0 {
 		return attempt, nil
 	}
@@ -951,7 +898,7 @@ func ResumeAttempt(
 		return RuntimeAttemptProjection{}, fmt.Errorf("attempt %s has no current boundary to resume", attempt.attemptID)
 	}
 	if !boundary.ownerResponseOK {
-		return RuntimeAttemptProjection{}, fmt.Errorf("attempt %s cannot resume before verified owner response", attempt.attemptID)
+		return RuntimeAttemptProjection{}, fmt.Errorf("attempt %s cannot resume before the exact owner response", attempt.attemptID)
 	}
 	goal := boundary.goal
 	if boundary.mode == AttemptBoundaryCompleteGoalAndWait {
@@ -1012,6 +959,9 @@ func readAttemptRuntime(
 		return JournalSnapshot{}, WorkspaceRuntimeProjection{}, fmt.Errorf("attempt definition does not match the active workspace generation")
 	}
 	if err := requireReadyLocalTarget(runtime); err != nil {
+		return JournalSnapshot{}, WorkspaceRuntimeProjection{}, err
+	}
+	if err := verifyWorkspaceWorktreeRootBinding(runtime.worktreeRoot); err != nil {
 		return JournalSnapshot{}, WorkspaceRuntimeProjection{}, err
 	}
 	return snapshot, runtime, nil

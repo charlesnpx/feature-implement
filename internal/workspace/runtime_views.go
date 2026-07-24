@@ -20,22 +20,20 @@ const (
 )
 
 type SchedulerUnitView struct {
-	PlanID              string                  `json:"plan_id"`
-	MergeUnitID         string                  `json:"merge_unit_id"`
-	Status              SchedulerUnitStatus     `json:"status"`
-	Generation          string                  `json:"generation"`
-	LifecycleGeneration string                  `json:"lifecycle_generation,omitempty"`
-	Dependencies        []string                `json:"dependencies"`
-	Blockers            []string                `json:"blockers"`
-	AttemptID           string                  `json:"attempt_id,omitempty"`
-	AttemptNumber       uint64                  `json:"attempt_number,omitempty"`
-	Branch              string                  `json:"branch,omitempty"`
-	Worktree            string                  `json:"worktree,omitempty"`
-	Head                string                  `json:"head,omitempty"`
-	CompletionReceipt   string                  `json:"completion_receipt,omitempty"`
-	BoundaryPending     bool                    `json:"boundary_pending"`
-	BoundaryReason      string                  `json:"boundary_reason,omitempty"`
-	PendingDirectives   []BoundaryDirectiveView `json:"pending_directives"`
+	PlanID            string                  `json:"plan_id"`
+	MergeUnitID       string                  `json:"merge_unit_id"`
+	Status            SchedulerUnitStatus     `json:"status"`
+	Generation        string                  `json:"generation"`
+	Dependencies      []string                `json:"dependencies"`
+	Blockers          []string                `json:"blockers"`
+	AttemptID         string                  `json:"attempt_id,omitempty"`
+	AttemptNumber     uint64                  `json:"attempt_number,omitempty"`
+	Branch            string                  `json:"branch,omitempty"`
+	Worktree          string                  `json:"worktree,omitempty"`
+	Head              string                  `json:"head,omitempty"`
+	BoundaryPending   bool                    `json:"boundary_pending"`
+	BoundaryReason    string                  `json:"boundary_reason,omitempty"`
+	PendingDirectives []BoundaryDirectiveView `json:"pending_directives"`
 }
 
 type BoundaryDirectiveView struct {
@@ -53,11 +51,11 @@ type BoundaryDirectiveView struct {
 }
 
 type SchedulerView struct {
-	SchemaVersion    int                 `json:"schema_version"`
-	WorkspaceID      string              `json:"workspace_id"`
-	ActiveGeneration string              `json:"active_generation"`
-	JournalHead      string              `json:"journal_head"`
-	Units            []SchedulerUnitView `json:"units"`
+	SchemaVersion int                 `json:"schema_version"`
+	WorkspaceID   string              `json:"workspace_id"`
+	Generation    string              `json:"generation"`
+	JournalHead   string              `json:"journal_head"`
+	Units         []SchedulerUnitView `json:"units"`
 }
 
 type GateStatus string
@@ -84,107 +82,118 @@ type UnitGateView struct {
 }
 
 type GateView struct {
-	SchemaVersion    int            `json:"schema_version"`
-	WorkspaceID      string         `json:"workspace_id"`
-	ActiveGeneration string         `json:"active_generation"`
-	JournalHead      string         `json:"journal_head"`
-	Units            []UnitGateView `json:"units"`
+	SchemaVersion int            `json:"schema_version"`
+	WorkspaceID   string         `json:"workspace_id"`
+	Generation    string         `json:"generation"`
+	JournalHead   string         `json:"journal_head"`
+	Units         []UnitGateView `json:"units"`
 }
 
-type MergeQueueEntryView struct {
-	Position    int    `json:"position"`
+type WorkspaceWorkflowView struct {
+	WorkspaceID            string `json:"workspace_id"`
+	Generation             string `json:"generation"`
+	JournalHead            string `json:"journal_head"`
+	PlanCheckpoint         string `json:"plan_checkpoint"`
+	WorktreeRoot           string `json:"worktree_root"`
+	ProjectionDigest       string `json:"projection_digest"`
+	ReviewProjectionDigest string `json:"review_projection_digest"`
+}
+
+type WorkspaceTargetView struct {
+	Root             string `json:"root"`
+	GitDirectory     string `json:"git_directory"`
+	CommonDirectory  string `json:"common_directory"`
+	RepositoryFormat uint64 `json:"repository_format"`
+	ObjectFormat     string `json:"object_format"`
+	LinkedWorktree   bool   `json:"linked_worktree"`
+	BaseRef          string `json:"base_ref"`
+	BaseCommit       string `json:"base_commit"`
+	FeatureBranch    string `json:"feature_branch"`
+	FeatureRef       string `json:"feature_ref"`
+	FeatureHead      string `json:"feature_head"`
+	BindingDigest    string `json:"binding_digest"`
+	Ready            bool   `json:"ready"`
+}
+
+type WorkspaceAttemptView struct {
+	AttemptID         string                  `json:"attempt_id"`
+	PlanID            string                  `json:"plan_id"`
+	MergeUnitID       string                  `json:"merge_unit_id"`
+	Generation        string                  `json:"generation"`
+	AttemptNumber     uint64                  `json:"attempt_number"`
+	Base              string                  `json:"base"`
+	Branch            string                  `json:"branch"`
+	Worktree          string                  `json:"worktree"`
+	Phase             AttemptRuntimePhase     `json:"phase"`
+	Head              string                  `json:"head,omitempty"`
+	GoalID            string                  `json:"goal_id"`
+	GoalScope         GoalScope               `json:"goal_scope"`
+	BoundaryPending   bool                    `json:"boundary_pending"`
+	BoundaryReason    string                  `json:"boundary_reason,omitempty"`
+	PendingDirectives []BoundaryDirectiveView `json:"pending_directives"`
+}
+
+type WorkspaceReviewView struct {
+	AttemptID             string `json:"attempt_id"`
+	PlanID                string `json:"plan_id"`
+	MergeUnitID           string `json:"merge_unit_id"`
+	Generation            string `json:"generation"`
+	Head                  string `json:"head"`
+	Tree                  string `json:"tree"`
+	Status                string `json:"status"`
+	RoundsUsed            uint16 `json:"rounds_used"`
+	FixesUsed             uint16 `json:"fixes_used"`
+	InfrastructureRetries uint16 `json:"infrastructure_retries"`
+	MergeReady            bool   `json:"merge_ready"`
+}
+
+type IntegrationUnitView struct {
 	PlanID      string `json:"plan_id"`
 	MergeUnitID string `json:"merge_unit_id"`
-	AttemptID   string `json:"attempt_id"`
-	Generation  string `json:"generation"`
-	Head        string `json:"head"`
+	AttemptID   string `json:"attempt_id,omitempty"`
+	Head        string `json:"head,omitempty"`
+	Status      string `json:"status"`
 }
 
-type ProviderQueueEntryView struct {
-	EntryID    string `json:"entry_id"`
-	Generation string `json:"generation"`
-	Resolved   bool   `json:"resolved"`
+type IntegrationView struct {
+	Units []IntegrationUnitView `json:"units"`
 }
 
-type MergeQueueView struct {
-	SchemaVersion    int                      `json:"schema_version"`
-	WorkspaceID      string                   `json:"workspace_id"`
-	ActiveGeneration string                   `json:"active_generation"`
-	JournalHead      string                   `json:"journal_head"`
-	Ready            []MergeQueueEntryView    `json:"ready"`
-	ProviderEntries  []ProviderQueueEntryView `json:"provider_entries"`
-}
-
-type ReceiptIndexEntry struct {
-	Sequence   uint64 `json:"sequence"`
-	Kind       string `json:"kind"`
-	Generation string `json:"generation"`
-	Digest     string `json:"digest"`
-}
-
-type ReceiptView struct {
-	SchemaVersion int                 `json:"schema_version"`
-	WorkspaceID   string              `json:"workspace_id"`
-	JournalHead   string              `json:"journal_head"`
-	Receipts      []ReceiptIndexEntry `json:"receipts"`
-}
-
-type CompletionEntryView struct {
-	PlanID        string `json:"plan_id"`
-	MergeUnitID   string `json:"merge_unit_id"`
-	AttemptID     string `json:"attempt_id"`
-	Generation    string `json:"generation"`
-	Head          string `json:"head"`
-	MergeCommit   string `json:"merge_commit"`
-	FinalBaseHead string `json:"final_base_head"`
-	ReceiptDigest string `json:"receipt_digest"`
+type DriftView struct {
+	Detected bool     `json:"detected"`
+	Reasons  []string `json:"reasons"`
 }
 
 type CompletionView struct {
-	SchemaVersion int                   `json:"schema_version"`
-	WorkspaceID   string                `json:"workspace_id"`
-	JournalHead   string                `json:"journal_head"`
-	Completed     []CompletionEntryView `json:"completed"`
+	Complete bool     `json:"complete"`
+	Blockers []string `json:"blockers"`
 }
 
 type WorkspaceReport struct {
-	SchemaVersion       int            `json:"schema_version"`
-	WorkspaceID         string         `json:"workspace_id"`
-	ActiveGeneration    string         `json:"active_generation"`
-	JournalHead         string         `json:"journal_head"`
-	CoreConformance     string         `json:"core_conformance"`
-	ReviewConformance   string         `json:"review_conformance"`
-	ProviderConformance string         `json:"provider_conformance"`
-	Scheduler           SchedulerView  `json:"scheduler"`
-	Gates               GateView       `json:"gates"`
-	Queue               MergeQueueView `json:"queue"`
-	Receipts            ReceiptView    `json:"receipts"`
-	Completion          CompletionView `json:"completion"`
-	ReportDigest        string         `json:"report_digest"`
+	SchemaVersion int                    `json:"schema_version"`
+	Workflow      WorkspaceWorkflowView  `json:"workflow"`
+	Target        WorkspaceTargetView    `json:"target"`
+	Attempts      []WorkspaceAttemptView `json:"attempts"`
+	Reviews       []WorkspaceReviewView  `json:"reviews"`
+	Scheduler     SchedulerView          `json:"scheduler"`
+	Gates         GateView               `json:"gates"`
+	Integration   IntegrationView        `json:"integration"`
+	Drift         DriftView              `json:"drift"`
+	Completion    CompletionView         `json:"completion"`
+	ReportDigest  string                 `json:"report_digest"`
 }
 
 func RebuildSchedulerView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefinition) (SchedulerView, error) {
-	core, reviews, providers, _, err := rebuildViewProjections(snapshot, definition)
+	core, reviews, err := rebuildViewProjections(snapshot, definition)
 	if err != nil {
 		return SchedulerView{}, err
 	}
 	dependencies, references := definitionDependencyGraph(definition)
 	attempts := latestAttemptsByMergeUnit(core)
-	completions, err := completionsByMergeUnit(providers)
-	if err != nil {
-		return SchedulerView{}, err
-	}
-	completed := make(map[string]bool, len(completions))
-	for key, receipt := range completions {
-		attempt, exists := attempts[key]
-		if exists && attempt.attemptID == receipt.attemptID && attemptCompletionBoundaryResolved(attempt) {
-			completed[key] = true
-		}
-	}
 
 	view := SchedulerView{
 		SchemaVersion: JournalSchemaVersion, WorkspaceID: core.workspaceID.String(),
-		ActiveGeneration: core.activeGeneration.String(), JournalHead: snapshot.head.String(),
+		Generation: core.activeGeneration.String(), JournalHead: snapshot.head.String(),
 		Units: make([]SchedulerUnitView, 0, len(references)),
 	}
 	for _, reference := range references {
@@ -196,31 +205,16 @@ func RebuildSchedulerView(snapshot JournalSnapshot, definition EffectiveWorkspac
 		}
 		for _, dependency := range dependencies[key] {
 			unit.Dependencies = append(unit.Dependencies, dependency.String())
-			if !completed[dependency.key()] {
-				unit.Blockers = append(unit.Blockers, "dependency:"+dependency.String())
-			}
+			unit.Blockers = append(unit.Blockers, "dependency:"+dependency.String())
 		}
-		if receipt, ok := completions[key]; ok && completed[key] {
-			unit.Status = SchedulerUnitCompleted
-			unit.LifecycleGeneration = receipt.Generation().String()
-			unit.AttemptID = receipt.AttemptID().String()
-			unit.Head = receipt.Head().String()
-			unit.CompletionReceipt = receipt.Digest().String()
-			unit.Blockers = []string{}
-		} else if attempt, ok := attempts[key]; ok {
-			receipt, completedByProvider := completions[key]
+		if attempt, ok := attempts[key]; ok {
 			unit.Status = schedulerStatusForAttempt(attempt)
-			unit.LifecycleGeneration = attempt.generation.String()
 			unit.AttemptID = attempt.attemptID.String()
 			unit.AttemptNumber = attempt.attemptNumber
 			unit.Branch = attempt.branch
 			unit.Worktree = attempt.worktree
 			unit.Head = attempt.verifiedHead.String()
-			if completedByProvider {
-				unit.CompletionReceipt = receipt.Digest().String()
-				unit.LifecycleGeneration = receipt.Generation().String()
-			}
-			unit.BoundaryPending, unit.BoundaryReason, unit.PendingDirectives = attemptBoundaryStatus(core, attempt, completedByProvider)
+			unit.BoundaryPending, unit.BoundaryReason, unit.PendingDirectives = attemptBoundaryStatus(core, attempt)
 			if state, exists := reviews.State(attempt.attemptID); exists {
 				if _, exhausted := state.Exhaustion(); exhausted {
 					unit.Status = SchedulerUnitReviewExhausted
@@ -237,7 +231,7 @@ func RebuildSchedulerView(snapshot JournalSnapshot, definition EffectiveWorkspac
 }
 
 func RebuildGateView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefinition) (GateView, error) {
-	core, reviews, providers, authorization, err := rebuildViewProjections(snapshot, definition)
+	core, reviews, err := rebuildViewProjections(snapshot, definition)
 	if err != nil {
 		return GateView{}, err
 	}
@@ -247,14 +241,9 @@ func RebuildGateView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefi
 	}
 	attempts := latestAttemptsByMergeUnit(core)
 	unitExecution := unitExecutionsByMergeUnit(definition)
-	completed, err := completionsByMergeUnit(providers)
-	if err != nil {
-		return GateView{}, err
-	}
-	authorizationSafe := authorizationStateSafe(authorization.State())
 	view := GateView{
 		SchemaVersion: JournalSchemaVersion, WorkspaceID: core.workspaceID.String(),
-		ActiveGeneration: core.activeGeneration.String(), JournalHead: snapshot.head.String(),
+		Generation: core.activeGeneration.String(), JournalHead: snapshot.head.String(),
 		Units: make([]UnitGateView, 0, len(scheduler.Units)),
 	}
 	for _, scheduled := range scheduler.Units {
@@ -310,135 +299,49 @@ func RebuildGateView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefi
 		}
 		unit.Checks = append(unit.Checks, reviewGate)
 
-		authorizationGate := GateCheckView{Name: "authorization_safety", Generation: definition.generation.String()}
-		if authorizationSafe {
-			authorizationGate.Status, authorizationGate.Reason = GatePassed, "safe"
+		integrationGate := GateCheckView{Name: "integration", Generation: definition.generation.String()}
+		if scheduled.Status == SchedulerUnitCompleted {
+			integrationGate.Status, integrationGate.Reason = GatePassed, "merge_unit_integrated"
 		} else {
-			authorizationGate.Status, authorizationGate.Reason = GateFailed, "unsafe_or_reconciliation_pending"
+			integrationGate.Status, integrationGate.Reason = GatePending, "not_integrated"
 		}
-		unit.Checks = append(unit.Checks, authorizationGate)
-
-		completionGate := GateCheckView{Name: "provider_completion", Generation: definition.generation.String()}
-		if receipt, exists := completed[key]; exists {
-			completionGate.Status, completionGate.Reason = GatePassed, receipt.Digest().String()
-		} else {
-			completionGate.Status, completionGate.Reason = GatePending, "merge_not_verified"
-		}
-		unit.Checks = append(unit.Checks, completionGate)
+		unit.Checks = append(unit.Checks, integrationGate)
 		unit.MergeReady = dependencyGate.Status == GatePassed && commitGate.Status == GatePassed &&
-			reviewGate.Status == GatePassed && authorizationGate.Status == GatePassed && completionGate.Status != GatePassed
+			reviewGate.Status == GatePassed && integrationGate.Status != GatePassed
 		view.Units = append(view.Units, unit)
 	}
 	return view, nil
 }
 
-func RebuildMergeQueueView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefinition) (MergeQueueView, error) {
-	core, _, providers, _, err := rebuildViewProjections(snapshot, definition)
-	if err != nil {
-		return MergeQueueView{}, err
-	}
-	gates, err := RebuildGateView(snapshot, definition)
-	if err != nil {
-		return MergeQueueView{}, err
-	}
-	attempts := latestAttemptsByMergeUnit(core)
-	view := MergeQueueView{
-		SchemaVersion: JournalSchemaVersion, WorkspaceID: core.workspaceID.String(),
-		ActiveGeneration: core.activeGeneration.String(), JournalHead: snapshot.head.String(),
-		Ready: []MergeQueueEntryView{}, ProviderEntries: []ProviderQueueEntryView{},
-	}
-	for _, unit := range gates.Units {
-		if !unit.MergeReady {
-			continue
-		}
-		key := unit.PlanID + "\x00" + unit.MergeUnitID
-		attempt, exists := attempts[key]
-		if !exists || attempt.generation != definition.generation {
-			continue
-		}
-		view.Ready = append(view.Ready, MergeQueueEntryView{
-			Position: len(view.Ready) + 1, PlanID: unit.PlanID, MergeUnitID: unit.MergeUnitID,
-			AttemptID: attempt.attemptID.String(), Generation: attempt.generation.String(), Head: attempt.verifiedHead.String(),
-		})
-	}
-	for _, entry := range providers.QueueEntryStates() {
-		view.ProviderEntries = append(view.ProviderEntries, ProviderQueueEntryView{
-			EntryID: entry.entryID.String(), Generation: entry.generation.String(), Resolved: entry.resolved,
-		})
-	}
-	sort.Slice(view.ProviderEntries, func(i, j int) bool { return view.ProviderEntries[i].EntryID < view.ProviderEntries[j].EntryID })
-	return view, nil
-}
-
-func RebuildReceiptView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefinition) (ReceiptView, error) {
-	core, _, _, _, err := rebuildViewProjections(snapshot, definition)
-	if err != nil {
-		return ReceiptView{}, err
-	}
-	view := ReceiptView{
-		SchemaVersion: JournalSchemaVersion, WorkspaceID: core.workspaceID.String(),
-		JournalHead: snapshot.head.String(), Receipts: []ReceiptIndexEntry{},
-	}
-	appendReceipt := func(record JournalRecord, kind string, digest Digest) {
-		if digest.IsZero() {
-			return
-		}
-		view.Receipts = append(view.Receipts, ReceiptIndexEntry{
-			Sequence: record.sequence, Kind: kind, Generation: record.Generation().String(), Digest: digest.String(),
-		})
-	}
-	for _, record := range snapshot.records {
-		switch event := record.event.(type) {
-		case AttemptOrchestrationAcknowledgedJournalEvent:
-			appendReceipt(record, "goal_acknowledgment", event.receiptDigest)
-		case AttemptOwnerResponseJournalEvent:
-			appendReceipt(record, "owner_decision", event.receiptDigest)
-		case AuthorizationGrantRecordedJournalEvent:
-			appendReceipt(record, "standing_grant", event.grant.receiptDigest)
-		case AuthorizationRevokedJournalEvent:
-			appendReceipt(record, "revocation", event.revocation.receipt)
-		case AuthorizationSafetyChangedJournalEvent:
-			appendReceipt(record, "authorization_safety", event.receiptDigest)
-		case GenerationActivatedJournalEvent:
-			appendReceipt(record, "reconciliation", event.ownerReceiptDigest)
-		case ReviewResultRecordedJournalEvent:
-			appendReceipt(record, "review_evidence", event.receiptDigest)
-		case ProviderResultRecordedJournalEvent:
-			appendReceipt(record, "provider_result", event.result.digest)
-		case ProviderCompletionVerifiedJournalEvent:
-			appendReceipt(record, "provider_completion", event.receipt.digest)
-		}
-	}
-	return view, nil
-}
-
 func RebuildCompletionView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefinition) (CompletionView, error) {
-	core, _, providers, _, err := rebuildViewProjections(snapshot, definition)
+	scheduler, err := RebuildSchedulerView(snapshot, definition)
 	if err != nil {
 		return CompletionView{}, err
 	}
-	view := CompletionView{
-		SchemaVersion: JournalSchemaVersion, WorkspaceID: core.workspaceID.String(),
-		JournalHead: snapshot.head.String(), Completed: []CompletionEntryView{},
+	view := CompletionView{Blockers: []string{}}
+	for _, unit := range scheduler.Units {
+		if unit.Status == SchedulerUnitCompleted {
+			continue
+		}
+		view.Blockers = append(
+			view.Blockers,
+			fmt.Sprintf(
+				"merge_unit:%s/%s:%s",
+				unit.PlanID, unit.MergeUnitID, unit.Status,
+			),
+		)
 	}
-	for _, receipt := range providers.CompletionReceipts() {
-		view.Completed = append(view.Completed, CompletionEntryView{
-			PlanID: receipt.mergeUnit.planID.String(), MergeUnitID: receipt.mergeUnit.mergeUnitID.String(),
-			AttemptID: receipt.attemptID.String(), Generation: receipt.generation.String(), Head: receipt.head.String(),
-			MergeCommit: receipt.mergeCommit.String(), FinalBaseHead: receipt.finalBaseHead.String(),
-			ReceiptDigest: receipt.digest.String(),
-		})
+	if len(view.Blockers) == 0 {
+		view.Blockers = append(
+			view.Blockers,
+			"workspace_completion_not_recorded",
+		)
 	}
-	sort.Slice(view.Completed, func(i, j int) bool {
-		left := view.Completed[i].PlanID + "\x00" + view.Completed[i].MergeUnitID
-		right := view.Completed[j].PlanID + "\x00" + view.Completed[j].MergeUnitID
-		return left < right
-	})
 	return view, nil
 }
 
 func RebuildWorkspaceReport(snapshot JournalSnapshot, definition EffectiveWorkspaceDefinition) (WorkspaceReport, error) {
-	core, _, _, _, err := rebuildViewProjections(snapshot, definition)
+	core, reviews, err := rebuildViewProjections(snapshot, definition)
 	if err != nil {
 		return WorkspaceReport{}, err
 	}
@@ -450,10 +353,6 @@ func RebuildWorkspaceReport(snapshot JournalSnapshot, definition EffectiveWorksp
 	if err != nil {
 		return WorkspaceReport{}, err
 	}
-	providerDigest, err := VerifyProviderRuntimeConformance(snapshot, definition)
-	if err != nil {
-		return WorkspaceReport{}, err
-	}
 	scheduler, err := RebuildSchedulerView(snapshot, definition)
 	if err != nil {
 		return WorkspaceReport{}, err
@@ -462,23 +361,36 @@ func RebuildWorkspaceReport(snapshot JournalSnapshot, definition EffectiveWorksp
 	if err != nil {
 		return WorkspaceReport{}, err
 	}
-	queue, err := RebuildMergeQueueView(snapshot, definition)
+	target, err := workspaceTargetView(core)
 	if err != nil {
 		return WorkspaceReport{}, err
 	}
-	receipts, err := RebuildReceiptView(snapshot, definition)
-	if err != nil {
-		return WorkspaceReport{}, err
-	}
+	attempts := workspaceAttemptViews(core, scheduler)
+	reviewViews := workspaceReviewViews(reviews)
+	integration := workspaceIntegrationView(scheduler)
 	completion, err := RebuildCompletionView(snapshot, definition)
 	if err != nil {
 		return WorkspaceReport{}, err
 	}
 	report := WorkspaceReport{
-		SchemaVersion: JournalSchemaVersion, WorkspaceID: core.workspaceID.String(),
-		ActiveGeneration: core.activeGeneration.String(), JournalHead: snapshot.head.String(),
-		CoreConformance: coreDigest.String(), ReviewConformance: reviewDigest.String(), ProviderConformance: providerDigest.String(),
-		Scheduler: scheduler, Gates: gates, Queue: queue, Receipts: receipts, Completion: completion,
+		SchemaVersion: JournalSchemaVersion,
+		Workflow: WorkspaceWorkflowView{
+			WorkspaceID:            core.workspaceID.String(),
+			Generation:             core.activeGeneration.String(),
+			JournalHead:            snapshot.head.String(),
+			PlanCheckpoint:         core.planCheckpoint.String(),
+			WorktreeRoot:           core.worktreeRoot.Path(),
+			ProjectionDigest:       coreDigest.String(),
+			ReviewProjectionDigest: reviewDigest.String(),
+		},
+		Target:      target,
+		Attempts:    attempts,
+		Reviews:     reviewViews,
+		Scheduler:   scheduler,
+		Gates:       gates,
+		Integration: integration,
+		Drift:       DriftView{Reasons: []string{}},
+		Completion:  completion,
 	}
 	canonical, err := json.Marshal(report)
 	if err != nil {
@@ -488,95 +400,138 @@ func RebuildWorkspaceReport(snapshot JournalSnapshot, definition EffectiveWorksp
 	return report, nil
 }
 
-func RebuildReconciliationState(snapshot JournalSnapshot, definition EffectiveWorkspaceDefinition) (ReconciliationState, error) {
-	core, reviews, providers, authorization, err := rebuildViewProjections(snapshot, definition)
-	if err != nil {
-		return ReconciliationState{}, err
+func workspaceTargetView(
+	core WorkspaceRuntimeProjection,
+) (WorkspaceTargetView, error) {
+	target, exists := core.LocalTarget()
+	if !exists || !target.Created() {
+		return WorkspaceTargetView{}, fmt.Errorf(
+			"workspace report requires the ready local target",
+		)
 	}
-	scheduler, err := RebuildSchedulerView(snapshot, definition)
-	if err != nil {
-		return ReconciliationState{}, err
-	}
-	mergeUnits := make([]MergeUnitRuntimeState, 0, len(scheduler.Units))
-	for _, unit := range scheduler.Units {
-		reference, err := referenceFromStrings(unit.PlanID, unit.MergeUnitID)
-		if err != nil {
-			return ReconciliationState{}, err
-		}
-		disposition := reconciliationDisposition(unit.Status)
-		generation := Digest{}
-		if disposition != MergeUnitFuture {
-			generation, err = ParseDigest(unit.LifecycleGeneration)
-			if err != nil {
-				generation = definition.generation
-			}
-		}
-		state, err := NewMergeUnitRuntimeState(reference, disposition, generation)
-		if err != nil {
-			return ReconciliationState{}, err
-		}
-		mergeUnits = append(mergeUnits, state)
-	}
-	reviewHistory, err := json.Marshal(reviewHistoryView(reviews))
-	if err != nil {
-		return ReconciliationState{}, err
-	}
-	authorizationHistory, err := canonicalAuthorizationHistory(authorization.State())
-	if err != nil {
-		return ReconciliationState{}, err
-	}
-	receipts, err := RebuildReceiptView(snapshot, definition)
-	if err != nil {
-		return ReconciliationState{}, err
-	}
-	receiptHistory, err := json.Marshal(receipts)
-	if err != nil {
-		return ReconciliationState{}, err
-	}
-	history, err := NewRuntimeHistoryBinding(
-		DigestBytes(reviewHistory), DigestBytes(authorizationHistory), DigestBytes(receiptHistory),
-	)
-	if err != nil {
-		return ReconciliationState{}, err
-	}
-	attemptBindings := core.AttemptGenerationBindings()
-	completedAttempts := make(map[ID]struct{}, len(scheduler.Units))
-	for _, unit := range scheduler.Units {
-		if unit.Status == SchedulerUnitCompleted {
-			attemptID, parseErr := NewID(unit.AttemptID)
-			if parseErr != nil {
-				return ReconciliationState{}, fmt.Errorf("completed scheduler attempt: %w", parseErr)
-			}
-			completedAttempts[attemptID] = struct{}{}
-		}
-	}
-	for index := range attemptBindings {
-		if _, completed := completedAttempts[attemptBindings[index].attemptID]; completed {
-			attemptBindings[index].phase = AttemptCompleted
-		}
-	}
-	return NewReconciliationState(
-		snapshot, mergeUnits, attemptBindings, providers.ReconciliationStates(),
-		providers.QueueEntryStates(), history,
-	)
+	binding := target.Binding()
+	return WorkspaceTargetView{
+		Root:             binding.Root(),
+		GitDirectory:     binding.GitDirectory(),
+		CommonDirectory:  binding.CommonDirectory(),
+		RepositoryFormat: binding.RepositoryFormat(),
+		ObjectFormat:     string(binding.ObjectFormat()),
+		LinkedWorktree:   binding.LinkedWorktree(),
+		BaseRef:          binding.BaseRef(),
+		BaseCommit:       binding.BaseCommit().String(),
+		FeatureBranch:    binding.FeatureBranch(),
+		FeatureRef:       binding.FeatureRef(),
+		FeatureHead:      target.CreatedHead().String(),
+		BindingDigest:    binding.Digest().String(),
+		Ready:            true,
+	}, nil
 }
 
-func attemptCompletionBoundaryResolved(attempt RuntimeAttemptProjection) bool {
-	pending, _, _ := attemptBoundaryStatus(WorkspaceRuntimeProjection{workspaceID: ID{}}, attempt, true)
-	return !pending
+func workspaceAttemptViews(
+	core WorkspaceRuntimeProjection,
+	scheduler SchedulerView,
+) []WorkspaceAttemptView {
+	scheduled := make(map[string]SchedulerUnitView, len(scheduler.Units))
+	for _, unit := range scheduler.Units {
+		if unit.AttemptID != "" {
+			scheduled[unit.AttemptID] = unit
+		}
+	}
+	result := make([]WorkspaceAttemptView, 0, len(core.attempts))
+	for _, attempt := range core.attempts {
+		unit := scheduled[attempt.attemptID.String()]
+		result = append(result, WorkspaceAttemptView{
+			AttemptID:         attempt.attemptID.String(),
+			PlanID:            attempt.mergeUnit.planID.String(),
+			MergeUnitID:       attempt.mergeUnit.mergeUnitID.String(),
+			Generation:        attempt.generation.String(),
+			AttemptNumber:     attempt.attemptNumber,
+			Base:              attempt.base.String(),
+			Branch:            attempt.branch,
+			Worktree:          attempt.worktree,
+			Phase:             attempt.phase,
+			Head:              attempt.verifiedHead.String(),
+			GoalID:            attempt.goal.id.String(),
+			GoalScope:         attempt.goal.scope,
+			BoundaryPending:   unit.BoundaryPending,
+			BoundaryReason:    unit.BoundaryReason,
+			PendingDirectives: append([]BoundaryDirectiveView(nil), unit.PendingDirectives...),
+		})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		left := result[i].PlanID + "\x00" + result[i].MergeUnitID
+		right := result[j].PlanID + "\x00" + result[j].MergeUnitID
+		if left != right {
+			return left < right
+		}
+		if result[i].AttemptNumber != result[j].AttemptNumber {
+			return result[i].AttemptNumber < result[j].AttemptNumber
+		}
+		return result[i].AttemptID < result[j].AttemptID
+	})
+	return result
+}
+
+func workspaceReviewViews(
+	reviews ReviewRuntimeProjection,
+) []WorkspaceReviewView {
+	states := reviews.States()
+	result := make([]WorkspaceReviewView, 0, len(states))
+	for _, state := range states {
+		status := "active"
+		if state.MergeReady() {
+			status = "ready"
+		} else if _, exhausted := state.Exhaustion(); exhausted {
+			status = "exhausted"
+		} else if _, pending := state.PendingFix(); pending {
+			status = "fix_pending"
+		}
+		result = append(result, WorkspaceReviewView{
+			AttemptID:             state.AttemptID().String(),
+			PlanID:                state.MergeUnit().PlanID().String(),
+			MergeUnitID:           state.MergeUnit().MergeUnitID().String(),
+			Generation:            state.Generation().String(),
+			Head:                  state.Head().String(),
+			Tree:                  state.Tree().String(),
+			Status:                status,
+			RoundsUsed:            state.RoundsUsed(),
+			FixesUsed:             state.FixesUsed(),
+			InfrastructureRetries: state.InfrastructureRetriesUsed(),
+			MergeReady:            state.MergeReady(),
+		})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].AttemptID < result[j].AttemptID
+	})
+	return result
+}
+
+func workspaceIntegrationView(
+	scheduler SchedulerView,
+) IntegrationView {
+	view := IntegrationView{
+		Units: make([]IntegrationUnitView, 0, len(scheduler.Units)),
+	}
+	for _, unit := range scheduler.Units {
+		status := "pending"
+		if unit.Status == SchedulerUnitCompleted {
+			status = "integrated"
+		}
+		view.Units = append(view.Units, IntegrationUnitView{
+			PlanID: unit.PlanID, MergeUnitID: unit.MergeUnitID,
+			AttemptID: unit.AttemptID, Head: unit.Head, Status: status,
+		})
+	}
+	return view
 }
 
 func attemptBoundaryStatus(
 	core WorkspaceRuntimeProjection,
 	attempt RuntimeAttemptProjection,
-	completionRecorded bool,
 ) (bool, string, []BoundaryDirectiveView) {
 	directives := []BoundaryDirectiveView{}
 	boundary, exists := attempt.CurrentBoundary()
 	if !exists {
-		if completionRecorded {
-			return true, "completion_boundary_not_recorded", directives
-		}
 		return false, "", directives
 	}
 	view := func(kind string, goal GoalBinding, idempotency Digest, choices []string) BoundaryDirectiveView {
@@ -584,7 +539,8 @@ func attemptBoundaryStatus(
 			Kind: kind, WorkspaceID: core.workspaceID.String(), Generation: attempt.generation.String(),
 			AttemptID: attempt.attemptID.String(), BoundaryID: boundary.boundaryID.String(),
 			GoalID: goal.id.String(), GoalScope: string(goal.scope), Head: boundary.head.String(),
-			DirectiveDigest: boundary.directiveDigest.String(), IdempotencyKey: idempotency.String(), Choices: choices,
+			DirectiveDigest: boundary.directiveDigest.String(), IdempotencyKey: idempotency.String(),
+			Choices: append([]string{}, choices...),
 		}
 	}
 	if boundary.mode == AttemptBoundaryCompleteGoalAndWait && !boundary.goalCompletedOK {
@@ -613,31 +569,23 @@ func attemptBoundaryStatus(
 func rebuildViewProjections(
 	snapshot JournalSnapshot,
 	definition EffectiveWorkspaceDefinition,
-) (WorkspaceRuntimeProjection, ReviewRuntimeProjection, ProviderRuntimeProjection, AuthorizationRuntimeProjection, error) {
+) (WorkspaceRuntimeProjection, ReviewRuntimeProjection, error) {
 	core, err := RebuildWorkspaceRuntime(snapshot)
 	if err != nil {
-		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, ProviderRuntimeProjection{}, AuthorizationRuntimeProjection{}, err
+		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, err
 	}
 	if core.workspaceID != definition.workspace.id || core.activeGeneration != definition.generation {
-		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, ProviderRuntimeProjection{}, AuthorizationRuntimeProjection{},
+		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{},
 			fmt.Errorf("workspace report definition does not match active journal generation")
 	}
 	if err := requireReadyLocalTarget(core); err != nil {
-		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, ProviderRuntimeProjection{}, AuthorizationRuntimeProjection{}, err
+		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, err
 	}
 	reviews, err := RebuildReviewRuntime(snapshot, definition)
 	if err != nil {
-		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, ProviderRuntimeProjection{}, AuthorizationRuntimeProjection{}, err
+		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, err
 	}
-	providers, err := RebuildProviderRuntime(snapshot, definition)
-	if err != nil {
-		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, ProviderRuntimeProjection{}, AuthorizationRuntimeProjection{}, err
-	}
-	authorization, err := RebuildAuthorizationRuntime(snapshot, definition)
-	if err != nil {
-		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, ProviderRuntimeProjection{}, AuthorizationRuntimeProjection{}, err
-	}
-	return core, reviews, providers, authorization, nil
+	return core, reviews, nil
 }
 
 func definitionDependencyGraph(definition EffectiveWorkspaceDefinition) (map[string][]MergeUnitReference, []MergeUnitReference) {
@@ -696,18 +644,6 @@ func latestAttemptsByMergeUnit(core WorkspaceRuntimeProjection) map[string]Runti
 	return result
 }
 
-func completionsByMergeUnit(providers ProviderRuntimeProjection) (map[string]ProviderCompletionReceipt, error) {
-	result := make(map[string]ProviderCompletionReceipt)
-	for _, receipt := range providers.completionReceipts {
-		key := receipt.mergeUnit.key()
-		if existing, exists := result[key]; exists && existing.digest != receipt.digest {
-			return nil, fmt.Errorf("merge unit %s has multiple provider completion receipts", receipt.mergeUnit)
-		}
-		result[key] = receipt
-	}
-	return result, nil
-}
-
 func schedulerStatusForAttempt(attempt RuntimeAttemptProjection) SchedulerUnitStatus {
 	switch attempt.phase {
 	case AttemptReserved:
@@ -735,93 +671,4 @@ func authorizationStateSafe(state AuthorizationState) bool {
 	safety := state.safety
 	return !safety.gatesBlocked && !safety.reconciliationPending && !safety.driftDetected && !safety.ambiguousEffect &&
 		len(state.obligations) == 0
-}
-
-func referenceFromStrings(planID, mergeUnitID string) (MergeUnitReference, error) {
-	plan, err := NewID(planID)
-	if err != nil {
-		return MergeUnitReference{}, err
-	}
-	unit, err := NewID(mergeUnitID)
-	if err != nil {
-		return MergeUnitReference{}, err
-	}
-	return NewMergeUnitReference(plan, unit)
-}
-
-func reconciliationDisposition(status SchedulerUnitStatus) MergeUnitRuntimeDisposition {
-	switch status {
-	case SchedulerUnitReserved:
-		return MergeUnitReserved
-	case SchedulerUnitMaterializing:
-		return MergeUnitMaterializing
-	case SchedulerUnitActive:
-		return MergeUnitActive
-	case SchedulerUnitPaused:
-		return MergeUnitPaused
-	case SchedulerUnitReviewExhausted:
-		return MergeUnitReviewExhausted
-	case SchedulerUnitCompleted:
-		return MergeUnitCompleted
-	default:
-		return MergeUnitFuture
-	}
-}
-
-type reviewHistoryEntry struct {
-	AttemptID             string `json:"attempt_id"`
-	Generation            string `json:"generation"`
-	RoundsUsed            uint16 `json:"rounds_used"`
-	FixesUsed             uint16 `json:"fixes_used"`
-	InfrastructureRetries uint16 `json:"infrastructure_retries"`
-	Head                  string `json:"head"`
-	MergeReady            bool   `json:"merge_ready"`
-}
-
-func reviewHistoryView(projection ReviewRuntimeProjection) []reviewHistoryEntry {
-	result := make([]reviewHistoryEntry, 0, len(projection.states))
-	for _, state := range projection.states {
-		result = append(result, reviewHistoryEntry{
-			AttemptID: state.attemptID.String(), Generation: state.generation.String(), RoundsUsed: state.RoundsUsed(),
-			FixesUsed: state.FixesUsed(), InfrastructureRetries: state.InfrastructureRetriesUsed(),
-			Head: state.head.String(), MergeReady: state.MergeReady(),
-		})
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].AttemptID < result[j].AttemptID })
-	return result
-}
-
-func canonicalAuthorizationHistory(state AuthorizationState) ([]byte, error) {
-	type authorizationHistory struct {
-		WorkspaceID       string   `json:"workspace_id"`
-		Generation        string   `json:"generation"`
-		Epoch             uint64   `json:"epoch"`
-		Safety            [4]bool  `json:"safety"`
-		GrantIDs          []string `json:"grant_ids"`
-		RevokedGrantIDs   []string `json:"revoked_grant_ids"`
-		CompletedSegments []string `json:"completed_segments"`
-		Obligations       []string `json:"obligations"`
-	}
-	value := authorizationHistory{
-		WorkspaceID: state.workspaceID.String(), Generation: state.generation.String(), Epoch: state.epoch,
-		Safety:   [4]bool{state.safety.gatesBlocked, state.safety.reconciliationPending, state.safety.driftDetected, state.safety.ambiguousEffect},
-		GrantIDs: []string{}, RevokedGrantIDs: []string{}, CompletedSegments: []string{}, Obligations: []string{},
-	}
-	for _, grant := range state.grants {
-		value.GrantIDs = append(value.GrantIDs, grant.grantID.String())
-	}
-	for _, revoked := range state.revokedGrantIDs {
-		value.RevokedGrantIDs = append(value.RevokedGrantIDs, revoked.String())
-	}
-	for _, segment := range state.completedSegments {
-		value.CompletedSegments = append(value.CompletedSegments, segment.String())
-	}
-	for _, obligation := range state.obligations {
-		value.Obligations = append(value.Obligations, obligation.effectID.String()+":"+obligation.requestDigest.String())
-	}
-	sort.Strings(value.GrantIDs)
-	sort.Strings(value.RevokedGrantIDs)
-	sort.Strings(value.CompletedSegments)
-	sort.Strings(value.Obligations)
-	return json.Marshal(value)
 }

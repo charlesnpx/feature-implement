@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 )
 
 const (
@@ -129,6 +128,18 @@ func (store *GenerationStore) Store(definition EffectiveWorkspaceDefinition) (St
 	if err := store.verify(); err != nil {
 		return StoredGeneration{}, err
 	}
+	generations, err := store.List()
+	if err != nil {
+		return StoredGeneration{}, err
+	}
+	if len(generations) != 0 &&
+		(len(generations) != 1 || generations[0] != definition.generation) {
+		return StoredGeneration{}, fmt.Errorf(
+			"runtime generation store is already bound to %s; generation %s requires a fresh runtime directory",
+			generations[0],
+			definition.generation,
+		)
+	}
 	canonical, err := marshalStoredGeneration(definition)
 	if err != nil {
 		return StoredGeneration{}, err
@@ -218,124 +229,6 @@ func (store *GenerationStore) List() ([]Digest, error) {
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].String() < result[j].String() })
 	return result, nil
-}
-
-func (store *GenerationStore) OrphanCandidates(snapshot JournalSnapshot) ([]Digest, error) {
-	stored, err := store.List()
-	if err != nil {
-		return nil, err
-	}
-	runtime, err := RebuildWorkspaceRuntime(snapshot)
-	if err != nil && len(snapshot.records) != 0 {
-		return nil, err
-	}
-	recorded := append([]Digest(nil), runtime.generationHistory...)
-	recorded = append(recorded, sortedCandidateGenerations(runtime)...)
-	orphans := make([]Digest, 0)
-	for _, generation := range stored {
-		if !containsDigest(recorded, generation) {
-			orphans = append(orphans, generation)
-		}
-	}
-	return orphans, nil
-}
-
-func (store *GenerationStore) StageCandidate(
-	journal *WorkspaceJournal,
-	definition EffectiveWorkspaceDefinition,
-	occurredAt time.Time,
-) (JournalRecord, error) {
-	if journal == nil || store == nil || journal.workspaceDir != store.workspaceDir {
-		return JournalRecord{}, fmt.Errorf("candidate staging requires journal and generation store for the same workspace")
-	}
-	snapshot, err := journal.ReadSnapshot()
-	if err != nil {
-		return JournalRecord{}, err
-	}
-	runtime, err := RebuildWorkspaceRuntime(snapshot)
-	if err != nil {
-		return JournalRecord{}, err
-	}
-	if runtime.workspaceID != definition.workspace.id {
-		return JournalRecord{}, fmt.Errorf("candidate definition belongs to workspace %s, not %s", definition.workspace.id, runtime.workspaceID)
-	}
-	if definition.generation == runtime.activeGeneration || runtime.HasCandidate(definition.generation) {
-		return JournalRecord{}, fmt.Errorf("generation %s is already active or staged", definition.generation)
-	}
-	if _, err := store.Store(definition); err != nil {
-		return JournalRecord{}, err
-	}
-	event, err := NewCandidateGenerationStoredJournalEvent(
-		runtime.workspaceID, runtime.activeGeneration, definition.generation, false,
-	)
-	if err != nil {
-		return JournalRecord{}, err
-	}
-	workspaceResource := WorkspaceJournalResource(runtime.workspaceID)
-	candidateResource := GenerationJournalResource(definition.generation)
-	workspaceRevision, _ := NewJournalResourceRevision(workspaceResource, snapshot.Revision(workspaceResource))
-	candidateRevision, _ := NewJournalResourceRevision(candidateResource, snapshot.Revision(candidateResource))
-	appendRequest, err := NewJournalAppend(
-		event, occurredAt,
-		[]JournalResourceRevision{workspaceRevision, candidateRevision},
-		[]JournalResource{workspaceResource, candidateResource},
-	)
-	if err != nil {
-		return JournalRecord{}, err
-	}
-	return journal.Append(appendRequest)
-}
-
-func (store *GenerationStore) RecoverOrphanCandidate(
-	journal *WorkspaceJournal,
-	generation Digest,
-	occurredAt time.Time,
-) (JournalRecord, error) {
-	if journal == nil || store == nil || journal.workspaceDir != store.workspaceDir {
-		return JournalRecord{}, fmt.Errorf("orphan recovery requires journal and generation store for the same workspace")
-	}
-	stored, err := store.Load(generation)
-	if err != nil {
-		return JournalRecord{}, err
-	}
-	snapshot, err := journal.ReadSnapshot()
-	if err != nil {
-		return JournalRecord{}, err
-	}
-	orphans, err := store.OrphanCandidates(snapshot)
-	if err != nil {
-		return JournalRecord{}, err
-	}
-	if !containsDigest(orphans, generation) {
-		return JournalRecord{}, fmt.Errorf("generation %s is not an orphan candidate", generation)
-	}
-	runtime, err := RebuildWorkspaceRuntime(snapshot)
-	if err != nil {
-		return JournalRecord{}, err
-	}
-	if stored.workspaceID != runtime.workspaceID {
-		return JournalRecord{}, fmt.Errorf(
-			"orphan generation belongs to workspace %s, not %s",
-			stored.workspaceID, runtime.workspaceID,
-		)
-	}
-	event, err := NewCandidateGenerationStoredJournalEvent(runtime.workspaceID, runtime.activeGeneration, generation, true)
-	if err != nil {
-		return JournalRecord{}, err
-	}
-	workspaceResource := WorkspaceJournalResource(runtime.workspaceID)
-	candidateResource := GenerationJournalResource(generation)
-	workspaceRevision, _ := NewJournalResourceRevision(workspaceResource, snapshot.Revision(workspaceResource))
-	candidateRevision, _ := NewJournalResourceRevision(candidateResource, snapshot.Revision(candidateResource))
-	appendRequest, err := newPrivilegedJournalAppend(
-		event, occurredAt,
-		[]JournalResourceRevision{workspaceRevision, candidateRevision},
-		[]JournalResource{workspaceResource, candidateResource},
-	)
-	if err != nil {
-		return JournalRecord{}, err
-	}
-	return journal.Append(appendRequest)
 }
 
 func (store *GenerationStore) relativePath(generation Digest) string {
