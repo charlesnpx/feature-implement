@@ -116,8 +116,6 @@ const (
 	JournalEventWorkspaceInitialized           JournalEventType = "workspace.initialized.v2"
 	JournalEventFeatureRefCreationIntended     JournalEventType = "feature_ref_creation_intended"
 	JournalEventFeatureRefCreated              JournalEventType = "feature_ref_created"
-	JournalEventCandidateStored                JournalEventType = "generation.candidate_stored.v2"
-	JournalEventGenerationActivated            JournalEventType = "generation.activated.v2"
 	JournalEventTailRecovered                  JournalEventType = "journal.tail_recovered.v2"
 	JournalEventAttemptReserved                JournalEventType = "attempt.reserved.v2"
 	JournalEventAttemptMaterializationIntended JournalEventType = "attempt.materialization_intended.v2"
@@ -222,109 +220,6 @@ func (event WorkspaceInitializedJournalEvent) WorktreeRoot() WorkspaceWorktreeRo
 	return event.worktreeRoot
 }
 
-type CandidateGenerationStoredJournalEvent struct {
-	workspaceID         ID
-	activeGeneration    Digest
-	candidateGeneration Digest
-	recovered           bool
-}
-
-func NewCandidateGenerationStoredJournalEvent(workspaceID ID, active, candidate Digest, recovered bool) (CandidateGenerationStoredJournalEvent, error) {
-	event := CandidateGenerationStoredJournalEvent{
-		workspaceID: workspaceID, activeGeneration: active,
-		candidateGeneration: candidate, recovered: recovered,
-	}
-	if err := event.validate(); err != nil {
-		return CandidateGenerationStoredJournalEvent{}, err
-	}
-	return event, nil
-}
-
-func (CandidateGenerationStoredJournalEvent) isWorkspaceJournalEvent() {}
-func (CandidateGenerationStoredJournalEvent) eventType() JournalEventType {
-	return JournalEventCandidateStored
-}
-func (event CandidateGenerationStoredJournalEvent) boundGeneration() Digest {
-	return event.activeGeneration
-}
-func (event CandidateGenerationStoredJournalEvent) validate() error {
-	if event.workspaceID.IsZero() || event.activeGeneration.IsZero() || event.candidateGeneration.IsZero() {
-		return fmt.Errorf("candidate storage requires workspace, active, and candidate generations")
-	}
-	if event.activeGeneration == event.candidateGeneration {
-		return fmt.Errorf("candidate generation must differ from the active generation")
-	}
-	return nil
-}
-func (event CandidateGenerationStoredJournalEvent) WorkspaceID() ID { return event.workspaceID }
-func (event CandidateGenerationStoredJournalEvent) ActiveGeneration() Digest {
-	return event.activeGeneration
-}
-func (event CandidateGenerationStoredJournalEvent) CandidateGeneration() Digest {
-	return event.candidateGeneration
-}
-func (event CandidateGenerationStoredJournalEvent) Recovered() bool { return event.recovered }
-
-type GenerationActivatedJournalEvent struct {
-	workspaceID        ID
-	priorGeneration    Digest
-	activeGeneration   Digest
-	comparisonDigest   Digest
-	ownerReceiptDigest Digest
-	history            RuntimeHistoryBinding
-	changedMergeUnits  []MergeUnitReference
-}
-
-func NewGenerationActivatedJournalEvent(
-	workspaceID ID,
-	prior, active, comparisonDigest, ownerReceiptDigest Digest,
-	history RuntimeHistoryBinding,
-	changed []MergeUnitReference,
-) (GenerationActivatedJournalEvent, error) {
-	normalized, err := normalizeMergeUnitReferences(changed)
-	if err != nil {
-		return GenerationActivatedJournalEvent{}, err
-	}
-	event := GenerationActivatedJournalEvent{
-		workspaceID: workspaceID, priorGeneration: prior, activeGeneration: active,
-		comparisonDigest: comparisonDigest, ownerReceiptDigest: ownerReceiptDigest,
-		history: history, changedMergeUnits: normalized,
-	}
-	if err := event.validate(); err != nil {
-		return GenerationActivatedJournalEvent{}, err
-	}
-	return event, nil
-}
-
-func (GenerationActivatedJournalEvent) isWorkspaceJournalEvent() {}
-func (GenerationActivatedJournalEvent) eventType() JournalEventType {
-	return JournalEventGenerationActivated
-}
-func (event GenerationActivatedJournalEvent) boundGeneration() Digest { return event.activeGeneration }
-func (event GenerationActivatedJournalEvent) validate() error {
-	if event.workspaceID.IsZero() || event.priorGeneration.IsZero() || event.activeGeneration.IsZero() ||
-		event.comparisonDigest.IsZero() || event.ownerReceiptDigest.IsZero() ||
-		event.history.budgets.IsZero() || event.history.approvals.IsZero() || event.history.evidence.IsZero() {
-		return fmt.Errorf("generation activation requires workspace, generation, comparison, owner receipt, and history bindings")
-	}
-	if event.priorGeneration == event.activeGeneration {
-		return fmt.Errorf("generation activation must change the active generation")
-	}
-	_, err := normalizeMergeUnitReferences(event.changedMergeUnits)
-	return err
-}
-func (event GenerationActivatedJournalEvent) WorkspaceID() ID          { return event.workspaceID }
-func (event GenerationActivatedJournalEvent) PriorGeneration() Digest  { return event.priorGeneration }
-func (event GenerationActivatedJournalEvent) ActiveGeneration() Digest { return event.activeGeneration }
-func (event GenerationActivatedJournalEvent) ComparisonDigest() Digest { return event.comparisonDigest }
-func (event GenerationActivatedJournalEvent) OwnerReceiptDigest() Digest {
-	return event.ownerReceiptDigest
-}
-func (event GenerationActivatedJournalEvent) History() RuntimeHistoryBinding { return event.history }
-func (event GenerationActivatedJournalEvent) ChangedMergeUnits() []MergeUnitReference {
-	return append([]MergeUnitReference(nil), event.changedMergeUnits...)
-}
-
 type JournalTailRecoveredEvent struct {
 	workspaceID   ID
 	generation    Digest
@@ -406,15 +301,9 @@ func newJournalAppend(
 		return JournalAppend{}, fmt.Errorf("unsupported workspace journal event %T", event)
 	}
 	if !privileged {
-		switch event := event.(type) {
-		case GenerationActivatedJournalEvent:
-			return JournalAppend{}, fmt.Errorf("generation activation must use the owner-authorized activation workflow")
+		switch event.(type) {
 		case JournalTailRecoveredEvent:
 			return JournalAppend{}, fmt.Errorf("journal recovery events must use the explicit recovery workflow")
-		case CandidateGenerationStoredJournalEvent:
-			if event.recovered {
-				return JournalAppend{}, fmt.Errorf("recovered candidates must use the orphan recovery workflow")
-			}
 		case AttemptOrchestrationAcknowledgedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("orchestration acknowledgements must use the idempotent acknowledgement workflow")
 		case AttemptNextGoalIntendedJournalEvent:
@@ -487,8 +376,7 @@ func newJournalAppend(
 
 func supportedWorkspaceJournalEvent(event WorkspaceJournalEvent) bool {
 	switch event.(type) {
-	case WorkspaceInitializedJournalEvent, CandidateGenerationStoredJournalEvent,
-		GenerationActivatedJournalEvent, JournalTailRecoveredEvent,
+	case WorkspaceInitializedJournalEvent, JournalTailRecoveredEvent,
 		FeatureRefCreationIntendedJournalEvent, FeatureRefCreatedJournalEvent:
 		return true
 	default:
@@ -508,18 +396,6 @@ func validateJournalEventResources(
 		expectedReads = []JournalResource{
 			WorkspaceJournalResource(event.workspaceID),
 			GenerationJournalResource(event.generation),
-		}
-		expectedWrites = append([]JournalResource(nil), expectedReads...)
-	case CandidateGenerationStoredJournalEvent:
-		expectedReads = []JournalResource{
-			WorkspaceJournalResource(event.workspaceID),
-			GenerationJournalResource(event.candidateGeneration),
-		}
-		expectedWrites = append([]JournalResource(nil), expectedReads...)
-	case GenerationActivatedJournalEvent:
-		expectedReads = []JournalResource{
-			WorkspaceJournalResource(event.workspaceID),
-			GenerationJournalResource(event.activeGeneration),
 		}
 		expectedWrites = append([]JournalResource(nil), expectedReads...)
 	case JournalTailRecoveredEvent:
@@ -638,30 +514,9 @@ func normalizeJournalWriteSet(values []JournalResource) ([]JournalResource, erro
 	return result, nil
 }
 
-func normalizeMergeUnitReferences(values []MergeUnitReference) ([]MergeUnitReference, error) {
-	result := append([]MergeUnitReference(nil), values...)
-	seen := make(map[string]struct{}, len(result))
-	for _, reference := range result {
-		if reference.planID.IsZero() || reference.mergeUnitID.IsZero() {
-			return nil, fmt.Errorf("changed merge unit reference is invalid")
-		}
-		if _, exists := seen[reference.key()]; exists {
-			return nil, fmt.Errorf("duplicate changed merge unit %s", reference.String())
-		}
-		seen[reference.key()] = struct{}{}
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].key() < result[j].key() })
-	return result, nil
-}
-
 func cloneWorkspaceJournalEvent(event WorkspaceJournalEvent) WorkspaceJournalEvent {
 	switch value := event.(type) {
 	case WorkspaceInitializedJournalEvent:
-		return value
-	case CandidateGenerationStoredJournalEvent:
-		return value
-	case GenerationActivatedJournalEvent:
-		value.changedMergeUnits = append([]MergeUnitReference(nil), value.changedMergeUnits...)
 		return value
 	case JournalTailRecoveredEvent:
 		return value

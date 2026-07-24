@@ -427,31 +427,6 @@ func reduceAuthorizationRuntime(
 			return AuthorizationRuntimeProjection{}, err
 		}
 		next.initialized, next.state = true, state
-	case CandidateGenerationStoredJournalEvent:
-		if !current.initialized || event.workspaceID != current.state.workspaceID ||
-			event.activeGeneration != current.state.generation {
-			return AuthorizationRuntimeProjection{}, fmt.Errorf("authorization projection candidate has stale bindings")
-		}
-		if !containsDigest(current.pendingCandidates, event.candidateGeneration) {
-			next.pendingCandidates = append(next.pendingCandidates, event.candidateGeneration)
-			sort.Slice(next.pendingCandidates, func(i, j int) bool {
-				return next.pendingCandidates[i].String() < next.pendingCandidates[j].String()
-			})
-		}
-		next.state.safety.reconciliationPending = true
-	case GenerationActivatedJournalEvent:
-		if !current.initialized || event.workspaceID != current.state.workspaceID ||
-			event.priorGeneration != current.state.generation || len(current.state.obligations) != 0 {
-			return AuthorizationRuntimeProjection{}, fmt.Errorf("authorization generation activation is stale or has reconciliation obligations")
-		}
-		next.state.generation = event.activeGeneration
-		next.state.epoch++
-		next.state.grants = nil
-		next.state.revokedGrantIDs = nil
-		next.state.completedSegments = nil
-		next.state.safety = AuthorizationSafetyState{}
-		next.pendingCandidates = removeDigest(next.pendingCandidates, event.activeGeneration)
-		next.state.safety.reconciliationPending = len(next.pendingCandidates) != 0
 	case AuthorizationGrantRecordedJournalEvent:
 		if !current.initialized || event.workspaceID != current.state.workspaceID || event.generation != current.state.generation {
 			return AuthorizationRuntimeProjection{}, fmt.Errorf("authorization grant journal event has stale bindings")
@@ -1081,14 +1056,4 @@ func cloneAuthorizationRuntime(source AuthorizationRuntimeProjection) Authorizat
 func cloneStandingGrant(grant StandingGrant) StandingGrant {
 	grant.scope = cloneStandingGrantScope(grant.scope)
 	return grant
-}
-
-func removeDigest(values []Digest, target Digest) []Digest {
-	result := make([]Digest, 0, len(values))
-	for _, value := range values {
-		if value != target {
-			result = append(result, value)
-		}
-	}
-	return result
 }

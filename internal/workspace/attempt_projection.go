@@ -5,6 +5,77 @@ import (
 	"fmt"
 )
 
+type AttemptRuntimePhase string
+
+const (
+	AttemptReserved        AttemptRuntimePhase = "reserved"
+	AttemptMaterializing   AttemptRuntimePhase = "materializing"
+	AttemptActive          AttemptRuntimePhase = "active"
+	AttemptPaused          AttemptRuntimePhase = "paused"
+	AttemptReviewExhausted AttemptRuntimePhase = "review_exhausted"
+	AttemptCompleted       AttemptRuntimePhase = "completed"
+	AttemptFailed          AttemptRuntimePhase = "failed"
+	AttemptAbandoned       AttemptRuntimePhase = "abandoned"
+)
+
+func (phase AttemptRuntimePhase) valid() bool {
+	switch phase {
+	case AttemptReserved, AttemptMaterializing, AttemptActive, AttemptPaused,
+		AttemptReviewExhausted, AttemptCompleted, AttemptFailed, AttemptAbandoned:
+		return true
+	default:
+		return false
+	}
+}
+
+func (phase AttemptRuntimePhase) nonterminal() bool {
+	return phase == AttemptReserved || phase == AttemptMaterializing ||
+		phase == AttemptActive || phase == AttemptPaused ||
+		phase == AttemptReviewExhausted
+}
+
+type AttemptGenerationBinding struct {
+	attemptID  ID
+	mergeUnit  MergeUnitReference
+	generation Digest
+	phase      AttemptRuntimePhase
+}
+
+func NewAttemptGenerationBinding(
+	attemptID ID,
+	mergeUnit MergeUnitReference,
+	generation Digest,
+	phase AttemptRuntimePhase,
+) (AttemptGenerationBinding, error) {
+	if attemptID.IsZero() || mergeUnit.planID.IsZero() ||
+		mergeUnit.mergeUnitID.IsZero() || generation.IsZero() ||
+		!phase.valid() {
+		return AttemptGenerationBinding{}, fmt.Errorf(
+			"attempt requires identity, merge unit, exact generation, and valid phase",
+		)
+	}
+	return AttemptGenerationBinding{
+		attemptID: attemptID, mergeUnit: mergeUnit,
+		generation: generation, phase: phase,
+	}, nil
+}
+
+func (attempt AttemptGenerationBinding) AttemptID() ID {
+	return attempt.attemptID
+}
+
+func (attempt AttemptGenerationBinding) MergeUnit() MergeUnitReference {
+	return attempt.mergeUnit
+}
+
+func (attempt AttemptGenerationBinding) Generation() Digest {
+	return attempt.generation
+}
+
+func (attempt AttemptGenerationBinding) Phase() AttemptRuntimePhase {
+	return attempt.phase
+}
+
 type RuntimeOrchestrationAcknowledgement struct {
 	record         uint64
 	kind           OrchestrationAcknowledgementKind

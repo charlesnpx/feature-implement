@@ -126,16 +126,6 @@ func TestProviderRevocationBetweenReservationAndDispatchPreventsBrokerCapability
 		record.EventType() != workspace.JournalEventProviderIntentAbandoned {
 		t.Fatalf("abandon revoked reservation = %#v record=%s err=%v", abandoned, record.EventType(), err)
 	}
-	projection, err = workspace.RebuildProviderRuntime(
-		mustJournalSnapshot(t, scenario.harness.journal), scenario.harness.definition,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	states := projection.ReconciliationStates()
-	if len(states) != 1 || !states[0].Resolved() {
-		t.Fatalf("abandoned reservation still blocks generation advancement: %#v", states)
-	}
 }
 
 func TestProviderDistinctReservedIntentsRaceAtDurableDispatchCAS(t *testing.T) {

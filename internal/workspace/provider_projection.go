@@ -115,29 +115,6 @@ func (projection ProviderRuntimeProjection) CompletionReceipts() []ProviderCompl
 	}
 	return result
 }
-func (projection ProviderRuntimeProjection) ReconciliationStates() []ProviderIntentRuntimeState {
-	result := make([]ProviderIntentRuntimeState, 0, len(projection.intents))
-	for _, intent := range projection.intents {
-		state, _ := NewProviderIntentRuntimeState(
-			intent.intent.intentID, intent.intent.scope.generation, intent.status.terminal(),
-		)
-		result = append(result, state)
-	}
-	return result
-}
-func (projection ProviderRuntimeProjection) QueueEntryStates() []QueueEntryRuntimeState {
-	result := make([]QueueEntryRuntimeState, 0, len(projection.intents))
-	for _, intent := range projection.intents {
-		if intent.dispatchRecord == 0 {
-			continue
-		}
-		state, _ := NewQueueEntryRuntimeState(
-			intent.intent.intentID, intent.intent.scope.generation, intent.status.terminal(),
-		)
-		result = append(result, state)
-	}
-	return result
-}
 
 func RebuildProviderRuntime(
 	snapshot JournalSnapshot,
@@ -203,17 +180,6 @@ func reduceProviderRuntime(
 		}
 		next.initialized, next.workspaceID, next.activeGeneration = true, event.workspaceID, event.generation
 		next.provider = definition.workspace.provider
-	case GenerationActivatedJournalEvent:
-		if !current.initialized || event.workspaceID != current.workspaceID ||
-			event.priorGeneration != current.activeGeneration {
-			return ProviderRuntimeProjection{}, fmt.Errorf("provider projection generation activation is stale")
-		}
-		for _, intent := range current.intents {
-			if !intent.status.terminal() {
-				return ProviderRuntimeProjection{}, fmt.Errorf("generation activation is blocked by unresolved provider intent %s", intent.intent.intentID)
-			}
-		}
-		next.activeGeneration = event.activeGeneration
 	case ProviderIntentReservedJournalEvent:
 		if !current.initialized || event.workspaceID != current.workspaceID ||
 			event.generation != current.activeGeneration || event.intent.scope.generation != current.activeGeneration {

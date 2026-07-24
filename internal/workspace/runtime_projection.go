@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"sort"
 )
 
 type ProjectionReducer[State any] func(State, JournalRecord) (State, error)
@@ -64,44 +63,6 @@ func VerifyReplayConformance[State any](
 	return DigestBytes(firstBytes), nil
 }
 
-type RuntimeCandidateProjection struct {
-	generation Digest
-	record     uint64
-	recovered  bool
-	activated  bool
-}
-
-func (candidate RuntimeCandidateProjection) Generation() Digest { return candidate.generation }
-func (candidate RuntimeCandidateProjection) Record() uint64     { return candidate.record }
-func (candidate RuntimeCandidateProjection) Recovered() bool    { return candidate.recovered }
-func (candidate RuntimeCandidateProjection) Activated() bool    { return candidate.activated }
-
-type RuntimeActivationProjection struct {
-	prior             Digest
-	active            Digest
-	record            uint64
-	comparisonDigest  Digest
-	ownerReceipt      Digest
-	history           RuntimeHistoryBinding
-	changedMergeUnits []MergeUnitReference
-}
-
-func (activation RuntimeActivationProjection) PriorGeneration() Digest  { return activation.prior }
-func (activation RuntimeActivationProjection) ActiveGeneration() Digest { return activation.active }
-func (activation RuntimeActivationProjection) Record() uint64           { return activation.record }
-func (activation RuntimeActivationProjection) ComparisonDigest() Digest {
-	return activation.comparisonDigest
-}
-func (activation RuntimeActivationProjection) OwnerReceiptDigest() Digest {
-	return activation.ownerReceipt
-}
-func (activation RuntimeActivationProjection) History() RuntimeHistoryBinding {
-	return activation.history
-}
-func (activation RuntimeActivationProjection) ChangedMergeUnits() []MergeUnitReference {
-	return append([]MergeUnitReference(nil), activation.changedMergeUnits...)
-}
-
 type RuntimeRecoveryProjection struct {
 	record        uint64
 	generation    Digest
@@ -149,16 +110,13 @@ func (projection RuntimeLocalTargetProjection) IsZero() bool {
 }
 
 type WorkspaceRuntimeProjection struct {
-	workspaceID       ID
-	activeGeneration  Digest
-	planCheckpoint    GitObjectID
-	worktreeRoot      WorkspaceWorktreeRootBinding
-	localTarget       RuntimeLocalTargetProjection
-	generationHistory []Digest
-	candidates        []RuntimeCandidateProjection
-	activations       []RuntimeActivationProjection
-	recoveries        []RuntimeRecoveryProjection
-	attempts          []RuntimeAttemptProjection
+	workspaceID      ID
+	activeGeneration Digest
+	planCheckpoint   GitObjectID
+	worktreeRoot     WorkspaceWorktreeRootBinding
+	localTarget      RuntimeLocalTargetProjection
+	recoveries       []RuntimeRecoveryProjection
+	attempts         []RuntimeAttemptProjection
 }
 
 func (projection WorkspaceRuntimeProjection) WorkspaceID() ID { return projection.workspaceID }
@@ -180,38 +138,8 @@ func (projection WorkspaceRuntimeProjection) LocalTarget() (
 	}
 	return projection.localTarget, true
 }
-func (projection WorkspaceRuntimeProjection) GenerationHistory() []Digest {
-	return append([]Digest(nil), projection.generationHistory...)
-}
-func (projection WorkspaceRuntimeProjection) Candidates() []RuntimeCandidateProjection {
-	return append([]RuntimeCandidateProjection(nil), projection.candidates...)
-}
-func (projection WorkspaceRuntimeProjection) Activations() []RuntimeActivationProjection {
-	result := append([]RuntimeActivationProjection(nil), projection.activations...)
-	for index := range result {
-		result[index].changedMergeUnits = append([]MergeUnitReference(nil), result[index].changedMergeUnits...)
-	}
-	return result
-}
 func (projection WorkspaceRuntimeProjection) Recoveries() []RuntimeRecoveryProjection {
 	return append([]RuntimeRecoveryProjection(nil), projection.recoveries...)
-}
-func (projection WorkspaceRuntimeProjection) HasCandidate(generation Digest) bool {
-	for _, candidate := range projection.candidates {
-		if candidate.generation == generation {
-			return true
-		}
-	}
-	return false
-}
-
-func (projection WorkspaceRuntimeProjection) HasActivatableCandidate(generation Digest) bool {
-	for _, candidate := range projection.candidates {
-		if candidate.generation == generation && !candidate.activated {
-			return true
-		}
-	}
-	return false
 }
 
 func RebuildWorkspaceRuntime(snapshot JournalSnapshot) (WorkspaceRuntimeProjection, error) {
@@ -250,9 +178,8 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 	}
 	switch event := record.event.(type) {
 	case WorkspaceInitializedJournalEvent:
-		if !current.activeGeneration.IsZero() || len(current.generationHistory) != 0 ||
-			!current.localTarget.IsZero() || len(current.candidates) != 0 ||
-			len(current.activations) != 0 || len(current.attempts) != 0 {
+		if !current.activeGeneration.IsZero() || !current.localTarget.IsZero() ||
+			len(current.attempts) != 0 {
 			return WorkspaceRuntimeProjection{}, fmt.Errorf("workspace initialization must be the first and only initialization event")
 		}
 		if current.workspaceID.IsZero() {
@@ -273,7 +200,6 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 		next.activeGeneration = event.generation
 		next.planCheckpoint = event.planCheckpoint
 		next.worktreeRoot = event.worktreeRoot
-		next.generationHistory = []Digest{event.generation}
 	case FeatureRefCreationIntendedJournalEvent:
 		if current.workspaceID != event.workspaceID ||
 			current.activeGeneration != event.generation {
@@ -309,43 +235,6 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 		}
 		next.localTarget.createdHead = event.head
 		next.localTarget.createdRecord = record.sequence
-	case CandidateGenerationStoredJournalEvent:
-		if current.workspaceID != event.workspaceID || current.activeGeneration != event.activeGeneration {
-			return WorkspaceRuntimeProjection{}, fmt.Errorf("candidate generation is not based on the active workspace generation")
-		}
-		if current.HasCandidate(event.candidateGeneration) || containsDigest(current.generationHistory, event.candidateGeneration) {
-			return WorkspaceRuntimeProjection{}, fmt.Errorf("candidate generation %s is already recorded", event.candidateGeneration)
-		}
-		next.candidates = append(next.candidates, RuntimeCandidateProjection{
-			generation: event.candidateGeneration, record: record.sequence, recovered: event.recovered,
-		})
-	case GenerationActivatedJournalEvent:
-		if current.workspaceID != event.workspaceID || current.activeGeneration != event.priorGeneration {
-			return WorkspaceRuntimeProjection{}, fmt.Errorf("generation activation has a stale prior generation")
-		}
-		candidateIndex := -1
-		for index, candidate := range current.candidates {
-			if candidate.generation == event.activeGeneration && !candidate.activated {
-				candidateIndex = index
-				break
-			}
-		}
-		if candidateIndex < 0 {
-			return WorkspaceRuntimeProjection{}, fmt.Errorf("generation activation references an unstaged candidate")
-		}
-		for _, attempt := range current.attempts {
-			if attempt.phase.nonterminal() {
-				return WorkspaceRuntimeProjection{}, fmt.Errorf("generation activation is blocked by nonterminal attempt %s", attempt.attemptID)
-			}
-		}
-		next.candidates[candidateIndex].activated = true
-		next.activeGeneration = event.activeGeneration
-		next.generationHistory = append(next.generationHistory, event.activeGeneration)
-		next.activations = append(next.activations, RuntimeActivationProjection{
-			prior: event.priorGeneration, active: event.activeGeneration, record: record.sequence,
-			comparisonDigest: event.comparisonDigest, ownerReceipt: event.ownerReceiptDigest,
-			history: event.history, changedMergeUnits: append([]MergeUnitReference(nil), event.changedMergeUnits...),
-		})
 	case JournalTailRecoveredEvent:
 		if current.activeGeneration.IsZero() {
 			if current.workspaceID.IsZero() {
@@ -445,35 +334,12 @@ func reduceReviewHeadAdoption(
 
 func cloneWorkspaceRuntime(source WorkspaceRuntimeProjection) WorkspaceRuntimeProjection {
 	result := source
-	result.generationHistory = append([]Digest(nil), source.generationHistory...)
-	result.candidates = append([]RuntimeCandidateProjection(nil), source.candidates...)
-	result.activations = append([]RuntimeActivationProjection(nil), source.activations...)
-	for index := range result.activations {
-		result.activations[index].changedMergeUnits = append([]MergeUnitReference(nil), source.activations[index].changedMergeUnits...)
-	}
 	result.recoveries = append([]RuntimeRecoveryProjection(nil), source.recoveries...)
 	result.attempts = cloneRuntimeAttempts(source.attempts)
 	return result
 }
 
 func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, error) {
-	type candidateJSON struct {
-		Generation string `json:"generation"`
-		Record     uint64 `json:"record"`
-		Recovered  bool   `json:"recovered"`
-		Activated  bool   `json:"activated"`
-	}
-	type activationJSON struct {
-		Prior             string                   `json:"prior_generation"`
-		Active            string                   `json:"active_generation"`
-		Record            uint64                   `json:"record"`
-		ComparisonDigest  string                   `json:"comparison_digest"`
-		OwnerReceipt      string                   `json:"owner_receipt_digest"`
-		BudgetHistory     string                   `json:"budget_history_digest"`
-		ApprovalHistory   string                   `json:"approval_history_digest"`
-		EvidenceHistory   string                   `json:"evidence_history_digest"`
-		ChangedMergeUnits []mergeUnitReferenceJSON `json:"changed_merge_units"`
-	}
 	type recoveryJSON struct {
 		Record        uint64 `json:"record"`
 		Generation    string `json:"generation"`
@@ -492,30 +358,24 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 		CreatedRecord uint64                 `json:"created_record,omitempty"`
 	}
 	type runtimeJSON struct {
-		SchemaVersion     int                  `json:"schema_version"`
-		WorkspaceID       string               `json:"workspace_id"`
-		ActiveGeneration  string               `json:"active_generation"`
-		PlanCheckpoint    string               `json:"plan_checkpoint,omitempty"`
-		WorktreeRoot      string               `json:"worktree_root"`
-		WorktreeIdentity  PlatformFileIdentity `json:"worktree_root_identity"`
-		LocalTarget       *localTargetJSON     `json:"local_target,omitempty"`
-		GenerationHistory []string             `json:"generation_history"`
-		Candidates        []candidateJSON      `json:"candidates"`
-		Activations       []activationJSON     `json:"activations"`
-		Recoveries        []recoveryJSON       `json:"recoveries"`
-		Attempts          []json.RawMessage    `json:"attempts"`
+		SchemaVersion    int                  `json:"schema_version"`
+		WorkspaceID      string               `json:"workspace_id"`
+		ActiveGeneration string               `json:"active_generation"`
+		PlanCheckpoint   string               `json:"plan_checkpoint,omitempty"`
+		WorktreeRoot     string               `json:"worktree_root"`
+		WorktreeIdentity PlatformFileIdentity `json:"worktree_root_identity"`
+		LocalTarget      *localTargetJSON     `json:"local_target,omitempty"`
+		Recoveries       []recoveryJSON       `json:"recoveries"`
+		Attempts         []json.RawMessage    `json:"attempts"`
 	}
 	value := runtimeJSON{
 		SchemaVersion: JournalSchemaVersion, WorkspaceID: projection.workspaceID.String(),
-		ActiveGeneration:  projection.activeGeneration.String(),
-		PlanCheckpoint:    projection.planCheckpoint.String(),
-		WorktreeRoot:      projection.worktreeRoot.Path(),
-		WorktreeIdentity:  projection.worktreeRoot.Identity(),
-		GenerationHistory: make([]string, 0, len(projection.generationHistory)),
-		Candidates:        make([]candidateJSON, 0, len(projection.candidates)),
-		Activations:       make([]activationJSON, 0, len(projection.activations)),
-		Recoveries:        make([]recoveryJSON, 0, len(projection.recoveries)),
-		Attempts:          make([]json.RawMessage, 0, len(projection.attempts)),
+		ActiveGeneration: projection.activeGeneration.String(),
+		PlanCheckpoint:   projection.planCheckpoint.String(),
+		WorktreeRoot:     projection.worktreeRoot.Path(),
+		WorktreeIdentity: projection.worktreeRoot.Identity(),
+		Recoveries:       make([]recoveryJSON, 0, len(projection.recoveries)),
+		Attempts:         make([]json.RawMessage, 0, len(projection.attempts)),
 	}
 	if !projection.localTarget.IsZero() {
 		value.LocalTarget = &localTargetJSON{
@@ -529,27 +389,6 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 			CreatedHead:   projection.localTarget.createdHead.String(),
 			CreatedRecord: projection.localTarget.createdRecord,
 		}
-	}
-	for _, generation := range projection.generationHistory {
-		value.GenerationHistory = append(value.GenerationHistory, generation.String())
-	}
-	for _, candidate := range projection.candidates {
-		value.Candidates = append(value.Candidates, candidateJSON{
-			Generation: candidate.generation.String(), Record: candidate.record,
-			Recovered: candidate.recovered, Activated: candidate.activated,
-		})
-	}
-	for _, activation := range projection.activations {
-		changed := make([]mergeUnitReferenceJSON, 0, len(activation.changedMergeUnits))
-		for _, reference := range activation.changedMergeUnits {
-			changed = append(changed, mergeUnitReferenceJSON{PlanID: reference.planID.String(), MergeUnitID: reference.mergeUnitID.String()})
-		}
-		value.Activations = append(value.Activations, activationJSON{
-			Prior: activation.prior.String(), Active: activation.active.String(), Record: activation.record,
-			ComparisonDigest: activation.comparisonDigest.String(), OwnerReceipt: activation.ownerReceipt.String(),
-			BudgetHistory: activation.history.budgets.String(), ApprovalHistory: activation.history.approvals.String(),
-			EvidenceHistory: activation.history.evidence.String(), ChangedMergeUnits: changed,
-		})
 	}
 	for _, recovery := range projection.recoveries {
 		value.Recoveries = append(value.Recoveries, recoveryJSON{
@@ -575,13 +414,4 @@ func containsDigest(values []Digest, wanted Digest) bool {
 		}
 	}
 	return false
-}
-
-func sortedCandidateGenerations(projection WorkspaceRuntimeProjection) []Digest {
-	result := make([]Digest, 0, len(projection.candidates))
-	for _, candidate := range projection.candidates {
-		result = append(result, candidate.generation)
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].String() < result[j].String() })
-	return result
 }

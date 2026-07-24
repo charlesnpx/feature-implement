@@ -350,24 +350,34 @@ func TestWorkspaceJournalMultiProcessCASAllowsOneWinner(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T01:00:00Z")); err != nil {
+	store, err := workspace.OpenGenerationStore(workspaceDir)
+	if err != nil {
 		t.Fatal(err)
 	}
-	newCommand := func(label string, output *bytes.Buffer) *exec.Cmd {
+	stored, err := store.Store(definition)
+	if closeErr := store.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktreeRoot := t.TempDir()
+	newCommand := func(output *bytes.Buffer) *exec.Cmd {
 		command := exec.Command(os.Args[0], "-test.run=^TestWorkspaceJournalCASSubprocess$")
 		command.Env = append(
 			os.Environ(),
 			"WORKSPACE_JOURNAL_CAS_HELPER="+workspaceDir,
-			"WORKSPACE_JOURNAL_CAS_LABEL="+label,
 			"WORKSPACE_JOURNAL_CAS_ACTIVE="+definition.Generation().String(),
+			"WORKSPACE_JOURNAL_CAS_DEFINITION="+stored.DefinitionDigest().String(),
+			"WORKSPACE_JOURNAL_CAS_WORKTREE_ROOT="+worktreeRoot,
 		)
 		command.Stdout = output
 		command.Stderr = output
 		return command
 	}
 	var firstOutput, secondOutput bytes.Buffer
-	first := newCommand("candidate-one", &firstOutput)
-	second := newCommand("candidate-two", &secondOutput)
+	first := newCommand(&firstOutput)
+	second := newCommand(&secondOutput)
 	if err := first.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -388,7 +398,14 @@ func TestWorkspaceJournalMultiProcessCASAllowsOneWinner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Records()) != 4 || snapshot.Revision(workspace.WorkspaceJournalResource(definition.Workspace().ID())) != 4 {
+	if len(snapshot.Records()) != 1 ||
+		snapshot.Records()[0].EventType() !=
+			workspace.JournalEventWorkspaceInitialized ||
+		snapshot.Revision(
+			workspace.WorkspaceJournalResource(
+				definition.Workspace().ID(),
+			),
+		) != 1 {
 		t.Fatalf("multi-process CAS journal = %#v", snapshot.Records())
 	}
 }
@@ -402,7 +419,13 @@ func TestWorkspaceJournalCASSubprocess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	label := os.Getenv("WORKSPACE_JOURNAL_CAS_LABEL")
+	definitionDigest, err := workspace.ParseDigest(
+		os.Getenv("WORKSPACE_JOURNAL_CAS_DEFINITION"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktreeRoot := os.Getenv("WORKSPACE_JOURNAL_CAS_WORKTREE_ROOT")
 	var journal *workspace.WorkspaceJournal
 	for attempt := 0; attempt < 200; attempt++ {
 		journal, err = workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
@@ -419,19 +442,35 @@ func TestWorkspaceJournalCASSubprocess(t *testing.T) {
 	}
 	defer journal.Close()
 	workspaceID := workspace.MustID("example-workspace")
-	candidate := workspace.DigestBytes([]byte(label))
-	event, err := workspace.NewCandidateGenerationStoredJournalEvent(workspaceID, active, candidate, false)
+	event, err := workspace.NewWorkspaceInitializedJournalEvent(
+		workspaceID,
+		active,
+		definitionDigest,
+		testWorktreeRootBinding(t, worktreeRoot),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	workspaceResource := workspace.WorkspaceJournalResource(workspaceID)
-	candidateResource := workspace.GenerationJournalResource(candidate)
-	workspaceRevision, _ := workspace.NewJournalResourceRevision(workspaceResource, 3)
-	candidateRevision, _ := workspace.NewJournalResourceRevision(candidateResource, 0)
+	generationResource := workspace.GenerationJournalResource(active)
+	workspaceRevision, _ := workspace.NewJournalResourceRevision(
+		workspaceResource,
+		0,
+	)
+	generationRevision, _ := workspace.NewJournalResourceRevision(
+		generationResource,
+		0,
+	)
 	request, err := workspace.NewJournalAppend(
 		event, mustTime(t, "2026-07-21T01:01:00Z"),
-		[]workspace.JournalResourceRevision{workspaceRevision, candidateRevision},
-		[]workspace.JournalResource{workspaceResource, candidateResource},
+		[]workspace.JournalResourceRevision{
+			workspaceRevision,
+			generationRevision,
+		},
+		[]workspace.JournalResource{
+			workspaceResource,
+			generationResource,
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -460,19 +499,31 @@ func TestJournalCASRejectsStaleResourceWithoutAppending(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer journal.Close()
-	candidate := workspace.DigestBytes([]byte("candidate"))
-	event, err := workspace.NewCandidateGenerationStoredJournalEvent(definition.Workspace().ID(), definition.Generation(), candidate, false)
+	event, err := workspace.NewWorkspaceInitializedJournalEvent(
+		definition.Workspace().ID(),
+		definition.Generation(),
+		result.StoredGeneration().DefinitionDigest(),
+		result.Runtime().WorktreeRoot(),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	workspaceResource := workspace.WorkspaceJournalResource(definition.Workspace().ID())
-	candidateResource := workspace.GenerationJournalResource(candidate)
+	generationResource := workspace.GenerationJournalResource(
+		definition.Generation(),
+	)
 	stale, _ := workspace.NewJournalResourceRevision(workspaceResource, 0)
-	candidateRevision, _ := workspace.NewJournalResourceRevision(candidateResource, 0)
+	generationRevision, _ := workspace.NewJournalResourceRevision(
+		generationResource,
+		result.Snapshot().Revision(generationResource),
+	)
 	request, err := workspace.NewJournalAppend(
 		event, mustTime(t, "2026-07-21T01:01:00Z"),
-		[]workspace.JournalResourceRevision{stale, candidateRevision},
-		[]workspace.JournalResource{workspaceResource, candidateResource},
+		[]workspace.JournalResourceRevision{stale, generationRevision},
+		[]workspace.JournalResource{
+			workspaceResource,
+			generationResource,
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -520,62 +571,55 @@ func TestJournalRejectsInvalidEventResourceSetsAndRuntimeTransitions(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidate := workspace.DigestBytes([]byte("candidate"))
-	event, err := workspace.NewCandidateGenerationStoredJournalEvent(
-		definition.Workspace().ID(), definition.Generation(), candidate, false,
+	event, err := workspace.NewWorkspaceInitializedJournalEvent(
+		definition.Workspace().ID(),
+		definition.Generation(),
+		initialized.StoredGeneration().DefinitionDigest(),
+		initialized.Runtime().WorktreeRoot(),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	workspaceResource := workspace.WorkspaceJournalResource(definition.Workspace().ID())
-	candidateResource := workspace.GenerationJournalResource(candidate)
+	generationResource := workspace.GenerationJournalResource(
+		definition.Generation(),
+	)
 	workspaceRevision, _ := workspace.NewJournalResourceRevision(workspaceResource, snapshot.Revision(workspaceResource))
-	candidateRevision, _ := workspace.NewJournalResourceRevision(candidateResource, snapshot.Revision(candidateResource))
+	generationRevision, _ := workspace.NewJournalResourceRevision(
+		generationResource,
+		snapshot.Revision(generationResource),
+	)
 	if _, err := workspace.NewJournalAppend(
 		event,
 		mustTime(t, "2026-07-21T01:01:00Z"),
-		[]workspace.JournalResourceRevision{workspaceRevision, candidateRevision},
-		[]workspace.JournalResource{candidateResource},
+		[]workspace.JournalResourceRevision{
+			workspaceRevision,
+			generationRevision,
+		},
+		[]workspace.JournalResource{generationResource},
 	); err == nil || !strings.Contains(err.Error(), "invalid CAS resource set") {
 		t.Fatalf("incomplete event resource set error = %v", err)
 	}
-	activation, err := workspace.NewGenerationActivatedJournalEvent(
-		definition.Workspace().ID(),
-		definition.Generation(),
-		candidate,
-		workspace.DigestBytes([]byte("comparison")),
-		workspace.DigestBytes([]byte("owner-receipt")),
-		workspace.EmptyRuntimeHistoryBinding(),
-		nil,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := workspace.NewJournalAppend(
-		activation,
-		mustTime(t, "2026-07-21T01:01:00Z"),
-		[]workspace.JournalResourceRevision{workspaceRevision, candidateRevision},
-		[]workspace.JournalResource{workspaceResource, candidateResource},
-	); err == nil || !strings.Contains(err.Error(), "owner-authorized activation workflow") {
-		t.Fatalf("direct activation append error = %v", err)
-	}
-
-	staleEvent, err := workspace.NewCandidateGenerationStoredJournalEvent(
-		definition.Workspace().ID(), workspace.DigestBytes([]byte("stale-active")), candidate, false,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
 	request, err := workspace.NewJournalAppend(
-		staleEvent,
+		event,
 		mustTime(t, "2026-07-21T01:01:00Z"),
-		[]workspace.JournalResourceRevision{workspaceRevision, candidateRevision},
-		[]workspace.JournalResource{workspaceResource, candidateResource},
+		[]workspace.JournalResourceRevision{
+			workspaceRevision,
+			generationRevision,
+		},
+		[]workspace.JournalResource{
+			workspaceResource,
+			generationResource,
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := journal.Append(request); err == nil || !strings.Contains(err.Error(), "active workspace generation") {
+	if _, err := journal.Append(request); err == nil ||
+		!strings.Contains(
+			err.Error(),
+			"initialization must be the first",
+		) {
 		t.Fatalf("invalid runtime transition error = %v", err)
 	}
 	after, err := journal.ReadSnapshot()
@@ -697,11 +741,19 @@ func TestJournalFailpointsDistinguishIncompleteAndCompleteAppends(t *testing.T) 
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T01:00:00Z")); err != nil {
+	store, err := workspace.OpenGenerationStore(workspaceDir)
+	if err != nil {
 		t.Fatal(err)
 	}
+	stored, err := store.Store(definition)
+	if closeErr := store.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktreeRoot := testWorktreeRootBinding(t, t.TempDir())
 
-	candidateOne := workspace.DigestBytes([]byte("candidate-one"))
 	faulty, err := workspace.OpenWorkspaceJournalWithOptions(workspaceDir, workspace.JournalReadWrite, workspace.JournalOptions{
 		FaultInjector: func(point workspace.JournalFaultPoint) error {
 			if point == workspace.JournalFaultAfterAppendPrefix {
@@ -717,7 +769,15 @@ func TestJournalFailpointsDistinguishIncompleteAndCompleteAppends(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := candidateJournalAppend(t, snapshot, definition.Workspace().ID(), definition.Generation(), candidateOne, mustTime(t, "2026-07-21T01:01:00Z"))
+	request := initializationJournalAppend(
+		t,
+		snapshot,
+		definition.Workspace().ID(),
+		definition.Generation(),
+		stored.DefinitionDigest(),
+		worktreeRoot,
+		mustTime(t, "2026-07-21T01:01:00Z"),
+	)
 	if _, err := faulty.Append(request); err == nil || !strings.Contains(err.Error(), string(workspace.JournalFaultAfterAppendPrefix)) {
 		t.Fatalf("partial append failpoint error = %v", err)
 	}
@@ -738,7 +798,6 @@ func TestJournalFailpointsDistinguishIncompleteAndCompleteAppends(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	candidateTwo := workspace.DigestBytes([]byte("candidate-two"))
 	beforeSync, err := workspace.OpenWorkspaceJournalWithOptions(workspaceDir, workspace.JournalReadWrite, workspace.JournalOptions{
 		FaultInjector: func(point workspace.JournalFaultPoint) error {
 			if point == workspace.JournalFaultBeforeFileSync {
@@ -754,7 +813,15 @@ func TestJournalFailpointsDistinguishIncompleteAndCompleteAppends(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	request = candidateJournalAppend(t, snapshot, definition.Workspace().ID(), definition.Generation(), candidateTwo, mustTime(t, "2026-07-21T01:03:00Z"))
+	request = initializationJournalAppend(
+		t,
+		snapshot,
+		definition.Workspace().ID(),
+		definition.Generation(),
+		stored.DefinitionDigest(),
+		worktreeRoot,
+		mustTime(t, "2026-07-21T01:03:00Z"),
+	)
 	if _, err := beforeSync.Append(request); err == nil || !strings.Contains(err.Error(), string(workspace.JournalFaultBeforeFileSync)) {
 		t.Fatalf("before-sync failpoint error = %v", err)
 	} else {
@@ -771,7 +838,7 @@ func TestJournalFailpointsDistinguishIncompleteAndCompleteAppends(t *testing.T) 
 		t.Fatalf("complete but unsynced append should be reconciled as a complete record: %v", err)
 	}
 	last := complete.Records()[len(complete.Records())-1]
-	if last.EventType() != workspace.JournalEventCandidateStored {
+	if last.EventType() != workspace.JournalEventWorkspaceInitialized {
 		t.Fatalf("complete failpoint record = %#v", last)
 	}
 }
@@ -863,17 +930,28 @@ func TestJournalSubprocessCrashesAroundAppendAndFsync(t *testing.T) {
 			fixture := newDefinitionFixture(t)
 			definition := mustDefinition(t, fixture.sources)
 			workspaceDir := t.TempDir()
-			if _, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T01:00:00Z")); err != nil {
+			store, err := workspace.OpenGenerationStore(workspaceDir)
+			if err != nil {
 				t.Fatal(err)
 			}
+			stored, err := store.Store(definition)
+			if closeErr := store.Close(); err == nil {
+				err = closeErr
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			worktreeRoot := t.TempDir()
 			command := exec.Command(os.Args[0], "-test.run=^TestWorkspaceJournalCrashSubprocess$")
 			command.Env = append(
 				os.Environ(),
 				"WORKSPACE_JOURNAL_CRASH_HELPER="+workspaceDir,
 				"WORKSPACE_JOURNAL_CRASH_POINT="+string(faultPoint),
 				"WORKSPACE_JOURNAL_CRASH_ACTIVE="+definition.Generation().String(),
+				"WORKSPACE_JOURNAL_CRASH_DEFINITION="+stored.DefinitionDigest().String(),
+				"WORKSPACE_JOURNAL_CRASH_WORKTREE_ROOT="+worktreeRoot,
 			)
-			err := command.Run()
+			err = command.Run()
 			var exitError *exec.ExitError
 			if !errors.As(err, &exitError) || exitError.ExitCode() != 73 {
 				t.Fatalf("crash subprocess exit = %v", err)
@@ -895,7 +973,9 @@ func TestJournalSubprocessCrashesAroundAppendAndFsync(t *testing.T) {
 				return
 			}
 			snapshot, err := workspace.ReadWorkspaceJournalSnapshot(workspaceDir)
-			if err != nil || len(snapshot.Records()) != 4 || snapshot.Records()[3].EventType() != workspace.JournalEventCandidateStored {
+			if err != nil || len(snapshot.Records()) != 1 ||
+				snapshot.Records()[0].EventType() !=
+					workspace.JournalEventWorkspaceInitialized {
 				t.Fatalf("complete subprocess append = %#v, %v", snapshot.Records(), err)
 			}
 		})
@@ -1027,6 +1107,12 @@ func TestWorkspaceJournalCrashSubprocess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	definitionDigest, err := workspace.ParseDigest(
+		os.Getenv("WORKSPACE_JOURNAL_CRASH_DEFINITION"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	faultPoint := workspace.JournalFaultPoint(os.Getenv("WORKSPACE_JOURNAL_CRASH_POINT"))
 	journal, err := workspace.OpenWorkspaceJournalWithOptions(workspaceDir, workspace.JournalReadWrite, workspace.JournalOptions{
 		FaultInjector: func(point workspace.JournalFaultPoint) error {
@@ -1043,9 +1129,17 @@ func TestWorkspaceJournalCrashSubprocess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := candidateJournalAppend(
-		t, snapshot, workspace.MustID("example-workspace"), active,
-		workspace.DigestBytes([]byte("subprocess-candidate")), mustTime(t, "2026-07-21T01:01:00Z"),
+	request := initializationJournalAppend(
+		t,
+		snapshot,
+		workspace.MustID("example-workspace"),
+		active,
+		definitionDigest,
+		testWorktreeRootBinding(
+			t,
+			os.Getenv("WORKSPACE_JOURNAL_CRASH_WORKTREE_ROOT"),
+		),
+		mustTime(t, "2026-07-21T01:01:00Z"),
 	)
 	_, _ = journal.Append(request)
 	t.Fatal("crash failpoint was not reached")
@@ -1087,26 +1181,42 @@ func TestJournalRejectsOversizedAndNonCanonicalCompleteRecords(t *testing.T) {
 	}
 }
 
-func candidateJournalAppend(
+func initializationJournalAppend(
 	t *testing.T,
 	snapshot workspace.JournalSnapshot,
 	workspaceID workspace.ID,
-	active, candidate workspace.Digest,
+	generation workspace.Digest,
+	definitionDigest workspace.Digest,
+	worktreeRoot workspace.WorkspaceWorktreeRootBinding,
 	occurredAt time.Time,
 ) workspace.JournalAppend {
 	t.Helper()
-	event, err := workspace.NewCandidateGenerationStoredJournalEvent(workspaceID, active, candidate, false)
+	event, err := workspace.NewWorkspaceInitializedJournalEvent(
+		workspaceID,
+		generation,
+		definitionDigest,
+		worktreeRoot,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	workspaceResource := workspace.WorkspaceJournalResource(workspaceID)
-	candidateResource := workspace.GenerationJournalResource(candidate)
+	generationResource := workspace.GenerationJournalResource(generation)
 	workspaceRevision, _ := workspace.NewJournalResourceRevision(workspaceResource, snapshot.Revision(workspaceResource))
-	candidateRevision, _ := workspace.NewJournalResourceRevision(candidateResource, snapshot.Revision(candidateResource))
+	generationRevision, _ := workspace.NewJournalResourceRevision(
+		generationResource,
+		snapshot.Revision(generationResource),
+	)
 	request, err := workspace.NewJournalAppend(
 		event, occurredAt,
-		[]workspace.JournalResourceRevision{workspaceRevision, candidateRevision},
-		[]workspace.JournalResource{workspaceResource, candidateResource},
+		[]workspace.JournalResourceRevision{
+			workspaceRevision,
+			generationRevision,
+		},
+		[]workspace.JournalResource{
+			workspaceResource,
+			generationResource,
+		},
 	)
 	if err != nil {
 		t.Fatal(err)

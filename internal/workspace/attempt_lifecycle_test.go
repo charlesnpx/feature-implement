@@ -1787,59 +1787,6 @@ func TestSerialSegmentsFenceOnlyMatchingSegments(t *testing.T) {
 	}
 }
 
-func TestReconciliationConsultsJournalProjectedAttempts(t *testing.T) {
-	fixture := newDefinitionFixture(t)
-	active := mustDefinition(t, fixture.sources)
-	candidate := mustProspectiveCandidate(t, fixture)
-	workspaceDir := t.TempDir()
-	if _, err := initializeWorkspaceV2(t, workspaceDir, active, mustTime(t, "2026-07-21T14:00:00Z")); err != nil {
-		t.Fatal(err)
-	}
-	store, err := workspace.OpenGenerationStore(workspaceDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer journal.Close()
-	if _, err := store.StageCandidate(journal, candidate, mustTime(t, "2026-07-21T14:01:00Z")); err != nil {
-		t.Fatal(err)
-	}
-	goal, _ := workspace.NewGoalBinding(workspace.MustID("reconcile-goal"), workspace.GoalScopeMergeUnit)
-	if _, err := workspace.ReserveAttempt(
-		context.Background(), journal, active, &fakeAttemptGit{},
-		workspace.ReserveAttemptRequest{
-			MergeUnit: mustMergeUnitReference(t, "alpha-plan", "unit-one"), AttemptNumber: 1,
-			Goal: goal, OccurredAt: mustTime(t, "2026-07-21T14:02:00Z"),
-		},
-	); err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := journal.ReadSnapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	completed, _ := workspace.NewMergeUnitRuntimeState(
-		mustMergeUnitReference(t, "alpha-plan", "unit-one"), workspace.MergeUnitCompleted, active.Generation(),
-	)
-	future, _ := workspace.NewMergeUnitRuntimeState(
-		mustMergeUnitReference(t, "alpha-plan", "unit-two"), workspace.MergeUnitFuture, workspace.Digest{},
-	)
-	state, err := workspace.NewReconciliationState(
-		snapshot, []workspace.MergeUnitRuntimeState{completed, future}, nil, nil, nil,
-		workspace.EmptyRuntimeHistoryBinding(),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := workspace.DryRunReconciliation(active, candidate, snapshot, state); err == nil ||
-		!strings.Contains(err.Error(), "journal-projected nonterminal attempt") {
-		t.Fatalf("reconciliation ignored journal attempt: %v", err)
-	}
-}
-
 type boundaryVerifier struct {
 	expectedRequest workspace.Digest
 	calls           int

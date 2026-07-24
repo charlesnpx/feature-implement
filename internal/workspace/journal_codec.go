@@ -54,30 +54,6 @@ type workspaceInitializedPayloadWire struct {
 	WorktreeRootIdentity PlatformFileIdentity `json:"worktree_root_identity"`
 }
 
-type candidateStoredPayloadWire struct {
-	WorkspaceID         string `json:"workspace_id"`
-	ActiveGeneration    string `json:"active_generation"`
-	CandidateGeneration string `json:"candidate_generation"`
-	Recovered           bool   `json:"recovered"`
-}
-
-type mergeUnitReferenceJSON struct {
-	PlanID      string `json:"plan_id"`
-	MergeUnitID string `json:"merge_unit_id"`
-}
-
-type generationActivatedPayloadWire struct {
-	WorkspaceID        string                   `json:"workspace_id"`
-	PriorGeneration    string                   `json:"prior_generation"`
-	ActiveGeneration   string                   `json:"active_generation"`
-	ComparisonDigest   string                   `json:"comparison_digest"`
-	OwnerReceiptDigest string                   `json:"owner_receipt_digest"`
-	BudgetHistory      string                   `json:"budget_history_digest"`
-	ApprovalHistory    string                   `json:"approval_history_digest"`
-	EvidenceHistory    string                   `json:"evidence_history_digest"`
-	ChangedMergeUnits  []mergeUnitReferenceJSON `json:"changed_merge_units"`
-}
-
 type journalTailRecoveredPayloadWire struct {
 	WorkspaceID   string `json:"workspace_id"`
 	Generation    string `json:"generation"`
@@ -184,23 +160,6 @@ func marshalWorkspaceJournalEvent(event WorkspaceJournalEvent) (json.RawMessage,
 			DefinitionDigest: event.definitionDigest.String(), PlanCheckpoint: event.planCheckpoint.String(),
 			WorktreeRoot:         event.worktreeRoot.Path(),
 			WorktreeRootIdentity: event.worktreeRoot.Identity(),
-		}
-	case CandidateGenerationStoredJournalEvent:
-		value = candidateStoredPayloadWire{
-			WorkspaceID: event.workspaceID.String(), ActiveGeneration: event.activeGeneration.String(),
-			CandidateGeneration: event.candidateGeneration.String(), Recovered: event.recovered,
-		}
-	case GenerationActivatedJournalEvent:
-		changed := make([]mergeUnitReferenceJSON, 0, len(event.changedMergeUnits))
-		for _, reference := range event.changedMergeUnits {
-			changed = append(changed, mergeUnitReferenceJSON{PlanID: reference.planID.String(), MergeUnitID: reference.mergeUnitID.String()})
-		}
-		value = generationActivatedPayloadWire{
-			WorkspaceID: event.workspaceID.String(), PriorGeneration: event.priorGeneration.String(),
-			ActiveGeneration: event.activeGeneration.String(), ComparisonDigest: event.comparisonDigest.String(),
-			OwnerReceiptDigest: event.ownerReceiptDigest.String(),
-			BudgetHistory:      event.history.budgets.String(), ApprovalHistory: event.history.approvals.String(),
-			EvidenceHistory: event.history.evidence.String(), ChangedMergeUnits: changed,
 		}
 	case JournalTailRecoveredEvent:
 		value = journalTailRecoveredPayloadWire{
@@ -381,79 +340,6 @@ func decodeWorkspaceJournalEvent(eventType JournalEventType, payload json.RawMes
 			workspaceID, generation, definitionDigest,
 			worktreeRoot, checkpoint...,
 		)
-	case JournalEventCandidateStored:
-		var wire candidateStoredPayloadWire
-		if err := decodeStrictJSON(payload, &wire); err != nil {
-			return nil, fmt.Errorf("decode candidate storage: %w", err)
-		}
-		workspaceID, err := NewID(wire.WorkspaceID)
-		if err != nil {
-			return nil, err
-		}
-		active, err := ParseDigest(wire.ActiveGeneration)
-		if err != nil {
-			return nil, err
-		}
-		candidate, err := ParseDigest(wire.CandidateGeneration)
-		if err != nil {
-			return nil, err
-		}
-		return NewCandidateGenerationStoredJournalEvent(workspaceID, active, candidate, wire.Recovered)
-	case JournalEventGenerationActivated:
-		var wire generationActivatedPayloadWire
-		if err := decodeStrictJSON(payload, &wire); err != nil {
-			return nil, fmt.Errorf("decode generation activation: %w", err)
-		}
-		workspaceID, err := NewID(wire.WorkspaceID)
-		if err != nil {
-			return nil, err
-		}
-		prior, err := ParseDigest(wire.PriorGeneration)
-		if err != nil {
-			return nil, err
-		}
-		active, err := ParseDigest(wire.ActiveGeneration)
-		if err != nil {
-			return nil, err
-		}
-		comparison, err := ParseDigest(wire.ComparisonDigest)
-		if err != nil {
-			return nil, err
-		}
-		receipt, err := ParseDigest(wire.OwnerReceiptDigest)
-		if err != nil {
-			return nil, err
-		}
-		budgetHistory, err := ParseDigest(wire.BudgetHistory)
-		if err != nil {
-			return nil, err
-		}
-		approvalHistory, err := ParseDigest(wire.ApprovalHistory)
-		if err != nil {
-			return nil, err
-		}
-		evidenceHistory, err := ParseDigest(wire.EvidenceHistory)
-		if err != nil {
-			return nil, err
-		}
-		history, err := NewRuntimeHistoryBinding(budgetHistory, approvalHistory, evidenceHistory)
-		if err != nil {
-			return nil, err
-		}
-		changed := make([]MergeUnitReference, 0, len(wire.ChangedMergeUnits))
-		for _, value := range wire.ChangedMergeUnits {
-			planID, err := NewID(value.PlanID)
-			if err != nil {
-				return nil, err
-			}
-			unitID, err := NewID(value.MergeUnitID)
-			if err != nil {
-				return nil, err
-			}
-			reference, _ := NewMergeUnitReference(planID, unitID)
-			changed = append(changed, reference)
-		}
-		return NewGenerationActivatedJournalEvent(workspaceID, prior, active, comparison, receipt, history, changed)
 	case JournalEventTailRecovered:
 		var wire journalTailRecoveredPayloadWire
 		if err := decodeStrictJSON(payload, &wire); err != nil {

@@ -18,14 +18,13 @@ const requestSchemaVersion = 2
 const MaxCommandInputBytes = workspace.MaxArtifactBytes
 
 type Options struct {
-	Action             string
-	Subaction          string
-	BundleDir          string
-	CandidateBundleDir string
-	WorkspaceDir       string
-	Input              []byte
-	WriteLocks         bool
-	GeneratorVersion   string
+	Action           string
+	Subaction        string
+	BundleDir        string
+	WorkspaceDir     string
+	Input            []byte
+	WriteLocks       bool
+	GeneratorVersion string
 }
 
 type ValidationResult struct {
