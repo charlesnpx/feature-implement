@@ -408,7 +408,6 @@ type VerifiedReviewResult struct {
 	request           ReviewRequest
 	submission        ReviewResultSubmission
 	reservationDigest Digest
-	receiptDigest     Digest
 }
 
 func (result VerifiedReviewResult) Request() ReviewRequest { return result.request }
@@ -416,7 +415,6 @@ func (result VerifiedReviewResult) Submission() ReviewResultSubmission {
 	return cloneReviewResult(result.submission)
 }
 func (result VerifiedReviewResult) ReservationDigest() Digest { return result.reservationDigest }
-func (result VerifiedReviewResult) ReceiptDigest() Digest     { return result.receiptDigest }
 
 type ReviewRoundState struct {
 	ordinal      uint16
@@ -683,23 +681,23 @@ type RecordReviewResult struct {
 	invocation        uint16
 	reservationDigest Digest
 	result            ReviewResultSubmission
-	receiptDigest     Digest
 }
 
 func NewRecordReviewResult(
 	round, profileOrdinal, invocation uint16,
 	reservationDigest Digest,
 	result ReviewResultSubmission,
-	receiptDigest Digest,
 ) (RecordReviewResult, error) {
 	canonical, err := canonicalReviewResult(result)
 	if round == 0 || profileOrdinal == 0 || invocation == 0 || err != nil ||
-		reservationDigest.IsZero() || result.digest != DigestBytes(canonical) || receiptDigest.IsZero() {
-		return RecordReviewResult{}, fmt.Errorf("review result record requires canonical signed result bindings")
+		reservationDigest.IsZero() || result.digest != DigestBytes(canonical) {
+		return RecordReviewResult{}, fmt.Errorf(
+			"review result record requires canonical local result bindings",
+		)
 	}
 	return RecordReviewResult{
 		round: round, profileOrdinal: profileOrdinal, invocation: invocation, reservationDigest: reservationDigest,
-		result: cloneReviewResult(result), receiptDigest: receiptDigest,
+		result: cloneReviewResult(result),
 	}, nil
 }
 func (RecordReviewResult) isReviewEvent() {}
@@ -848,7 +846,7 @@ func ReduceReview(current ReviewState, event ReviewEvent) (ReviewState, error) {
 		}
 		verified := VerifiedReviewResult{
 			request: request, submission: cloneReviewResult(value.result),
-			reservationDigest: value.reservationDigest, receiptDigest: value.receiptDigest,
+			reservationDigest: value.reservationDigest,
 		}
 		round.attempts = append(round.attempts, verified)
 		if value.result.status == ReviewResultCompleted {

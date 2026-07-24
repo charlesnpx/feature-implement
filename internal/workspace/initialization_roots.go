@@ -17,6 +17,7 @@ type WorkspaceInitializationRootGuard struct {
 	plan                       *VerifiedRoot
 	runtime                    *VerifiedRoot
 	target                     *VerifiedRoot
+	worktree                   *VerifiedRoot
 	gitDirectory               *VerifiedRoot
 	commonDirectory            *VerifiedRoot
 	registered                 []*VerifiedRoot
@@ -31,6 +32,7 @@ func OpenWorkspaceInitializationRootGuard(
 	planPath string,
 	runtimePath string,
 	targetPath string,
+	worktreePath string,
 ) (*WorkspaceInitializationRootGuard, error) {
 	runtimePath, err := normalizeInitializationRootPath(
 		RootRoleRuntime, runtimePath,
@@ -39,6 +41,12 @@ func OpenWorkspaceInitializationRootGuard(
 		return nil, err
 	}
 	targetPath, err = normalizeInitializationRootPath(RootRoleTarget, targetPath)
+	if err != nil {
+		return nil, err
+	}
+	worktreePath, err = normalizeInitializationRootPath(
+		RootRoleWorktree, worktreePath,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -66,6 +74,14 @@ func OpenWorkspaceInitializationRootGuard(
 			return nil, fmt.Errorf("open workspace initialization plan root: %w", err)
 		}
 	}
+	guard.worktree, err = OpenVerifiedRoot(
+		RootRoleWorktree, worktreePath, false,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"open workspace initialization worktree root: %w", err,
+		)
+	}
 	guard.runtime, err = openOptionalInitializationRuntimeRoot(runtimePath)
 	if err != nil {
 		return nil, err
@@ -75,6 +91,23 @@ func OpenWorkspaceInitializationRootGuard(
 	}
 	closeGuard = false
 	return guard, nil
+}
+
+func (guard *WorkspaceInitializationRootGuard) WorktreeRootBinding() (
+	WorkspaceWorktreeRootBinding,
+	error,
+) {
+	if guard == nil || guard.worktree == nil {
+		return WorkspaceWorktreeRootBinding{}, fmt.Errorf(
+			"workspace initialization worktree root is unavailable",
+		)
+	}
+	if err := guard.worktree.VerifyPath(); err != nil {
+		return WorkspaceWorktreeRootBinding{}, err
+	}
+	return NewWorkspaceWorktreeRootBinding(
+		guard.worktree.Path(), guard.worktree.Identity(),
+	)
 }
 
 func (guard *WorkspaceInitializationRootGuard) bindLocalTarget(
@@ -278,6 +311,10 @@ func (guard *WorkspaceInitializationRootGuard) Close() error {
 		closeErrors = append(closeErrors, guard.runtime.Close())
 		guard.runtime = nil
 	}
+	if guard.worktree != nil {
+		closeErrors = append(closeErrors, guard.worktree.Close())
+		guard.worktree = nil
+	}
 	for index := len(guard.registered) - 1; index >= 0; index-- {
 		closeErrors = append(closeErrors, guard.registered[index].Close())
 	}
@@ -313,6 +350,7 @@ func (guard *WorkspaceInitializationRootGuard) verifyHeldRoots() error {
 		guard.plan,
 		guard.runtime,
 		guard.target,
+		guard.worktree,
 		guard.gitDirectory,
 		guard.commonDirectory,
 	}
@@ -343,8 +381,10 @@ func (guard *WorkspaceInitializationRootGuard) verifyHeldRoots() error {
 }
 
 func (guard *WorkspaceInitializationRootGuard) validateLayout() error {
-	if guard.target == nil {
-		return fmt.Errorf("workspace initialization requires a verified target root")
+	if guard.target == nil || guard.worktree == nil {
+		return fmt.Errorf(
+			"workspace initialization requires verified target and worktree roots",
+		)
 	}
 	protected := []*VerifiedRoot{
 		guard.target,
@@ -352,6 +392,17 @@ func (guard *WorkspaceInitializationRootGuard) validateLayout() error {
 		guard.commonDirectory,
 	}
 	protected = append(protected, guard.registered...)
+	for _, root := range protected {
+		if root == nil {
+			continue
+		}
+		if rootsOverlap(root, guard.worktree) {
+			return unsafeInitializationRootOverlap(
+				root.Role(), root.Path(),
+				guard.worktree.Role(), guard.worktree.Path(),
+			)
+		}
+	}
 	for _, registeredPath := range guard.registeredPaths {
 		if guard.plan != nil &&
 			initializationRootPathsOverlap(
@@ -368,6 +419,14 @@ func (guard *WorkspaceInitializationRootGuard) validateLayout() error {
 			return unsafeInitializationRootOverlap(
 				RootRoleRegisteredWorktree, registeredPath,
 				RootRoleRuntime, guard.runtimePath,
+			)
+		}
+		if initializationRootPathsOverlap(
+			registeredPath, guard.worktree.Path(),
+		) {
+			return unsafeInitializationRootOverlap(
+				RootRoleRegisteredWorktree, registeredPath,
+				guard.worktree.Role(), guard.worktree.Path(),
 			)
 		}
 	}
@@ -399,6 +458,12 @@ func (guard *WorkspaceInitializationRootGuard) validateLayout() error {
 		}
 	}
 	if guard.plan != nil {
+		if rootsOverlap(guard.plan, guard.worktree) {
+			return unsafeInitializationRootOverlap(
+				guard.plan.Role(), guard.plan.Path(),
+				guard.worktree.Role(), guard.worktree.Path(),
+			)
+		}
 		if guard.runtime != nil && rootsOverlap(guard.plan, guard.runtime) {
 			return unsafeInitializationRootOverlap(
 				guard.plan.Role(), guard.plan.Path(),
@@ -413,6 +478,21 @@ func (guard *WorkspaceInitializationRootGuard) validateLayout() error {
 				RootRoleRuntime, guard.runtimePath,
 			)
 		}
+	}
+	if guard.runtime != nil {
+		if rootsOverlap(guard.runtime, guard.worktree) {
+			return unsafeInitializationRootOverlap(
+				guard.runtime.Role(), guard.runtime.Path(),
+				guard.worktree.Role(), guard.worktree.Path(),
+			)
+		}
+	} else if initializationRootPathsOverlap(
+		guard.runtimePath, guard.worktree.Path(),
+	) {
+		return unsafeInitializationRootOverlap(
+			RootRoleRuntime, guard.runtimePath,
+			guard.worktree.Role(), guard.worktree.Path(),
+		)
 	}
 	return nil
 }

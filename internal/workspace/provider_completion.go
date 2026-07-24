@@ -1256,7 +1256,6 @@ func providerCompletionLocalEvidence(
 				reviewEvidence,
 				result.submission.digest,
 				result.reservationDigest,
-				result.receiptDigest,
 			)
 		}
 		for _, fix := range state.Fixes() {

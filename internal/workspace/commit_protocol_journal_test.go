@@ -25,16 +25,26 @@ type journalCommitGit struct {
 }
 
 func TestJournaledCommitProtocolStartsFromRealStagedWorktree(t *testing.T) {
-	seed, _, base := newProtocolRepository(t)
 	harness := newConfiguredAttemptHarness(t)
-	harness.base = base
 	attempt := harness.reserve(t, "2026-07-21T10:55:00Z")
 	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T10:56:00Z")
 
-	runGitSetup(t, "", "clone", "--no-local", seed, attempt.Worktree())
+	runGitSetup(
+		t, "", "clone", "--no-local",
+		harness.definition.Workspace().RepositoryRoot(),
+		attempt.Worktree(),
+	)
 	runGitSetup(t, attempt.Worktree(), "config", "user.name", "Protocol Test")
 	runGitSetup(t, attempt.Worktree(), "config", "user.email", "protocol@example.test")
-	runGitSetup(t, attempt.Worktree(), "switch", "-c", attempt.Branch(), rawGitObject(base))
+	runGitSetup(
+		t, attempt.Worktree(), "switch", "-c", attempt.Branch(),
+		rawGitObject(attempt.Base()),
+	)
+	if err := os.MkdirAll(
+		filepath.Join(attempt.Worktree(), "src"), 0o755,
+	); err != nil {
+		t.Fatal(err)
+	}
 	tracked := filepath.Join(attempt.Worktree(), "src", "protocol.go")
 	if err := os.WriteFile(tracked, []byte("package protocol\n\nconst Durable = true\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -58,7 +68,8 @@ func TestJournaledCommitProtocolStartsFromRealStagedWorktree(t *testing.T) {
 	state, configured := result.Protocol()
 	head := parseGitHead(t, attempt.Worktree())
 	if !configured || state.Phase() != workspace.CommitProtocolComplete || state.Head() != head ||
-		result.Attempt().VerifiedHead() != head || head == base || runnerCallCount(runner) != 1 {
+		result.Attempt().VerifiedHead() != head || head == attempt.Base() ||
+		runnerCallCount(runner) != 1 {
 		t.Fatalf("result=%#v state=%#v configured=%v head=%s checks=%d", result, state, configured, head, runnerCallCount(runner))
 	}
 	snapshot, err := harness.journal.ReadSnapshot()
@@ -1325,7 +1336,11 @@ func newConfiguredAttemptHarness(t *testing.T) attemptHarness {
 	fixture.sources.ExecutionConfig.Bytes = []byte(configuration)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T10:00:00Z")); err != nil {
+	initialized, err := initializeWorkspaceV2(
+		t, workspaceDir, definition,
+		mustTime(t, "2026-07-21T10:00:00Z"),
+	)
+	if err != nil {
 		t.Fatal(err)
 	}
 	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
@@ -1333,11 +1348,16 @@ func newConfiguredAttemptHarness(t *testing.T) attemptHarness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = journal.Close() })
-	base := mustGitObject(t, 'a')
+	target, ok := initialized.Runtime().LocalTarget()
+	if !ok || target.CreatedHead().IsZero() {
+		t.Fatal("configured harness has no durable local target")
+	}
+	base := target.CreatedHead()
 	goal, _ := workspace.NewGoalBinding(workspace.MustID("implementation-goal"), workspace.GoalScopeMergeUnit)
 	return attemptHarness{
 		definition: definition, journal: journal, workspace: workspaceDir, git: &fakeAttemptGit{}, base: base,
-		unit: mustMergeUnitReference(t, "alpha-plan", "unit-one"), goal: goal, worktrees: t.TempDir(),
+		unit: mustMergeUnitReference(t, "alpha-plan", "unit-one"), goal: goal,
+		worktrees: initialized.Runtime().WorktreeRoot().Path(),
 	}
 }
 
@@ -1373,7 +1393,11 @@ func newReviewOnlyAttemptHarness(t *testing.T) attemptHarness {
 	fixture.sources.ExecutionConfig.Bytes = []byte(configuration)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T10:00:00Z")); err != nil {
+	initialized, err := initializeWorkspaceV2(
+		t, workspaceDir, definition,
+		mustTime(t, "2026-07-21T10:00:00Z"),
+	)
+	if err != nil {
 		t.Fatal(err)
 	}
 	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
@@ -1381,11 +1405,16 @@ func newReviewOnlyAttemptHarness(t *testing.T) attemptHarness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = journal.Close() })
-	base := mustGitObject(t, 'a')
+	target, ok := initialized.Runtime().LocalTarget()
+	if !ok || target.CreatedHead().IsZero() {
+		t.Fatal("review harness has no durable local target")
+	}
+	base := target.CreatedHead()
 	goal, _ := workspace.NewGoalBinding(workspace.MustID("implementation-goal"), workspace.GoalScopeMergeUnit)
 	return attemptHarness{
 		definition: definition, journal: journal, workspace: workspaceDir, git: &fakeAttemptGit{}, base: base,
-		unit: mustMergeUnitReference(t, "alpha-plan", "unit-one"), goal: goal, worktrees: t.TempDir(),
+		unit: mustMergeUnitReference(t, "alpha-plan", "unit-one"), goal: goal,
+		worktrees: initialized.Runtime().WorktreeRoot().Path(),
 	}
 }
 

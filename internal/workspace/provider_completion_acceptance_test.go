@@ -34,7 +34,9 @@ func newProviderOpenScenario(
 	pullRequestNumber uint64,
 ) providerOpenScenario {
 	t.Helper()
-	harness := newAttemptHarness(t, "unit-one")
+	harness := newAttemptHarnessFromFixture(
+		t, newDefinitionFixtureForHash(t, algorithm), "unit-one",
+	)
 	return newProviderOpenScenarioWithHarness(t, harness, hour, algorithm, pullRequestNumber)
 }
 
@@ -46,9 +48,6 @@ func newProviderOpenScenarioWithHarness(
 	pullRequestNumber uint64,
 ) providerOpenScenario {
 	t.Helper()
-	if algorithm == workspace.GitHashSHA256 {
-		harness.base = mustProviderGitObject(t, algorithm, 'a')
-	}
 	attempt := harness.reserve(t, "2026-07-21T"+hour+":01:00Z")
 	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T"+hour+":02:00Z")
 	return newProviderOpenScenarioForAttempt(t, harness, attempt, hour, algorithm, pullRequestNumber)
@@ -259,7 +258,7 @@ func TestProviderMergeRequiresConfiguredExactHeadReviewReadiness(t *testing.T) {
 	fixture := configuredReviewFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDirectory := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(
+	if _, err := initializeWorkspaceV2(t,
 		workspaceDirectory, definition, mustTime(t, "2026-07-21T10:00:00Z"),
 	); err != nil {
 		t.Fatal(err)
@@ -312,7 +311,7 @@ func TestProviderMergeRequiresConfiguredCommitProtocolWithoutReviewToComplete(t 
 	fixture.sources.ExecutionConfig.Bytes = []byte(configuration)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDirectory := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(
+	if _, err := initializeWorkspaceV2(t,
 		workspaceDirectory, definition, mustTime(t, "2026-07-21T10:00:00Z"),
 	); err != nil {
 		t.Fatal(err)

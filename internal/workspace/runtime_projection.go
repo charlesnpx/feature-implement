@@ -152,6 +152,7 @@ type WorkspaceRuntimeProjection struct {
 	workspaceID       ID
 	activeGeneration  Digest
 	planCheckpoint    GitObjectID
+	worktreeRoot      WorkspaceWorktreeRootBinding
 	localTarget       RuntimeLocalTargetProjection
 	generationHistory []Digest
 	candidates        []RuntimeCandidateProjection
@@ -166,6 +167,9 @@ func (projection WorkspaceRuntimeProjection) ActiveGeneration() Digest {
 }
 func (projection WorkspaceRuntimeProjection) PlanCheckpoint() GitObjectID {
 	return projection.planCheckpoint
+}
+func (projection WorkspaceRuntimeProjection) WorktreeRoot() WorkspaceWorktreeRootBinding {
+	return projection.worktreeRoot
 }
 func (projection WorkspaceRuntimeProjection) LocalTarget() (
 	RuntimeLocalTargetProjection,
@@ -268,6 +272,7 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 		next.workspaceID = event.workspaceID
 		next.activeGeneration = event.generation
 		next.planCheckpoint = event.planCheckpoint
+		next.worktreeRoot = event.worktreeRoot
 		next.generationHistory = []Digest{event.generation}
 	case FeatureRefCreationIntendedJournalEvent:
 		if current.workspaceID != event.workspaceID ||
@@ -487,21 +492,25 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 		CreatedRecord uint64                 `json:"created_record,omitempty"`
 	}
 	type runtimeJSON struct {
-		SchemaVersion     int               `json:"schema_version"`
-		WorkspaceID       string            `json:"workspace_id"`
-		ActiveGeneration  string            `json:"active_generation"`
-		PlanCheckpoint    string            `json:"plan_checkpoint,omitempty"`
-		LocalTarget       *localTargetJSON  `json:"local_target,omitempty"`
-		GenerationHistory []string          `json:"generation_history"`
-		Candidates        []candidateJSON   `json:"candidates"`
-		Activations       []activationJSON  `json:"activations"`
-		Recoveries        []recoveryJSON    `json:"recoveries"`
-		Attempts          []json.RawMessage `json:"attempts"`
+		SchemaVersion     int                  `json:"schema_version"`
+		WorkspaceID       string               `json:"workspace_id"`
+		ActiveGeneration  string               `json:"active_generation"`
+		PlanCheckpoint    string               `json:"plan_checkpoint,omitempty"`
+		WorktreeRoot      string               `json:"worktree_root"`
+		WorktreeIdentity  PlatformFileIdentity `json:"worktree_root_identity"`
+		LocalTarget       *localTargetJSON     `json:"local_target,omitempty"`
+		GenerationHistory []string             `json:"generation_history"`
+		Candidates        []candidateJSON      `json:"candidates"`
+		Activations       []activationJSON     `json:"activations"`
+		Recoveries        []recoveryJSON       `json:"recoveries"`
+		Attempts          []json.RawMessage    `json:"attempts"`
 	}
 	value := runtimeJSON{
 		SchemaVersion: JournalSchemaVersion, WorkspaceID: projection.workspaceID.String(),
 		ActiveGeneration:  projection.activeGeneration.String(),
 		PlanCheckpoint:    projection.planCheckpoint.String(),
+		WorktreeRoot:      projection.worktreeRoot.Path(),
+		WorktreeIdentity:  projection.worktreeRoot.Identity(),
 		GenerationHistory: make([]string, 0, len(projection.generationHistory)),
 		Candidates:        make([]candidateJSON, 0, len(projection.candidates)),
 		Activations:       make([]activationJSON, 0, len(projection.activations)),

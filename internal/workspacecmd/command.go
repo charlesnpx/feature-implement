@@ -87,15 +87,27 @@ func Execute(ctx context.Context, options Options) (any, error) {
 			return workspace.WorkspaceBundleSchema(), nil
 		case "requests":
 			return RequestSchemas(), nil
+		case "reports":
+			return ReportSchemas(), nil
 		default:
 			return nil, fmt.Errorf("unsupported workspace schema %q", options.Subaction)
 		}
-	case "validate", "init", "status", "recover", "scheduler", "gates", "queue", "receipts", "report":
+	case "queue", "receipts", "reconcile", "control", "provider":
+		return nil, removedWorkspaceCommand(action)
+	case "validate", "init", "status", "recover", "scheduler", "gates", "report":
 		// handled below
-	case "reconcile", "attempt", "commit", "review", "control", "provider", "complete":
+	case "attempt", "commit", "review", "integrate", "complete":
 		// handled below
 	default:
 		return nil, fmt.Errorf("unsupported workspace command %q", action)
+	}
+	if action == "commit" && strings.TrimSpace(options.Subaction) == "rebase" {
+		return nil, fmt.Errorf(
+			"workspace commit rebase was removed; attempt bases are immutable",
+		)
+	}
+	if err := validateWorkspaceSubaction(action, options.Subaction); err != nil {
+		return nil, err
 	}
 	if strings.TrimSpace(options.BundleDir) == "" {
 		return nil, fmt.Errorf("workspace %s requires --bundle <dir>", action)
@@ -126,37 +138,68 @@ func Execute(ctx context.Context, options Options) (any, error) {
 			return nil, err
 		}
 		return report.Gates, nil
-	case "queue":
-		report, err := readReport(bundle, options.WorkspaceDir)
-		if err != nil {
-			return nil, err
-		}
-		return report.Queue, nil
-	case "receipts":
-		report, err := readReport(bundle, options.WorkspaceDir)
-		if err != nil {
-			return nil, err
-		}
-		return report.Receipts, nil
 	case "recover":
 		return recoverWorkspace(bundle, options)
-	case "reconcile":
-		return executeReconciliation(ctx, bundle, options)
 	case "attempt":
 		return executeAttempt(ctx, bundle, options)
 	case "commit":
 		return executeCommit(ctx, bundle, options)
 	case "review":
 		return executeReview(ctx, bundle, options)
-	case "control":
-		return executeControl(ctx, bundle, options)
-	case "provider":
-		return executeProvider(ctx, bundle, options)
+	case "integrate":
+		return executeIntegration(bundle, options)
 	case "complete":
-		return executeCompletion(ctx, bundle, options)
+		return executeCompletion(bundle, options)
 	default:
 		panic("unreachable")
 	}
+}
+
+func removedWorkspaceCommand(action string) error {
+	return fmt.Errorf(
+		"workspace %s was removed from the local-only workflow",
+		action,
+	)
+}
+
+func validateWorkspaceSubaction(action, subaction string) error {
+	subaction = strings.TrimSpace(subaction)
+	var supported map[string]struct{}
+	switch action {
+	case "attempt":
+		supported = stringSet(
+			"reserve", "materialize", "adopt-head", "boundary",
+			"next-goal", "acknowledge", "owner-response", "resume",
+		)
+	case "commit":
+		supported = stringSet("next")
+	case "review":
+		supported = stringSet(
+			"start", "reserve", "record", "reserve-fix",
+			"apply-fix", "record-fix", "ready",
+		)
+	case "integrate":
+		supported = stringSet("merge-unit")
+	case "complete":
+		supported = stringSet("verify")
+	default:
+		return nil
+	}
+	if _, ok := supported[subaction]; !ok {
+		return fmt.Errorf(
+			"unsupported workspace %s action %q",
+			action, subaction,
+		)
+	}
+	return nil
+}
+
+func stringSet(values ...string) map[string]struct{} {
+	result := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		result[value] = struct{}{}
+	}
+	return result
 }
 
 // BundleExample is discovery-only example metadata. The referenced source
@@ -167,17 +210,7 @@ func BundleExample() string {
   "workspace": "feature.workspace.yaml",
   "plans": ["plans/example.yaml"],
   "execution_config": "config/execution.yaml",
-  "authorities": [
-    {
-      "id": "owner-policy",
-      "kind": "git_blob",
-      "content_path": "authority/owner-policy.yaml",
-      "repository_identity": "https://github.com/example/policy.git",
-      "commit_object": "sha1:1111111111111111111111111111111111111111",
-      "blob_object": "sha1:2222222222222222222222222222222222222222"
-    }
-  ],
-  "control_plane_authority": "owner-policy"
+  "authorities": []
 }
 `
 }
@@ -193,9 +226,6 @@ func RequestSchemas() map[string]any {
 	arrayOfStrings := func() map[string]any {
 		return map[string]any{"type": "array", "uniqueItems": true, "items": stringProperty()}
 	}
-	arrayOfEnum := func(values ...string) map[string]any {
-		return map[string]any{"type": "array", "uniqueItems": true, "items": enumProperty(values...)}
-	}
 	request := func(required []string, properties map[string]any) map[string]any {
 		properties["schema_version"] = map[string]any{"const": requestSchemaVersion}
 		return map[string]any{
@@ -207,7 +237,6 @@ func RequestSchemas() map[string]any {
 		"type": "object", "additionalProperties": false, "required": []string{"id", "scope"},
 		"properties": map[string]any{"id": stringProperty(), "scope": enumProperty("merge_unit", "workspace")},
 	}
-	receipt := map[string]any{"type": "object"}
 	evidenceItem := map[string]any{
 		"type": "object", "additionalProperties": false, "required": []string{"name", "value"},
 		"properties": map[string]any{"name": stringProperty(), "value": stringProperty()},
@@ -230,11 +259,11 @@ func RequestSchemas() map[string]any {
 	}
 	isolation := map[string]any{
 		"type": "object", "additionalProperties": false,
-		"required": []string{"repository_read_only", "scratch_ephemeral", "credentials_available", "repository_hooks", "write_network", "provider_broker", "external_write"},
+		"required": []string{"repository_read_only", "scratch_ephemeral", "credentials_available", "repository_hooks", "write_network", "external_write"},
 		"properties": map[string]any{
 			"repository_read_only": booleanProperty(), "scratch_ephemeral": booleanProperty(),
 			"credentials_available": booleanProperty(), "repository_hooks": booleanProperty(),
-			"write_network": booleanProperty(), "provider_broker": booleanProperty(), "external_write": booleanProperty(),
+			"write_network": booleanProperty(), "external_write": booleanProperty(),
 		},
 	}
 	occurred := func(properties map[string]any) map[string]any {
@@ -245,16 +274,13 @@ func RequestSchemas() map[string]any {
 		return occurred(map[string]any{"attempt_id": stringProperty()})
 	}
 	schemas := map[string]any{
-		"init":            request([]string{"occurred_at"}, occurred(map[string]any{})),
-		"recover":         request([]string{"occurred_at"}, occurred(map[string]any{})),
-		"reconcile.stage": request([]string{"occurred_at"}, occurred(map[string]any{})),
-		"reconcile.plan":  request(nil, map[string]any{}),
-		"reconcile.activate": request([]string{"occurred_at", "token", "receipt"}, occurred(map[string]any{
-			"token": map[string]any{"type": "object"}, "receipt": receipt,
+		"init": request([]string{"occurred_at", "worktree_root"}, occurred(map[string]any{
+			"worktree_root": stringProperty(),
 		})),
-		"attempt.reserve": request([]string{"occurred_at", "plan_id", "merge_unit_id", "attempt_number", "base", "worktree_root", "goal"}, occurred(map[string]any{
+		"recover": request([]string{"occurred_at"}, occurred(map[string]any{})),
+		"attempt.reserve": request([]string{"occurred_at", "plan_id", "merge_unit_id", "attempt_number", "goal"}, occurred(map[string]any{
 			"plan_id": stringProperty(), "merge_unit_id": stringProperty(), "attempt_number": integerProperty(1),
-			"base": stringProperty(), "worktree_root": stringProperty(), "goal": goal,
+			"goal": goal,
 		})),
 		"attempt.materialize": request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
 		"attempt.adopt-head":  request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
@@ -264,28 +290,44 @@ func RequestSchemas() map[string]any {
 		"attempt.next-goal": request([]string{"occurred_at", "attempt_id", "goal"}, occurred(map[string]any{
 			"attempt_id": stringProperty(), "goal": goal,
 		})),
-		"attempt.acknowledge": request([]string{"occurred_at", "attempt_id", "kind", "goal", "receipt"}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "kind": enumProperty("goal_completed", "next_goal_created"), "goal": goal, "receipt": receipt,
+		"attempt.acknowledge": request([]string{
+			"occurred_at", "attempt_id", "kind", "directive_digest", "goal", "idempotency_key",
+		}, occurred(map[string]any{
+			"attempt_id": stringProperty(), "kind": enumProperty("goal_completed", "next_goal_created"),
+			"directive_digest": stringProperty(), "goal": goal, "idempotency_key": stringProperty(),
 		})),
-		"attempt.owner-response": request([]string{"occurred_at", "attempt_id", "response", "receipt"}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "response": enumProperty("continue"), "receipt": receipt,
+		"attempt.owner-response": request([]string{
+			"occurred_at", "attempt_id", "boundary_id", "directive_digest", "goal", "expected_head", "response",
+		}, occurred(map[string]any{
+			"attempt_id": stringProperty(), "boundary_id": stringProperty(),
+			"directive_digest": stringProperty(), "goal": goal,
+			"expected_head": stringProperty(), "response": enumProperty("continue"),
 		})),
 		"attempt.resume": request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
 		"commit.next": request([]string{"occurred_at", "attempt_id"}, occurred(map[string]any{
 			"attempt_id": stringProperty(), "body": optionalString(),
 		})),
-		"commit.rebase": request([]string{"occurred_at", "attempt_id", "new_base", "new_head"}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "new_base": stringProperty(), "new_head": stringProperty(),
-		})),
 		"review.start": request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
 		"review.reserve": request([]string{"occurred_at", "attempt_id", "reviewer_instance", "idempotency_key"}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "reviewer_instance": stringProperty(), "idempotency_key": stringProperty(),
+			"attempt_id": stringProperty(),
+			"reviewer_instance": map[string]any{
+				"type": "string", "minLength": 1,
+				"description": "Descriptive local reviewer label; not an authenticated identity.",
+			},
+			"idempotency_key": stringProperty(),
 		})),
-		"review.record": request([]string{"occurred_at", "attempt_id", "reservation_digest", "request_digest", "reviewer_instance", "status", "findings", "isolation", "receipt"}, occurred(map[string]any{
+		"review.record": request([]string{
+			"occurred_at", "attempt_id", "reservation_digest", "request_digest",
+			"reviewer_instance", "status", "findings", "isolation",
+		}, occurred(map[string]any{
 			"attempt_id": stringProperty(), "reservation_digest": stringProperty(), "request_digest": stringProperty(),
-			"reviewer_instance": stringProperty(), "status": enumProperty("completed", "infrastructure_failure"),
+			"reviewer_instance": map[string]any{
+				"type": "string", "minLength": 1,
+				"description": "Descriptive local reviewer label; not an authenticated identity.",
+			},
+			"status":                 enumProperty("completed", "infrastructure_failure"),
 			"findings":               map[string]any{"type": "array", "items": reviewFinding},
-			"infrastructure_failure": optionalString(), "isolation": isolation, "receipt": receipt,
+			"infrastructure_failure": optionalString(), "isolation": isolation,
 		})),
 		"review.reserve-fix": request([]string{"occurred_at", "attempt_id", "ordinal", "accepted_finding_ids"}, occurred(map[string]any{
 			"attempt_id": stringProperty(), "ordinal": integerProperty(1), "accepted_finding_ids": arrayOfStrings(), "body": optionalString(),
@@ -297,33 +339,10 @@ func RequestSchemas() map[string]any {
 			"attempt_id": stringProperty(), "ordinal": integerProperty(1), "accepted_finding_ids": arrayOfStrings(), "body": optionalString(),
 		})),
 		"review.ready": request([]string{"attempt_id"}, map[string]any{"attempt_id": stringProperty()}),
-		"control.grant": request([]string{"occurred_at", "serial_segment", "base", "head", "actions", "expires_at", "epoch", "requires_provider_pull_request", "receipt"}, occurred(map[string]any{
-			"serial_segment": stringProperty(), "base": stringProperty(), "head": stringProperty(),
-			"actions":    arrayOfEnum("push", "open_pull_request", "merge"),
-			"expires_at": map[string]any{"type": "string", "format": "date-time"}, "epoch": integerProperty(1),
-			"requires_provider_pull_request": booleanProperty(), "receipt": receipt,
+		"integrate.merge-unit": request([]string{"occurred_at", "attempt_id"}, occurred(map[string]any{
+			"attempt_id": stringProperty(),
 		})),
-		"control.revoke": request([]string{"occurred_at", "next_epoch", "reason", "receipt"}, occurred(map[string]any{
-			"target_grant": optionalString(), "next_epoch": integerProperty(1), "reason": stringProperty(), "receipt": receipt,
-		})),
-		"control.safety": request([]string{"occurred_at", "gates_blocked", "reconciliation_pending", "drift_detected", "ambiguous_effect", "receipt"}, occurred(map[string]any{
-			"gates_blocked": booleanProperty(), "reconciliation_pending": booleanProperty(), "drift_detected": booleanProperty(),
-			"ambiguous_effect": booleanProperty(), "receipt": receipt,
-		})),
-		"control.segment-complete": request([]string{"occurred_at", "serial_segment"}, occurred(map[string]any{"serial_segment": stringProperty()})),
-		"control.inspect-receipt":  request([]string{"receipt"}, map[string]any{"receipt": receipt}),
-		"provider.reserve": request([]string{"occurred_at", "kind", "attempt_id", "branch", "head", "tree"}, occurred(map[string]any{
-			"kind": enumProperty("push", "open_pull_request", "merge"), "attempt_id": stringProperty(),
-			"branch": stringProperty(), "head": stringProperty(), "tree": stringProperty(),
-			"expected_remote_head": optionalString(), "expect_remote_absent": booleanProperty(), "integration_base_head": optionalString(),
-			"title": optionalString(), "body": optionalString(),
-		})),
-		"provider.preflight":    request([]string{"occurred_at", "intent_id"}, occurred(map[string]any{"intent_id": stringProperty()})),
-		"provider.dispatch":     request([]string{"occurred_at", "intent_id"}, occurred(map[string]any{"intent_id": stringProperty()})),
-		"provider.reconcile":    request([]string{"occurred_at", "intent_id"}, occurred(map[string]any{"intent_id": stringProperty()})),
-		"provider.abandon":      request([]string{"occurred_at", "intent_id"}, occurred(map[string]any{"intent_id": stringProperty()})),
-		"provider.authorize-pr": request([]string{"occurred_at", "intent_id"}, occurred(map[string]any{"intent_id": stringProperty()})),
-		"complete.verify":       request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
+		"complete.verify": request([]string{"occurred_at"}, occurred(map[string]any{})),
 	}
 	return map[string]any{
 		"$schema": "https://json-schema.org/draft/2020-12/schema", "schema_version": requestSchemaVersion,
@@ -398,6 +417,7 @@ func validateBundle(
 type initializeRequest struct {
 	SchemaVersion int    `json:"schema_version"`
 	OccurredAt    string `json:"occurred_at"`
+	WorktreeRoot  string `json:"worktree_root"`
 }
 
 func initializeWorkspace(
@@ -417,9 +437,16 @@ func initializeWorkspace(
 	if err != nil {
 		return InitializationResult{}, err
 	}
+	worktreeRoot := filepath.Clean(strings.TrimSpace(request.WorktreeRoot))
+	if !filepath.IsAbs(worktreeRoot) {
+		return InitializationResult{}, fmt.Errorf(
+			"workspace init worktree_root must be absolute",
+		)
+	}
 	definition := bundle.Definition()
 	roots, err := workspace.OpenWorkspaceInitializationRootGuard(
 		bundle.Root(), workspaceDir, definition.Workspace().RepositoryRoot(),
+		worktreeRoot,
 	)
 	if err != nil {
 		return InitializationResult{}, err
@@ -462,6 +489,7 @@ func initializeWorkspace(
 				occurredAt,
 				workspace.WorkspaceInitializationOptions{
 					PlanCheckpoint: &checkpoint,
+					WorktreeRoot:   worktreeRoot,
 				},
 			)
 			return initializeErr

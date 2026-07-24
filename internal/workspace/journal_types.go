@@ -169,18 +169,21 @@ type WorkspaceInitializedJournalEvent struct {
 	generation       Digest
 	definitionDigest Digest
 	planCheckpoint   GitObjectID
+	worktreeRoot     WorkspaceWorktreeRootBinding
 }
 
 func NewWorkspaceInitializedJournalEvent(
 	workspaceID ID,
 	generation, definitionDigest Digest,
+	worktreeRoot WorkspaceWorktreeRootBinding,
 	planCheckpoint ...GitObjectID,
 ) (WorkspaceInitializedJournalEvent, error) {
 	if len(planCheckpoint) > 1 {
 		return WorkspaceInitializedJournalEvent{}, fmt.Errorf("workspace initialization accepts one plan checkpoint")
 	}
 	event := WorkspaceInitializedJournalEvent{
-		workspaceID: workspaceID, generation: generation, definitionDigest: definitionDigest,
+		workspaceID: workspaceID, generation: generation,
+		definitionDigest: definitionDigest, worktreeRoot: worktreeRoot,
 	}
 	if len(planCheckpoint) == 1 {
 		event.planCheckpoint = planCheckpoint[0]
@@ -200,6 +203,11 @@ func (event WorkspaceInitializedJournalEvent) validate() error {
 	if event.workspaceID.IsZero() || event.generation.IsZero() || event.definitionDigest.IsZero() {
 		return fmt.Errorf("workspace initialization requires workspace, generation, and definition bindings")
 	}
+	if event.worktreeRoot.IsZero() {
+		return fmt.Errorf(
+			"workspace initialization requires a verified worktree root",
+		)
+	}
 	return nil
 }
 func (event WorkspaceInitializedJournalEvent) WorkspaceID() ID    { return event.workspaceID }
@@ -209,6 +217,9 @@ func (event WorkspaceInitializedJournalEvent) DefinitionDigest() Digest {
 }
 func (event WorkspaceInitializedJournalEvent) PlanCheckpoint() GitObjectID {
 	return event.planCheckpoint
+}
+func (event WorkspaceInitializedJournalEvent) WorktreeRoot() WorkspaceWorktreeRootBinding {
+	return event.worktreeRoot
 }
 
 type CandidateGenerationStoredJournalEvent struct {
@@ -409,7 +420,7 @@ func newJournalAppend(
 		case AttemptNextGoalIntendedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("next-goal intents must use the durable intent workflow")
 		case AttemptOwnerResponseJournalEvent:
-			return JournalAppend{}, fmt.Errorf("owner responses must use the verifier-backed response workflow")
+			return JournalAppend{}, fmt.Errorf("owner responses must use the exact-boundary response workflow")
 		case AttemptResumedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("attempt resume must use the verified resume workflow")
 		case FeatureRefCreationIntendedJournalEvent, FeatureRefCreatedJournalEvent:
@@ -437,7 +448,7 @@ func newJournalAppend(
 		case ReviewHeadAdoptedJournalEvent, ReviewRoundStartedJournalEvent, ReviewInvocationReservedJournalEvent,
 			ReviewInvocationFailedJournalEvent, ReviewResultRecordedJournalEvent,
 			ReviewFindingFixReservedJournalEvent, ReviewFixAppliedJournalEvent:
-			return JournalAppend{}, fmt.Errorf("review events must use the exact-head verifier-backed review workflow")
+			return JournalAppend{}, fmt.Errorf("review events must use the exact-head review workflow")
 		case ProviderIntentReservedJournalEvent, ProviderIntentAbandonedJournalEvent,
 			ProviderMergePreflightRecordedJournalEvent, ProviderIntentDispatchedJournalEvent,
 			ProviderResultRecordedJournalEvent, ProviderIntentReconciledJournalEvent,

@@ -170,7 +170,13 @@ func newAttemptHarnessFromFixture(t *testing.T, fixture definitionFixture, unitI
 	t.Helper()
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T10:00:00Z")); err != nil {
+	worktrees := t.TempDir()
+	initialized, err := workspace.InitializeWorkspaceV2WithOptions(
+		context.Background(), workspaceDir, definition,
+		mustTime(t, "2026-07-21T10:00:00Z"),
+		workspace.WorkspaceInitializationOptions{WorktreeRoot: worktrees},
+	)
+	if err != nil {
 		t.Fatal(err)
 	}
 	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
@@ -178,17 +184,18 @@ func newAttemptHarnessFromFixture(t *testing.T, fixture definitionFixture, unitI
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = journal.Close() })
-	base, err := workspace.ParseGitObjectID("sha1:" + strings.Repeat("a", 40))
-	if err != nil {
-		t.Fatal(err)
+	target, ok := initialized.Runtime().LocalTarget()
+	if !ok || target.CreatedHead().IsZero() {
+		t.Fatal("initialized harness has no durable local target head")
 	}
+	base := target.CreatedHead()
 	goal, err := workspace.NewGoalBinding(workspace.MustID("implementation-goal"), workspace.GoalScopeMergeUnit)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return attemptHarness{
 		definition: definition, journal: journal, workspace: workspaceDir, git: &fakeAttemptGit{}, base: base,
-		unit: mustMergeUnitReference(t, "alpha-plan", unitID), goal: goal, worktrees: t.TempDir(),
+		unit: mustMergeUnitReference(t, "alpha-plan", unitID), goal: goal, worktrees: worktrees,
 	}
 }
 
@@ -197,8 +204,8 @@ func (h attemptHarness) reserve(t *testing.T, at string) workspace.RuntimeAttemp
 	attempt, err := workspace.ReserveAttempt(
 		context.Background(), h.journal, h.definition, h.git,
 		workspace.ReserveAttemptRequest{
-			MergeUnit: h.unit, AttemptNumber: 1, Base: h.base,
-			WorktreeRoot: h.worktrees, Goal: h.goal, OccurredAt: mustTime(t, at),
+			MergeUnit: h.unit, AttemptNumber: 1,
+			Goal: h.goal, OccurredAt: mustTime(t, at),
 		},
 	)
 	if err != nil {
@@ -278,8 +285,7 @@ func TestAttemptReservationEnforcesSchedulerOrderAndEffectiveAttemptBudget(t *te
 	if _, err := workspace.ReserveAttempt(
 		context.Background(), harness.journal, harness.definition, harness.git,
 		workspace.ReserveAttemptRequest{
-			MergeUnit: blockedUnit, AttemptNumber: 1, Base: harness.base,
-			WorktreeRoot: harness.worktrees, Goal: harness.goal,
+			MergeUnit: blockedUnit, AttemptNumber: 1, Goal: harness.goal,
 			OccurredAt: mustTime(t, "2026-07-21T10:01:00Z"),
 		},
 	); err == nil || !strings.Contains(err.Error(), "not scheduler-ready") || !strings.Contains(err.Error(), "dependency:alpha-plan/unit-one") {
@@ -288,8 +294,7 @@ func TestAttemptReservationEnforcesSchedulerOrderAndEffectiveAttemptBudget(t *te
 	if _, err := workspace.ReserveAttempt(
 		context.Background(), harness.journal, harness.definition, harness.git,
 		workspace.ReserveAttemptRequest{
-			MergeUnit: harness.unit, AttemptNumber: 4, Base: harness.base,
-			WorktreeRoot: harness.worktrees, Goal: harness.goal,
+			MergeUnit: harness.unit, AttemptNumber: 4, Goal: harness.goal,
 			OccurredAt: mustTime(t, "2026-07-21T10:02:00Z"),
 		},
 	); err == nil || !strings.Contains(err.Error(), "exceeds max_attempts 3") {
@@ -298,8 +303,7 @@ func TestAttemptReservationEnforcesSchedulerOrderAndEffectiveAttemptBudget(t *te
 	if _, err := workspace.ReserveAttempt(
 		context.Background(), harness.journal, harness.definition, harness.git,
 		workspace.ReserveAttemptRequest{
-			MergeUnit: harness.unit, AttemptNumber: 2, Base: harness.base,
-			WorktreeRoot: harness.worktrees, Goal: harness.goal,
+			MergeUnit: harness.unit, AttemptNumber: 2, Goal: harness.goal,
 			OccurredAt: mustTime(t, "2026-07-21T10:03:00Z"),
 		},
 	); err == nil || !strings.Contains(err.Error(), "next attempt is 1") {
@@ -359,8 +363,7 @@ func TestReserveAttemptRejectsLocalAndRemoteRefCollisions(t *testing.T) {
 			_, err = workspace.ReserveAttempt(
 				context.Background(), harness.journal, harness.definition, harness.git,
 				workspace.ReserveAttemptRequest{
-					MergeUnit: harness.unit, AttemptNumber: 1, Base: harness.base,
-					WorktreeRoot: harness.worktrees, Goal: harness.goal,
+					MergeUnit: harness.unit, AttemptNumber: 1, Goal: harness.goal,
 					OccurredAt: mustTime(t, "2026-07-21T09:00:00Z"),
 				},
 			)
@@ -382,8 +385,8 @@ func TestAttemptMaterializationRecoversAcrossEveryCrashPoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	reservation := workspace.ReserveAttemptRequest{
-		MergeUnit: harness.unit, AttemptNumber: 1, Base: harness.base,
-		WorktreeRoot: harness.worktrees, Goal: harness.goal, OccurredAt: mustTime(t, "2026-07-21T10:01:00Z"),
+		MergeUnit: harness.unit, AttemptNumber: 1,
+		Goal: harness.goal, OccurredAt: mustTime(t, "2026-07-21T10:01:00Z"),
 		Fault: failAt(workspace.AttemptFaultAfterReservation, crash),
 	}
 	if _, err := workspace.ReserveAttempt(
@@ -797,34 +800,32 @@ func TestAttemptWorktreeAdmissionRejectsGitOwnedRootsBeforeMutation(t *testing.T
 	}
 	fixture.sources.Workspace.Bytes = []byte(strings.Join(workspaceSource, "\n"))
 	definition := mustDefinition(t, fixture.sources)
-	goal, err := workspace.NewGoalBinding(
-		workspace.MustID("root-admission-goal"), workspace.GoalScopeMergeUnit,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
 	cases := map[string]string{
 		"repository-root": repositoryRoot,
 		"git-common-root": filepath.Join(repositoryRoot, ".git"),
 		"linked-worktree": linkedRoot,
 	}
-	runtimeRoot := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(
-		runtimeRoot, definition, mustTime(t, "2026-07-21T10:15:00Z"),
-	); err != nil {
-		t.Fatal(err)
-	}
 	for name, worktreeRoot := range cases {
 		t.Run(name, func(t *testing.T) {
-			journal, err := workspace.OpenWorkspaceJournal(
-				runtimeRoot, workspace.JournalReadWrite,
-			)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer journal.Close()
-			beforeRecords := journalRecordCount(t, journal)
 			beforeEntries := directoryEntryNames(t, worktreeRoot)
+			if _, err := workspace.InitializeWorkspaceV2WithOptions(
+				context.Background(), t.TempDir(), definition,
+				mustTime(t, "2026-07-21T10:15:00Z"),
+				workspace.WorkspaceInitializationOptions{
+					WorktreeRoot: worktreeRoot,
+				},
+			); err == nil || !strings.Contains(err.Error(), "unsafe workspace root overlap") {
+				t.Fatalf("Git-owned initialization worktree root error = %v", err)
+			}
+			if afterEntries := directoryEntryNames(t, worktreeRoot); !slices.Equal(
+				beforeEntries, afterEntries,
+			) {
+				t.Fatalf(
+					"rejected initialization worktree root was mutated: before=%v after=%v",
+					beforeEntries, afterEntries,
+				)
+			}
+
 			originalInfo, err := os.Stat(worktreeRoot)
 			if err != nil {
 				t.Fatal(err)
@@ -846,26 +847,6 @@ func TestAttemptWorktreeAdmissionRejectsGitOwnedRootsBeforeMutation(t *testing.T
 						return errors.New("claim publication must not start")
 					},
 				)
-			if _, err := workspace.ReserveAttempt(
-				context.Background(), journal, definition, adapter,
-				workspace.ReserveAttemptRequest{
-					MergeUnit:     mustMergeUnitReference(t, "alpha-plan", "unit-one"),
-					AttemptNumber: 1,
-					Base:          base,
-					WorktreeRoot:  worktreeRoot,
-					Goal:          goal,
-					OccurredAt:    mustTime(t, "2026-07-21T10:16:00Z"),
-				},
-			); err == nil || !strings.Contains(err.Error(), "unsafe attempt worktree overlap") {
-				t.Fatalf("Git-owned worktree root reservation error = %v", err)
-			}
-			if afterRecords := journalRecordCount(t, journal); afterRecords != beforeRecords {
-				t.Fatalf(
-					"rejected worktree root journaled an attempt: before=%d after=%d",
-					beforeRecords, afterRecords,
-				)
-			}
-
 			worktree := filepath.Join(worktreeRoot, "rejected-attempt")
 			claim, err := workspace.NewAttemptWorktreeClaim(
 				workspace.MustID("rejected-"+name),
@@ -919,9 +900,12 @@ func TestAttemptWorktreeAdmissionAllowsSafeExternalRoot(t *testing.T) {
 	}
 	fixture.sources.Workspace.Bytes = []byte(strings.Join(workspaceSource, "\n"))
 	definition := mustDefinition(t, fixture.sources)
+	worktreeRoot := canonicalTestDirectory(t)
 	runtimeRoot := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(
-		runtimeRoot, definition, mustTime(t, "2026-07-21T10:17:00Z"),
+	if _, err := workspace.InitializeWorkspaceV2WithOptions(
+		context.Background(), runtimeRoot, definition,
+		mustTime(t, "2026-07-21T10:17:00Z"),
+		workspace.WorkspaceInitializationOptions{WorktreeRoot: worktreeRoot},
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -938,15 +922,12 @@ func TestAttemptWorktreeAdmissionAllowsSafeExternalRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	worktreeRoot := t.TempDir()
 	adapter := workspace.DefaultLocalAttemptGitAdapter()
 	attempt, err := workspace.ReserveAttempt(
 		context.Background(), journal, definition, adapter,
 		workspace.ReserveAttemptRequest{
 			MergeUnit:     mustMergeUnitReference(t, "alpha-plan", "unit-one"),
 			AttemptNumber: 1,
-			Base:          base,
-			WorktreeRoot:  worktreeRoot,
 			Goal:          goal,
 			OccurredAt:    mustTime(t, "2026-07-21T10:18:00Z"),
 		},
@@ -1014,7 +995,12 @@ func TestLocalGitAttemptMaterializationPreservesDirtyPrimaryCheckout(t *testing.
 	fixture.sources.Workspace.Bytes = []byte(strings.Join(workspaceSource, "\n"))
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T10:20:00Z")); err != nil {
+	worktreeRoot := t.TempDir()
+	if _, err := workspace.InitializeWorkspaceV2WithOptions(
+		context.Background(), workspaceDir, definition,
+		mustTime(t, "2026-07-21T10:20:00Z"),
+		workspace.WorkspaceInitializationOptions{WorktreeRoot: worktreeRoot},
+	); err != nil {
 		t.Fatal(err)
 	}
 	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
@@ -1028,7 +1014,7 @@ func TestLocalGitAttemptMaterializationPreservesDirtyPrimaryCheckout(t *testing.
 		context.Background(), journal, definition, adapter,
 		workspace.ReserveAttemptRequest{
 			MergeUnit: mustMergeUnitReference(t, "alpha-plan", "unit-one"), AttemptNumber: 1,
-			Base: base, WorktreeRoot: t.TempDir(), Goal: goal, OccurredAt: mustTime(t, "2026-07-21T10:21:00Z"),
+			Goal: goal, OccurredAt: mustTime(t, "2026-07-21T10:21:00Z"),
 		},
 	)
 	if err != nil {
@@ -1325,35 +1311,23 @@ func TestPauseOnlyBoundaryAtomicallyPausesAndResumesSameGoal(t *testing.T) {
 		}
 	}
 	if _, err := workspace.RecordOrchestrationAcknowledgement(
-		context.Background(), harness.journal, harness.definition, &boundaryVerifier{},
+		harness.journal, harness.definition,
 		workspace.RecordOrchestrationAcknowledgementRequest{
 			AttemptID: attempt.AttemptID(), Kind: workspace.AcknowledgementGoalCompleted,
-			Goal: harness.goal, Receipt: placeholderControlPlaneReceipt(t, workspace.DigestBytes([]byte("false-completion")), "false-completion"),
-			OccurredAt: mustTime(t, "2026-07-21T11:04:00Z"),
+			DirectiveDigest: boundary.DirectiveDigest(), Goal: harness.goal,
+			IdempotencyKey: workspace.DigestBytes([]byte("false-completion")),
+			OccurredAt:     mustTime(t, "2026-07-21T11:04:00Z"),
 		},
 	); err == nil || !strings.Contains(err.Error(), "pause-only") {
 		t.Fatalf("pause-only boundary claimed broader goal completion: %v", err)
 	}
-	projection := mustRuntime(t, harness.journal)
-	requestDigest, err := workspace.OwnerBoundaryResponseRequestDigest(
-		projection, attempt.AttemptID(), workspace.OwnerBoundaryContinue,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	verifier := &boundaryVerifier{expectedRequest: requestDigest}
-	binding, err := workspace.OwnerBoundaryResponseControlPlaneBinding(
-		harness.definition, projection, attempt.AttemptID(), workspace.OwnerBoundaryContinue,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	receipt := controlPlaneReceipt(t, binding, "pause-nonce")
 	if _, err := workspace.RecordOwnerBoundaryResponse(
-		context.Background(), harness.journal, harness.definition, verifier,
+		harness.journal, harness.definition,
 		workspace.RecordOwnerBoundaryResponseRequest{
-			AttemptID: attempt.AttemptID(), Response: workspace.OwnerBoundaryContinue,
-			Receipt: receipt, OccurredAt: mustTime(t, "2026-07-21T11:05:00Z"),
+			AttemptID: attempt.AttemptID(), BoundaryID: boundary.BoundaryID(),
+			DirectiveDigest: boundary.DirectiveDigest(), Goal: boundary.Goal(),
+			ExpectedHead: boundary.Head(), Response: workspace.OwnerBoundaryContinue,
+			OccurredAt: mustTime(t, "2026-07-21T11:05:00Z"),
 		},
 	); err != nil {
 		t.Fatal(err)
@@ -1466,83 +1440,206 @@ func TestCompleteGoalBoundaryRecoversIdempotentlyThroughHandoffAndRejectsStaleHe
 	); err == nil || !strings.Contains(err.Error(), "goal-completion acknowledgement") {
 		t.Fatalf("owner request was signable before goal completion: %v", err)
 	}
-	prematureDigest := workspace.DigestBytes([]byte("premature-owner-request"))
-	verifier := &boundaryVerifier{expectedRequest: prematureDigest}
-	receipt := placeholderControlPlaneReceipt(t, prematureDigest, "premature-complete-nonce")
+	boundary := result.Boundary()
 	if _, err := workspace.RecordOwnerBoundaryResponse(
-		context.Background(), harness.journal, harness.definition, verifier,
+		harness.journal, harness.definition,
 		workspace.RecordOwnerBoundaryResponseRequest{
-			AttemptID: attempt.AttemptID(), Response: workspace.OwnerBoundaryContinue,
-			Receipt: receipt, OccurredAt: mustTime(t, "2026-07-21T12:06:00Z"),
+			AttemptID: attempt.AttemptID(), BoundaryID: boundary.BoundaryID(),
+			DirectiveDigest: boundary.DirectiveDigest(), Goal: boundary.Goal(),
+			ExpectedHead: boundary.Head(), Response: workspace.OwnerBoundaryContinue,
+			OccurredAt: mustTime(t, "2026-07-21T12:06:00Z"),
 		},
 	); err == nil || !strings.Contains(err.Error(), "goal-completion acknowledgement") {
 		t.Fatalf("owner response bypassed goal completion: %v", err)
 	}
 	nextGoal, _ := workspace.NewGoalBinding(workspace.MustID("review-goal"), workspace.GoalScopeMergeUnit)
+	differentAttempt := workspace.MustID("different-attempt")
+	differentDirective := workspace.DigestBytes([]byte("different-directive"))
+	differentIdempotency := workspace.DigestBytes([]byte("different-idempotency"))
+	acknowledgement := workspace.RecordOrchestrationAcknowledgementRequest{
+		AttemptID: attempt.AttemptID(), Kind: workspace.AcknowledgementGoalCompleted,
+		DirectiveDigest: directive.DirectiveDigest(), Goal: harness.goal,
+		IdempotencyKey: directive.IdempotencyKey(),
+		OccurredAt:     mustTime(t, "2026-07-21T12:06:30Z"),
+	}
+	recordsBeforeMismatches := journalRecordCount(t, harness.journal)
+	for _, test := range []struct {
+		name   string
+		want   string
+		mutate func(*workspace.RecordOrchestrationAcknowledgementRequest)
+	}{
+		{
+			name: "attempt",
+			want: "is not reserved",
+			mutate: func(request *workspace.RecordOrchestrationAcknowledgementRequest) {
+				request.AttemptID = differentAttempt
+			},
+		},
+		{
+			name: "directive",
+			want: "directive does not match",
+			mutate: func(request *workspace.RecordOrchestrationAcknowledgementRequest) {
+				request.DirectiveDigest = differentDirective
+			},
+		},
+		{
+			name: "goal",
+			want: "must bind the boundary goal",
+			mutate: func(request *workspace.RecordOrchestrationAcknowledgementRequest) {
+				request.Goal = nextGoal
+			},
+		},
+		{
+			name: "idempotency",
+			want: "idempotency key does not match",
+			mutate: func(request *workspace.RecordOrchestrationAcknowledgementRequest) {
+				request.IdempotencyKey = differentIdempotency
+			},
+		},
+	} {
+		t.Run("rejects mismatched acknowledgement "+test.name, func(t *testing.T) {
+			request := acknowledgement
+			test.mutate(&request)
+			if _, err := workspace.RecordOrchestrationAcknowledgement(
+				harness.journal, harness.definition, request,
+			); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("mismatched %s acknowledgement error = %v", test.name, err)
+			}
+		})
+	}
+	if records := journalRecordCount(t, harness.journal); records != recordsBeforeMismatches {
+		t.Fatalf(
+			"mismatched acknowledgements changed journal records: before=%d after=%d",
+			recordsBeforeMismatches, records,
+		)
+	}
+	if _, err := workspace.RecordAttemptBoundary(
+		context.Background(), harness.journal, harness.definition, harness.git,
+		workspace.RecordAttemptBoundaryRequest{
+			AttemptID: attempt.AttemptID(), Evidence: boundaryEvidence(t, "different-evidence"),
+			OccurredAt: mustTime(t, "2026-07-21T12:06:45Z"),
+		},
+	); err == nil || !strings.Contains(err.Error(), "different boundary evidence") {
+		t.Fatalf("mismatched boundary evidence error = %v", err)
+	}
 	if _, err := workspace.RecordOrchestrationAcknowledgement(
-		context.Background(), harness.journal, harness.definition, &boundaryVerifier{},
+		harness.journal, harness.definition,
 		workspace.RecordOrchestrationAcknowledgementRequest{
 			AttemptID: attempt.AttemptID(), Kind: workspace.AcknowledgementNextGoalCreated,
-			Goal: nextGoal, Receipt: placeholderControlPlaneReceipt(t, workspace.DigestBytes([]byte("next-too-early")), "next-too-early"),
-			OccurredAt: mustTime(t, "2026-07-21T12:07:00Z"),
+			DirectiveDigest: directive.DirectiveDigest(), Goal: nextGoal,
+			IdempotencyKey: workspace.DigestBytes([]byte("next-too-early")),
+			OccurredAt:     mustTime(t, "2026-07-21T12:07:00Z"),
 		},
 	); err == nil || !strings.Contains(err.Error(), "durable creation intent") {
 		t.Fatalf("next goal bypassed required ordering: %v", err)
 	}
-	goalBinding, err := workspace.OrchestrationAcknowledgementControlPlaneBinding(
-		harness.definition, mustRuntime(t, harness.journal), attempt.AttemptID(),
-		workspace.AcknowledgementGoalCompleted, harness.goal,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	goalVerifier := &boundaryVerifier{expectedRequest: goalBinding.RequestDigest()}
 	goalAck := workspace.RecordOrchestrationAcknowledgementRequest{
 		AttemptID: attempt.AttemptID(), Kind: workspace.AcknowledgementGoalCompleted,
-		Goal: harness.goal, Receipt: controlPlaneReceipt(t, goalBinding, "goal-completed"),
-		OccurredAt: mustTime(t, "2026-07-21T12:08:00Z"),
-		Fault:      failAt(workspace.AttemptFaultAfterOrchestrationAck, crash),
+		DirectiveDigest: directive.DirectiveDigest(), Goal: harness.goal,
+		IdempotencyKey: directive.IdempotencyKey(),
+		OccurredAt:     mustTime(t, "2026-07-21T12:08:00Z"),
+		Fault:          failAt(workspace.AttemptFaultAfterOrchestrationAck, crash),
 	}
 	if _, err := workspace.RecordOrchestrationAcknowledgement(
-		context.Background(), harness.journal, harness.definition, goalVerifier, goalAck,
+		harness.journal, harness.definition, goalAck,
 	); !errors.Is(err, crash) {
 		t.Fatalf("goal ack crash = %v", err)
 	}
 	goalAck.Fault = nil
 	ack, err := workspace.RecordOrchestrationAcknowledgement(
-		context.Background(), harness.journal, harness.definition, goalVerifier, goalAck,
+		harness.journal, harness.definition, goalAck,
 	)
 	if err != nil || ack.IdempotencyKey() != directive.IdempotencyKey() {
 		t.Fatalf("goal ack retry = %#v, %v", ack, err)
 	}
 	projection = mustRuntime(t, harness.journal)
-	requestDigest, err := workspace.OwnerBoundaryResponseRequestDigest(
+	_, err = workspace.OwnerBoundaryResponseRequestDigest(
 		projection, attempt.AttemptID(), workspace.OwnerBoundaryContinue,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	verifier = &boundaryVerifier{expectedRequest: requestDigest}
-	binding, err := workspace.OwnerBoundaryResponseControlPlaneBinding(
-		harness.definition, projection, attempt.AttemptID(), workspace.OwnerBoundaryContinue,
-	)
-	if err != nil {
-		t.Fatal(err)
+	differentBoundary := workspace.MustID("different-boundary")
+	differentHead := mustGitObject(t, 'b')
+	ownerResponse := workspace.RecordOwnerBoundaryResponseRequest{
+		AttemptID: attempt.AttemptID(), BoundaryID: boundary.BoundaryID(),
+		DirectiveDigest: boundary.DirectiveDigest(), Goal: boundary.Goal(),
+		ExpectedHead: boundary.Head(), Response: workspace.OwnerBoundaryContinue,
+		OccurredAt: mustTime(t, "2026-07-21T12:08:30Z"),
 	}
-	receipt = controlPlaneReceipt(t, binding, "complete-nonce")
+	recordsBeforeMismatches = journalRecordCount(t, harness.journal)
+	for _, test := range []struct {
+		name   string
+		want   string
+		mutate func(*workspace.RecordOwnerBoundaryResponseRequest)
+	}{
+		{
+			name: "attempt",
+			want: "is not reserved",
+			mutate: func(request *workspace.RecordOwnerBoundaryResponseRequest) {
+				request.AttemptID = differentAttempt
+			},
+		},
+		{
+			name: "boundary",
+			want: "does not match the exact current boundary",
+			mutate: func(request *workspace.RecordOwnerBoundaryResponseRequest) {
+				request.BoundaryID = differentBoundary
+			},
+		},
+		{
+			name: "directive",
+			want: "does not match the exact current boundary",
+			mutate: func(request *workspace.RecordOwnerBoundaryResponseRequest) {
+				request.DirectiveDigest = differentDirective
+			},
+		},
+		{
+			name: "goal",
+			want: "does not match the exact current boundary",
+			mutate: func(request *workspace.RecordOwnerBoundaryResponseRequest) {
+				request.Goal = nextGoal
+			},
+		},
+		{
+			name: "head",
+			want: "does not match the exact current boundary",
+			mutate: func(request *workspace.RecordOwnerBoundaryResponseRequest) {
+				request.ExpectedHead = differentHead
+			},
+		},
+	} {
+		t.Run("rejects mismatched owner response "+test.name, func(t *testing.T) {
+			request := ownerResponse
+			test.mutate(&request)
+			if _, err := workspace.RecordOwnerBoundaryResponse(
+				harness.journal, harness.definition, request,
+			); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("mismatched %s owner response error = %v", test.name, err)
+			}
+		})
+	}
+	if records := journalRecordCount(t, harness.journal); records != recordsBeforeMismatches {
+		t.Fatalf(
+			"mismatched owner responses changed journal records: before=%d after=%d",
+			recordsBeforeMismatches, records,
+		)
+	}
 	ownerRequest := workspace.RecordOwnerBoundaryResponseRequest{
-		AttemptID: attempt.AttemptID(), Response: workspace.OwnerBoundaryContinue,
-		Receipt: receipt, OccurredAt: mustTime(t, "2026-07-21T12:09:00Z"),
-		Fault: failAt(workspace.AttemptFaultAfterOwnerResponse, crash),
+		AttemptID: attempt.AttemptID(), BoundaryID: boundary.BoundaryID(),
+		DirectiveDigest: boundary.DirectiveDigest(), Goal: boundary.Goal(),
+		ExpectedHead: boundary.Head(), Response: workspace.OwnerBoundaryContinue,
+		OccurredAt: mustTime(t, "2026-07-21T12:09:00Z"),
+		Fault:      failAt(workspace.AttemptFaultAfterOwnerResponse, crash),
 	}
 	if _, err := workspace.RecordOwnerBoundaryResponse(
-		context.Background(), harness.journal, harness.definition, verifier, ownerRequest,
+		harness.journal, harness.definition, ownerRequest,
 	); !errors.Is(err, crash) {
 		t.Fatalf("owner response crash = %v", err)
 	}
 	ownerRequest.Fault = nil
 	if _, err := workspace.RecordOwnerBoundaryResponse(
-		context.Background(), harness.journal, harness.definition, verifier, ownerRequest,
+		harness.journal, harness.definition, ownerRequest,
 	); err != nil {
 		t.Fatalf("owner response retry: %v", err)
 	}
@@ -1567,28 +1664,21 @@ func TestCompleteGoalBoundaryRecoversIdempotentlyThroughHandoffAndRejectsStaleHe
 	if !ok || pendingIntent.NextGoal() != nextGoal || pendingIntent.IdempotencyKey() != intent.IdempotencyKey() {
 		t.Fatalf("pending next-goal intent was not stably re-emitted: %#v", pendingIntent)
 	}
-	nextBinding, err := workspace.OrchestrationAcknowledgementControlPlaneBinding(
-		harness.definition, mustRuntime(t, harness.journal), attempt.AttemptID(),
-		workspace.AcknowledgementNextGoalCreated, nextGoal,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	nextVerifier := &boundaryVerifier{expectedRequest: nextBinding.RequestDigest()}
 	nextAck := workspace.RecordOrchestrationAcknowledgementRequest{
 		AttemptID: attempt.AttemptID(), Kind: workspace.AcknowledgementNextGoalCreated,
-		Goal: nextGoal, Receipt: controlPlaneReceipt(t, nextBinding, "next-goal-created"),
-		OccurredAt: mustTime(t, "2026-07-21T12:10:00Z"),
-		Fault:      failAt(workspace.AttemptFaultAfterOrchestrationAck, crash),
+		DirectiveDigest: intent.DirectiveDigest(), Goal: nextGoal,
+		IdempotencyKey: intent.IdempotencyKey(),
+		OccurredAt:     mustTime(t, "2026-07-21T12:10:00Z"),
+		Fault:          failAt(workspace.AttemptFaultAfterOrchestrationAck, crash),
 	}
 	if _, err := workspace.RecordOrchestrationAcknowledgement(
-		context.Background(), harness.journal, harness.definition, nextVerifier, nextAck,
+		harness.journal, harness.definition, nextAck,
 	); !errors.Is(err, crash) {
 		t.Fatalf("next-goal ack crash = %v", err)
 	}
 	nextAck.Fault = nil
 	if _, err := workspace.RecordOrchestrationAcknowledgement(
-		context.Background(), harness.journal, harness.definition, nextVerifier, nextAck,
+		harness.journal, harness.definition, nextAck,
 	); err != nil {
 		t.Fatalf("next-goal ack retry: %v", err)
 	}
@@ -1639,8 +1729,8 @@ func TestSerialSegmentsFenceOnlyMatchingSegments(t *testing.T) {
 	other, err := workspace.ReserveAttempt(
 		context.Background(), harness.journal, harness.definition, harness.git,
 		workspace.ReserveAttemptRequest{
-			MergeUnit: otherUnit, AttemptNumber: 1, Base: harness.base,
-			WorktreeRoot: harness.worktrees, Goal: otherGoal, OccurredAt: mustTime(t, "2026-07-21T13:02:00Z"),
+			MergeUnit: otherUnit, AttemptNumber: 1,
+			Goal: otherGoal, OccurredAt: mustTime(t, "2026-07-21T13:02:00Z"),
 		},
 	)
 	if err != nil || other.AttemptID().IsZero() {
@@ -1665,7 +1755,12 @@ func TestSerialSegmentsFenceOnlyMatchingSegments(t *testing.T) {
 	))
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T13:10:00Z")); err != nil {
+	worktreeRoot := t.TempDir()
+	if _, err := workspace.InitializeWorkspaceV2WithOptions(
+		context.Background(), workspaceDir, definition,
+		mustTime(t, "2026-07-21T13:10:00Z"),
+		workspace.WorkspaceInitializationOptions{WorktreeRoot: worktreeRoot},
+	); err != nil {
 		t.Fatal(err)
 	}
 	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
@@ -1679,7 +1774,7 @@ func TestSerialSegmentsFenceOnlyMatchingSegments(t *testing.T) {
 			context.Background(), journal, definition, git,
 			workspace.ReserveAttemptRequest{
 				MergeUnit: mustMergeUnitReference(t, "alpha-plan", unitID), AttemptNumber: 1,
-				Base: harness.base, WorktreeRoot: t.TempDir(), Goal: otherGoal,
+				Goal:       otherGoal,
 				OccurredAt: mustTime(t, fmt.Sprintf("2026-07-21T13:1%d:00Z", index+1)),
 			},
 		)
@@ -1697,7 +1792,7 @@ func TestReconciliationConsultsJournalProjectedAttempts(t *testing.T) {
 	active := mustDefinition(t, fixture.sources)
 	candidate := mustProspectiveCandidate(t, fixture)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, active, mustTime(t, "2026-07-21T14:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, active, mustTime(t, "2026-07-21T14:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	store, err := workspace.OpenGenerationStore(workspaceDir)
@@ -1712,13 +1807,12 @@ func TestReconciliationConsultsJournalProjectedAttempts(t *testing.T) {
 	if _, err := store.StageCandidate(journal, candidate, mustTime(t, "2026-07-21T14:01:00Z")); err != nil {
 		t.Fatal(err)
 	}
-	base, _ := workspace.ParseGitObjectID("sha1:" + strings.Repeat("a", 40))
 	goal, _ := workspace.NewGoalBinding(workspace.MustID("reconcile-goal"), workspace.GoalScopeMergeUnit)
 	if _, err := workspace.ReserveAttempt(
 		context.Background(), journal, active, &fakeAttemptGit{},
 		workspace.ReserveAttemptRequest{
 			MergeUnit: mustMergeUnitReference(t, "alpha-plan", "unit-one"), AttemptNumber: 1,
-			Base: base, WorktreeRoot: t.TempDir(), Goal: goal, OccurredAt: mustTime(t, "2026-07-21T14:02:00Z"),
+			Goal: goal, OccurredAt: mustTime(t, "2026-07-21T14:02:00Z"),
 		},
 	); err != nil {
 		t.Fatal(err)

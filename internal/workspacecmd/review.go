@@ -2,7 +2,6 @@ package workspacecmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/charlesnpx/feature-implement/internal/workspace"
@@ -88,7 +87,6 @@ type isolationInput struct {
 	CredentialsAvailable bool `json:"credentials_available"`
 	RepositoryHooks      bool `json:"repository_hooks"`
 	WriteNetwork         bool `json:"write_network"`
-	ProviderBroker       bool `json:"provider_broker"`
 	ExternalWrite        bool `json:"external_write"`
 }
 
@@ -103,7 +101,6 @@ type recordReviewInput struct {
 	Findings              []reviewFindingInput `json:"findings"`
 	InfrastructureFailure string               `json:"infrastructure_failure,omitempty"`
 	Isolation             isolationInput       `json:"isolation"`
-	Receipt               json.RawMessage      `json:"receipt"`
 }
 
 type reviewFixInput struct {
@@ -224,7 +221,7 @@ func executeReview(ctx context.Context, bundle workspace.WorkspaceBundle, option
 		}
 		proof := workspace.NewReviewIsolationProof(
 			input.Isolation.RepositoryReadOnly, input.Isolation.ScratchEphemeral, input.Isolation.CredentialsAvailable,
-			input.Isolation.RepositoryHooks, input.Isolation.WriteNetwork, input.Isolation.ProviderBroker, input.Isolation.ExternalWrite,
+			input.Isolation.RepositoryHooks, input.Isolation.WriteNetwork, false, input.Isolation.ExternalWrite,
 		)
 		submission, err := workspace.NewReviewResultSubmission(workspace.ReviewResultSubmissionOptions{
 			RequestDigest: requestDigest, ReviewerInstance: reviewer, Status: workspace.ReviewResultStatus(input.Status),
@@ -233,17 +230,15 @@ func executeReview(ctx context.Context, bundle workspace.WorkspaceBundle, option
 		if err != nil {
 			return nil, err
 		}
-		receipt, verifier, err := controlPlaneInputs(bundle, options.WorkspaceDir, input.Receipt)
-		if err != nil {
-			return nil, err
-		}
-		verified, _, err := workspace.RecordAttemptReviewResult(ctx, journal, definition, repository, verifier, workspace.RecordAttemptReviewResultRequest{
-			AttemptID: attemptID, ReservationDigest: reservation, Submission: submission, Receipt: receipt, OccurredAt: occurredAt,
+		verified, _, err := workspace.RecordAttemptReviewResult(ctx, journal, definition, repository, workspace.RecordAttemptReviewResultRequest{
+			AttemptID: attemptID, ReservationDigest: reservation, Submission: submission, OccurredAt: occurredAt,
 		})
 		if err != nil {
 			return nil, err
 		}
-		detail := map[string]any{"result_digest": verified.Submission().Digest().String(), "receipt_digest": verified.ReceiptDigest().String()}
+		detail := map[string]any{
+			"result_digest": verified.Submission().Digest().String(),
+		}
 		return reviewCommandResult("review.record", detail, journal, definition)
 	case "reserve-fix", "apply-fix", "record-fix":
 		var input reviewFixInput

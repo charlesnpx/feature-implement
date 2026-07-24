@@ -2,7 +2,6 @@ package workspacecmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -31,8 +30,6 @@ type reserveAttemptInput struct {
 	PlanID        string    `json:"plan_id"`
 	MergeUnitID   string    `json:"merge_unit_id"`
 	AttemptNumber uint64    `json:"attempt_number"`
-	Base          string    `json:"base"`
-	WorktreeRoot  string    `json:"worktree_root"`
 	Goal          goalInput `json:"goal"`
 }
 
@@ -57,20 +54,24 @@ type nextGoalInput struct {
 }
 
 type acknowledgeInput struct {
-	SchemaVersion int             `json:"schema_version"`
-	OccurredAt    string          `json:"occurred_at"`
-	AttemptID     string          `json:"attempt_id"`
-	Kind          string          `json:"kind"`
-	Goal          goalInput       `json:"goal"`
-	Receipt       json.RawMessage `json:"receipt"`
+	SchemaVersion   int       `json:"schema_version"`
+	OccurredAt      string    `json:"occurred_at"`
+	AttemptID       string    `json:"attempt_id"`
+	Kind            string    `json:"kind"`
+	DirectiveDigest string    `json:"directive_digest"`
+	Goal            goalInput `json:"goal"`
+	IdempotencyKey  string    `json:"idempotency_key"`
 }
 
 type ownerResponseInput struct {
-	SchemaVersion int             `json:"schema_version"`
-	OccurredAt    string          `json:"occurred_at"`
-	AttemptID     string          `json:"attempt_id"`
-	Response      string          `json:"response"`
-	Receipt       json.RawMessage `json:"receipt"`
+	SchemaVersion   int       `json:"schema_version"`
+	OccurredAt      string    `json:"occurred_at"`
+	AttemptID       string    `json:"attempt_id"`
+	BoundaryID      string    `json:"boundary_id"`
+	DirectiveDigest string    `json:"directive_digest"`
+	Goal            goalInput `json:"goal"`
+	ExpectedHead    string    `json:"expected_head"`
+	Response        string    `json:"response"`
 }
 
 func executeAttempt(ctx context.Context, bundle workspace.WorkspaceBundle, options Options) (MutationResult, error) {
@@ -103,21 +104,13 @@ func executeAttempt(ctx context.Context, bundle workspace.WorkspaceBundle, optio
 		if err != nil {
 			return MutationResult{}, err
 		}
-		base, err := parseGitObject(input.Base, "base")
-		if err != nil {
-			return MutationResult{}, err
-		}
-		worktreeRoot, err := absoluteDirectory(input.WorktreeRoot, "worktree root")
-		if err != nil {
-			return MutationResult{}, err
-		}
 		goal, err := parseGoal(input.Goal)
 		if err != nil {
 			return MutationResult{}, err
 		}
 		if _, err := workspace.ReserveAttempt(ctx, journal, definition, git, workspace.ReserveAttemptRequest{
-			MergeUnit: reference, AttemptNumber: input.AttemptNumber, Base: base,
-			WorktreeRoot: worktreeRoot, Goal: goal, OccurredAt: occurredAt,
+			MergeUnit: reference, AttemptNumber: input.AttemptNumber,
+			Goal: goal, OccurredAt: occurredAt,
 		}); err != nil {
 			return MutationResult{}, err
 		}
@@ -211,14 +204,26 @@ func executeAttempt(ctx context.Context, bundle workspace.WorkspaceBundle, optio
 		if err != nil {
 			return MutationResult{}, err
 		}
-		receipt, verifier, err := controlPlaneInputs(bundle, options.WorkspaceDir, input.Receipt)
+		directive, err := parseDigest(
+			input.DirectiveDigest, "directive_digest",
+		)
 		if err != nil {
 			return MutationResult{}, err
 		}
-		if _, err := workspace.RecordOrchestrationAcknowledgement(ctx, journal, definition, verifier, workspace.RecordOrchestrationAcknowledgementRequest{
-			AttemptID: attemptID, Kind: workspace.OrchestrationAcknowledgementKind(input.Kind),
-			Goal: goal, Receipt: receipt, OccurredAt: occurredAt,
-		}); err != nil {
+		idempotency, err := parseDigest(
+			input.IdempotencyKey, "idempotency_key",
+		)
+		if err != nil {
+			return MutationResult{}, err
+		}
+		if _, err := workspace.RecordOrchestrationAcknowledgement(
+			journal, definition,
+			workspace.RecordOrchestrationAcknowledgementRequest{
+				AttemptID: attemptID, Kind: workspace.OrchestrationAcknowledgementKind(input.Kind),
+				DirectiveDigest: directive, Goal: goal,
+				IdempotencyKey: idempotency, OccurredAt: occurredAt,
+			},
+		); err != nil {
 			return MutationResult{}, err
 		}
 		return mutationResult("attempt.acknowledge", journal, definition, nil)
@@ -235,14 +240,33 @@ func executeAttempt(ctx context.Context, bundle workspace.WorkspaceBundle, optio
 		if err != nil {
 			return MutationResult{}, err
 		}
-		receipt, verifier, err := controlPlaneInputs(bundle, options.WorkspaceDir, input.Receipt)
+		boundaryID, err := parseID(input.BoundaryID, "boundary_id")
 		if err != nil {
 			return MutationResult{}, err
 		}
-		if _, err := workspace.RecordOwnerBoundaryResponse(ctx, journal, definition, verifier, workspace.RecordOwnerBoundaryResponseRequest{
-			AttemptID: attemptID, Response: workspace.OwnerBoundaryResponse(input.Response),
-			Receipt: receipt, OccurredAt: occurredAt,
-		}); err != nil {
+		directive, err := parseDigest(
+			input.DirectiveDigest, "directive_digest",
+		)
+		if err != nil {
+			return MutationResult{}, err
+		}
+		goal, err := parseGoal(input.Goal)
+		if err != nil {
+			return MutationResult{}, err
+		}
+		head, err := parseGitObject(input.ExpectedHead, "expected_head")
+		if err != nil {
+			return MutationResult{}, err
+		}
+		if _, err := workspace.RecordOwnerBoundaryResponse(
+			journal, definition, workspace.RecordOwnerBoundaryResponseRequest{
+				AttemptID: attemptID, BoundaryID: boundaryID,
+				DirectiveDigest: directive, Goal: goal,
+				ExpectedHead: head,
+				Response:     workspace.OwnerBoundaryResponse(input.Response),
+				OccurredAt:   occurredAt,
+			},
+		); err != nil {
 			return MutationResult{}, err
 		}
 		return mutationResult("attempt.owner-response", journal, definition, nil)
@@ -324,7 +348,7 @@ func directiveViews(directives []workspace.AttemptBoundaryDirective) []BoundaryD
 				Kind: "complete_goal_and_wait", WorkspaceID: value.WorkspaceID().String(), Generation: value.Generation().String(),
 				AttemptID: value.AttemptID().String(), BoundaryID: value.BoundaryID().String(), GoalID: value.Goal().ID().String(),
 				GoalScope: string(value.Goal().Scope()), Head: value.Head().String(), DirectiveDigest: value.DirectiveDigest().String(),
-				IdempotencyKey: value.IdempotencyKey().String(),
+				IdempotencyKey: value.IdempotencyKey().String(), Choices: []string{},
 			})
 		case workspace.OwnerGateDirective:
 			choices := make([]string, 0, len(value.Choices()))
@@ -334,7 +358,8 @@ func directiveViews(directives []workspace.AttemptBoundaryDirective) []BoundaryD
 			result = append(result, BoundaryDirectiveView{
 				Kind: "owner_gate", WorkspaceID: value.WorkspaceID().String(), Generation: value.Generation().String(),
 				AttemptID: value.AttemptID().String(), BoundaryID: value.BoundaryID().String(), GoalID: value.Goal().ID().String(),
-				GoalScope: string(value.Goal().Scope()), Head: value.Head().String(), DirectiveDigest: value.DirectiveDigest().String(), Choices: choices,
+				GoalScope: string(value.Goal().Scope()), Head: value.Head().String(), DirectiveDigest: value.DirectiveDigest().String(),
+				Choices: append([]string{}, choices...),
 			})
 		}
 	}
@@ -346,6 +371,6 @@ func nextGoalDirectiveView(intent workspace.NextGoalCreationIntent) BoundaryDire
 		Kind: "create_next_goal", WorkspaceID: intent.WorkspaceID().String(), Generation: intent.Generation().String(),
 		AttemptID: intent.AttemptID().String(), BoundaryID: intent.BoundaryID().String(), GoalID: intent.NextGoal().ID().String(),
 		GoalScope: string(intent.NextGoal().Scope()), Head: intent.Head().String(), DirectiveDigest: intent.DirectiveDigest().String(),
-		IdempotencyKey: intent.IdempotencyKey().String(),
+		IdempotencyKey: intent.IdempotencyKey().String(), Choices: []string{},
 	}
 }

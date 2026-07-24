@@ -212,7 +212,6 @@ type ReviewResultRecordedJournalEvent struct {
 	invocation        uint16
 	reservationDigest Digest
 	result            ReviewResultSubmission
-	receiptDigest     Digest
 }
 
 func NewReviewResultRecordedJournalEvent(
@@ -223,7 +222,6 @@ func NewReviewResultRecordedJournalEvent(
 		workspaceID: workspaceID, generation: generation, attemptID: attemptID, loopDigest: loopDigest,
 		round: record.round, profileOrdinal: record.profileOrdinal, invocation: record.invocation,
 		reservationDigest: record.reservationDigest, result: cloneReviewResult(record.result),
-		receiptDigest: record.receiptDigest,
 	}
 	if err := event.validate(); err != nil {
 		return ReviewResultRecordedJournalEvent{}, err
@@ -245,7 +243,7 @@ func (event ReviewResultRecordedJournalEvent) validate() error {
 	}
 	_, err := NewRecordReviewResult(
 		event.round, event.profileOrdinal, event.invocation, event.reservationDigest,
-		event.result, event.receiptDigest,
+		event.result,
 	)
 	return err
 }
@@ -262,7 +260,6 @@ func (event ReviewResultRecordedJournalEvent) ReservationDigest() Digest {
 func (event ReviewResultRecordedJournalEvent) Result() ReviewResultSubmission {
 	return cloneReviewResult(event.result)
 }
-func (event ReviewResultRecordedJournalEvent) ReceiptDigest() Digest { return event.receiptDigest }
 
 type ReviewFindingFixReservedJournalEvent struct {
 	workspaceID ID
@@ -428,7 +425,6 @@ func reviewJournalEventResources(event WorkspaceJournalEvent) ([]JournalResource
 			AttemptJournalResource(attemptID), ReviewJournalResource(attemptID), ReviewBudgetJournalResource(attemptID),
 			ReviewProfileResultJournalResource(attemptID, event.round, event.profileOrdinal, event.invocation),
 			ReviewInvocationJournalResource(attemptID, event.reservationDigest),
-			AuthorizationReceiptJournalResource(event.receiptDigest),
 		}
 	case ReviewFindingFixReservedJournalEvent:
 		workspaceID, generation, attemptID = event.workspaceID, event.generation, event.attemptID

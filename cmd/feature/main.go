@@ -55,7 +55,7 @@ func usage(w io.Writer) {
   feature plan materialize --manifest <file> [--out-root <dir>] [--json]
   feature plan checkpoint --root <bundle-root> --kind initial|revision|lock --input <json-file|-> [--json]
   feature validate <plan-dir> [--write-lock] [--json]
-  feature workspace schema [bundle|requests] [--json]
+  feature workspace schema [bundle|requests|reports] [--json]
   feature workspace example
   feature workspace validate --bundle <dir> [--write-locks] [--json]
   feature workspace <action> [<subaction>] --bundle <dir> --workspace <dir> [--input <json-file|->] [--json]
@@ -253,6 +253,13 @@ func workspaceCommand(args []string) error {
 	action := args[0]
 	remaining := args[1:]
 	subaction := ""
+	switch action {
+	case "queue", "receipts", "reconcile", "control", "provider":
+		return fmt.Errorf(
+			"workspace %s was removed from the local-only workflow",
+			action,
+		)
+	}
 	if hasHelpFlag(remaining) {
 		usageWorkspace(os.Stdout)
 		return nil
@@ -266,15 +273,19 @@ func workspaceCommand(args []string) error {
 	if action == "schema" && len(remaining) > 0 && !strings.HasPrefix(remaining[0], "-") {
 		subaction, remaining = remaining[0], remaining[1:]
 	}
+	if action == "commit" && subaction == "rebase" {
+		return fmt.Errorf(
+			"workspace commit rebase was removed; attempt bases are immutable",
+		)
+	}
 	fs := flag.NewFlagSet("workspace "+action, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	bundle := fs.String("bundle", "", "Directory containing feature.workspace.bundle.json")
-	candidateBundle := fs.String("candidate-bundle", "", "Candidate bundle directory for reconciliation")
 	workspaceDir := fs.String("workspace", "", "Journal-backed workspace state directory")
 	inputPath := fs.String("input", "", "Strict JSON request file, or - for stdin")
 	writeLocks := fs.Bool("write-locks", false, "Synchronize immutable generated lock projections")
 	fs.Bool("json", false, "Emit JSON (workspace commands always emit JSON)")
-	if err := parsePermissive(fs, remaining, "bundle", "candidate-bundle", "workspace", "input"); err != nil {
+	if err := parsePermissive(fs, remaining, "bundle", "workspace", "input"); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
@@ -292,7 +303,7 @@ func workspaceCommand(args []string) error {
 		return err
 	}
 	result, err := workspacecmd.Execute(context.Background(), workspacecmd.Options{
-		Action: action, Subaction: subaction, BundleDir: *bundle, CandidateBundleDir: *candidateBundle,
+		Action: action, Subaction: subaction, BundleDir: *bundle,
 		WorkspaceDir: *workspaceDir, Input: input, WriteLocks: *writeLocks, GeneratorVersion: Version,
 	})
 	if err != nil {
@@ -303,7 +314,7 @@ func workspaceCommand(args []string) error {
 
 func workspaceActionRequiresSubaction(action string) bool {
 	switch action {
-	case "reconcile", "attempt", "commit", "review", "control", "provider", "complete":
+	case "attempt", "commit", "review", "integrate", "complete":
 		return true
 	default:
 		return false
@@ -449,19 +460,16 @@ Validates a standalone materialized plan directory. Workspace execution uses fea
 
 func usageWorkspace(w io.Writer) {
 	fmt.Fprintln(w, `Usage:
-  feature workspace schema [bundle|requests] [--json]
+  feature workspace schema [bundle|requests|reports] [--json]
   feature workspace example
   feature workspace validate --bundle <dir> [--write-locks] [--json]
   feature workspace init|recover --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
-  feature workspace status|scheduler|gates|queue|receipts|report --bundle <dir> --workspace <dir> [--json]
-  feature workspace reconcile stage|plan|activate --bundle <dir> --candidate-bundle <dir> --workspace <dir> --input <json-file|-> [--json]
+  feature workspace status|scheduler|gates|report --bundle <dir> --workspace <dir> [--json]
   feature workspace attempt reserve|materialize|adopt-head|boundary|next-goal|acknowledge|owner-response|resume --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
-  feature workspace commit next|rebase --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
+  feature workspace commit next --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
   feature workspace review start|reserve|record|reserve-fix|apply-fix|record-fix|ready --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
-  feature workspace control grant|revoke|safety|segment-complete|inspect-receipt --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
-  feature workspace provider reserve|preflight|dispatch|reconcile|abandon|authorize-pr --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
+  feature workspace integrate merge-unit --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
   feature workspace complete verify --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
 
-All mutations accept one strict schema-version-2 JSON request and record typed journal events.
-Provider writes execute inside the trusted adapter; no provider command is returned.`)
+All mutations accept one strict schema-version-2 JSON request and record typed local journal events.`)
 }

@@ -68,7 +68,7 @@ func TestProspectiveReconciliationActivatesCandidateWithOwnerCAS(t *testing.T) {
 	active := mustDefinition(t, fixture.sources)
 	candidate := mustProspectiveCandidate(t, fixture)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, active, mustTime(t, "2026-07-21T02:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, active, mustTime(t, "2026-07-21T02:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	store, err := workspace.OpenGenerationStore(workspaceDir)
@@ -215,7 +215,7 @@ func TestProspectiveReconciliationActivatesCandidateWithOwnerCAS(t *testing.T) {
 	if err := journal.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, active, mustTime(t, "2026-07-21T02:04:00Z")); err == nil || !strings.Contains(err.Error(), "already initialized") {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, active, mustTime(t, "2026-07-21T02:04:00Z")); err == nil || !strings.Contains(err.Error(), "already initialized") {
 		t.Fatalf("old generation reinitialization error = %v", err)
 	}
 	unchanged, err := workspace.ReadWorkspaceJournalSnapshot(workspaceDir)
@@ -229,7 +229,7 @@ func TestGenerationActivationRejectsOutstandingAuthorizationObligationsBeforeApp
 	active := mustDefinition(t, fixture.sources)
 	candidate := mustProspectiveCandidate(t, fixture)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, active, mustTime(t, "2026-07-21T02:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, active, mustTime(t, "2026-07-21T02:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	store, err := workspace.OpenGenerationStore(workspaceDir)
@@ -327,7 +327,7 @@ func TestActivatedCandidateCannotBeReactivated(t *testing.T) {
 	))
 	third := mustDefinition(t, thirdSources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, first, mustTime(t, "2026-07-21T02:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, first, mustTime(t, "2026-07-21T02:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	store, err := workspace.OpenGenerationStore(workspaceDir)
@@ -421,7 +421,7 @@ func TestReconciliationRejectsImmutableLocalTargetAuthorityChanges(t *testing.T)
 	}
 
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(
+	if _, err := initializeWorkspaceV2(t,
 		workspaceDir, active, mustTime(t, "2026-07-21T02:00:00Z"),
 	); err != nil {
 		t.Fatal(err)
@@ -540,7 +540,7 @@ func TestReconciliationSafetyMatrixRejectsUnsafeRuntimeAndRetrospectiveChanges(t
 	active := mustDefinition(t, fixture.sources)
 	candidate := mustProspectiveCandidate(t, fixture)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, active, mustTime(t, "2026-07-21T02:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, active, mustTime(t, "2026-07-21T02:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	store, _ := workspace.OpenGenerationStore(workspaceDir)
@@ -713,7 +713,7 @@ func TestCandidateOrphanRecoveryAndStaleComparisonToken(t *testing.T) {
 	active := mustDefinition(t, fixture.sources)
 	candidate := mustProspectiveCandidate(t, fixture)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, active, mustTime(t, "2026-07-21T02:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, active, mustTime(t, "2026-07-21T02:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	store, _ := workspace.OpenGenerationStore(workspaceDir)
@@ -806,7 +806,7 @@ func TestOrphanRecoveryRejectsGenerationFromAnotherWorkspace(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	active := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(
+	if _, err := initializeWorkspaceV2(t,
 		workspaceDir, active, mustTime(t, "2026-07-21T02:00:00Z"),
 	); err != nil {
 		t.Fatal(err)

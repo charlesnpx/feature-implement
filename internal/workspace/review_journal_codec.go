@@ -103,7 +103,6 @@ type reviewResultRecordedPayloadWire struct {
 	Invocation     uint16                  `json:"invocation"`
 	Reservation    string                  `json:"reservation_digest"`
 	Result         reviewResultPayloadWire `json:"result"`
-	ReceiptDigest  string                  `json:"receipt_digest"`
 }
 
 type reviewInvocationReservedPayloadWire struct {
@@ -192,7 +191,6 @@ func marshalReviewJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, bo
 			AttemptID: event.attemptID.String(), LoopDigest: event.loopDigest.String(),
 			Round: event.round, ProfileOrdinal: event.profileOrdinal, Invocation: event.invocation,
 			Reservation: event.reservationDigest.String(), Result: reviewResultToWire(event.result),
-			ReceiptDigest: event.receiptDigest.String(),
 		}
 	case ReviewFindingFixReservedJournalEvent:
 		findings := make([]string, 0, len(event.reservation.findings))
@@ -384,16 +382,12 @@ func decodeReviewJournalEvent(
 		if err != nil {
 			return nil, true, err
 		}
-		receipt, err := ParseDigest(wire.ReceiptDigest)
-		if err != nil {
-			return nil, true, err
-		}
 		reservation, err := ParseDigest(wire.Reservation)
 		if err != nil {
 			return nil, true, err
 		}
 		record, err := NewRecordReviewResult(
-			wire.Round, wire.ProfileOrdinal, wire.Invocation, reservation, result, receipt,
+			wire.Round, wire.ProfileOrdinal, wire.Invocation, reservation, result,
 		)
 		if err != nil {
 			return nil, true, err

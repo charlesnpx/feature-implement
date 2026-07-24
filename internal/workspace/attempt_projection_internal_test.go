@@ -40,7 +40,7 @@ func TestAttemptProjectionRecomputesOrchestrationAcknowledgementRequestDigest(t 
 	}
 	valid, err := NewAttemptOrchestrationAcknowledgedJournalEvent(
 		workspaceID, attemptID, boundaryID, generation, AcknowledgementGoalCompleted,
-		goal, boundary.idempotencyKey, validRequest, DigestBytes([]byte("projection-receipt")),
+		boundary.directiveDigest, goal, boundary.idempotencyKey, validRequest,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -55,8 +55,8 @@ func TestAttemptProjectionRecomputesOrchestrationAcknowledgementRequestDigest(t 
 
 	tampered, err := NewAttemptOrchestrationAcknowledgedJournalEvent(
 		workspaceID, attemptID, boundaryID, generation, AcknowledgementGoalCompleted,
-		goal, boundary.idempotencyKey, DigestBytes([]byte("stored-but-wrong-request")),
-		DigestBytes([]byte("projection-receipt")),
+		boundary.directiveDigest, goal, boundary.idempotencyKey,
+		DigestBytes([]byte("stored-but-wrong-request")),
 	)
 	if err != nil {
 		t.Fatal(err)

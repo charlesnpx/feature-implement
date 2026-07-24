@@ -389,11 +389,10 @@ func WorkspaceBundleSchema() map[string]any {
 		"additionalProperties": false,
 		"required":             []string{"schema_version", "workspace", "plans", "execution_config", "authorities"},
 		"properties": map[string]any{
-			"schema_version":          map[string]any{"const": WorkspaceBundleSchemaVersion},
-			"workspace":               map[string]any{"type": "string", "minLength": 1},
-			"plans":                   map[string]any{"type": "array", "minItems": 1, "uniqueItems": true, "items": map[string]any{"type": "string", "minLength": 1}},
-			"execution_config":        map[string]any{"type": "string", "minLength": 1},
-			"control_plane_authority": map[string]any{"type": "string", "minLength": 1},
+			"schema_version":   map[string]any{"const": WorkspaceBundleSchemaVersion},
+			"workspace":        map[string]any{"type": "string", "minLength": 1},
+			"plans":            map[string]any{"type": "array", "minItems": 1, "uniqueItems": true, "items": map[string]any{"type": "string", "minLength": 1}},
+			"execution_config": map[string]any{"type": "string", "minLength": 1},
 			"authorities": map[string]any{
 				"type": "array", "items": map[string]any{
 					"type": "object", "additionalProperties": false,

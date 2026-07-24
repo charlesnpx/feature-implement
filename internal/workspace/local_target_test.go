@@ -56,7 +56,7 @@ func TestLocalTargetValidationAndInitializationBindPrimaryAndLinkedWorktrees(
 			}
 
 			runtimeRoot := canonicalTestDirectory(t)
-			result, err := workspace.InitializeWorkspaceV2(
+			result, err := initializeWorkspaceV2(t,
 				runtimeRoot,
 				definition,
 				mustTime(t, "2026-07-24T12:00:00Z"),
@@ -97,6 +97,7 @@ func TestLocalTargetInitializationRecoversExactFeatureRefBoundaries(t *testing.T
 				definition,
 				mustTime(t, "2026-07-24T12:10:00Z"),
 				workspace.WorkspaceInitializationOptions{
+					WorktreeRoot: workspaceTestWorktreeRoot(t, runtimeRoot),
 					TargetFault: func(
 						point workspace.LocalTargetInitializationFaultPoint,
 					) error {
@@ -112,7 +113,7 @@ func TestLocalTargetInitializationRecoversExactFeatureRefBoundaries(t *testing.T
 				!strings.Contains(err.Error(), string(faultPoint)) {
 				t.Fatalf("initialization fault = %v fired=%t", err, fired)
 			}
-			recovered, err := workspace.InitializeWorkspaceV2(
+			recovered, err := initializeWorkspaceV2(t,
 				runtimeRoot,
 				definition,
 				mustTime(t, "2026-07-24T12:11:00Z"),
@@ -142,6 +143,7 @@ func TestLocalTargetInitializationRefRaceIsNotAdopted(t *testing.T) {
 		definition,
 		mustTime(t, "2026-07-24T12:20:00Z"),
 		workspace.WorkspaceInitializationOptions{
+			WorktreeRoot: workspaceTestWorktreeRoot(t, runtimeRoot),
 			TargetFault: func(
 				point workspace.LocalTargetInitializationFaultPoint,
 			) error {
@@ -162,7 +164,7 @@ func TestLocalTargetInitializationRefRaceIsNotAdopted(t *testing.T) {
 		!strings.Contains(err.Error(), "expected-absent CAS") {
 		t.Fatalf("feature-ref race error = %v raced=%t", err, raced)
 	}
-	_, err = workspace.InitializeWorkspaceV2(
+	_, err = initializeWorkspaceV2(t,
 		runtimeRoot,
 		definition,
 		mustTime(t, "2026-07-24T12:21:00Z"),
@@ -186,6 +188,7 @@ func TestLocalTargetRefCreationDoesNotMutateReplacementGitDirectory(t *testing.T
 		definition,
 		mustTime(t, "2026-07-24T12:25:00Z"),
 		workspace.WorkspaceInitializationOptions{
+			WorktreeRoot: workspaceTestWorktreeRoot(t, runtimeRoot),
 			TargetFault: func(
 				point workspace.LocalTargetInitializationFaultPoint,
 			) error {
@@ -245,6 +248,7 @@ func TestLocalTargetRefCreationDoesNotFollowReplacedCommonDirectory(t *testing.T
 		definition,
 		mustTime(t, "2026-07-24T12:25:30Z"),
 		workspace.WorkspaceInitializationOptions{
+			WorktreeRoot: workspaceTestWorktreeRoot(t, runtimeRoot),
 			TargetFault: func(
 				point workspace.LocalTargetInitializationFaultPoint,
 			) error {
@@ -365,6 +369,7 @@ func TestLocalTargetRefCreationRejectsExternalRefAndReflogStorage(t *testing.T) 
 				definition,
 				mustTime(t, "2026-07-24T12:25:40Z"),
 				workspace.WorkspaceInitializationOptions{
+					WorktreeRoot: workspaceTestWorktreeRoot(t, runtimeRoot),
 					TargetFault: func(
 						point workspace.LocalTargetInitializationFaultPoint,
 					) error {
@@ -456,13 +461,15 @@ func TestLocalTargetRefCreationRejectsUnsafeStorageAncestorPermissions(
 			if err := os.WriteFile(externalVictim, original, 0o600); err != nil {
 				t.Fatal(err)
 			}
+			runtimeRoot := canonicalTestDirectory(t)
 			changed := false
 			_, err := workspace.InitializeWorkspaceV2WithOptions(
 				context.Background(),
-				canonicalTestDirectory(t),
+				runtimeRoot,
 				definition,
 				mustTime(t, "2026-07-24T12:25:50Z"),
 				workspace.WorkspaceInitializationOptions{
+					WorktreeRoot: workspaceTestWorktreeRoot(t, runtimeRoot),
 					TargetFault: func(
 						point workspace.LocalTargetInitializationFaultPoint,
 					) error {
@@ -515,7 +522,7 @@ func TestLocalTargetCreatesSecureFeatureStorageAncestors(t *testing.T) {
 	definition := localTargetDefinition(
 		t, root, base, "feature/secure-storage-ancestors",
 	)
-	if _, err := workspace.InitializeWorkspaceV2(
+	if _, err := initializeWorkspaceV2(t,
 		canonicalTestDirectory(t),
 		definition,
 		mustTime(t, "2026-07-24T12:25:55Z"),
@@ -563,6 +570,7 @@ func TestLocalTargetInitializationReadinessBarrierAtEveryFault(t *testing.T) {
 				definition,
 				mustTime(t, "2026-07-24T12:26:00Z"),
 				workspace.WorkspaceInitializationOptions{
+					WorktreeRoot: workspaceTestWorktreeRoot(t, runtimeRoot),
 					TargetFault: func(
 						point workspace.LocalTargetInitializationFaultPoint,
 					) error {
@@ -611,8 +619,6 @@ func TestLocalTargetInitializationReadinessBarrierAtEveryFault(t *testing.T) {
 						t, "alpha-plan", "unit-one",
 					),
 					AttemptNumber: 1,
-					Base:          definition.Workspace().BaseCommit(),
-					WorktreeRoot:  canonicalTestDirectory(t),
 					Goal:          goal,
 					OccurredAt: mustTime(
 						t, "2026-07-24T12:26:01Z",
@@ -646,6 +652,7 @@ func TestLocalTargetBaseMustRemainPinnedAtEveryPreCompletionFault(t *testing.T) 
 				definition,
 				mustTime(t, "2026-07-24T12:27:00Z"),
 				workspace.WorkspaceInitializationOptions{
+					WorktreeRoot: workspaceTestWorktreeRoot(t, runtimeRoot),
 					TargetFault: func(
 						point workspace.LocalTargetInitializationFaultPoint,
 					) error {
@@ -676,7 +683,7 @@ func TestLocalTargetBaseMustRemainPinnedAtEveryPreCompletionFault(t *testing.T) 
 				"-c", "user.email=feature-implement@localhost",
 				"commit", "--quiet", "-m", "move base before completion",
 			)
-			_, err = workspace.InitializeWorkspaceV2(
+			_, err = initializeWorkspaceV2(t,
 				runtimeRoot,
 				definition,
 				mustTime(t, "2026-07-24T12:27:01Z"),
@@ -704,7 +711,7 @@ func TestLocalTargetBaseMovementIsInformationalAfterInitialization(t *testing.T)
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	runtimeRoot := canonicalTestDirectory(t)
-	first, err := workspace.InitializeWorkspaceV2(
+	first, err := initializeWorkspaceV2(t,
 		runtimeRoot,
 		definition,
 		mustTime(t, "2026-07-24T12:30:00Z"),
@@ -730,7 +737,7 @@ func TestLocalTargetBaseMovementIsInformationalAfterInitialization(t *testing.T)
 	); err == nil || !strings.Contains(err.Error(), "not pinned base_commit") {
 		t.Fatalf("moved base validation error = %v", err)
 	}
-	retried, err := workspace.InitializeWorkspaceV2(
+	retried, err := initializeWorkspaceV2(t,
 		runtimeRoot,
 		definition,
 		mustTime(t, "2026-07-24T12:31:00Z"),
@@ -795,7 +802,7 @@ func TestLocalTargetInitializationRejectsDiscoveredRootOverlap(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			definition, runtimeRoot := test.setup(t)
-			_, err := workspace.InitializeWorkspaceV2(
+			_, err := initializeWorkspaceV2(t,
 				runtimeRoot,
 				definition,
 				mustTime(t, "2026-07-24T12:35:00Z"),
@@ -829,7 +836,7 @@ func TestLocalTargetInitializationRejectsPrunableRegisteredRuntimePath(
 	definition := localTargetDefinition(
 		t, root, base, "feature/prunable-runtime-overlap",
 	)
-	_, err := workspace.InitializeWorkspaceV2(
+	_, err := initializeWorkspaceV2(t,
 		runtimeRoot,
 		definition,
 		mustTime(t, "2026-07-24T12:35:10Z"),
@@ -862,6 +869,7 @@ func TestLocalTargetInitializationRejectsConcurrentRegisteredWorktree(
 		definition,
 		mustTime(t, "2026-07-24T12:35:20Z"),
 		workspace.WorkspaceInitializationOptions{
+			WorktreeRoot: workspaceTestWorktreeRoot(t, runtimeRoot),
 			TargetFault: func(
 				point workspace.LocalTargetInitializationFaultPoint,
 			) error {
@@ -1526,7 +1534,7 @@ func TestLocalTargetRejectsEscapingSymlinkAndRepositoryReplacement(t *testing.T)
 		fixture := newDefinitionFixture(t)
 		definition := mustDefinition(t, fixture.sources)
 		runtimeRoot := canonicalTestDirectory(t)
-		if _, err := workspace.InitializeWorkspaceV2(
+		if _, err := initializeWorkspaceV2(t,
 			runtimeRoot,
 			definition,
 			mustTime(t, "2026-07-24T12:40:00Z"),
@@ -1558,7 +1566,7 @@ func TestLocalTargetRejectsEscapingSymlinkAndRepositoryReplacement(t *testing.T)
 			"-c", "user.email=feature-implement@localhost",
 			"commit", "--quiet", "-m", "replacement",
 		)
-		_, err := workspace.InitializeWorkspaceV2(
+		_, err := initializeWorkspaceV2(t,
 			runtimeRoot,
 			definition,
 			mustTime(t, "2026-07-24T12:41:00Z"),
@@ -1621,7 +1629,7 @@ func TestLocalTargetRejectsConfiguredSignatureVerifierWithoutInvocation(
 	definition := localTargetDefinition(
 		t, root, base, "feature/inert-signature-verifier",
 	)
-	_, err = workspace.InitializeWorkspaceV2(
+	_, err = initializeWorkspaceV2(t,
 		canonicalTestDirectory(t),
 		definition,
 		mustTime(t, "2026-07-24T12:45:00Z"),
@@ -1652,7 +1660,7 @@ func TestLocalTargetOperationsDoNotInvokeHooksCredentialsOrProtocols(t *testing.
 		t, root, "remote", "add", "hostile",
 		"ext::sh -c ': > "+shellSingleQuote(marker)+"'",
 	)
-	if _, err := workspace.InitializeWorkspaceV2(
+	if _, err := initializeWorkspaceV2(t,
 		canonicalTestDirectory(t),
 		definition,
 		mustTime(t, "2026-07-24T12:50:00Z"),

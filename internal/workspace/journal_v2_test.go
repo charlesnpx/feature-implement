@@ -2,6 +2,7 @@ package workspace_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -20,7 +21,7 @@ func TestInitializeWorkspaceV2CreatesDurableJournalGenerationAndProjection(t *te
 	workspaceDir := filepath.Join(t.TempDir(), "workspace")
 	initializedAt := mustTime(t, "2026-07-21T01:00:00Z")
 
-	result, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, initializedAt)
+	result, err := initializeWorkspaceV2(t, workspaceDir, definition, initializedAt)
 	if err != nil {
 		t.Fatalf("InitializeWorkspaceV2: %v", err)
 	}
@@ -77,7 +78,7 @@ func TestInitializeWorkspaceV2CreatesDurableJournalGenerationAndProjection(t *te
 		t.Fatalf("rebuild disposable projection = %s, %v", rebuilt, err)
 	}
 
-	second, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, initializedAt.Add(time.Minute))
+	second, err := initializeWorkspaceV2(t, workspaceDir, definition, initializedAt.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("idempotent initialization: %v", err)
 	}
@@ -85,7 +86,8 @@ func TestInitializeWorkspaceV2CreatesDurableJournalGenerationAndProjection(t *te
 		t.Fatalf("idempotent initialization appended history: %#v", second.Snapshot().Records())
 	}
 	candidate := mustProspectiveCandidate(t, fixture)
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, candidate, initializedAt.Add(2*time.Minute)); err == nil || !strings.Contains(err.Error(), "already initialized") {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, candidate, initializedAt.Add(2*time.Minute)); err == nil ||
+		!strings.Contains(err.Error(), "requires a fresh runtime directory") {
 		t.Fatalf("different generation initialization error = %v", err)
 	}
 	store, err := workspace.OpenGenerationStore(workspaceDir)
@@ -98,12 +100,40 @@ func TestInitializeWorkspaceV2CreatesDurableJournalGenerationAndProjection(t *te
 	}
 }
 
+func TestInitializeWorkspaceV2RequiresExplicitWorktreeRoot(
+	t *testing.T,
+) {
+	definition := mustDefinition(t, newDefinitionFixture(t).sources)
+	workspaceDir := t.TempDir()
+	if _, err := workspace.InitializeWorkspaceV2WithOptions(
+		context.Background(),
+		workspaceDir,
+		definition,
+		mustTime(t, "2026-07-21T00:59:00Z"),
+		workspace.WorkspaceInitializationOptions{},
+	); err == nil ||
+		!strings.Contains(
+			err.Error(),
+			"requires an explicit worktree root",
+		) {
+		t.Fatalf("missing worktree root error = %v", err)
+	}
+	if _, err := os.Lstat(
+		workspace.WorkspaceRuntimeProjectionPath(workspaceDir),
+	); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf(
+			"missing worktree root created runtime projection: %v",
+			err,
+		)
+	}
+}
+
 func TestInitializeWorkspaceV2RejectsRuntimeTargetOverlapBeforeMutation(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	target := definition.Workspace().RepositoryRoot()
 
-	if _, err := workspace.InitializeWorkspaceV2(
+	if _, err := initializeWorkspaceV2(t,
 		target,
 		definition,
 		mustTime(t, "2026-07-21T01:00:00Z"),
@@ -147,6 +177,7 @@ func TestInitializationResumesAfterBootstrapTailRecovery(t *testing.T) {
 	}
 	event, err := workspace.NewWorkspaceInitializedJournalEvent(
 		definition.Workspace().ID(), definition.Generation(), stored.DefinitionDigest(),
+		testWorktreeRootBinding(t, t.TempDir()),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -191,7 +222,7 @@ func TestInitializationResumesAfterBootstrapTailRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := workspace.InitializeWorkspaceV2(
+	result, err := initializeWorkspaceV2(t,
 		workspaceDir, definition, mustTime(t, "2026-07-21T01:02:00Z"),
 	)
 	if err != nil {
@@ -220,7 +251,7 @@ func TestWorkspaceJournalUsesProcessLifetimeAdvisoryLocks(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T01:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T01:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -272,7 +303,7 @@ func TestWorkspaceJournalReadOnlyLockDoesNotRequireWritePermission(t *testing.T)
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(
+	if _, err := initializeWorkspaceV2(t,
 		workspaceDir, definition, mustTime(t, "2026-07-21T01:00:00Z"),
 	); err != nil {
 		t.Fatal(err)
@@ -319,7 +350,7 @@ func TestWorkspaceJournalMultiProcessCASAllowsOneWinner(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T01:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T01:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	newCommand := func(label string, output *bytes.Buffer) *exec.Cmd {
@@ -420,7 +451,7 @@ func TestJournalCASRejectsStaleResourceWithoutAppending(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	result, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T01:00:00Z"))
+	result, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T01:00:00Z"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -474,7 +505,7 @@ func TestJournalRejectsInvalidEventResourceSetsAndRuntimeTransitions(t *testing.
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	initialized, err := workspace.InitializeWorkspaceV2(
+	initialized, err := initializeWorkspaceV2(t,
 		workspaceDir, definition, mustTime(t, "2026-07-21T01:00:00Z"),
 	)
 	if err != nil {
@@ -560,7 +591,7 @@ func TestIncompleteTailRequiresExplicitRecoveryAndRecordsDiscardedBytes(t *testi
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	initialized, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T01:00:00Z"))
+	initialized, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T01:00:00Z"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -633,7 +664,7 @@ func TestRecoveryRejectsCorruptCompleteRecord(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T01:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T01:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	journalPath := workspace.WorkspaceJournalPath(workspaceDir)
@@ -666,7 +697,7 @@ func TestJournalFailpointsDistinguishIncompleteAndCompleteAppends(t *testing.T) 
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T01:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T01:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -758,7 +789,7 @@ func TestJournalRecoveryResumesAcrossCrashBoundaries(t *testing.T) {
 			fixture := newDefinitionFixture(t)
 			definition := mustDefinition(t, fixture.sources)
 			workspaceDir := t.TempDir()
-			initialized, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T01:00:00Z"))
+			initialized, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T01:00:00Z"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -832,7 +863,7 @@ func TestJournalSubprocessCrashesAroundAppendAndFsync(t *testing.T) {
 			fixture := newDefinitionFixture(t)
 			definition := mustDefinition(t, fixture.sources)
 			workspaceDir := t.TempDir()
-			if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T01:00:00Z")); err != nil {
+			if _, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T01:00:00Z")); err != nil {
 				t.Fatal(err)
 			}
 			command := exec.Command(os.Args[0], "-test.run=^TestWorkspaceJournalCrashSubprocess$")
@@ -940,6 +971,7 @@ func TestWorkspaceJournalInitialAppendCrashSubprocess(t *testing.T) {
 	}
 	event, err := workspace.NewWorkspaceInitializedJournalEvent(
 		workspace.MustID("example-workspace"), generation, definitionDigest,
+		testWorktreeRootBinding(t, t.TempDir()),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -959,6 +991,31 @@ func TestWorkspaceJournalInitialAppendCrashSubprocess(t *testing.T) {
 	}
 	_, _ = journal.Append(request)
 	t.Fatal("initial append crash failpoint was not reached")
+}
+
+func testWorktreeRootBinding(
+	t *testing.T,
+	path string,
+) workspace.WorkspaceWorktreeRootBinding {
+	t.Helper()
+	path, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := workspace.OpenVerifiedRoot(
+		workspace.RootRoleWorktree, path, false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	binding, err := workspace.NewWorkspaceWorktreeRootBinding(
+		root.Path(), root.Identity(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return binding
 }
 
 func TestWorkspaceJournalCrashSubprocess(t *testing.T) {
@@ -1014,7 +1071,7 @@ func TestJournalRejectsOversizedAndNonCanonicalCompleteRecords(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	canonicalDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(canonicalDir, definition, mustTime(t, "2026-07-21T01:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, canonicalDir, definition, mustTime(t, "2026-07-21T01:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	content, err := os.ReadFile(workspace.WorkspaceJournalPath(canonicalDir))

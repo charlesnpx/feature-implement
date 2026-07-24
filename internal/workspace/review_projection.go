@@ -226,12 +226,9 @@ func reduceReviewRuntime(current ReviewRuntimeProjection, record JournalRecord) 
 			current.states[index].loop.digest != event.loopDigest {
 			return ReviewRuntimeProjection{}, fmt.Errorf("review result does not match the active durable review state")
 		}
-		if reviewReceiptSeen(current.states, event.receiptDigest) {
-			return ReviewRuntimeProjection{}, fmt.Errorf("control-plane review receipt %s was replayed", event.receiptDigest)
-		}
 		domain, err := NewRecordReviewResult(
 			event.round, event.profileOrdinal, event.invocation, event.reservationDigest,
-			event.result, event.receiptDigest,
+			event.result,
 		)
 		if err != nil {
 			return ReviewRuntimeProjection{}, err
@@ -343,19 +340,6 @@ func validateReviewFixJournalReservation(
 	return nil
 }
 
-func reviewReceiptSeen(states []ReviewState, receipt Digest) bool {
-	for _, state := range states {
-		for _, round := range state.rounds {
-			for _, result := range round.attempts {
-				if result.receiptDigest == receipt {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
 func reviewStateIndex(states []ReviewState, attemptID ID) int {
 	for index, state := range states {
 		if state.attemptID == attemptID {
@@ -380,7 +364,6 @@ func canonicalReviewRuntime(projection ReviewRuntimeProjection) ([]byte, error) 
 		Request     string `json:"request_digest"`
 		Reservation string `json:"reservation_digest"`
 		Result      string `json:"result_digest"`
-		Receipt     string `json:"receipt_digest"`
 	}
 	type reservationJSON struct {
 		Request        string `json:"request_digest"`
@@ -463,15 +446,13 @@ func canonicalReviewRuntime(projection ReviewRuntimeProjection) ([]byte, error) 
 			for _, result := range round.attempts {
 				roundItem.Attempts = append(roundItem.Attempts, resultJSON{
 					Request: result.request.digest.String(), Reservation: result.reservationDigest.String(),
-					Result:  result.submission.digest.String(),
-					Receipt: result.receiptDigest.String(),
+					Result: result.submission.digest.String(),
 				})
 			}
 			for _, result := range round.results {
 				roundItem.Results = append(roundItem.Results, resultJSON{
 					Request: result.request.digest.String(), Reservation: result.reservationDigest.String(),
-					Result:  result.submission.digest.String(),
-					Receipt: result.receiptDigest.String(),
+					Result: result.submission.digest.String(),
 				})
 			}
 			item.Rounds = append(item.Rounds, roundItem)

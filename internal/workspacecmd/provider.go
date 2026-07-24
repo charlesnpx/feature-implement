@@ -28,12 +28,6 @@ type providerIntentInput struct {
 	IntentID      string `json:"intent_id"`
 }
 
-type completionInput struct {
-	SchemaVersion int    `json:"schema_version"`
-	OccurredAt    string `json:"occurred_at"`
-	AttemptID     string `json:"attempt_id"`
-}
-
 type ProviderCommandResult struct {
 	SchemaVersion int                       `json:"schema_version"`
 	Status        string                    `json:"status"`
@@ -140,49 +134,6 @@ func executeProvider(ctx context.Context, bundle workspace.WorkspaceBundle, opti
 		return nil, fmt.Errorf("unsupported workspace provider action %q", options.Subaction)
 	}
 	panic("unreachable")
-}
-
-func executeCompletion(ctx context.Context, bundle workspace.WorkspaceBundle, options Options) (any, error) {
-	if options.Subaction != "" && options.Subaction != "verify" {
-		return nil, fmt.Errorf("unsupported workspace complete action %q", options.Subaction)
-	}
-	journal, _, err := openWritableJournal(options)
-	if err != nil {
-		return nil, err
-	}
-	defer journal.Close()
-	definition := bundle.Definition()
-	var input completionInput
-	if err := decodeRequest(options.Input, &input); err != nil {
-		return nil, err
-	}
-	occurredAt, err := parseOccurredAt(input.SchemaVersion, input.OccurredAt)
-	if err != nil {
-		return nil, err
-	}
-	attemptID, err := parseID(input.AttemptID, "attempt_id")
-	if err != nil {
-		return nil, err
-	}
-	adapter, err := newGitHubProviderAdapter(definition.Workspace())
-	if err != nil {
-		return nil, err
-	}
-	broker, err := workspace.NewProviderBroker(definition.Workspace().Provider(), adapter)
-	if err != nil {
-		return nil, err
-	}
-	receipt, _, err := workspace.VerifyAndRecordProviderCompletion(
-		ctx, journal, definition, broker, workspace.DefaultLocalProviderCompletionGitAdapter(),
-		workspace.ProviderCompletionRequest{AttemptID: attemptID, OccurredAt: occurredAt},
-	)
-	if err != nil {
-		return nil, err
-	}
-	return providerCommandResult("complete.verify", map[string]any{
-		"attempt_id": receipt.AttemptID().String(), "merge_commit": receipt.MergeCommit().String(),
-		"final_base_head": receipt.FinalBaseHead().String(), "receipt_digest": receipt.Digest().String(),
-	}, journal, definition)
 }
 
 func buildProviderIntent(

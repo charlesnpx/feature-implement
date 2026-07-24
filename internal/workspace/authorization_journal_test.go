@@ -21,7 +21,7 @@ func TestAuthorizationJournalProtectedWorkflowsUseRealEd25519(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
@@ -95,7 +95,7 @@ func TestAuthorizationSafetyChangesRequireExactSignedDurableReceipt(t *testing.T
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
@@ -271,7 +271,7 @@ func TestAuthorizationSafetyReceiptsBindPendingCandidatesAndCannotClearThem(t *t
 	))
 	secondCandidate := mustDefinition(t, secondSources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, active, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, active, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	store, err := workspace.OpenGenerationStore(workspaceDir)
@@ -362,7 +362,7 @@ func TestAuthorizationJournalPersistsGrantsSegmentsRevocationsAndReceiptCAS(t *t
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
@@ -486,7 +486,7 @@ func TestAuthorizationJournalRejectsStaleEpochAndGeneration(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
@@ -519,7 +519,7 @@ func TestProviderDerivedStandingGrantIsVerifiedSingleUseAndDurable(t *testing.T)
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
@@ -640,7 +640,7 @@ func TestPullRequestStandingGrantFrontierAdvanceAuthorizesExactReviewFixPush(t *
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
@@ -881,7 +881,7 @@ func TestAuthorizationDispatchUsesTrustedClockAndDurableRevocationCAS(t *testing
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	if _, err := workspace.InitializeWorkspaceV2(workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
+	if _, err := initializeWorkspaceV2(t, workspaceDir, definition, mustTime(t, "2026-07-21T16:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
 	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
