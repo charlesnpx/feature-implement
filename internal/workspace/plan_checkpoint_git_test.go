@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -212,6 +214,75 @@ func TestPlanCheckpointRejectsGitSymlinkBeforeInitialization(t *testing.T) {
 	}
 }
 
+func TestPlanCheckpointGitEffectsRemainBoundToRetainedDirectory(t *testing.T) {
+	root := writeDefinitionBundle(t, newDefinitionFixture(t), nil)
+	external := filepath.Join(canonicalMaterializationTestTempDir(t), "external-git-race")
+	if err := os.Mkdir(external, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	markerPath := filepath.Join(external, "marker.txt")
+	if err := os.WriteFile(markerPath, []byte("untouched\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapperRoot := canonicalMaterializationTestTempDir(t)
+	wrapper := filepath.Join(wrapperRoot, "git-wrapper")
+	trigger := filepath.Join(wrapperRoot, "triggered")
+	script := fmt.Sprintf(`#!/bin/sh
+case " $* " in
+  *" hash-object "*)
+    if [ ! -e %s ]; then
+      mv %s %s
+      ln -s %s %s
+      : > %s
+    fi
+    ;;
+esac
+exec %s "$@"
+`,
+		planShellQuote(trigger),
+		planShellQuote(filepath.Join(root, ".git")),
+		planShellQuote(filepath.Join(root, ".git-retained")),
+		planShellQuote(external),
+		planShellQuote(filepath.Join(root, ".git")),
+		planShellQuote(trigger),
+		planShellQuote(realGit),
+	)
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err = workspace.CheckpointPlanRepository(
+		context.Background(),
+		workspace.PlanCheckpointOptions{
+			Root: root, Kind: workspace.PlanCheckpointInitial,
+			Input:         checkpointInput(t, "2026-07-23T10:32:00Z", "", ""),
+			GitExecutable: wrapper,
+		},
+	)
+	if err == nil ||
+		(!strings.Contains(err.Error(), "replaced") &&
+			!strings.Contains(err.Error(), "symlink")) {
+		t.Fatalf("replaced Git directory error = %v", err)
+	}
+	content, readErr := os.ReadFile(markerPath)
+	if readErr != nil || string(content) != "untouched\n" {
+		t.Fatalf("external marker changed: content=%q err=%v", content, readErr)
+	}
+	entries, readErr := os.ReadDir(external)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 1 || entries[0].Name() != "marker.txt" {
+		t.Fatalf("external Git target was mutated: %+v", entries)
+	}
+	if _, statErr := os.Stat(trigger); statErr != nil {
+		t.Fatalf("Git replacement wrapper did not trigger: %v", statErr)
+	}
+}
+
 func TestPlanCheckpointRejectsNoOpUnownedStagedAndDuplicateRevisions(t *testing.T) {
 	t.Run("semantic no-op", func(t *testing.T) {
 		root := initializedPlanRepository(t)
@@ -385,6 +456,151 @@ func TestPlanCheckpointIndexRecoveryPreservesUnexpectedStaging(t *testing.T) {
 		retried := runGitSetup(t, root, "diff", "--cached", "--binary", "--", relative)
 		if !stringEqualBytes(staged, retried) {
 			t.Fatalf("post-CAS exact retry changed the staged diff")
+		}
+	})
+}
+
+func TestPlanCheckpointIndexPublicationLocksAndRecovers(t *testing.T) {
+	t.Run("concurrent Git add is blocked", func(t *testing.T) {
+		root := initializedPlanRepository(t)
+		relative := "plans/alpha.yaml"
+		planPath := filepath.Join(root, filepath.FromSlash(relative))
+		replaceFileText(
+			t,
+			planPath,
+			"Establish the first contract.",
+			"Define the first contract.",
+		)
+		input := checkpointInput(
+			t,
+			"2026-07-23T11:08:00Z",
+			"rev-index-lock",
+			workspace.DigestBytes([]byte("review")).String(),
+		)
+		injected := errors.New("stop after proving index exclusion")
+		_, err := workspace.CheckpointPlanRepository(
+			context.Background(),
+			workspace.PlanCheckpointOptions{
+				Root: root, Kind: workspace.PlanCheckpointRevision, Input: input,
+				FaultInjector: func(point workspace.PlanCheckpointFaultPoint) error {
+					if point != workspace.PlanCheckpointFaultAfterIndexLock {
+						return nil
+					}
+					replaceFileText(
+						t,
+						planPath,
+						"Define the first contract.",
+						"Concurrent staged contract.",
+					)
+					command := exec.Command("git", "-C", root, "add", "--", relative)
+					output, addErr := command.CombinedOutput()
+					if addErr == nil || !strings.Contains(string(output), "index.lock") {
+						t.Fatalf(
+							"concurrent git add was not excluded: err=%v output=%s",
+							addErr,
+							output,
+						)
+					}
+					replaceFileText(
+						t,
+						planPath,
+						"Concurrent staged contract.",
+						"Define the first contract.",
+					)
+					return injected
+				},
+			},
+		)
+		if !errors.Is(err, injected) {
+			t.Fatalf("index lock interruption error = %v", err)
+		}
+		if staged := runGitSetup(
+			t,
+			root,
+			"diff",
+			"--cached",
+			"--name-only",
+			"HEAD^",
+		); len(staged) != 0 {
+			t.Fatalf("concurrent Git add changed the prior index: %s", staged)
+		}
+		retried, err := workspace.CheckpointPlanRepository(
+			context.Background(),
+			workspace.PlanCheckpointOptions{
+				Root: root, Kind: workspace.PlanCheckpointRevision, Input: input,
+			},
+		)
+		if err != nil || !retried.Recovered {
+			t.Fatalf("retry after index exclusion: result=%#v err=%v", retried, err)
+		}
+	})
+
+	t.Run("quarantined prior index is crash recoverable", func(t *testing.T) {
+		root := initializedPlanRepository(t)
+		planPath := filepath.Join(root, "plans", "alpha.yaml")
+		replaceFileText(
+			t,
+			planPath,
+			"Establish the first contract.",
+			"Define the first contract.",
+		)
+		input := checkpointInput(
+			t,
+			"2026-07-23T11:09:00Z",
+			"rev-index-quarantine",
+			workspace.DigestBytes([]byte("review")).String(),
+		)
+		injected := errors.New("stop after index quarantine")
+		_, err := workspace.CheckpointPlanRepository(
+			context.Background(),
+			workspace.PlanCheckpointOptions{
+				Root: root, Kind: workspace.PlanCheckpointRevision, Input: input,
+				FaultInjector: func(point workspace.PlanCheckpointFaultPoint) error {
+					if point == workspace.PlanCheckpointFaultAfterIndexQuarantine {
+						return injected
+					}
+					return nil
+				},
+			},
+		)
+		if !errors.Is(err, injected) {
+			t.Fatalf("index quarantine interruption error = %v", err)
+		}
+		for _, relative := range []string{
+			"index.lock",
+			"feature-plan-index-sync.v1.json",
+			"feature-plan-index.previous.v1",
+		} {
+			if _, statErr := os.Stat(filepath.Join(root, ".git", relative)); statErr != nil {
+				t.Fatalf("expected recoverable index file %s: %v", relative, statErr)
+			}
+		}
+		if _, statErr := os.Stat(filepath.Join(root, ".git", "index")); !errors.Is(
+			statErr,
+			os.ErrNotExist,
+		) {
+			t.Fatalf("quarantined index unexpectedly exists: %v", statErr)
+		}
+		retried, err := workspace.CheckpointPlanRepository(
+			context.Background(),
+			workspace.PlanCheckpointOptions{
+				Root: root, Kind: workspace.PlanCheckpointRevision, Input: input,
+			},
+		)
+		if err != nil || !retried.Recovered {
+			t.Fatalf("retry quarantined index: result=%#v err=%v", retried, err)
+		}
+		for _, relative := range []string{
+			"index.lock",
+			"feature-plan-index-sync.v1.json",
+			"feature-plan-index.previous.v1",
+		} {
+			if _, statErr := os.Stat(filepath.Join(root, ".git", relative)); !errors.Is(
+				statErr,
+				os.ErrNotExist,
+			) {
+				t.Fatalf("recovered index left %s: %v", relative, statErr)
+			}
 		}
 	})
 }
@@ -643,6 +859,59 @@ func TestPlanCheckpointRecoversInterruptedLockGeneration(t *testing.T) {
 	}
 }
 
+func TestPlanCheckpointRecoversLockAfterInventoryPublication(t *testing.T) {
+	for _, point := range []workspace.PlanCheckpointFaultPoint{
+		workspace.PlanCheckpointFaultAfterTreeCreation,
+		workspace.PlanCheckpointFaultAfterCommitCreation,
+		workspace.PlanCheckpointFaultBeforeRefCAS,
+	} {
+		t.Run(string(point), func(t *testing.T) {
+			root := initializedPlanRepository(t)
+			input := checkpointInput(t, "2026-07-23T13:04:00Z", "", "")
+			injected := errors.New("interrupt prepared lock checkpoint")
+			_, err := workspace.CheckpointPlanRepository(
+				context.Background(),
+				workspace.PlanCheckpointOptions{
+					Root: root, Kind: workspace.PlanCheckpointLock, Input: input,
+					FaultInjector: func(observed workspace.PlanCheckpointFaultPoint) error {
+						if observed == point {
+							return injected
+						}
+						return nil
+					},
+				},
+			)
+			if !errors.Is(err, injected) {
+				t.Fatalf("prepared lock interruption error = %v", err)
+			}
+			if got := strings.TrimSpace(string(runGitSetup(
+				t,
+				root,
+				"log",
+				"-1",
+				"--format=%s",
+			))); got != "feature plan checkpoint: initial" {
+				t.Fatalf("HEAD after prepared lock interruption = %q", got)
+			}
+			retried, err := workspace.CheckpointPlanRepository(
+				context.Background(),
+				workspace.PlanCheckpointOptions{
+					Root: root, Kind: workspace.PlanCheckpointLock, Input: input,
+				},
+			)
+			if err != nil || retried.Recovered || retried.LockDigest == "" {
+				t.Fatalf("retry prepared lock: result=%#v err=%v", retried, err)
+			}
+			if _, err := workspace.VerifyPlanLockCheckpoint(
+				context.Background(),
+				mustLoadBundle(t, root),
+			); err != nil {
+				t.Fatalf("verify recovered lock: %v", err)
+			}
+		})
+	}
+}
+
 func initializedPlanRepository(t *testing.T) string {
 	t.Helper()
 	root := writeDefinitionBundle(t, newDefinitionFixture(t), nil)
@@ -689,6 +958,10 @@ func replaceFileText(t *testing.T, file, old, replacement string) {
 
 func stringEqualBytes(left, right []byte) bool {
 	return string(left) == string(right)
+}
+
+func planShellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func mustLoadBundle(t *testing.T, root string) workspace.WorkspaceBundle {

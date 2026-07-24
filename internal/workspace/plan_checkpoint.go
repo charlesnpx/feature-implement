@@ -53,6 +53,8 @@ const (
 	PlanCheckpointFaultAfterCommitCreation           PlanCheckpointFaultPoint = "after_commit_creation"
 	PlanCheckpointFaultBeforeRefCAS                  PlanCheckpointFaultPoint = "before_ref_cas"
 	PlanCheckpointFaultAfterRefCAS                   PlanCheckpointFaultPoint = "after_ref_cas"
+	PlanCheckpointFaultAfterIndexLock                PlanCheckpointFaultPoint = "after_index_lock"
+	PlanCheckpointFaultAfterIndexQuarantine          PlanCheckpointFaultPoint = "after_index_quarantine"
 	PlanCheckpointFaultAfterIndexSynchronization     PlanCheckpointFaultPoint = "after_index_synchronization"
 )
 
