@@ -171,6 +171,211 @@ func TestLocalTargetInitializationRefRaceIsNotAdopted(t *testing.T) {
 	}
 }
 
+func TestLocalTargetRefCreationDoesNotMutateReplacementGitDirectory(t *testing.T) {
+	fixture := newDefinitionFixture(t)
+	definition := mustDefinition(t, fixture.sources)
+	root := definition.Workspace().RepositoryRoot()
+	replacement, _ := initializeTargetRepository(t, workspace.GitHashSHA1)
+	runtimeRoot := canonicalTestDirectory(t)
+	originalGit := filepath.Join(canonicalTestDirectory(t), "original.git")
+	replaced := false
+	_, err := workspace.InitializeWorkspaceV2WithOptions(
+		context.Background(),
+		runtimeRoot,
+		definition,
+		mustTime(t, "2026-07-24T12:25:00Z"),
+		workspace.WorkspaceInitializationOptions{
+			TargetFault: func(
+				point workspace.LocalTargetInitializationFaultPoint,
+			) error {
+				if point != workspace.LocalTargetFaultBeforeRefUpdate || replaced {
+					return nil
+				}
+				replaced = true
+				if err := os.Rename(filepath.Join(root, ".git"), originalGit); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(
+					filepath.Join(replacement, ".git"),
+					filepath.Join(root, ".git"),
+				); err != nil {
+					t.Fatal(err)
+				}
+				return nil
+			},
+		},
+	)
+	if err == nil || !replaced {
+		t.Fatalf("Git-directory replacement error = %v replaced=%t", err, replaced)
+	}
+	branch := definition.Workspace().FeatureBranch()
+	if got := strings.TrimSpace(runTargetGitTest(
+		t, root, "branch", "--list", branch,
+	)); got != "" {
+		t.Fatalf("replacement repository received feature branch %q", got)
+	}
+	if got := strings.TrimSpace(runTargetGitTest(
+		t, root, "--git-dir="+originalGit, "branch", "--list", branch,
+	)); got != "" {
+		t.Fatalf("retained original repository was mutated after replacement %q", got)
+	}
+}
+
+func TestLocalTargetInitializationReadinessBarrierAtEveryFault(t *testing.T) {
+	for _, faultPoint := range []workspace.LocalTargetInitializationFaultPoint{
+		workspace.LocalTargetFaultAfterIntentSynced,
+		workspace.LocalTargetFaultBeforeRefUpdate,
+		workspace.LocalTargetFaultAfterRefUpdate,
+		workspace.LocalTargetFaultBeforeCompletion,
+	} {
+		t.Run(string(faultPoint), func(t *testing.T) {
+			fixture := newDefinitionFixture(t)
+			definition := mustDefinition(t, fixture.sources)
+			runtimeRoot := canonicalTestDirectory(t)
+			fired := false
+			_, err := workspace.InitializeWorkspaceV2WithOptions(
+				context.Background(),
+				runtimeRoot,
+				definition,
+				mustTime(t, "2026-07-24T12:26:00Z"),
+				workspace.WorkspaceInitializationOptions{
+					TargetFault: func(
+						point workspace.LocalTargetInitializationFaultPoint,
+					) error {
+						if !fired && point == faultPoint {
+							fired = true
+							return errors.New("injected readiness boundary")
+						}
+						return nil
+					},
+				},
+			)
+			if err == nil || !fired {
+				t.Fatalf("initialization fault = %v fired=%t", err, fired)
+			}
+			journal, err := workspace.OpenWorkspaceJournal(
+				runtimeRoot, workspace.JournalReadWrite,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer journal.Close()
+			snapshot, err := journal.ReadSnapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := workspace.RebuildWorkspaceReport(
+				snapshot, definition,
+			); err == nil || !strings.Contains(err.Error(), "feature_ref_created") {
+				t.Fatalf("incomplete initialization report error = %v", err)
+			}
+			goal, err := workspace.NewGoalBinding(
+				workspace.MustID("readiness-goal"),
+				workspace.GoalScopeMergeUnit,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fakeGit := &fakeAttemptGit{}
+			if _, err := workspace.ReserveAttempt(
+				context.Background(),
+				journal,
+				definition,
+				fakeGit,
+				workspace.ReserveAttemptRequest{
+					MergeUnit: mustMergeUnitReference(
+						t, "alpha-plan", "unit-one",
+					),
+					AttemptNumber: 1,
+					Base:          definition.Workspace().BaseCommit(),
+					WorktreeRoot:  canonicalTestDirectory(t),
+					Goal:          goal,
+					OccurredAt: mustTime(
+						t, "2026-07-24T12:26:01Z",
+					),
+				},
+			); err == nil || !strings.Contains(err.Error(), "feature_ref_created") {
+				t.Fatalf("incomplete initialization attempt error = %v", err)
+			}
+			if fakeGit.prepareCalls != 0 || fakeGit.createCalls != 0 {
+				t.Fatal("incomplete initialization reached attempt Git mutation")
+			}
+		})
+	}
+}
+
+func TestLocalTargetBaseMustRemainPinnedAtEveryPreCompletionFault(t *testing.T) {
+	for _, faultPoint := range []workspace.LocalTargetInitializationFaultPoint{
+		workspace.LocalTargetFaultAfterIntentSynced,
+		workspace.LocalTargetFaultBeforeRefUpdate,
+		workspace.LocalTargetFaultAfterRefUpdate,
+		workspace.LocalTargetFaultBeforeCompletion,
+	} {
+		t.Run(string(faultPoint), func(t *testing.T) {
+			fixture := newDefinitionFixture(t)
+			definition := mustDefinition(t, fixture.sources)
+			runtimeRoot := canonicalTestDirectory(t)
+			fired := false
+			_, err := workspace.InitializeWorkspaceV2WithOptions(
+				context.Background(),
+				runtimeRoot,
+				definition,
+				mustTime(t, "2026-07-24T12:27:00Z"),
+				workspace.WorkspaceInitializationOptions{
+					TargetFault: func(
+						point workspace.LocalTargetInitializationFaultPoint,
+					) error {
+						if !fired && point == faultPoint {
+							fired = true
+							return errors.New("injected base-pin boundary")
+						}
+						return nil
+					},
+				},
+			)
+			if err == nil || !fired {
+				t.Fatalf("initialization fault = %v fired=%t", err, fired)
+			}
+			root := definition.Workspace().RepositoryRoot()
+			movedFile := filepath.Join(
+				root, "base-moved-"+string(faultPoint)+".txt",
+			)
+			if err := os.WriteFile(
+				movedFile, []byte("move base\n"), 0o600,
+			); err != nil {
+				t.Fatal(err)
+			}
+			runTargetGitTest(t, root, "add", "--", filepath.Base(movedFile))
+			runTargetGitTest(
+				t, root,
+				"-c", "user.name=Feature Implement Test",
+				"-c", "user.email=feature-implement@localhost",
+				"commit", "--quiet", "-m", "move base before completion",
+			)
+			_, err = workspace.InitializeWorkspaceV2(
+				runtimeRoot,
+				definition,
+				mustTime(t, "2026-07-24T12:27:01Z"),
+			)
+			if err == nil || !strings.Contains(err.Error(), "not pinned base_commit") {
+				t.Fatalf("moved pre-completion base error = %v", err)
+			}
+			snapshot, err := workspace.ReadWorkspaceJournalSnapshot(runtimeRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime, err := workspace.RebuildWorkspaceRuntime(snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target, ok := runtime.LocalTarget()
+			if !ok || target.Created() {
+				t.Fatalf("moved base completed local target = %#v", target)
+			}
+		})
+	}
+}
+
 func TestLocalTargetBaseMovementIsInformationalAfterInitialization(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
@@ -212,6 +417,74 @@ func TestLocalTargetBaseMovementIsInformationalAfterInitialization(t *testing.T)
 	if retried.Snapshot().Head() != first.Snapshot().Head() ||
 		len(retried.Snapshot().Records()) != 3 {
 		t.Fatalf("base movement changed initialization history")
+	}
+}
+
+func TestLocalTargetInitializationRejectsDiscoveredRootOverlap(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*testing.T) (workspace.EffectiveWorkspaceDefinition, string)
+	}{
+		{
+			name: "linked target runtime inside common directory",
+			setup: func(t *testing.T) (
+				workspace.EffectiveWorkspaceDefinition,
+				string,
+			) {
+				root, base := initializeTargetRepository(
+					t, workspace.GitHashSHA1,
+				)
+				linked := filepath.Join(canonicalTestDirectory(t), "linked")
+				runTargetGitTest(
+					t, root,
+					"worktree", "add", "--quiet", "--detach",
+					linked, baseObjectHex(base),
+				)
+				return localTargetDefinition(
+						t, linked, base, "feature/common-overlap",
+					),
+					filepath.Join(root, ".git", "unsafe-runtime")
+			},
+		},
+		{
+			name: "primary target runtime inside registered worktree",
+			setup: func(t *testing.T) (
+				workspace.EffectiveWorkspaceDefinition,
+				string,
+			) {
+				root, base := initializeTargetRepository(
+					t, workspace.GitHashSHA1,
+				)
+				linked := filepath.Join(canonicalTestDirectory(t), "linked")
+				runTargetGitTest(
+					t, root,
+					"worktree", "add", "--quiet", "--detach",
+					linked, baseObjectHex(base),
+				)
+				return localTargetDefinition(
+						t, root, base, "feature/registered-overlap",
+					),
+					filepath.Join(linked, "unsafe-runtime")
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			definition, runtimeRoot := test.setup(t)
+			_, err := workspace.InitializeWorkspaceV2(
+				runtimeRoot,
+				definition,
+				mustTime(t, "2026-07-24T12:35:00Z"),
+			)
+			if err == nil || !strings.Contains(
+				err.Error(), "unsafe workspace root overlap",
+			) {
+				t.Fatalf("discovered root overlap error = %v", err)
+			}
+			if _, err := os.Lstat(runtimeRoot); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("rejected runtime root was created: %v", err)
+			}
+		})
 	}
 }
 
@@ -289,6 +562,96 @@ func TestLocalTargetRejectsFeatureNamespaceAndCheckedOutOwnership(t *testing.T) 
 			}
 		})
 	}
+}
+
+func TestLocalTargetRejectsExternalObjectLinks(t *testing.T) {
+	t.Run("packed objects", func(t *testing.T) {
+		root, base := initializeTargetRepository(t, workspace.GitHashSHA1)
+		runTargetGitTest(t, root, "gc", "--quiet", "--prune=now")
+		packDirectory := filepath.Join(root, ".git", "objects", "pack")
+		entries, err := os.ReadDir(packDirectory)
+		if err != nil {
+			t.Fatal(err)
+		}
+		external := canonicalTestDirectory(t)
+		replaced := 0
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			extension := filepath.Ext(entry.Name())
+			if extension != ".pack" && extension != ".idx" &&
+				extension != ".rev" {
+				continue
+			}
+			source := filepath.Join(packDirectory, entry.Name())
+			outside := filepath.Join(external, entry.Name())
+			if err := os.Rename(source, outside); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, source); err != nil {
+				t.Fatal(err)
+			}
+			replaced++
+		}
+		if replaced == 0 {
+			t.Fatal("Git gc produced no pack object files")
+		}
+		definition := localTargetDefinition(
+			t, root, base, "feature/external-pack",
+		)
+		_, err = workspace.ValidateLocalTarget(
+			context.Background(), definition.Workspace(),
+		)
+		if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("external pack symlink error = %v", err)
+		}
+	})
+
+	t.Run("loose object", func(t *testing.T) {
+		root, base := initializeTargetRepository(t, workspace.GitHashSHA1)
+		raw := baseObjectHex(base)
+		source := filepath.Join(
+			root, ".git", "objects", raw[:2], raw[2:],
+		)
+		outside := filepath.Join(canonicalTestDirectory(t), raw)
+		if err := os.Rename(source, outside); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, source); err != nil {
+			t.Fatal(err)
+		}
+		definition := localTargetDefinition(
+			t, root, base, "feature/external-loose-object",
+		)
+		_, err := workspace.ValidateLocalTarget(
+			context.Background(), definition.Workspace(),
+		)
+		if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("external loose-object symlink error = %v", err)
+		}
+	})
+
+	t.Run("loose object hard link", func(t *testing.T) {
+		root, base := initializeTargetRepository(t, workspace.GitHashSHA1)
+		raw := baseObjectHex(base)
+		source := filepath.Join(
+			root, ".git", "objects", raw[:2], raw[2:],
+		)
+		outside := filepath.Join(canonicalTestDirectory(t), raw)
+		if err := os.Link(source, outside); err != nil {
+			t.Fatal(err)
+		}
+		definition := localTargetDefinition(
+			t, root, base, "feature/hard-linked-loose-object",
+		)
+		_, err := workspace.ValidateLocalTarget(
+			context.Background(), definition.Workspace(),
+		)
+		if err == nil || !strings.Contains(err.Error(), "hard links") {
+			t.Fatalf("hard-linked loose-object error = %v", err)
+		}
+	})
 }
 
 func TestLocalTargetRejectsUnsupportedRepositoryProfiles(t *testing.T) {

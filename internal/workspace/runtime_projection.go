@@ -227,6 +227,23 @@ func VerifyWorkspaceRuntimeConformance(snapshot JournalSnapshot, expectedGenerat
 
 func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRecord) (WorkspaceRuntimeProjection, error) {
 	next := cloneWorkspaceRuntime(current)
+	if !current.activeGeneration.IsZero() {
+		target, hasTarget := current.LocalTarget()
+		ready := hasTarget && target.Created()
+		switch record.event.(type) {
+		case FeatureRefCreationIntendedJournalEvent,
+			FeatureRefCreatedJournalEvent,
+			JournalTailRecoveredEvent:
+			// Initialization and journal-tail recovery are the only transitions
+			// admitted before durable feature-ref completion.
+		default:
+			if !ready {
+				return WorkspaceRuntimeProjection{}, fmt.Errorf(
+					"workspace runtime is not ready until feature_ref_created is durable",
+				)
+			}
+		}
+	}
 	switch event := record.event.(type) {
 	case WorkspaceInitializedJournalEvent:
 		if !current.activeGeneration.IsZero() || len(current.generationHistory) != 0 ||
@@ -378,6 +395,16 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 		}
 	}
 	return next, nil
+}
+
+func requireReadyLocalTarget(runtime WorkspaceRuntimeProjection) error {
+	target, ok := runtime.LocalTarget()
+	if !ok || !target.Created() {
+		return fmt.Errorf(
+			"workspace runtime is not ready until feature_ref_created is durable",
+		)
+	}
+	return nil
 }
 
 func reduceReviewHeadAdoption(

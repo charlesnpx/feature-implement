@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -19,6 +20,7 @@ type LocalTargetInspection struct {
 	featureRefExists    bool
 	featureHead         GitObjectID
 	featureReflogMarker string
+	registeredWorktrees map[string]registeredWorktree
 }
 
 func (inspection LocalTargetInspection) Binding() LocalTargetBinding {
@@ -217,7 +219,7 @@ func (adapter LocalTargetGitAdapter) inspect(
 		return LocalTargetInspection{}, err
 	}
 	if err := adapter.rejectUnsupportedAdministrativeFiles(
-		commonRoot, gitRoot,
+		commonRoot, gitRoot, objectFormat,
 	); err != nil {
 		return LocalTargetInspection{}, err
 	}
@@ -279,9 +281,10 @@ func (adapter LocalTargetGitAdapter) inspect(
 	); err != nil {
 		return LocalTargetInspection{}, err
 	}
-	if err := adapter.rejectCheckedOutFeatureBranch(
+	registeredWorktrees, err := adapter.rejectCheckedOutFeatureBranch(
 		ctx, target.root, target.FeatureRef(),
-	); err != nil {
+	)
+	if err != nil {
 		return LocalTargetInspection{}, err
 	}
 	if featureExists {
@@ -341,6 +344,7 @@ func (adapter LocalTargetGitAdapter) inspect(
 		binding: binding, baseHead: baseHead,
 		featureRefExists: featureExists, featureHead: featureHead,
 		featureReflogMarker: marker,
+		registeredWorktrees: registeredWorktrees,
 	}, nil
 }
 
@@ -675,6 +679,7 @@ func configHasCommand(values []string) bool {
 
 func (adapter LocalTargetGitAdapter) rejectUnsupportedAdministrativeFiles(
 	commonRoot, gitRoot *VerifiedRoot,
+	objectFormat GitHashAlgorithm,
 ) error {
 	checks := []struct {
 		root  *VerifiedRoot
@@ -717,8 +722,121 @@ func (adapter LocalTargetGitAdapter) rejectUnsupportedAdministrativeFiles(
 				filepath.Join(commonRoot.Path(), "objects", "pack", entry.name),
 			)
 		}
+		if !entry.info.Mode().IsRegular() {
+			return fmt.Errorf(
+				"local target pack entry %s is not a regular file",
+				filepath.Join(commonRoot.Path(), "objects", "pack", entry.name),
+			)
+		}
+		if err := verifyLocalTargetObjectFile(
+			commonRoot,
+			path.Join("objects/pack", entry.name),
+			"pack",
+		); err != nil {
+			return err
+		}
+	}
+	objectEntries, err := commonRoot.adapter.readDirectory("objects")
+	if err != nil {
+		return fmt.Errorf("inspect local target object database entries: %w", err)
+	}
+	looseNameLength := 38
+	if objectFormat == GitHashSHA256 {
+		looseNameLength = 62
+	}
+	for _, directory := range objectEntries {
+		if directory.name == "info" || directory.name == "pack" {
+			if !directory.info.IsDir() {
+				return fmt.Errorf(
+					"local target object database entry %s is not a directory",
+					filepath.Join(commonRoot.Path(), "objects", directory.name),
+				)
+			}
+			continue
+		}
+		if len(directory.name) != 2 || !lowerHex(directory.name) {
+			return fmt.Errorf(
+				"unexpected local target object database entry %s",
+				filepath.Join(commonRoot.Path(), "objects", directory.name),
+			)
+		}
+		if !directory.info.IsDir() {
+			return fmt.Errorf(
+				"loose object directory %s is not a directory",
+				filepath.Join(commonRoot.Path(), "objects", directory.name),
+			)
+		}
+		relativeDirectory := path.Join("objects", directory.name)
+		looseEntries, err := commonRoot.adapter.readDirectory(relativeDirectory)
+		if err != nil {
+			return fmt.Errorf(
+				"inspect loose object directory %s: %w",
+				filepath.Join(commonRoot.Path(), filepath.FromSlash(relativeDirectory)),
+				err,
+			)
+		}
+		for _, entry := range looseEntries {
+			if len(entry.name) != looseNameLength || !lowerHex(entry.name) {
+				return fmt.Errorf(
+					"unexpected loose object entry %s",
+					filepath.Join(
+						commonRoot.Path(),
+						filepath.FromSlash(relativeDirectory),
+						entry.name,
+					),
+				)
+			}
+			if !entry.info.Mode().IsRegular() {
+				return fmt.Errorf(
+					"loose object entry %s is not a regular file",
+					filepath.Join(
+						commonRoot.Path(),
+						filepath.FromSlash(relativeDirectory),
+						entry.name,
+					),
+				)
+			}
+			if err := verifyLocalTargetObjectFile(
+				commonRoot,
+				path.Join(relativeDirectory, entry.name),
+				"loose object",
+			); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
+}
+
+func verifyLocalTargetObjectFile(
+	root *VerifiedRoot,
+	relative string,
+	label string,
+) error {
+	file, _, err := root.adapter.openRegularFileExact(
+		relative, os.O_RDONLY, 0, false,
+	)
+	if err != nil {
+		return fmt.Errorf("open local target %s %s: %w", label, relative, err)
+	}
+	defer file.Close()
+	if err := root.verifyOwnedRegularFile(relative, file); err != nil {
+		return fmt.Errorf("verify local target %s %s: %w", label, relative, err)
+	}
+	return nil
+}
+
+func lowerHex(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') &&
+			(character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (adapter LocalTargetGitAdapter) rejectBare(
@@ -1058,32 +1176,32 @@ func (adapter LocalTargetGitAdapter) validateFeatureNamespace(
 func (adapter LocalTargetGitAdapter) rejectCheckedOutFeatureBranch(
 	ctx context.Context,
 	root, featureRef string,
-) error {
+) (map[string]registeredWorktree, error) {
 	output, exitCode, err := adapter.git.run(
 		ctx, root, "worktree", "list", "--porcelain", "-z",
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if exitCode != 0 {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"inspect target worktrees: Git exited with status %d", exitCode,
 		)
 	}
 	worktrees, err := parseRegisteredWorktrees(output)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	branch := strings.TrimPrefix(featureRef, "refs/heads/")
 	for worktreePath, worktree := range worktrees {
 		if worktree.branch == branch {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"feature branch %s is already checked out at %s",
 				branch, worktreePath,
 			)
 		}
 	}
-	return nil
+	return worktrees, nil
 }
 
 func (adapter LocalTargetGitAdapter) inspectFeatureRef(
@@ -1135,34 +1253,6 @@ func (adapter LocalTargetGitAdapter) inspectFeatureRef(
 	return true, head, marker, nil
 }
 
-func (adapter LocalTargetGitAdapter) createFeatureRef(
-	ctx context.Context,
-	binding LocalTargetBinding,
-	intentDigest Digest,
-) error {
-	if binding.IsZero() || intentDigest.IsZero() {
-		return fmt.Errorf(
-			"feature-ref creation requires target binding and durable intent digest",
-		)
-	}
-	message := localTargetReflogMessage(intentDigest)
-	_, exitCode, err := adapter.git.run(
-		ctx, binding.root,
-		"update-ref", "--no-deref", "--create-reflog", "-m", message,
-		binding.featureRef, gitObjectHex(binding.baseCommit), "",
-	)
-	if err != nil {
-		return fmt.Errorf("create feature ref %s: %w", binding.featureRef, err)
-	}
-	if exitCode != 0 {
-		return fmt.Errorf(
-			"create feature ref %s with expected-absent CAS: Git exited with status %d",
-			binding.featureRef, exitCode,
-		)
-	}
-	return nil
-}
-
 func localTargetReflogMessage(intentDigest Digest) string {
 	return "feature-implement feature-ref creation " + intentDigest.String()
 }
@@ -1205,19 +1295,9 @@ func (adapter LocalTargetGitAdapter) inspectIntendedTarget(
 		baseCommit: binding.baseCommit, featureBranch: binding.featureBranch,
 	}
 	return adapter.inspect(ctx, target, localTargetInspectionOptions{
-		requireBaseAtPin: false, allowFeatureRef: true,
+		requireBaseAtPin: true, allowFeatureRef: true,
 		expectedBinding: &binding, intentDigest: intentDigest,
 	})
-}
-
-func (adapter LocalTargetGitAdapter) featureRefAbsent(
-	ctx context.Context,
-	binding LocalTargetBinding,
-) (bool, error) {
-	exists, _, _, err := adapter.inspectFeatureRef(
-		ctx, binding.root, binding.featureRef, binding.objectFormat,
-	)
-	return !exists, err
 }
 
 func (adapter LocalTargetGitAdapter) refuseConfiguredExternalPrograms(

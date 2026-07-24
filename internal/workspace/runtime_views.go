@@ -622,6 +622,9 @@ func rebuildViewProjections(
 		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, ProviderRuntimeProjection{}, AuthorizationRuntimeProjection{},
 			fmt.Errorf("workspace report definition does not match active journal generation")
 	}
+	if err := requireReadyLocalTarget(core); err != nil {
+		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, ProviderRuntimeProjection{}, AuthorizationRuntimeProjection{}, err
+	}
 	reviews, err := RebuildReviewRuntime(snapshot, definition)
 	if err != nil {
 		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, ProviderRuntimeProjection{}, AuthorizationRuntimeProjection{}, err

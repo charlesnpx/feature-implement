@@ -115,15 +115,27 @@ func initializeLocalTarget(
 	if err != nil {
 		return JournalSnapshot{}, err
 	}
+	session, err := adapter.openBoundSession(binding)
+	if err != nil {
+		return JournalSnapshot{}, err
+	}
+	defer session.Close()
+	inspection, err = session.inspectOwnedState(
+		ctx, targetProjection.intentDigest, true,
+	)
+	if err != nil {
+		return JournalSnapshot{}, err
+	}
 	if !inspection.featureRefExists {
 		if err := injectLocalTargetInitializationFault(
 			fault, LocalTargetFaultBeforeRefUpdate,
 		); err != nil {
 			return JournalSnapshot{}, err
 		}
-		if err := adapter.createFeatureRef(
-			ctx, binding, targetProjection.intentDigest,
-		); err != nil {
+		inspection, err = session.createFeatureRef(
+			ctx, targetProjection.intentDigest,
+		)
+		if err != nil {
 			return JournalSnapshot{}, err
 		}
 		if err := injectLocalTargetInitializationFault(
@@ -132,8 +144,8 @@ func initializeLocalTarget(
 			return JournalSnapshot{}, err
 		}
 	}
-	verified, err := adapter.verifyOwnedFeatureRef(
-		ctx, binding, targetProjection.intentDigest,
+	verified, err := session.inspectOwnedState(
+		ctx, targetProjection.intentDigest, true,
 	)
 	if err != nil {
 		return JournalSnapshot{}, err
@@ -147,6 +159,11 @@ func initializeLocalTarget(
 	}
 	if err := injectLocalTargetInitializationFault(
 		fault, LocalTargetFaultBeforeCompletion,
+	); err != nil {
+		return JournalSnapshot{}, err
+	}
+	if _, err := session.inspectOwnedState(
+		ctx, targetProjection.intentDigest, true,
 	); err != nil {
 		return JournalSnapshot{}, err
 	}

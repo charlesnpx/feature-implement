@@ -13,10 +13,13 @@ import (
 // a missing runtime candidate only so overlap can be rejected before the
 // command creates any durable runtime state.
 type WorkspaceInitializationRootGuard struct {
-	plan        *VerifiedRoot
-	runtime     *VerifiedRoot
-	target      *VerifiedRoot
-	runtimePath string
+	plan            *VerifiedRoot
+	runtime         *VerifiedRoot
+	target          *VerifiedRoot
+	gitDirectory    *VerifiedRoot
+	commonDirectory *VerifiedRoot
+	registered      []*VerifiedRoot
+	runtimePath     string
 }
 
 func OpenWorkspaceInitializationRootGuard(
@@ -67,6 +70,101 @@ func OpenWorkspaceInitializationRootGuard(
 	}
 	closeGuard = false
 	return guard, nil
+}
+
+func (guard *WorkspaceInitializationRootGuard) bindLocalTarget(
+	inspection LocalTargetInspection,
+) (resultErr error) {
+	if guard == nil || guard.target == nil || inspection.binding.IsZero() {
+		return fmt.Errorf(
+			"workspace initialization Git-root admission requires a target inspection",
+		)
+	}
+	if guard.gitDirectory != nil || guard.commonDirectory != nil ||
+		len(guard.registered) != 0 {
+		return fmt.Errorf("workspace initialization Git roots are already bound")
+	}
+	binding := inspection.binding
+	if guard.target.Path() != binding.root ||
+		guard.target.Identity() != binding.rootIdentity {
+		return fmt.Errorf(
+			"workspace initialization target root does not match the inspected Git binding",
+		)
+	}
+	gitDirectory, err := OpenVerifiedRoot(
+		RootRoleGitDirectory, binding.gitDirectory, false,
+	)
+	if err != nil {
+		return fmt.Errorf("open workspace initialization Git directory: %w", err)
+	}
+	defer func() {
+		if resultErr != nil {
+			resultErr = errors.Join(resultErr, gitDirectory.Close())
+		}
+	}()
+	commonDirectory, err := OpenVerifiedRoot(
+		RootRoleGitCommon, binding.commonDirectory, false,
+	)
+	if err != nil {
+		return fmt.Errorf("open workspace initialization Git common directory: %w", err)
+	}
+	defer func() {
+		if resultErr != nil {
+			resultErr = errors.Join(resultErr, commonDirectory.Close())
+		}
+	}()
+	if gitDirectory.Identity() != binding.gitDirectoryIdentity ||
+		commonDirectory.Identity() != binding.commonIdentity {
+		return fmt.Errorf(
+			"workspace initialization Git-directory identity changed during admission",
+		)
+	}
+	registered := make([]*VerifiedRoot, 0, len(inspection.registeredWorktrees))
+	defer func() {
+		if resultErr == nil {
+			return
+		}
+		for index := len(registered) - 1; index >= 0; index-- {
+			resultErr = errors.Join(resultErr, registered[index].Close())
+		}
+	}()
+	for _, registeredPath := range sortedRegisteredWorktreePaths(
+		inspection.registeredWorktrees,
+	) {
+		info, err := os.Lstat(registeredPath)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf(
+				"inspect registered worktree root %s: %w", registeredPath, err,
+			)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf(
+				"registered worktree root %s is not a directory", registeredPath,
+			)
+		}
+		root, err := OpenVerifiedRoot(
+			RootRoleRegisteredWorktree, registeredPath, false,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"open registered worktree root %s: %w", registeredPath, err,
+			)
+		}
+		registered = append(registered, root)
+	}
+	guard.gitDirectory = gitDirectory
+	guard.commonDirectory = commonDirectory
+	guard.registered = registered
+	if err := guard.validateLayout(); err != nil {
+		guard.gitDirectory = nil
+		guard.commonDirectory = nil
+		guard.registered = nil
+		return err
+	}
+	return nil
 }
 
 func (guard *WorkspaceInitializationRootGuard) VerifyBeforeRuntimeCreation() error {
@@ -143,6 +241,18 @@ func (guard *WorkspaceInitializationRootGuard) Close() error {
 		closeErrors = append(closeErrors, guard.runtime.Close())
 		guard.runtime = nil
 	}
+	for index := len(guard.registered) - 1; index >= 0; index-- {
+		closeErrors = append(closeErrors, guard.registered[index].Close())
+	}
+	guard.registered = nil
+	if guard.commonDirectory != nil {
+		closeErrors = append(closeErrors, guard.commonDirectory.Close())
+		guard.commonDirectory = nil
+	}
+	if guard.gitDirectory != nil {
+		closeErrors = append(closeErrors, guard.gitDirectory.Close())
+		guard.gitDirectory = nil
+	}
 	if guard.target != nil {
 		closeErrors = append(closeErrors, guard.target.Close())
 		guard.target = nil
@@ -155,7 +265,15 @@ func (guard *WorkspaceInitializationRootGuard) Close() error {
 }
 
 func (guard *WorkspaceInitializationRootGuard) verifyHeldRoots() error {
-	for _, root := range []*VerifiedRoot{guard.plan, guard.runtime, guard.target} {
+	roots := []*VerifiedRoot{
+		guard.plan,
+		guard.runtime,
+		guard.target,
+		guard.gitDirectory,
+		guard.commonDirectory,
+	}
+	roots = append(roots, guard.registered...)
+	for _, root := range roots {
 		if root == nil {
 			continue
 		}
@@ -170,15 +288,21 @@ func (guard *WorkspaceInitializationRootGuard) validateLayout() error {
 	if guard.target == nil {
 		return fmt.Errorf("workspace initialization requires a verified target root")
 	}
-	if guard.plan != nil && rootsOverlap(guard.plan, guard.target) {
-		return unsafeInitializationRootOverlap(
-			guard.plan.Role(), guard.plan.Path(),
-			guard.target.Role(), guard.target.Path(),
-		)
+	protected := []*VerifiedRoot{
+		guard.target,
+		guard.gitDirectory,
+		guard.commonDirectory,
 	}
-	for _, root := range []*VerifiedRoot{guard.plan, guard.target} {
+	protected = append(protected, guard.registered...)
+	for _, root := range protected {
 		if root == nil {
 			continue
+		}
+		if guard.plan != nil && rootsOverlap(root, guard.plan) {
+			return unsafeInitializationRootOverlap(
+				guard.plan.Role(), guard.plan.Path(),
+				root.Role(), root.Path(),
+			)
 		}
 		if guard.runtime != nil {
 			if rootsOverlap(root, guard.runtime) {
@@ -193,6 +317,22 @@ func (guard *WorkspaceInitializationRootGuard) validateLayout() error {
 			pathContains(guard.runtimePath, root.Path()) {
 			return unsafeInitializationRootOverlap(
 				root.Role(), root.Path(),
+				RootRoleRuntime, guard.runtimePath,
+			)
+		}
+	}
+	if guard.plan != nil {
+		if guard.runtime != nil && rootsOverlap(guard.plan, guard.runtime) {
+			return unsafeInitializationRootOverlap(
+				guard.plan.Role(), guard.plan.Path(),
+				guard.runtime.Role(), guard.runtime.Path(),
+			)
+		}
+		if guard.runtime == nil &&
+			(pathContains(guard.plan.Path(), guard.runtimePath) ||
+				pathContains(guard.runtimePath, guard.plan.Path())) {
+			return unsafeInitializationRootOverlap(
+				guard.plan.Role(), guard.plan.Path(),
 				RootRoleRuntime, guard.runtimePath,
 			)
 		}

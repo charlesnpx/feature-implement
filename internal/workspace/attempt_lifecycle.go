@@ -71,11 +71,11 @@ func ReserveAttempt(
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
-	if err := git.ValidateAttemptWorktreeRoot(ctx, manifest.repositoryRoot, worktree); err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
 	snapshot, runtime, err := readAttemptRuntime(journal, definition)
 	if err != nil {
+		return RuntimeAttemptProjection{}, err
+	}
+	if err := git.ValidateAttemptWorktreeRoot(ctx, manifest.repositoryRoot, worktree); err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
 	if existing, exists := runtime.Attempt(identity.attemptID); exists {
@@ -1010,6 +1010,9 @@ func readAttemptRuntime(
 	}
 	if runtime.workspaceID != definition.workspace.id || runtime.activeGeneration != definition.generation {
 		return JournalSnapshot{}, WorkspaceRuntimeProjection{}, fmt.Errorf("attempt definition does not match the active workspace generation")
+	}
+	if err := requireReadyLocalTarget(runtime); err != nil {
+		return JournalSnapshot{}, WorkspaceRuntimeProjection{}, err
 	}
 	return snapshot, runtime, nil
 }
