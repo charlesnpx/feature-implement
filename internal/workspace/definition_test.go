@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -17,23 +18,24 @@ type definitionFixture struct {
 	sources workspace.DefinitionSources
 	gitData []byte
 	extData []byte
+	base    workspace.GitObjectID
 }
 
 func newDefinitionFixture(t *testing.T) definitionFixture {
 	t.Helper()
-	repositoryRoot := t.TempDir()
+	repositoryRoot, baseCommit := initializeTargetRepository(
+		t, workspace.GitHashSHA1,
+	)
 	gitData := []byte("owner-policy: strict\n")
 	externalData := []byte("organization-policy: strict\n")
 	workspaceYAML := fmt.Sprintf(`schema_version: 2
 id: example-workspace
+mode: local
 repository:
   root: %s
-  identity: https://github.com/example/project.git
-provider:
-  kind: github
-  repository: example/project
-base_ref: feature/example-workspace
-remote: origin
+base_ref: refs/heads/main
+base_commit: %s
+feature_branch: feature/example-workspace
 execution_config: config/execution.yaml
 plans:
   - id: alpha-plan
@@ -46,7 +48,7 @@ authority_sources:
   - id: organization-policy
     kind: external_digest
     location: https://policy.example/v2
-`, repositoryRoot)
+`, repositoryRoot, baseCommit)
 	planYAML := `schema_version: 2
 id: alpha-plan
 title: Alpha Plan
@@ -128,6 +130,7 @@ merge_units:
 	return definitionFixture{
 		gitData: gitData,
 		extData: externalData,
+		base:    baseCommit,
 		sources: workspace.DefinitionSources{
 			Workspace:       workspace.SourceArtifact{Path: "feature.workspace.yaml", Bytes: []byte(workspaceYAML)},
 			Plans:           []workspace.SourceArtifact{{Path: "plans/alpha.yaml", Bytes: []byte(planYAML)}},
@@ -161,14 +164,16 @@ func TestValidateDefinitionBuildsContentAddressedEffectiveAuthority(t *testing.T
 	if got := manifest.ID().String(); got != "example-workspace" {
 		t.Fatalf("workspace id = %q", got)
 	}
-	if got := manifest.Repository().String(); got != "https://github.com/example/project.git" {
-		t.Fatalf("repository identity = %q", got)
+	if manifest.Mode() != workspace.WorkspaceModeLocal {
+		t.Fatalf("workspace mode = %q", manifest.Mode())
 	}
-	if got := manifest.Provider().Repository(); got != "example/project" {
-		t.Fatalf("provider repository = %q", got)
+	if got := manifest.Target().Root(); got != manifest.RepositoryRoot() {
+		t.Fatalf("local target root = %q", got)
 	}
-	if manifest.BaseRef() != "feature/example-workspace" || manifest.Remote() != "origin" {
-		t.Fatalf("workspace authority missing base/remote: %#v", manifest)
+	if manifest.BaseRef() != "refs/heads/main" ||
+		manifest.BaseCommit() != fixture.base ||
+		manifest.FeatureBranch() != "feature/example-workspace" {
+		t.Fatalf("workspace local target authority is incomplete: %#v", manifest)
 	}
 	if got := manifest.ExecutionConfigSource(); got != "config/execution.yaml" {
 		t.Fatalf("execution config path = %q", got)
@@ -232,6 +237,78 @@ func TestValidateDefinitionBuildsContentAddressedEffectiveAuthority(t *testing.T
 		if !strings.Contains(text, definition.Generation().String()) || strings.Contains(text, "runtime") || strings.Contains(text, "status") || strings.Contains(text, "base_ref") || strings.Contains(text, "remote") {
 			t.Fatalf("projection JSON has mutable or misplaced authority: %s", text)
 		}
+	}
+}
+
+func initializeTargetRepository(
+	t *testing.T,
+	algorithm workspace.GitHashAlgorithm,
+) (string, workspace.GitObjectID) {
+	t.Helper()
+	root := t.TempDir()
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("canonicalize target repository: %v", err)
+	}
+	runTargetGitTest(
+		t, canonical,
+		"init", "--quiet", "--initial-branch=main",
+		"--object-format="+string(algorithm), ".",
+	)
+	if err := os.WriteFile(
+		filepath.Join(canonical, "seed.txt"),
+		[]byte("local target seed\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	runTargetGitTest(t, canonical, "add", "--", "seed.txt")
+	runTargetGitTest(
+		t, canonical,
+		"-c", "user.name=Feature Implement Test",
+		"-c", "user.email=feature-implement@localhost",
+		"commit", "--quiet", "-m", "seed local target",
+	)
+	raw := strings.TrimSpace(
+		runTargetGitTest(t, canonical, "rev-parse", "HEAD"),
+	)
+	object, err := workspace.ParseGitObjectID(
+		string(algorithm) + ":" + raw,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical, object
+}
+
+func runTargetGitTest(
+	t *testing.T,
+	root string,
+	arguments ...string,
+) string {
+	t.Helper()
+	command := exec.Command("git", append([]string{"-C", root}, arguments...)...)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf(
+			"git %s: %v\n%s",
+			strings.Join(arguments, " "), err, output,
+		)
+	}
+	return string(output)
+}
+
+func assertLocalTargetInitializationJournal(
+	t *testing.T,
+	snapshot workspace.JournalSnapshot,
+) {
+	t.Helper()
+	records := snapshot.Records()
+	if len(records) != 3 ||
+		records[0].EventType() != workspace.JournalEventWorkspaceInitialized ||
+		records[1].EventType() != workspace.JournalEventFeatureRefCreationIntended ||
+		records[2].EventType() != workspace.JournalEventFeatureRefCreated {
+		t.Fatalf("local target initialization journal = %#v", records)
 	}
 }
 

@@ -59,7 +59,7 @@ func TestStrictWorkspaceDecoderRejectsNonV2AndAmbiguousYAML(t *testing.T) {
 		},
 		{
 			name:    "nested unknown field",
-			source:  strings.Replace(valid, "  kind: github\n", "  kind: github\n  token: forbidden\n", 1),
+			source:  strings.Replace(valid, "  root:", "  token: forbidden\n  root:", 1),
 			wantErr: "field token not found",
 		},
 		{
@@ -68,18 +68,23 @@ func TestStrictWorkspaceDecoderRejectsNonV2AndAmbiguousYAML(t *testing.T) {
 			wantErr: "anchors and aliases are not supported",
 		},
 		{
-			name:    "merge key",
-			source:  strings.Replace(valid, "provider:\n  kind: github\n  repository: example/project", "provider:\n  <<: {kind: github, repository: example/project}", 1),
+			name: "merge key",
+			source: strings.Replace(
+				valid,
+				"repository:\n  root:",
+				"repository:\n  <<: {root: /tmp/other}\n  root:",
+				1,
+			),
 			wantErr: "YAML merge keys are not supported",
 		},
 		{
 			name:    "timestamp scalar",
-			source:  strings.Replace(valid, "remote: origin", "remote: 2026-07-21", 1),
+			source:  strings.Replace(valid, "mode: local", "mode: 2026-07-21", 1),
 			wantErr: `scalar tag "!!timestamp" is not supported`,
 		},
 		{
 			name:    "null scalar",
-			source:  strings.Replace(valid, "remote: origin", "remote: null", 1),
+			source:  strings.Replace(valid, "mode: local", "mode: null", 1),
 			wantErr: `scalar tag "!!null" is not supported`,
 		},
 		{
@@ -89,33 +94,38 @@ func TestStrictWorkspaceDecoderRejectsNonV2AndAmbiguousYAML(t *testing.T) {
 		},
 		{
 			name:    "integer in string field",
-			source:  strings.Replace(valid, "remote: origin", "remote: 7", 1),
-			wantErr: "root.remote must be a string",
+			source:  strings.Replace(valid, "mode: local", "mode: 7", 1),
+			wantErr: "root.mode must be a string",
 		},
 		{
-			name:    "local-only remote sentinel",
-			source:  strings.Replace(valid, "remote: origin", "remote: local-only", 1),
-			wantErr: "does not support local-only execution",
+			name:    "missing mode",
+			source:  strings.Replace(valid, "mode: local\n", "", 1),
+			wantErr: "workspace mode must be local",
 		},
 		{
-			name:    "local-only provider sentinel",
-			source:  strings.Replace(valid, "repository: example/project", "repository: local-only", 1),
-			wantErr: "does not support local-only execution",
+			name:    "unsupported mode",
+			source:  strings.Replace(valid, "mode: local", "mode: github", 1),
+			wantErr: "workspace mode must be local",
 		},
 		{
-			name:    "unsupported provider",
-			source:  strings.Replace(valid, "kind: github", "kind: gitlab", 1),
-			wantErr: "workspace v2 supports github",
+			name:    "unqualified base ref",
+			source:  strings.Replace(valid, "base_ref: refs/heads/main", "base_ref: main", 1),
+			wantErr: "fully qualified refs/heads/ ref",
 		},
 		{
-			name:    "malformed github repository",
-			source:  strings.Replace(valid, "repository: example/project", "repository: example/project/extra", 1),
-			wantErr: "must be GitHub owner/repository",
+			name:    "invalid feature branch namespace",
+			source:  strings.Replace(valid, "feature_branch: feature/example-workspace", "feature_branch: topic/example", 1),
+			wantErr: "feature/<kebab-case-name>",
 		},
 		{
-			name:    "unsafe github repository",
-			source:  strings.Replace(valid, "repository: example/project", "repository: example/project%2Fother", 1),
-			wantErr: "must be GitHub owner/repository",
+			name:    "invalid feature branch spelling",
+			source:  strings.Replace(valid, "feature_branch: feature/example-workspace", "feature_branch: feature/Not_Kebab", 1),
+			wantErr: "feature/<kebab-case-name>",
+		},
+		{
+			name:    "unqualified base commit",
+			source:  strings.Replace(valid, "base_commit: sha1:", "base_commit: ", 1),
+			wantErr: "algorithm-qualified",
 		},
 		{
 			name:    "noncanonical integer",
@@ -243,17 +253,15 @@ func TestExecutionPolicyRejectsImplicitOrWeakeningPrecedence(t *testing.T) {
 }
 
 func TestWorkspaceOwnsAndValidatesCrossPlanDependencies(t *testing.T) {
-	root := t.TempDir()
+	root, _ := initializeTargetRepository(t, workspace.GitHashSHA1)
 	valid := `schema_version: 2
 id: multi-plan
+mode: local
 repository:
   root: ` + root + `
-  identity: https://github.com/example/project.git
-provider:
-  kind: github
-  repository: example/project
-base_ref: feature/multi-plan
-remote: origin
+base_ref: refs/heads/main
+base_commit: sha1:` + strings.Repeat("1", 40) + `
+feature_branch: feature/multi-plan
 execution_config: config/execution.yaml
 plans:
   - id: second-plan

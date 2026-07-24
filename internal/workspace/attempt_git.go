@@ -214,7 +214,7 @@ func (adapter LocalAttemptGitAdapter) ValidateAttemptBranch(ctx context.Context,
 
 func (adapter LocalAttemptGitAdapter) InspectAttemptRefs(
 	ctx context.Context,
-	repositoryRoot, remote string,
+	repositoryRoot, _ string,
 ) (AttemptRefInventory, error) {
 	localOutput, exitCode, err := adapter.run(ctx, repositoryRoot, "for-each-ref", "--format=%(refname)", "refs/heads")
 	if err != nil || exitCode != 0 {
@@ -223,26 +223,11 @@ func (adapter LocalAttemptGitAdapter) InspectAttemptRefs(
 		}
 		return AttemptRefInventory{}, fmt.Errorf("inspect local branches: %w", err)
 	}
-	remote = strings.TrimSpace(remote)
-	if remote == "" || strings.HasPrefix(remote, "-") || strings.IndexByte(remote, 0) >= 0 {
-		return AttemptRefInventory{}, fmt.Errorf("attempt ref inspection requires a remote")
-	}
-	remoteOutput, exitCode, err := adapter.run(ctx, repositoryRoot, "ls-remote", "--heads", "--refs", "--", remote)
-	if err != nil || exitCode != 0 {
-		if err == nil {
-			err = fmt.Errorf("Git exited with status %d", exitCode)
-		}
-		return AttemptRefInventory{}, fmt.Errorf("inspect remote branches: %w", err)
-	}
 	local, err := parseLocalHeadRefs(localOutput)
 	if err != nil {
 		return AttemptRefInventory{}, err
 	}
-	remoteRefs, err := parseRemoteHeadRefs(remoteOutput)
-	if err != nil {
-		return AttemptRefInventory{}, err
-	}
-	return NewAttemptRefInventory(local, remoteRefs)
+	return NewAttemptRefInventory(local, nil)
 }
 
 func (adapter LocalAttemptGitAdapter) InspectAttemptWorktree(
@@ -1095,6 +1080,7 @@ func mergeProcessEnvironment(base []string, additions []EnvironmentVariable) []s
 		values[variable.name] = variable.value
 	}
 	values["GIT_NO_REPLACE_OBJECTS"] = "1"
+	values["GIT_NO_LAZY_FETCH"] = "1"
 	values["GIT_GRAFT_FILE"] = os.DevNull
 	values["GIT_OPTIONAL_LOCKS"] = "0"
 	values["GIT_CONFIG_NOSYSTEM"] = "1"
@@ -1205,8 +1191,15 @@ func trustedGitArguments(repositoryRoot string, arguments ...string) []string {
 		"-c", "credential.interactive=false",
 		"-c", "core.askPass=" + os.DevNull,
 		"-c", "http.extraHeader=",
+		"-c", "protocol.allow=never",
+		"-c", "protocol.file.allow=never",
+		"-c", "submodule.recurse=false",
+		"-c", "fetch.recurseSubmodules=false",
+		"-c", "core.attributesFile=" + os.DevNull,
 		"-c", "core.fsmonitor=false",
 		"-c", "core.untrackedCache=false",
+		"-c", "maintenance.auto=false",
+		"-c", "gc.auto=0",
 		"-C", repositoryRoot,
 	}
 	return append(prefix, arguments...)

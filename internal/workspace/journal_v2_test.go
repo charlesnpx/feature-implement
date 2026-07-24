@@ -28,10 +28,8 @@ func TestInitializeWorkspaceV2CreatesDurableJournalGenerationAndProjection(t *te
 		t.Fatalf("stored generation = %#v", result.StoredGeneration())
 	}
 	snapshot := result.Snapshot()
-	if len(snapshot.Records()) != 1 || snapshot.Records()[0].EventType() != workspace.JournalEventWorkspaceInitialized {
-		t.Fatalf("initial journal = %#v", snapshot.Records())
-	}
-	if snapshot.Head() != snapshot.Records()[0].EventHash() || snapshot.Head().IsZero() {
+	assertLocalTargetInitializationJournal(t, snapshot)
+	if snapshot.Head() != snapshot.Records()[2].EventHash() || snapshot.Head().IsZero() {
 		t.Fatalf("initial journal head = %s", snapshot.Head())
 	}
 	runtime := result.Runtime()
@@ -56,7 +54,7 @@ func TestInitializeWorkspaceV2CreatesDurableJournalGenerationAndProjection(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if readSnapshot.Head() != snapshot.Head() || len(readSnapshot.Records()) != 1 {
+	if readSnapshot.Head() != snapshot.Head() || len(readSnapshot.Records()) != 3 {
 		t.Fatalf("reader snapshot = %#v", readSnapshot)
 	}
 	conformance, err := workspace.VerifyWorkspaceRuntimeConformance(readSnapshot, definition.Generation())
@@ -83,7 +81,7 @@ func TestInitializeWorkspaceV2CreatesDurableJournalGenerationAndProjection(t *te
 	if err != nil {
 		t.Fatalf("idempotent initialization: %v", err)
 	}
-	if len(second.Snapshot().Records()) != 1 || second.Snapshot().Head() != snapshot.Head() {
+	if len(second.Snapshot().Records()) != 3 || second.Snapshot().Head() != snapshot.Head() {
 		t.Fatalf("idempotent initialization appended history: %#v", second.Snapshot().Records())
 	}
 	candidate := mustProspectiveCandidate(t, fixture)
@@ -200,8 +198,11 @@ func TestInitializationResumesAfterBootstrapTailRecovery(t *testing.T) {
 		t.Fatalf("resume initialization: %v", err)
 	}
 	records := result.Snapshot().Records()
-	if len(records) != 2 || records[0].EventType() != workspace.JournalEventTailRecovered ||
-		records[1].EventType() != workspace.JournalEventWorkspaceInitialized {
+	if len(records) != 4 ||
+		records[0].EventType() != workspace.JournalEventTailRecovered ||
+		records[1].EventType() != workspace.JournalEventWorkspaceInitialized ||
+		records[2].EventType() != workspace.JournalEventFeatureRefCreationIntended ||
+		records[3].EventType() != workspace.JournalEventFeatureRefCreated {
 		t.Fatalf("resumed initialization journal = %#v", records)
 	}
 	recovery, ok := records[0].Event().(workspace.JournalTailRecoveredEvent)
@@ -294,9 +295,7 @@ func TestWorkspaceJournalReadOnlyLockDoesNotRequireWritePermission(t *testing.T)
 	if closeErr != nil {
 		t.Fatal(closeErr)
 	}
-	if len(snapshot.Records()) != 1 || snapshot.Records()[0].EventType() != workspace.JournalEventWorkspaceInitialized {
-		t.Fatalf("read-only snapshot = %#v", snapshot.Records())
-	}
+	assertLocalTargetInitializationJournal(t, snapshot)
 }
 
 func TestWorkspaceJournalLockSubprocess(t *testing.T) {
@@ -358,7 +357,7 @@ func TestWorkspaceJournalMultiProcessCASAllowsOneWinner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Records()) != 2 || snapshot.Revision(workspace.WorkspaceJournalResource(definition.Workspace().ID())) != 2 {
+	if len(snapshot.Records()) != 4 || snapshot.Revision(workspace.WorkspaceJournalResource(definition.Workspace().ID())) != 4 {
 		t.Fatalf("multi-process CAS journal = %#v", snapshot.Records())
 	}
 }
@@ -396,7 +395,7 @@ func TestWorkspaceJournalCASSubprocess(t *testing.T) {
 	}
 	workspaceResource := workspace.WorkspaceJournalResource(workspaceID)
 	candidateResource := workspace.GenerationJournalResource(candidate)
-	workspaceRevision, _ := workspace.NewJournalResourceRevision(workspaceResource, 1)
+	workspaceRevision, _ := workspace.NewJournalResourceRevision(workspaceResource, 3)
 	candidateRevision, _ := workspace.NewJournalResourceRevision(candidateResource, 0)
 	request, err := workspace.NewJournalAppend(
 		event, mustTime(t, "2026-07-21T01:01:00Z"),
@@ -449,14 +448,14 @@ func TestJournalCASRejectsStaleResourceWithoutAppending(t *testing.T) {
 	}
 	_, err = journal.Append(request)
 	var staleError workspace.StaleJournalResourceError
-	if !errors.As(err, &staleError) || staleError.Observed != 1 || staleError.Expected != 0 {
+	if !errors.As(err, &staleError) || staleError.Observed != 3 || staleError.Expected != 0 {
 		t.Fatalf("stale CAS error = %v", err)
 	}
 	after, err := journal.ReadSnapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Head() != result.Snapshot().Head() || len(after.Records()) != 1 {
+	if after.Head() != result.Snapshot().Head() || len(after.Records()) != 3 {
 		t.Fatalf("stale append changed journal: %#v", after.Records())
 	}
 }
@@ -552,7 +551,7 @@ func TestJournalRejectsInvalidEventResourceSetsAndRuntimeTransitions(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Head() != initialized.Snapshot().Head() || len(after.Records()) != 1 {
+	if after.Head() != initialized.Snapshot().Head() || len(after.Records()) != 3 {
 		t.Fatalf("invalid runtime transition changed journal: %#v", after.Records())
 	}
 }
@@ -610,12 +609,12 @@ func TestIncompleteTailRequiresExplicitRecoveryAndRecordsDiscardedBytes(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Records()) != 2 || snapshot.Records()[1].EventType() != workspace.JournalEventTailRecovered || snapshot.Head() != report.JournalHead() {
+	if len(snapshot.Records()) != 4 || snapshot.Records()[3].EventType() != workspace.JournalEventTailRecovered || snapshot.Head() != report.JournalHead() {
 		t.Fatalf("recovered journal = %#v", snapshot.Records())
 	}
-	recovery, ok := snapshot.Records()[1].Event().(workspace.JournalTailRecoveredEvent)
+	recovery, ok := snapshot.Records()[3].Event().(workspace.JournalTailRecoveredEvent)
 	if !ok || recovery.DiscardOffset() != tail.Offset() || recovery.DiscardSize() != tail.Size() || recovery.DiscardDigest() != tail.Digest() || recovery.ResultingHead() != initialized.Snapshot().Head() {
-		t.Fatalf("recovery event = %#v", snapshot.Records()[1].Event())
+		t.Fatalf("recovery event = %#v", snapshot.Records()[3].Event())
 	}
 	runtime, err := workspace.RebuildWorkspaceRuntime(snapshot)
 	if err != nil || len(runtime.Recoveries()) != 1 || runtime.ActiveGeneration() != definition.Generation() {
@@ -654,7 +653,7 @@ func TestRecoveryRejectsCorruptCompleteRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer journal.Close()
-	if _, err := journal.RecoverIncompleteTail(definition.Workspace().ID(), mustTime(t, "2026-07-21T01:01:00Z")); err == nil || !strings.Contains(err.Error(), "parse journal record 2") {
+	if _, err := journal.RecoverIncompleteTail(definition.Workspace().ID(), mustTime(t, "2026-07-21T01:01:00Z")); err == nil || !strings.Contains(err.Error(), "parse journal record 4") {
 		t.Fatalf("complete corruption recovery error = %v", err)
 	}
 	after, _ := os.ReadFile(journalPath)
@@ -811,7 +810,7 @@ func TestJournalRecoveryResumesAcrossCrashBoundaries(t *testing.T) {
 				t.Fatalf("resumed recovery report = %#v", report)
 			}
 			snapshot, err := resumer.ReadSnapshot()
-			if err != nil || len(snapshot.Records()) != 2 || snapshot.Records()[1].EventType() != workspace.JournalEventTailRecovered {
+			if err != nil || len(snapshot.Records()) != 4 || snapshot.Records()[3].EventType() != workspace.JournalEventTailRecovered {
 				t.Fatalf("resumed recovery journal = %#v, %v", snapshot.Records(), err)
 			}
 			if err := resumer.Close(); err != nil {
@@ -865,7 +864,7 @@ func TestJournalSubprocessCrashesAroundAppendAndFsync(t *testing.T) {
 				return
 			}
 			snapshot, err := workspace.ReadWorkspaceJournalSnapshot(workspaceDir)
-			if err != nil || len(snapshot.Records()) != 2 || snapshot.Records()[1].EventType() != workspace.JournalEventCandidateStored {
+			if err != nil || len(snapshot.Records()) != 4 || snapshot.Records()[3].EventType() != workspace.JournalEventCandidateStored {
 				t.Fatalf("complete subprocess append = %#v, %v", snapshot.Records(), err)
 			}
 		})

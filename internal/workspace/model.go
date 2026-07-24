@@ -4,10 +4,41 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
 )
+
+type WorkspaceMode string
+
+const WorkspaceModeLocal WorkspaceMode = "local"
+
+const maxFeatureBranchBytes = 240
+
+var featureBranchPattern = regexp.MustCompile(
+	`^feature/[a-z0-9]+(?:-[a-z0-9]+)*$`,
+)
+
+// LocalTarget describes the immutable local repository authority carried by
+// a workspace definition. Runtime admission adds opened filesystem identities
+// and observed Git layout metadata without changing this semantic binding.
+type LocalTarget struct {
+	root          string
+	baseRef       string
+	baseCommit    GitObjectID
+	featureBranch string
+}
+
+func (target LocalTarget) Root() string            { return target.root }
+func (target LocalTarget) BaseRef() string         { return target.baseRef }
+func (target LocalTarget) BaseCommit() GitObjectID { return target.baseCommit }
+func (target LocalTarget) FeatureBranch() string   { return target.featureBranch }
+func (target LocalTarget) FeatureRef() string      { return "refs/heads/" + target.featureBranch }
+func (target LocalTarget) IsZero() bool {
+	return target.root == "" || target.baseRef == "" ||
+		target.baseCommit.IsZero() || target.featureBranch == ""
+}
 
 type ProviderIdentity struct {
 	kind       ID
@@ -94,6 +125,8 @@ func (reference AuthorityReference) Location() string    { return reference.loca
 // metadata. Its fields are private and collection accessors return copies.
 type WorkspaceManifest struct {
 	id               ID
+	mode             WorkspaceMode
+	target           LocalTarget
 	repositoryRoot   string
 	repository       RepositoryIdentity
 	provider         ProviderIdentity
@@ -118,45 +151,45 @@ func normalizeWorkspace(wire workspaceWire) (WorkspaceManifest, error) {
 	if err != nil {
 		return WorkspaceManifest{}, fmt.Errorf("workspace id: %w", err)
 	}
-	repositoryRoot := filepath.Clean(strings.TrimSpace(wire.Repository.Root))
-	if wire.Repository.Root == "" || !filepath.IsAbs(repositoryRoot) {
+	mode := WorkspaceMode(strings.TrimSpace(wire.Mode))
+	if mode != WorkspaceModeLocal {
+		return WorkspaceManifest{}, fmt.Errorf("workspace mode must be local")
+	}
+	rawRepositoryRoot := strings.TrimSpace(wire.Repository.Root)
+	repositoryRoot := filepath.Clean(rawRepositoryRoot)
+	if rawRepositoryRoot == "" || !filepath.IsAbs(repositoryRoot) {
 		return WorkspaceManifest{}, fmt.Errorf("repository.root must be an absolute path")
 	}
-	repository, err := NewRepositoryIdentity(wire.Repository.Identity)
+	repositoryRoot, err = canonicalizeTrustedRootPath(repositoryRoot)
 	if err != nil {
 		return WorkspaceManifest{}, err
 	}
-	providerKind, err := NewID(wire.Provider.Kind)
-	if err != nil {
-		return WorkspaceManifest{}, fmt.Errorf("provider.kind: %w", err)
-	}
-	provider, err := NewProviderIdentity(providerKind, wire.Provider.Repository)
+	baseRef, err := normalizeFullyQualifiedBaseRef(wire.BaseRef)
 	if err != nil {
 		return WorkspaceManifest{}, err
 	}
-	if provider.repository == "local-only" {
-		return WorkspaceManifest{}, fmt.Errorf("workspace v2 does not support local-only execution")
+	baseCommit, err := ParseGitObjectID(wire.BaseCommit)
+	if err != nil {
+		return WorkspaceManifest{}, fmt.Errorf("base_commit: %w", err)
 	}
-	if provider.kind.String() != "github" {
-		return WorkspaceManifest{}, fmt.Errorf("provider.kind %q is unsupported; workspace v2 supports github", provider.kind)
-	}
-	providerRepositoryParts := strings.Split(provider.repository, "/")
-	if len(providerRepositoryParts) != 2 ||
-		!validGitHubRepositoryComponent(providerRepositoryParts[0]) ||
-		!validGitHubRepositoryComponent(providerRepositoryParts[1]) {
-		return WorkspaceManifest{}, fmt.Errorf("provider.repository must be GitHub owner/repository")
-	}
-	baseRef, err := normalizeToken("base_ref", wire.BaseRef, 1024)
+	featureBranch, err := normalizeFeatureBranch(wire.FeatureBranch)
 	if err != nil {
 		return WorkspaceManifest{}, err
 	}
-	remote, err := normalizeToken("remote", wire.Remote, 512)
+
+	// Provider/runtime code is removed in Story 6. Until then its private
+	// compatibility identity is deliberately derived from the local root and
+	// is not represented in, or authoritative over, the workspace schema.
+	repository, err := NewRepositoryIdentity("local:" + repositoryRoot)
 	if err != nil {
 		return WorkspaceManifest{}, err
 	}
-	if remote == "local-only" {
-		return WorkspaceManifest{}, fmt.Errorf("workspace v2 does not support local-only execution")
+	providerKind, _ := NewID("github")
+	provider, err := NewProviderIdentity(providerKind, "local/target")
+	if err != nil {
+		return WorkspaceManifest{}, err
 	}
+	remote := "origin"
 	executionConfig, err := normalizeSourcePath(wire.ExecutionConfig)
 	if err != nil {
 		return WorkspaceManifest{}, fmt.Errorf("execution_config: %w", err)
@@ -254,31 +287,54 @@ func normalizeWorkspace(wire workspaceWire) (WorkspaceManifest, error) {
 	sort.Slice(authorities, func(i, j int) bool { return authorities[i].id.String() < authorities[j].id.String() })
 
 	return WorkspaceManifest{
-		id: id, repositoryRoot: repositoryRoot, repository: repository, provider: provider,
+		id: id, mode: mode,
+		target: LocalTarget{
+			root: repositoryRoot, baseRef: baseRef, baseCommit: baseCommit,
+			featureBranch: featureBranch,
+		},
+		repositoryRoot: repositoryRoot, repository: repository, provider: provider,
 		baseRef: baseRef, remote: remote, executionConfig: executionConfig,
 		plans: plans, dependencies: dependencies, authoritySources: authorities,
 	}, nil
 }
 
-func validGitHubRepositoryComponent(value string) bool {
-	if value == "" || value == "." || value == ".." {
-		return false
+func normalizeFullyQualifiedBaseRef(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > maxFeatureBranchBytes+len("refs/heads/") ||
+		!strings.HasPrefix(value, "refs/heads/") {
+		return "", fmt.Errorf("base_ref must be a fully qualified refs/heads/ ref")
 	}
-	for _, character := range value {
-		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
-			character >= '0' && character <= '9' || character == '-' || character == '_' || character == '.' {
-			continue
-		}
-		return false
+	branch := strings.TrimPrefix(value, "refs/heads/")
+	if err := validateAttemptBranchSyntax(branch); err != nil {
+		return "", fmt.Errorf("base_ref: %w", err)
 	}
-	return true
+	return value, nil
+}
+
+func normalizeFeatureBranch(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if len(value) > maxFeatureBranchBytes || !featureBranchPattern.MatchString(value) {
+		return "", fmt.Errorf(
+			"feature_branch must match feature/<kebab-case-name> and be at most %d bytes",
+			maxFeatureBranchBytes,
+		)
+	}
+	if err := validateAttemptBranchSyntax(value); err != nil {
+		return "", fmt.Errorf("feature_branch: %w", err)
+	}
+	return value, nil
 }
 
 func (manifest WorkspaceManifest) ID() ID                         { return manifest.id }
+func (manifest WorkspaceManifest) Mode() WorkspaceMode            { return manifest.mode }
+func (manifest WorkspaceManifest) Target() LocalTarget            { return manifest.target }
 func (manifest WorkspaceManifest) RepositoryRoot() string         { return manifest.repositoryRoot }
 func (manifest WorkspaceManifest) Repository() RepositoryIdentity { return manifest.repository }
 func (manifest WorkspaceManifest) Provider() ProviderIdentity     { return manifest.provider }
 func (manifest WorkspaceManifest) BaseRef() string                { return manifest.baseRef }
+func (manifest WorkspaceManifest) BaseCommit() GitObjectID        { return manifest.target.baseCommit }
+func (manifest WorkspaceManifest) FeatureBranch() string          { return manifest.target.featureBranch }
+func (manifest WorkspaceManifest) FeatureRef() string             { return manifest.target.FeatureRef() }
 func (manifest WorkspaceManifest) Remote() string                 { return manifest.remote }
 func (manifest WorkspaceManifest) ExecutionConfigSource() string  { return manifest.executionConfig }
 func (manifest WorkspaceManifest) Plans() []PlanReference {

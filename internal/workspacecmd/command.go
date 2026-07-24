@@ -109,7 +109,7 @@ func Execute(ctx context.Context, options Options) (any, error) {
 	}
 	switch action {
 	case "validate":
-		return validateBundle(bundle, options)
+		return validateBundle(ctx, bundle, options)
 	case "init":
 		return initializeWorkspace(ctx, bundle, options)
 	case "status", "report":
@@ -331,9 +331,20 @@ func RequestSchemas() map[string]any {
 	}
 }
 
-func validateBundle(bundle workspace.WorkspaceBundle, options Options) (ValidationResult, error) {
+func validateBundle(
+	ctx context.Context,
+	bundle workspace.WorkspaceBundle,
+	options Options,
+) (ValidationResult, error) {
 	if err := bundle.VerifyRoot(); err != nil {
 		return ValidationResult{}, err
+	}
+	if _, err := workspace.ValidateLocalTarget(
+		ctx, bundle.Definition().Workspace(),
+	); err != nil {
+		return ValidationResult{}, fmt.Errorf(
+			"validate local target: %w", err,
+		)
 	}
 	result := ValidationResult{
 		SchemaVersion: requestSchemaVersion, Status: "valid", BundleRoot: bundle.Root(),
@@ -343,6 +354,13 @@ func validateBundle(bundle workspace.WorkspaceBundle, options Options) (Validati
 	if !options.WriteLocks {
 		if err := bundle.VerifyRoot(); err != nil {
 			return ValidationResult{}, err
+		}
+		if _, err := workspace.ValidateLocalTarget(
+			ctx, bundle.Definition().Workspace(),
+		); err != nil {
+			return ValidationResult{}, fmt.Errorf(
+				"revalidate local target: %w", err,
+			)
 		}
 		return result, nil
 	}
@@ -366,6 +384,13 @@ func validateBundle(bundle workspace.WorkspaceBundle, options Options) (Validati
 	result.LockRoot = lockRoot
 	if err := bundle.VerifyRoot(); err != nil {
 		return ValidationResult{}, err
+	}
+	if _, err := workspace.ValidateLocalTarget(
+		ctx, bundle.Definition().Workspace(),
+	); err != nil {
+		return ValidationResult{}, fmt.Errorf(
+			"revalidate local target: %w", err,
+		)
 	}
 	return result, nil
 }
@@ -430,11 +455,14 @@ func initializeWorkspace(
 				return err
 			}
 			var initializeErr error
-			initialized, initializeErr = workspace.InitializeWorkspaceV2(
+			initialized, initializeErr = workspace.InitializeWorkspaceV2WithOptions(
+				ctx,
 				workspaceDir,
 				definition,
 				occurredAt,
-				checkpoint,
+				workspace.WorkspaceInitializationOptions{
+					PlanCheckpoint: &checkpoint,
+				},
 			)
 			return initializeErr
 		},

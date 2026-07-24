@@ -204,7 +204,7 @@ func TestWithVerifiedPlanLockCheckpointExcludesGitMutationsThroughWorkspaceBindi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Records()) != 1 {
+	if len(snapshot.Records()) != 3 {
 		t.Fatalf("initialization journal records = %d", len(snapshot.Records()))
 	}
 	event, ok := snapshot.Records()[0].Event().(workspace.WorkspaceInitializedJournalEvent)

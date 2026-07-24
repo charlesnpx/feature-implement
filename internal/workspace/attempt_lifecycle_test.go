@@ -791,6 +791,9 @@ func TestAttemptWorktreeAdmissionRejectsGitOwnedRootsBeforeMutation(t *testing.T
 		if strings.HasPrefix(line, "  root: ") {
 			workspaceSource[index] = "  root: " + repositoryRoot
 		}
+		if strings.HasPrefix(line, "base_commit: ") {
+			workspaceSource[index] = "base_commit: " + base.String()
+		}
 	}
 	fixture.sources.Workspace.Bytes = []byte(strings.Join(workspaceSource, "\n"))
 	definition := mustDefinition(t, fixture.sources)
@@ -805,14 +808,14 @@ func TestAttemptWorktreeAdmissionRejectsGitOwnedRootsBeforeMutation(t *testing.T
 		"git-common-root": filepath.Join(repositoryRoot, ".git"),
 		"linked-worktree": linkedRoot,
 	}
+	runtimeRoot := t.TempDir()
+	if _, err := workspace.InitializeWorkspaceV2(
+		runtimeRoot, definition, mustTime(t, "2026-07-21T10:15:00Z"),
+	); err != nil {
+		t.Fatal(err)
+	}
 	for name, worktreeRoot := range cases {
 		t.Run(name, func(t *testing.T) {
-			runtimeRoot := t.TempDir()
-			if _, err := workspace.InitializeWorkspaceV2(
-				runtimeRoot, definition, mustTime(t, "2026-07-21T10:15:00Z"),
-			); err != nil {
-				t.Fatal(err)
-			}
 			journal, err := workspace.OpenWorkspaceJournal(
 				runtimeRoot, workspace.JournalReadWrite,
 			)
@@ -910,6 +913,9 @@ func TestAttemptWorktreeAdmissionAllowsSafeExternalRoot(t *testing.T) {
 		if strings.HasPrefix(line, "  root: ") {
 			workspaceSource[index] = "  root: " + repositoryRoot
 		}
+		if strings.HasPrefix(line, "base_commit: ") {
+			workspaceSource[index] = "base_commit: " + base.String()
+		}
 	}
 	fixture.sources.Workspace.Bytes = []byte(strings.Join(workspaceSource, "\n"))
 	definition := mustDefinition(t, fixture.sources)
@@ -1000,6 +1006,9 @@ func TestLocalGitAttemptMaterializationPreservesDirtyPrimaryCheckout(t *testing.
 	for index, line := range workspaceSource {
 		if strings.HasPrefix(line, "  root: ") {
 			workspaceSource[index] = "  root: " + repositoryRoot
+		}
+		if strings.HasPrefix(line, "base_commit: ") {
+			workspaceSource[index] = "base_commit: " + base.String()
 		}
 	}
 	fixture.sources.Workspace.Bytes = []byte(strings.Join(workspaceSource, "\n"))
