@@ -176,6 +176,43 @@ func TestWorkspaceInitializationRejectsWrongCheckpointIdentities(t *testing.T) {
 	}
 }
 
+func TestWorkspaceValidationPreservesFinalLockCheckpoint(t *testing.T) {
+	root, lock := lockedPlanRepository(t)
+	result, err := workspacecmd.Execute(context.Background(), workspacecmd.Options{
+		Action:           "validate",
+		BundleDir:        root,
+		WriteLocks:       true,
+		GeneratorVersion: "binary-version-must-not-own-plan-locks",
+	})
+	if err != nil {
+		t.Fatalf("validate final lock checkpoint: %v", err)
+	}
+	validation, ok := result.(workspacecmd.ValidationResult)
+	if !ok || validation.Status != "valid" {
+		t.Fatalf("validation result = %#v", result)
+	}
+	verified, err := workspace.VerifyPlanLockCheckpoint(context.Background(), mustLoadBundle(t, root))
+	if err != nil {
+		t.Fatalf("verify lock after validation: %v", err)
+	}
+	if verified.Commit().String() != lock.Commit {
+		t.Fatalf("verified checkpoint after validation = %s, want %s", verified.Commit(), lock.Commit)
+	}
+	retried, err := workspace.CheckpointPlanRepository(
+		context.Background(),
+		workspace.PlanCheckpointOptions{
+			Root: root, Kind: workspace.PlanCheckpointLock,
+			Input: checkpointInput(t, "2026-07-23T14:02:00Z", "", ""),
+		},
+	)
+	if err != nil {
+		t.Fatalf("retry final lock after validation: %v", err)
+	}
+	if !retried.Recovered || retried.Commit != lock.Commit {
+		t.Fatalf("lock retry after validation = %#v, want commit %s", retried, lock.Commit)
+	}
+}
+
 func lockedPlanRepository(t *testing.T) (string, workspace.PlanCheckpointResult) {
 	t.Helper()
 	root := initializedPlanRepository(t)

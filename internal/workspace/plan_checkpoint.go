@@ -20,6 +20,9 @@ const (
 	PlanRepositoryInventorySchema      = 1
 	PlanCheckpointRequestSchemaVersion = 2
 	PlanCheckpointGeneratorVersion     = "feature-plan-checkpoint/v1"
+	planRetiredLockArtifactID          = "feature-plan-lock-retired"
+	planRetiredLockFileName            = "feature.plan.lock.retired.v1.json"
+	planRetiredLockContent             = "{\"schema_version\":1,\"status\":\"retired\"}\n"
 	maxPlanRepositoryInventoryBytes    = 4 << 20
 	maxPlanRepositoryFiles             = 100_000
 )
@@ -170,6 +173,7 @@ type planBundleIdentity struct {
 type planLockFiles struct {
 	tracked map[string][]byte
 	digest  Digest
+	retired bool
 }
 
 var planCheckpointProcessMutex sync.Mutex
@@ -539,6 +543,36 @@ func synchronizePlanLockMaterialization(
 	return locks, administrative, nil
 }
 
+func synchronizeRetiredPlanLockMaterialization(
+	bundle WorkspaceBundle,
+) (planLockFiles, []string, error) {
+	artifact, err := NewMaterializationArtifact(
+		planRetiredLockArtifactID,
+		planRetiredLockFileName,
+		[]byte(planRetiredLockContent),
+	)
+	if err != nil {
+		return planLockFiles{}, nil, err
+	}
+	result, err := SynchronizeMaterialization(
+		filepath.Join(bundle.root, WorkspaceGeneratedDirectory),
+		PlanCheckpointGeneratorVersion,
+		[]MaterializationArtifact{artifact},
+		MaterializationOptions{},
+	)
+	if err != nil {
+		return planLockFiles{}, nil, err
+	}
+	administrative := planRetiredLockAdministrativePaths()
+	if err := verifyPlanRetiredLockMaterialization(bundle, administrative); err != nil {
+		return planLockFiles{}, nil, err
+	}
+	if len(result.Inventory().directories) != 0 {
+		return planLockFiles{}, nil, fmt.Errorf("retired lock materialization unexpectedly owns directories")
+	}
+	return planLockFiles{tracked: map[string][]byte{}, retired: true}, administrative, nil
+}
+
 func inspectPlanLockMaterialization(bundle WorkspaceBundle) (planLockFiles, []string, error) {
 	locks, err := expectedPlanLockFiles(bundle)
 	if err != nil {
@@ -586,6 +620,22 @@ func planLockAdministrativePaths(inventory MaterializationInventory) []string {
 			path.Join(prefix, materializationDirectoryClaimPath(directory)),
 			path.Join(prefix, materializationDirectoryAnchorPath(directory)),
 		)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func planRetiredLockAdministrativePaths() []string {
+	result := []string{
+		path.Join(WorkspaceGeneratedDirectory, MaterializationInventoryFileName),
+		path.Join(WorkspaceGeneratedDirectory, MaterializationStateFileName),
+		path.Join(WorkspaceGeneratedDirectory, MaterializationOwnershipProofFileName),
+		path.Join(
+			WorkspaceGeneratedDirectory,
+			MaterializationOwnershipDirectoryName,
+			materializationOwnershipRootClaimName,
+		),
+		path.Join(WorkspaceGeneratedDirectory, planRetiredLockFileName),
 	}
 	sort.Strings(result)
 	return result
@@ -639,6 +689,68 @@ func verifyPlanLockMaterialization(
 			return fmt.Errorf("generated lock inventory entry %s does not match the current lock set", owned.id)
 		}
 	}
+	expectedAdministrative := planLockAdministrativePaths(inventory)
+	if !equalStrings(expectedAdministrative, administrative) {
+		return fmt.Errorf("generated lock administrative path inventory is inconsistent")
+	}
+	return verifyPlanMaterializationControl(root, inventory)
+}
+
+func verifyPlanRetiredLockMaterialization(
+	bundle WorkspaceBundle,
+	administrative []string,
+) error {
+	root, err := OpenVerifiedRoot(RootRolePlan, bundle.root, false)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	artifact, err := NewMaterializationArtifact(
+		planRetiredLockArtifactID,
+		planRetiredLockFileName,
+		[]byte(planRetiredLockContent),
+	)
+	if err != nil {
+		return err
+	}
+	relative := path.Join(WorkspaceGeneratedDirectory, planRetiredLockFileName)
+	content, err := root.ReadBounded(relative, MaxMaterializationArtifactBytes)
+	if err != nil {
+		return fmt.Errorf("read retired generated lock sentinel: %w", err)
+	}
+	if !bytes.Equal(content, artifact.content) {
+		return fmt.Errorf("retired generated lock sentinel content changed")
+	}
+	inventoryPath := path.Join(WorkspaceGeneratedDirectory, MaterializationInventoryFileName)
+	inventoryBytes, err := root.adapter.readBounded(inventoryPath, MaxMaterializationControlBytes)
+	if err != nil {
+		return fmt.Errorf("read retired generated lock inventory: %w", err)
+	}
+	inventory, err := parseMaterializationInventory(inventoryBytes)
+	if err != nil {
+		return err
+	}
+	if inventory.generatorVersion != PlanCheckpointGeneratorVersion {
+		return fmt.Errorf("retired generated lock inventory has unexpected generator %q", inventory.generatorVersion)
+	}
+	if len(inventory.artifacts) != 1 || len(inventory.directories) != 0 {
+		return fmt.Errorf("retired generated lock inventory is not the fixed sentinel state")
+	}
+	owned := inventory.artifacts[0]
+	if owned.id != artifact.id || owned.path != artifact.path ||
+		owned.lastGeneratedHash != artifact.hash {
+		return fmt.Errorf("retired generated lock inventory does not match the fixed sentinel")
+	}
+	if !equalStrings(planRetiredLockAdministrativePaths(), administrative) {
+		return fmt.Errorf("retired generated lock administrative path inventory is inconsistent")
+	}
+	return verifyPlanMaterializationControl(root, inventory)
+}
+
+func verifyPlanMaterializationControl(
+	root *VerifiedRoot,
+	inventory MaterializationInventory,
+) error {
 	stateBytes, err := root.adapter.readBounded(
 		path.Join(WorkspaceGeneratedDirectory, MaterializationStateFileName),
 		MaxMaterializationControlBytes,
@@ -669,10 +781,6 @@ func verifyPlanLockMaterialization(
 	}
 	if state.Phase != materializationPhaseActive || state.ActiveInventoryHash != inventoryHash.String() {
 		return fmt.Errorf("generated lock materialization is not active at its exact inventory")
-	}
-	expectedAdministrative := planLockAdministrativePaths(inventory)
-	if !equalStrings(expectedAdministrative, administrative) {
-		return fmt.Errorf("generated lock administrative path inventory is inconsistent")
 	}
 	if err := verifyMaterializationOwnershipNamespaceAt(root.adapter, WorkspaceGeneratedDirectory); err != nil {
 		return err

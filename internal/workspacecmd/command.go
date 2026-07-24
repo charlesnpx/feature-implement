@@ -352,7 +352,10 @@ func validateBundle(bundle workspace.WorkspaceBundle, options Options) (Validati
 	}
 	lockRoot := filepath.Join(bundle.Root(), workspace.WorkspaceGeneratedDirectory)
 	materialized, err := workspace.SynchronizeMaterialization(
-		lockRoot, options.GeneratorVersion, artifacts, workspace.MaterializationOptions{},
+		lockRoot,
+		workspace.PlanCheckpointGeneratorVersion,
+		artifacts,
+		workspace.MaterializationOptions{},
 	)
 	if err != nil {
 		return ValidationResult{}, err

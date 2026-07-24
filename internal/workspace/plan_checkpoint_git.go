@@ -78,7 +78,7 @@ func (adapter planCheckpointGitAdapter) checkpoint(
 		return PlanCheckpointResult{}, fmt.Errorf("workspace bundle root changed before plan checkpoint")
 	}
 
-	head, err := adapter.prepareRepository(ctx, kind == PlanCheckpointInitial)
+	head, err := adapter.prepareRepository(ctx, root, kind == PlanCheckpointInitial)
 	if err != nil {
 		return PlanCheckpointResult{}, err
 	}
@@ -110,6 +110,7 @@ func (adapter planCheckpointGitAdapter) checkpoint(
 
 	locks := planLockFiles{tracked: map[string][]byte{}}
 	administrative := []string{}
+	lockTransition := false
 	if kind == PlanCheckpointLock {
 		if head.id.IsZero() {
 			return PlanCheckpointResult{}, fmt.Errorf("lock checkpoint requires an initial or revision checkpoint")
@@ -123,6 +124,7 @@ func (adapter planCheckpointGitAdapter) checkpoint(
 			if err := adapter.verifyPreLockCheckpoint(ctx, root, bundle, head, identity); err != nil {
 				return PlanCheckpointResult{}, err
 			}
+			lockTransition = true
 			locks, administrative, err = synchronizePlanLockMaterialization(bundle, fault)
 			if err != nil {
 				return PlanCheckpointResult{}, err
@@ -136,9 +138,20 @@ func (adapter planCheckpointGitAdapter) checkpoint(
 				return PlanCheckpointResult{}, err
 			}
 			if reloadedIdentity != identity {
-				return PlanCheckpointResult{}, fmt.Errorf("plan sources changed during lock generation")
+				return PlanCheckpointResult{}, adapter.recoverPlanLockSourceChange(
+					ctx,
+					root,
+					bundle,
+					head,
+					fmt.Errorf("plan sources changed during lock generation"),
+				)
 			}
 			bundle = reloaded
+		}
+	} else {
+		locks, administrative, err = synchronizeRetiredPlanLockMaterialization(bundle)
+		if err != nil {
+			return PlanCheckpointResult{}, err
 		}
 	}
 
@@ -146,7 +159,25 @@ func (adapter planCheckpointGitAdapter) checkpoint(
 	if err != nil {
 		return PlanCheckpointResult{}, err
 	}
-	if err := adapter.ensureInventoryPrecondition(ctx, root, head, inventoryBytes); err != nil {
+	inventoryAlternates := make([][]byte, 0, 1)
+	if lockTransition {
+		_, retiredInventoryBytes, err := buildPlanRepositoryInventory(
+			bundle,
+			planLockFiles{tracked: map[string][]byte{}, retired: true},
+			planRetiredLockAdministrativePaths(),
+		)
+		if err != nil {
+			return PlanCheckpointResult{}, err
+		}
+		inventoryAlternates = append(inventoryAlternates, retiredInventoryBytes)
+	}
+	if err := adapter.ensureInventoryPrecondition(
+		ctx,
+		root,
+		head,
+		inventoryBytes,
+		inventoryAlternates...,
+	); err != nil {
 		return PlanCheckpointResult{}, err
 	}
 	if err := root.PublishReplaceable(
@@ -168,13 +199,24 @@ func (adapter planCheckpointGitAdapter) checkpoint(
 		return PlanCheckpointResult{}, err
 	}
 	if reloadedIdentity != identity {
-		return PlanCheckpointResult{}, fmt.Errorf("plan sources changed while preparing checkpoint")
+		checkpointErr := fmt.Errorf("plan sources changed while preparing checkpoint")
+		if lockTransition {
+			checkpointErr = adapter.recoverPlanLockSourceChange(
+				ctx, root, bundle, head, checkpointErr,
+			)
+		}
+		return PlanCheckpointResult{}, checkpointErr
 	}
 	bundle = reloaded
 	tracked, err := adapter.readExactCheckpointWorktree(
 		root, bundle, locks, administrative, inventory, inventoryBytes,
 	)
 	if err != nil {
+		if lockTransition {
+			err = adapter.recoverPlanLockFailureIfSourcesChanged(
+				ctx, root, bundle, head, identity, err,
+			)
+		}
 		return PlanCheckpointResult{}, err
 	}
 	tree, err := adapter.createTree(ctx, tracked)
@@ -187,6 +229,11 @@ func (adapter planCheckpointGitAdapter) checkpoint(
 	if _, err := adapter.readExactCheckpointWorktree(
 		root, bundle, locks, administrative, inventory, inventoryBytes,
 	); err != nil {
+		if lockTransition {
+			err = adapter.recoverPlanLockFailureIfSourcesChanged(
+				ctx, root, bundle, head, identity, err,
+			)
+		}
 		return PlanCheckpointResult{}, err
 	}
 
@@ -241,6 +288,11 @@ func (adapter planCheckpointGitAdapter) checkpoint(
 	if _, err := adapter.readExactCheckpointWorktree(
 		root, bundle, locks, administrative, inventory, inventoryBytes,
 	); err != nil {
+		if lockTransition {
+			err = adapter.recoverPlanLockFailureIfSourcesChanged(
+				ctx, root, bundle, head, identity, err,
+			)
+		}
 		return PlanCheckpointResult{}, err
 	}
 	if err := adapter.publishMainCAS(ctx, commit.id, head.id); err != nil {
@@ -271,6 +323,81 @@ func (adapter planCheckpointGitAdapter) checkpoint(
 		return PlanCheckpointResult{}, err
 	}
 	return planCheckpointResult(bundle, metadata, commit.id, tree, false), nil
+}
+
+func (adapter planCheckpointGitAdapter) recoverPlanLockFailureIfSourcesChanged(
+	ctx context.Context,
+	root *VerifiedRoot,
+	bundle WorkspaceBundle,
+	head planCheckpointCommit,
+	expected planBundleIdentity,
+	checkpointErr error,
+) error {
+	current, loadErr := LoadWorkspaceBundle(bundle.root)
+	if loadErr == nil {
+		currentIdentity, identityErr := identityForPlanBundle(current)
+		if identityErr != nil {
+			return errors.Join(checkpointErr, identityErr)
+		}
+		if currentIdentity == expected {
+			return checkpointErr
+		}
+	} else {
+		current = bundle
+	}
+	recoveryErr := adapter.retirePlanLockAfterSourceChange(ctx, root, current, head)
+	return errors.Join(checkpointErr, recoveryErr)
+}
+
+func (adapter planCheckpointGitAdapter) recoverPlanLockSourceChange(
+	ctx context.Context,
+	root *VerifiedRoot,
+	bundle WorkspaceBundle,
+	head planCheckpointCommit,
+	checkpointErr error,
+) error {
+	recoveryErr := adapter.retirePlanLockAfterSourceChange(ctx, root, bundle, head)
+	return errors.Join(checkpointErr, recoveryErr)
+}
+
+func (adapter planCheckpointGitAdapter) retirePlanLockAfterSourceChange(
+	ctx context.Context,
+	root *VerifiedRoot,
+	bundle WorkspaceBundle,
+	head planCheckpointCommit,
+) error {
+	_, administrative, err := synchronizeRetiredPlanLockMaterialization(bundle)
+	if err != nil {
+		return fmt.Errorf("retire generated locks after source change: %w", err)
+	}
+	inventoryBytes, err := adapter.readCommitPath(
+		ctx,
+		head.id,
+		PlanRepositoryInventoryFileName,
+	)
+	if err != nil {
+		return fmt.Errorf("read checkpoint inventory after source change: %w", err)
+	}
+	if err := root.PublishReplaceable(
+		PlanRepositoryInventoryFileName,
+		inventoryBytes,
+		0o600,
+		maxPlanRepositoryInventoryBytes,
+		PublicationOptions{},
+	); err != nil {
+		return fmt.Errorf("publish retired lock inventory after source change: %w", err)
+	}
+	if err := verifyPlanRetiredLockMaterialization(bundle, administrative); err != nil {
+		return fmt.Errorf("verify retired generated locks after source change: %w", err)
+	}
+	current, err := adapter.inspectHead(ctx)
+	if err != nil {
+		return err
+	}
+	if current.id != head.id {
+		return fmt.Errorf("plan repository HEAD moved while retiring generated locks")
+	}
+	return root.VerifyPath()
 }
 
 func (adapter planCheckpointGitAdapter) verifyLockCheckpoint(
@@ -428,14 +555,33 @@ func (adapter planCheckpointGitAdapter) verifyTrackedTree(
 
 func (adapter planCheckpointGitAdapter) prepareRepository(
 	ctx context.Context,
+	root *VerifiedRoot,
 	allowInitialize bool,
 ) (planCheckpointCommit, error) {
+	gitRoot, err := adapter.prepareGitDirectory(root, allowInitialize)
+	if err != nil {
+		return planCheckpointCommit{}, err
+	}
+	defer gitRoot.Close()
 	repositoryExists := adapter.isRepository(ctx)
 	if !repositoryExists {
 		if !allowInitialize {
 			return planCheckpointCommit{}, fmt.Errorf("plan repository must be initialized with an initial checkpoint")
 		}
+		entries, err := gitRoot.adapter.readDirectory(".")
+		if err != nil {
+			return planCheckpointCommit{}, fmt.Errorf("inspect uninitialized plan Git directory: %w", err)
+		}
+		if len(entries) != 0 {
+			return planCheckpointCommit{}, fmt.Errorf("uninitialized plan Git directory is not empty")
+		}
 		if err := adapter.initializeRepository(ctx); err != nil {
+			return planCheckpointCommit{}, err
+		}
+		if err := gitRoot.VerifyPath(); err != nil {
+			return planCheckpointCommit{}, fmt.Errorf("verify plan Git directory after initialization: %w", err)
+		}
+		if err := root.VerifyPath(); err != nil {
 			return planCheckpointCommit{}, err
 		}
 	}
@@ -459,7 +605,54 @@ func (adapter planCheckpointGitAdapter) prepareRepository(
 	if err := adapter.verifyCheckpointHistory(ctx, head); err != nil {
 		return planCheckpointCommit{}, err
 	}
+	if err := gitRoot.VerifyPath(); err != nil {
+		return planCheckpointCommit{}, err
+	}
 	return head, nil
+}
+
+func (adapter planCheckpointGitAdapter) prepareGitDirectory(
+	root *VerifiedRoot,
+	allowInitialize bool,
+) (*VerifiedRoot, error) {
+	if root == nil || root.adapter == nil || root.Path() != adapter.root {
+		return nil, fmt.Errorf("verified bundle root is required to prepare the plan repository")
+	}
+	info, exists, err := root.adapter.inspectExact(".git")
+	if err != nil {
+		return nil, fmt.Errorf("inspect plan repository .git path before Git: %w", err)
+	}
+	if !exists {
+		if !allowInitialize {
+			return nil, fmt.Errorf("plan repository must be initialized with an initial checkpoint")
+		}
+		if err := root.EnsureDirectory(".git", 0o700); err != nil {
+			return nil, fmt.Errorf("create plan repository Git directory: %w", err)
+		}
+		info, exists, err = root.adapter.inspectExact(".git")
+		if err != nil || !exists {
+			if err == nil {
+				err = os.ErrNotExist
+			}
+			return nil, fmt.Errorf("verify created plan repository Git directory: %w", err)
+		}
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("plan repository .git path must be a directory")
+	}
+	gitRoot, err := OpenVerifiedRoot(
+		RootRoleGitCommon,
+		filepath.Join(adapter.root, ".git"),
+		false,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("open plan repository Git directory: %w", err)
+	}
+	if err := root.VerifyPath(); err != nil {
+		_ = gitRoot.Close()
+		return nil, err
+	}
+	return gitRoot, nil
 }
 
 func (adapter planCheckpointGitAdapter) inspectPreparedRepository(
@@ -692,6 +885,7 @@ func (adapter planCheckpointGitAdapter) verifyOrPublishExclude(ctx context.Conte
 
 func planRepositoryExcludeContent() []byte {
 	return []byte(`# Managed by Feature Implement plan checkpoints.
+/generated/feature.plan.lock.retired.v1.json
 /generated/feature.materialization.v2.json
 /generated/feature.materialization.state.v2.json
 /generated/feature.materialization.pending.v2.json
@@ -1158,6 +1352,35 @@ func (adapter planCheckpointGitAdapter) synchronizeIndex(
 	if current.id != commit.id {
 		return fmt.Errorf("plan repository HEAD moved before index recovery")
 	}
+	matchesCommit, err := adapter.indexMatchesCommit(ctx, commit.id)
+	if err != nil {
+		return err
+	}
+	if matchesCommit {
+		return nil
+	}
+	recoverable := false
+	switch len(commit.parents) {
+	case 0:
+		recoverable, err = adapter.indexIsEmpty(ctx)
+	case 1:
+		recoverable, err = adapter.indexMatchesCommit(ctx, commit.parents[0])
+	default:
+		return fmt.Errorf("plan checkpoint index recovery requires at most one parent")
+	}
+	if err != nil {
+		return err
+	}
+	if !recoverable {
+		return fmt.Errorf("plan repository index contains staged changes; refusing destructive recovery")
+	}
+	current, err = adapter.inspectHead(ctx)
+	if err != nil {
+		return err
+	}
+	if current.id != commit.id {
+		return fmt.Errorf("plan repository HEAD moved before index recovery")
+	}
 	_, stderr, exitCode, err := adapter.run(
 		ctx,
 		planGitRunOptions{},
@@ -1172,11 +1395,57 @@ func (adapter planCheckpointGitAdapter) synchronizeIndex(
 	return nil
 }
 
+func (adapter planCheckpointGitAdapter) indexMatchesCommit(
+	ctx context.Context,
+	commit GitObjectID,
+) (bool, error) {
+	_, stderr, exitCode, err := adapter.run(
+		ctx,
+		planGitRunOptions{},
+		"diff-index", "--cached", "--quiet", rawPlanGitObject(commit), "--",
+	)
+	if err != nil {
+		return false, err
+	}
+	switch exitCode {
+	case 0:
+		return true, nil
+	case 1:
+		return false, nil
+	default:
+		return false, fmt.Errorf(
+			"inspect plan repository index: Git exited with status %d: %s",
+			exitCode,
+			strings.TrimSpace(string(stderr)),
+		)
+	}
+}
+
+func (adapter planCheckpointGitAdapter) indexIsEmpty(ctx context.Context) (bool, error) {
+	stdout, stderr, exitCode, err := adapter.run(
+		ctx,
+		planGitRunOptions{},
+		"ls-files", "--cached", "-z",
+	)
+	if err != nil {
+		return false, err
+	}
+	if exitCode != 0 {
+		return false, fmt.Errorf(
+			"inspect initial plan index: Git exited with status %d: %s",
+			exitCode,
+			strings.TrimSpace(string(stderr)),
+		)
+	}
+	return len(stdout) == 0, nil
+}
+
 func (adapter planCheckpointGitAdapter) ensureInventoryPrecondition(
 	ctx context.Context,
 	root *VerifiedRoot,
 	head planCheckpointCommit,
 	desired []byte,
+	alternates ...[]byte,
 ) error {
 	current, exists, err := currentInventoryBytes(root)
 	if err != nil {
@@ -1195,7 +1464,11 @@ func (adapter planCheckpointGitAdapter) ensureInventoryPrecondition(
 	if err != nil {
 		return err
 	}
-	if !bytes.Equal(current, parent) && !bytes.Equal(current, desired) {
+	allowed := bytes.Equal(current, parent) || bytes.Equal(current, desired)
+	for _, alternate := range alternates {
+		allowed = allowed || bytes.Equal(current, alternate)
+	}
+	if !allowed {
 		return fmt.Errorf("plan repository inventory has uncheckpointed changes")
 	}
 	return nil
@@ -1310,7 +1583,6 @@ func (adapter planCheckpointGitAdapter) readTrackedPlanFiles(
 	locks planLockFiles,
 	inventoryBytes []byte,
 ) (map[string][]byte, error) {
-	result := make(map[string][]byte, len(bundle.sourcePaths)+len(locks.tracked)+1)
 	currentInventory, err := root.ReadBounded(
 		PlanRepositoryInventoryFileName,
 		maxPlanRepositoryInventoryBytes,
@@ -1321,7 +1593,17 @@ func (adapter planCheckpointGitAdapter) readTrackedPlanFiles(
 	if !bytes.Equal(currentInventory, inventoryBytes) {
 		return nil, fmt.Errorf("plan repository inventory changed while preparing checkpoint")
 	}
-	result[PlanRepositoryInventoryFileName] = currentInventory
+	return adapter.readTrackedPlanFilesAtInventory(root, bundle, locks, currentInventory)
+}
+
+func (adapter planCheckpointGitAdapter) readTrackedPlanFilesAtInventory(
+	root *VerifiedRoot,
+	bundle WorkspaceBundle,
+	locks planLockFiles,
+	inventoryBytes []byte,
+) (map[string][]byte, error) {
+	result := make(map[string][]byte, len(bundle.sourcePaths)+len(locks.tracked)+1)
+	result[PlanRepositoryInventoryFileName] = append([]byte(nil), inventoryBytes...)
 	var total int64 = int64(len(inventoryBytes))
 	for _, relative := range bundle.sourcePaths {
 		expected, exists := bundle.sourceFiles[relative]
@@ -1366,7 +1648,11 @@ func (adapter planCheckpointGitAdapter) readExactCheckpointWorktree(
 	if err := verifyCheckpointBundleRoot(root, bundle); err != nil {
 		return nil, err
 	}
-	if len(locks.tracked) != 0 {
+	if locks.retired {
+		if err := verifyPlanRetiredLockMaterialization(bundle, administrative); err != nil {
+			return nil, err
+		}
+	} else if len(locks.tracked) != 0 {
 		if err := verifyPlanLockMaterialization(bundle, locks, administrative); err != nil {
 			return nil, err
 		}
@@ -1606,14 +1892,38 @@ func (adapter planCheckpointGitAdapter) verifyPreLockCheckpoint(
 	if err != nil {
 		return err
 	}
+	retiredLocks := planLockFiles{tracked: map[string][]byte{}, retired: true}
+	_, retiredInventoryBytes, err := buildPlanRepositoryInventory(
+		bundle,
+		retiredLocks,
+		planRetiredLockAdministrativePaths(),
+	)
+	if err != nil {
+		return err
+	}
 	headInventory, err := adapter.readCommitPath(ctx, head.id, PlanRepositoryInventoryFileName)
 	if err != nil {
 		return err
 	}
-	if !bytes.Equal(headInventory, parentInventoryBytes) {
+	if !bytes.Equal(headInventory, parentInventoryBytes) &&
+		!bytes.Equal(headInventory, retiredInventoryBytes) {
 		return fmt.Errorf("latest plan checkpoint inventory does not match the current sources")
 	}
-	tracked, err := adapter.readTrackedPlanFiles(root, bundle, emptyLocks, parentInventoryBytes)
+	currentInventory, exists, err := currentInventoryBytes(root)
+	if err != nil {
+		return err
+	}
+	if !exists ||
+		(!bytes.Equal(currentInventory, parentInventoryBytes) &&
+			!bytes.Equal(currentInventory, retiredInventoryBytes)) {
+		return fmt.Errorf("plan repository inventory is neither the plain nor retired pre-lock inventory")
+	}
+	tracked, err := adapter.readTrackedPlanFilesAtInventory(
+		root,
+		bundle,
+		emptyLocks,
+		headInventory,
+	)
 	if err != nil {
 		return err
 	}
