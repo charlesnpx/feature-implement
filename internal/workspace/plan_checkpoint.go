@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -58,6 +59,7 @@ const (
 	PlanCheckpointFaultAfterIndexQuarantine          PlanCheckpointFaultPoint = "after_index_quarantine"
 	PlanCheckpointFaultAfterIndexPublication         PlanCheckpointFaultPoint = "after_index_publication"
 	PlanCheckpointFaultAfterIndexSynchronization     PlanCheckpointFaultPoint = "after_index_synchronization"
+	PlanCheckpointFaultBeforePreparedLockRecovery    PlanCheckpointFaultPoint = "before_prepared_lock_recovery"
 )
 
 type PlanCheckpointFaultInjector func(PlanCheckpointFaultPoint) error
@@ -94,6 +96,11 @@ type VerifiedPlanLockCheckpoint struct {
 	semanticDigest Digest
 	generation     Digest
 	lockDigest     Digest
+	lease          *planCheckpointVerificationLease
+}
+
+type planCheckpointVerificationLease struct {
+	active atomic.Bool
 }
 
 func (checkpoint VerifiedPlanLockCheckpoint) Root() string         { return checkpoint.root }
@@ -222,11 +229,28 @@ func VerifyPlanLockCheckpoint(
 	ctx context.Context,
 	bundle WorkspaceBundle,
 ) (VerifiedPlanLockCheckpoint, error) {
+	return WithVerifiedPlanLockCheckpoint(
+		ctx,
+		bundle,
+		func(VerifiedPlanLockCheckpoint) error { return nil },
+	)
+}
+
+func WithVerifiedPlanLockCheckpoint(
+	ctx context.Context,
+	bundle WorkspaceBundle,
+	use func(VerifiedPlanLockCheckpoint) error,
+) (VerifiedPlanLockCheckpoint, error) {
 	if ctx == nil {
 		return VerifiedPlanLockCheckpoint{}, fmt.Errorf("plan lock verification requires context")
 	}
 	if bundle.root == "" || bundle.definition.generation.IsZero() {
 		return VerifiedPlanLockCheckpoint{}, fmt.Errorf("validated workspace bundle is required")
+	}
+	if use == nil {
+		return VerifiedPlanLockCheckpoint{}, fmt.Errorf(
+			"plan lock verification requires a binding callback",
+		)
 	}
 	adapter, err := newPlanCheckpointGitAdapter("git", bundle.root)
 	if err != nil {
@@ -234,7 +258,7 @@ func VerifyPlanLockCheckpoint(
 	}
 	planCheckpointProcessMutex.Lock()
 	defer planCheckpointProcessMutex.Unlock()
-	return adapter.verifyLockCheckpoint(ctx, bundle)
+	return adapter.withVerifiedPlanLockCheckpoint(ctx, bundle, use)
 }
 
 func decodePlanCheckpointRequest(kind PlanCheckpointKind, input []byte) (planCheckpointRequest, error) {

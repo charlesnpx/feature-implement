@@ -69,7 +69,10 @@ func (adapter planCheckpointGitAdapter) checkpoint(
 	kind PlanCheckpointKind,
 	request planCheckpointRequest,
 	fault PlanCheckpointFaultInjector,
-) (PlanCheckpointResult, error) {
+) (
+	result PlanCheckpointResult,
+	resultErr error,
+) {
 	root, err := OpenVerifiedRoot(RootRolePlan, bundle.root, false)
 	if err != nil {
 		return PlanCheckpointResult{}, err
@@ -85,6 +88,13 @@ func (adapter planCheckpointGitAdapter) checkpoint(
 	}
 	defer gitDirectory.Close()
 	adapter.gitDirectory = gitDirectory
+	transaction, err := acquirePlanRepositoryTransaction(gitDirectory.root)
+	if err != nil {
+		return PlanCheckpointResult{}, err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, transaction.Close())
+	}()
 	head, err := adapter.prepareRepository(
 		ctx,
 		kind == PlanCheckpointInitial,
@@ -99,7 +109,12 @@ func (adapter planCheckpointGitAdapter) checkpoint(
 	if err := verifyCheckpointBundleRoot(root, bundle); err != nil {
 		return PlanCheckpointResult{}, err
 	}
-	if err := adapter.reconcilePreparedPlanLockInventory(ctx, root, head); err != nil {
+	if err := adapter.reconcilePreparedPlanLockInventory(
+		ctx,
+		root,
+		head,
+		fault,
+	); err != nil {
 		return PlanCheckpointResult{}, err
 	}
 
@@ -420,15 +435,21 @@ func (adapter planCheckpointGitAdapter) retirePlanLockAfterSourceChange(
 	return root.VerifyPath()
 }
 
-func (adapter planCheckpointGitAdapter) verifyLockCheckpoint(
+func (adapter planCheckpointGitAdapter) withVerifiedPlanLockCheckpoint(
 	ctx context.Context,
 	bundle WorkspaceBundle,
-) (VerifiedPlanLockCheckpoint, error) {
+	use func(VerifiedPlanLockCheckpoint) error,
+) (
+	result VerifiedPlanLockCheckpoint,
+	resultErr error,
+) {
 	root, err := OpenVerifiedRoot(RootRolePlan, bundle.root, false)
 	if err != nil {
 		return VerifiedPlanLockCheckpoint{}, err
 	}
-	defer root.Close()
+	defer func() {
+		resultErr = errors.Join(resultErr, root.Close())
+	}()
 	if root.Identity() != bundle.rootIdentity {
 		return VerifiedPlanLockCheckpoint{}, fmt.Errorf("workspace bundle root changed before lock verification")
 	}
@@ -436,12 +457,76 @@ func (adapter planCheckpointGitAdapter) verifyLockCheckpoint(
 	if err != nil {
 		return VerifiedPlanLockCheckpoint{}, err
 	}
-	defer gitDirectory.Close()
+	defer func() {
+		resultErr = errors.Join(resultErr, gitDirectory.Close())
+	}()
 	adapter.gitDirectory = gitDirectory
-	head, err := adapter.inspectPreparedRepository(ctx)
+	transaction, err := acquirePlanRepositoryTransaction(gitDirectory.root)
 	if err != nil {
 		return VerifiedPlanLockCheckpoint{}, err
 	}
+	defer func() {
+		resultErr = errors.Join(resultErr, transaction.Close())
+	}()
+	if _, err := adapter.inspectPreparedRepository(ctx); err != nil {
+		return VerifiedPlanLockCheckpoint{}, err
+	}
+	refExclusion, err := acquirePlanMainRefExclusion(gitDirectory.root)
+	if err != nil {
+		return VerifiedPlanLockCheckpoint{}, err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, refExclusion.Close())
+	}()
+	indexExclusion, err := acquirePlanIndexExclusion(
+		gitDirectory.root,
+		Digest{},
+	)
+	if err != nil {
+		return VerifiedPlanLockCheckpoint{}, err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, indexExclusion.Close())
+	}()
+	head, err := adapter.inspectHead(ctx)
+	if err != nil {
+		return VerifiedPlanLockCheckpoint{}, err
+	}
+	if err := adapter.verifyRepositoryRefs(ctx, head); err != nil {
+		return VerifiedPlanLockCheckpoint{}, err
+	}
+	if err := adapter.verifyCheckpointHistory(ctx, head); err != nil {
+		return VerifiedPlanLockCheckpoint{}, err
+	}
+	verified, err := adapter.verifyLockCheckpointState(
+		ctx,
+		bundle,
+		root,
+		head,
+	)
+	if err != nil {
+		return VerifiedPlanLockCheckpoint{}, err
+	}
+	lease := &planCheckpointVerificationLease{}
+	lease.active.Store(true)
+	verified.lease = lease
+	callbackErr := func() error {
+		defer lease.active.Store(false)
+		return use(verified)
+	}()
+	verified.lease = nil
+	if callbackErr != nil {
+		return VerifiedPlanLockCheckpoint{}, callbackErr
+	}
+	return verified, nil
+}
+
+func (adapter planCheckpointGitAdapter) verifyLockCheckpointState(
+	ctx context.Context,
+	bundle WorkspaceBundle,
+	root *VerifiedRoot,
+	head planCheckpointCommit,
+) (VerifiedPlanLockCheckpoint, error) {
 	if head.id.IsZero() {
 		return VerifiedPlanLockCheckpoint{}, fmt.Errorf("plan repository has no checkpoint")
 	}
@@ -689,6 +774,11 @@ func (adapter planCheckpointGitAdapter) prepareRepository(
 	}
 	gitRoot := adapter.gitDirectory.root
 	repositoryExists := adapter.isRepository(ctx)
+	if repositoryExists {
+		if err := recoverAbandonedPlanMainRefExclusion(gitRoot); err != nil {
+			return planCheckpointCommit{}, err
+		}
+	}
 	if !repositoryExists {
 		if !allowInitialize {
 			return planCheckpointCommit{}, fmt.Errorf("plan repository must be initialized with an initial checkpoint")
@@ -697,7 +787,8 @@ func (adapter planCheckpointGitAdapter) prepareRepository(
 		if err != nil {
 			return planCheckpointCommit{}, fmt.Errorf("inspect uninitialized plan Git directory: %w", err)
 		}
-		if len(entries) != 0 {
+		if len(entries) != 1 ||
+			entries[0].name != planRepositoryTransactionLockName {
 			return planCheckpointCommit{}, fmt.Errorf("uninitialized plan Git directory is not empty")
 		}
 		if err := adapter.initializeRepository(ctx); err != nil {
@@ -797,6 +888,11 @@ func (adapter planCheckpointGitAdapter) inspectPreparedRepository(
 ) (planCheckpointCommit, error) {
 	if !adapter.isRepository(ctx) {
 		return planCheckpointCommit{}, fmt.Errorf("bundle root is not a plan repository")
+	}
+	if err := recoverAbandonedPlanMainRefExclusion(
+		adapter.gitDirectory.root,
+	); err != nil {
+		return planCheckpointCommit{}, err
 	}
 	if err := adapter.verifyRepositoryLayout(ctx); err != nil {
 		return planCheckpointCommit{}, err

@@ -1,7 +1,6 @@
 package workspace_test
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -95,124 +94,139 @@ func TestPlanCheckpointInitialRevisionLockAndExactRetries(t *testing.T) {
 	assertPlanRepositoryGitPolicy(t, root)
 }
 
-func TestVerifyPlanLockCheckpointRejectsConcurrentRepositoryChanges(
+func TestWithVerifiedPlanLockCheckpointExcludesGitMutationsThroughWorkspaceBinding(
 	t *testing.T,
 ) {
-	for _, test := range []struct {
-		name string
-		mode string
-		want string
-	}{
-		{name: "HEAD moves", mode: "head", want: "HEAD changed"},
-		{name: "index changes", mode: "index", want: "index changed"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			root := initializedPlanRepository(t)
-			if _, err := workspace.CheckpointPlanRepository(
-				context.Background(),
-				workspace.PlanCheckpointOptions{
-					Root: root, Kind: workspace.PlanCheckpointLock,
-					Input: checkpointInput(
-						t,
-						"2026-07-23T10:03:00Z",
-						"",
-						"",
-					),
+	root, lock := lockedPlanRepository(t)
+	bundle := mustLoadBundle(t, root)
+	runtimeRoot := filepath.Join(
+		canonicalMaterializationTestTempDir(t),
+		"runtime",
+	)
+	var retained workspace.VerifiedPlanLockCheckpoint
+	var initialized workspace.WorkspaceInitializationResult
+	verified, err := workspace.WithVerifiedPlanLockCheckpoint(
+		context.Background(),
+		bundle,
+		func(checkpoint workspace.VerifiedPlanLockCheckpoint) error {
+			retained = checkpoint
+			for _, command := range []struct {
+				name string
+				argv []string
+				lock string
+			}{
+				{
+					name: "HEAD update",
+					argv: []string{
+						"-C", root, "update-ref",
+						"refs/heads/main", "HEAD^",
+					},
+					lock: "main.lock",
 				},
-			); err != nil {
-				t.Fatal(err)
-			}
-			wrapperRoot := canonicalMaterializationTestTempDir(t)
-			trigger := filepath.Join(wrapperRoot, "triggered")
-			realGit, err := exec.LookPath("git")
-			if err != nil {
-				t.Fatal(err)
-			}
-			action := fmt.Sprintf(
-				`env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE %s --git-dir=%s --work-tree=%s update-ref refs/heads/main HEAD^`,
-				planShellQuote(realGit),
-				planShellQuote(filepath.Join(root, ".git")),
-				planShellQuote(root),
-			)
-			if test.mode == "index" {
-				relative := "plans/alpha.yaml"
-				planPath := filepath.Join(root, filepath.FromSlash(relative))
-				clean, err := os.ReadFile(planPath)
-				if err != nil {
-					t.Fatal(err)
+				{
+					name: "index update",
+					argv: []string{
+						"-C", root, "add", "--", "plans/alpha.yaml",
+					},
+					lock: "index.lock",
+				},
+			} {
+				process := exec.Command("git", command.argv...)
+				output, commandErr := process.CombinedOutput()
+				if commandErr == nil ||
+					!strings.Contains(string(output), command.lock) {
+					return fmt.Errorf(
+						"%s was not excluded: err=%v output=%s",
+						command.name,
+						commandErr,
+						output,
+					)
 				}
-				staged := bytes.Replace(
-					clean,
-					[]byte("Establish the first contract."),
-					[]byte("Concurrent verified staging."),
-					1,
-				)
-				if stringEqualBytes(clean, staged) {
-					t.Fatal("verification race fixture did not change")
+			}
+			var initializeErr error
+			initialized, initializeErr = workspace.InitializeWorkspaceV2(
+				runtimeRoot,
+				bundle.Definition(),
+				mustTime(t, "2026-07-23T10:04:00Z"),
+				checkpoint,
+			)
+			if initializeErr != nil {
+				return initializeErr
+			}
+			for _, relative := range []string{
+				filepath.Join("refs", "heads", "main.lock"),
+				"index.lock",
+			} {
+				if _, statErr := os.Stat(
+					filepath.Join(root, ".git", relative),
+				); statErr != nil {
+					return fmt.Errorf(
+						"verification exclusion %s was released before binding: %w",
+						relative,
+						statErr,
+					)
 				}
-				stagedPath := filepath.Join(wrapperRoot, "staged-plan")
-				if err := os.WriteFile(stagedPath, staged, 0o600); err != nil {
-					t.Fatal(err)
-				}
-				blob := strings.TrimSpace(string(runGitSetup(
-					t,
-					root,
-					"hash-object",
-					"-w",
-					stagedPath,
-				)))
-				action = fmt.Sprintf(
-					`env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE %s --git-dir=%s --work-tree=%s update-index --cacheinfo 100644 %s %s`,
-					planShellQuote(realGit),
-					planShellQuote(filepath.Join(root, ".git")),
-					planShellQuote(root),
-					planShellQuote(blob),
-					planShellQuote(relative),
-				)
 			}
-			wrapper := filepath.Join(wrapperRoot, "git")
-			script := fmt.Sprintf(`#!/bin/sh
-case " $* " in
-  *" diff-index "*)
-    if [ ! -e %s ]; then
-      %s "$@"
-      status=$?
-      if [ "$status" -eq 0 ]; then
-        if ! %s; then
-          exit 97
-        fi
-        : > %s
-      fi
-      exit "$status"
-    fi
-    ;;
-esac
-exec %s "$@"
-`,
-				planShellQuote(trigger),
-				planShellQuote(realGit),
-				action,
-				planShellQuote(trigger),
-				planShellQuote(realGit),
-			)
-			if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv(
-				"PATH",
-				wrapperRoot+string(os.PathListSeparator)+os.Getenv("PATH"),
-			)
-			_, err = workspace.VerifyPlanLockCheckpoint(
-				context.Background(),
-				mustLoadBundle(t, root),
-			)
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("concurrent %s verification error = %v", test.mode, err)
-			}
-			if _, statErr := os.Stat(trigger); statErr != nil {
-				t.Fatalf("verification race wrapper did not trigger: %v", statErr)
-			}
-		})
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("verify and bind lock checkpoint: %v", err)
+	}
+	if verified.Commit().String() != lock.Commit ||
+		initialized.Runtime().PlanCheckpoint().String() != lock.Commit {
+		t.Fatalf(
+			"bound checkpoint: verified=%s runtime=%s want=%s",
+			verified.Commit(),
+			initialized.Runtime().PlanCheckpoint(),
+			lock.Commit,
+		)
+	}
+	if got := strings.TrimSpace(string(runGitSetup(
+		t,
+		root,
+		"rev-parse",
+		"HEAD",
+	))); !strings.HasSuffix(lock.Commit, ":"+got) {
+		t.Fatalf("HEAD after excluded update = %s, want %s", got, lock.Commit)
+	}
+	if staged := runGitSetup(
+		t,
+		root,
+		"diff",
+		"--cached",
+		"--name-only",
+		"HEAD",
+	); len(staged) != 0 {
+		t.Fatalf("index after excluded add is dirty: %s", staged)
+	}
+	snapshot, err := workspace.ReadWorkspaceJournalSnapshot(runtimeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Records()) != 1 {
+		t.Fatalf("initialization journal records = %d", len(snapshot.Records()))
+	}
+	event, ok := snapshot.Records()[0].Event().(workspace.WorkspaceInitializedJournalEvent)
+	if !ok || event.PlanCheckpoint().String() != lock.Commit {
+		t.Fatalf(
+			"initialization journal checkpoint = %#v, want %s",
+			event,
+			lock.Commit,
+		)
+	}
+	_, err = workspace.InitializeWorkspaceV2(
+		filepath.Join(
+			canonicalMaterializationTestTempDir(t),
+			"stale-runtime",
+		),
+		bundle.Definition(),
+		mustTime(t, "2026-07-23T10:05:00Z"),
+		retained,
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "active plan lock verification lease") {
+		t.Fatalf("stale verification lease error = %v", err)
 	}
 }
 
@@ -1341,6 +1355,221 @@ func TestPlanCheckpointReconcilesPreparedLockBeforeChangedRequest(t *testing.T) 
 					)
 				}
 			})
+		})
+	}
+}
+
+func TestPlanCheckpointTransactionExcludesConcurrentPreparedLockRecovery(
+	t *testing.T,
+) {
+	root := initializedPlanRepository(t)
+	interruptPreparedPlanLock(
+		t,
+		root,
+		checkpointInput(t, "2026-07-23T13:07:00Z", "", ""),
+		workspace.PlanCheckpointFaultAfterTreeCreation,
+	)
+	replaceFileText(
+		t,
+		filepath.Join(root, "plans", "alpha.yaml"),
+		"Establish the first contract.",
+		"Define the first contract.",
+	)
+	revisionInput := checkpointInput(
+		t,
+		"2026-07-23T13:07:01Z",
+		"rev-transaction-exclusion",
+		workspace.DigestBytes([]byte("review transaction exclusion")).String(),
+	)
+	headBefore := strings.TrimSpace(string(runGitSetup(
+		t,
+		root,
+		"rev-parse",
+		"HEAD",
+	)))
+	injected := errors.New("stop before prepared lock recovery")
+	_, err := workspace.CheckpointPlanRepository(
+		context.Background(),
+		workspace.PlanCheckpointOptions{
+			Root: root, Kind: workspace.PlanCheckpointRevision,
+			Input: revisionInput,
+			FaultInjector: func(point workspace.PlanCheckpointFaultPoint) error {
+				if point !=
+					workspace.PlanCheckpointFaultBeforePreparedLockRecovery {
+					return nil
+				}
+				command := exec.Command(
+					os.Args[0],
+					"-test.run=^TestPlanCheckpointTransactionSubprocess$",
+					"-test.count=1",
+				)
+				command.Env = append(
+					os.Environ(),
+					"FEATURE_IMPLEMENT_PLAN_TRANSACTION_HELPER=1",
+					"FEATURE_IMPLEMENT_PLAN_TRANSACTION_ROOT="+root,
+					"FEATURE_IMPLEMENT_PLAN_TRANSACTION_INPUT="+
+						string(revisionInput),
+				)
+				output, processErr := command.CombinedOutput()
+				if processErr != nil {
+					return fmt.Errorf(
+						"concurrent checkpoint helper: %w\n%s",
+						processErr,
+						output,
+					)
+				}
+				if observed := strings.TrimSpace(string(runGitSetup(
+					t,
+					root,
+					"rev-parse",
+					"HEAD",
+				))); observed != headBefore {
+					return fmt.Errorf(
+						"concurrent checkpoint published %s, expected %s",
+						observed,
+						headBefore,
+					)
+				}
+				return injected
+			},
+		},
+	)
+	if !errors.Is(err, injected) {
+		t.Fatalf("prepared lock recovery pause error = %v", err)
+	}
+	if observed := strings.TrimSpace(string(runGitSetup(
+		t,
+		root,
+		"rev-parse",
+		"HEAD",
+	))); observed != headBefore {
+		t.Fatalf(
+			"HEAD after excluded checkpoint = %s, want %s",
+			observed,
+			headBefore,
+		)
+	}
+	revision, err := workspace.CheckpointPlanRepository(
+		context.Background(),
+		workspace.PlanCheckpointOptions{
+			Root: root, Kind: workspace.PlanCheckpointRevision,
+			Input: revisionInput,
+		},
+	)
+	if err != nil {
+		t.Fatalf("revision after transaction exclusion: %v", err)
+	}
+	if strings.HasSuffix(revision.Commit, ":"+headBefore) ||
+		revision.RevisionID != "rev-transaction-exclusion" {
+		t.Fatalf("revision after transaction exclusion = %#v", revision)
+	}
+	assertInventoryMatchesHead(t, root)
+}
+
+func TestPlanCheckpointTransactionSubprocess(t *testing.T) {
+	if os.Getenv("FEATURE_IMPLEMENT_PLAN_TRANSACTION_HELPER") != "1" {
+		t.Skip("subprocess helper")
+	}
+	root := os.Getenv("FEATURE_IMPLEMENT_PLAN_TRANSACTION_ROOT")
+	input := []byte(os.Getenv("FEATURE_IMPLEMENT_PLAN_TRANSACTION_INPUT"))
+	if root == "" || len(input) == 0 {
+		t.Fatal("subprocess checkpoint fixture is incomplete")
+	}
+	_, err := workspace.CheckpointPlanRepository(
+		context.Background(),
+		workspace.PlanCheckpointOptions{
+			Root: root, Kind: workspace.PlanCheckpointRevision, Input: input,
+		},
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "plan repository transaction is active") {
+		t.Fatalf("concurrent checkpoint transaction error = %v", err)
+	}
+}
+
+func TestPlanCheckpointRecoversOnlyAbandonedMainRefExclusions(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		content string
+		wantErr string
+	}{
+		{
+			name:    "abandoned tool exclusion",
+			content: "feature-plan-main-ref-lock:v1\n",
+		},
+		{
+			name:    "foreign Git lock",
+			content: "external-git-lock\n",
+			wantErr: "locked by another Git operation",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := initializedPlanRepository(t)
+			replaceFileText(
+				t,
+				filepath.Join(root, "plans", "alpha.yaml"),
+				"Establish the first contract.",
+				"Define the first contract.",
+			)
+			lockPath := filepath.Join(
+				root,
+				".git",
+				"refs",
+				"heads",
+				"main.lock",
+			)
+			if err := os.WriteFile(
+				lockPath,
+				[]byte(test.content),
+				0o600,
+			); err != nil {
+				t.Fatal(err)
+			}
+			revision, err := workspace.CheckpointPlanRepository(
+				context.Background(),
+				workspace.PlanCheckpointOptions{
+					Root: root, Kind: workspace.PlanCheckpointRevision,
+					Input: checkpointInput(
+						t,
+						"2026-07-23T13:08:00Z",
+						"rev-main-ref-exclusion",
+						workspace.DigestBytes(
+							[]byte("review main ref exclusion"),
+						).String(),
+					),
+				},
+			)
+			if test.wantErr == "" {
+				if err != nil ||
+					revision.RevisionID != "rev-main-ref-exclusion" {
+					t.Fatalf(
+						"revision after abandoned exclusion: result=%#v err=%v",
+						revision,
+						err,
+					)
+				}
+				if _, statErr := os.Stat(lockPath); !errors.Is(
+					statErr,
+					os.ErrNotExist,
+				) {
+					t.Fatalf(
+						"abandoned main ref exclusion remains: %v",
+						statErr,
+					)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("foreign main ref lock error = %v", err)
+			}
+			content, readErr := os.ReadFile(lockPath)
+			if readErr != nil || string(content) != test.content {
+				t.Fatalf(
+					"foreign main ref lock changed: content=%q err=%v",
+					content,
+					readErr,
+				)
+			}
 		})
 	}
 }

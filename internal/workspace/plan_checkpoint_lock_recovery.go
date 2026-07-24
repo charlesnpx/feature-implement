@@ -3,6 +3,7 @@ package workspace
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"sort"
@@ -19,12 +20,22 @@ func (adapter planCheckpointGitAdapter) reconcilePreparedPlanLockInventory(
 	ctx context.Context,
 	root *VerifiedRoot,
 	head planCheckpointCommit,
-) error {
+	fault PlanCheckpointFaultInjector,
+) (resultErr error) {
 	if head.id.IsZero() ||
 		(head.metadata.kind != PlanCheckpointInitial &&
 			head.metadata.kind != PlanCheckpointRevision) {
 		return nil
 	}
+	exclusion, err := acquirePlanMainRefExclusion(
+		adapter.gitDirectory.root,
+	)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, exclusion.Close())
+	}()
 	current, exists, err := currentInventoryBytes(root)
 	if err != nil {
 		return err
@@ -59,6 +70,12 @@ func (adapter planCheckpointGitAdapter) reconcilePreparedPlanLockInventory(
 	}
 	if !exists || !bytes.Equal(latest, current) {
 		return fmt.Errorf("prepared plan lock inventory changed before recovery")
+	}
+	if err := injectPlanCheckpointFault(
+		fault,
+		PlanCheckpointFaultBeforePreparedLockRecovery,
+	); err != nil {
+		return err
 	}
 	if err := root.PublishReplaceable(
 		PlanRepositoryInventoryFileName,

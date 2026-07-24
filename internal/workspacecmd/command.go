@@ -418,21 +418,26 @@ func initializeWorkspace(
 	if err := bundle.VerifyRoot(); err != nil {
 		return InitializationResult{}, err
 	}
-	checkpoint, err := workspace.VerifyPlanLockCheckpoint(ctx, bundle)
-	if err != nil {
-		return InitializationResult{}, err
-	}
-	if err := bundle.VerifyRoot(); err != nil {
-		return InitializationResult{}, err
-	}
-	if err := roots.VerifyBeforeRuntimeCreation(); err != nil {
-		return InitializationResult{}, err
-	}
-	initialized, err := workspace.InitializeWorkspaceV2(
-		workspaceDir,
-		definition,
-		occurredAt,
-		checkpoint.Commit(),
+	var initialized workspace.WorkspaceInitializationResult
+	_, err = workspace.WithVerifiedPlanLockCheckpoint(
+		ctx,
+		bundle,
+		func(checkpoint workspace.VerifiedPlanLockCheckpoint) error {
+			if err := bundle.VerifyRoot(); err != nil {
+				return err
+			}
+			if err := roots.VerifyBeforeRuntimeCreation(); err != nil {
+				return err
+			}
+			var initializeErr error
+			initialized, initializeErr = workspace.InitializeWorkspaceV2(
+				workspaceDir,
+				definition,
+				occurredAt,
+				checkpoint,
+			)
+			return initializeErr
+		},
 	)
 	if err != nil {
 		return InitializationResult{}, err
