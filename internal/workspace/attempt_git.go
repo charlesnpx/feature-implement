@@ -1197,6 +1197,7 @@ func trustedGitArguments(repositoryRoot string, arguments ...string) []string {
 		"-c", "fetch.recurseSubmodules=false",
 		"-c", "core.attributesFile=" + os.DevNull,
 		"-c", "core.fsmonitor=false",
+		"-c", "log.showSignature=false",
 		"-c", "core.untrackedCache=false",
 		"-c", "maintenance.auto=false",
 		"-c", "gc.auto=0",

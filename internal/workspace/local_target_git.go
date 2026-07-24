@@ -269,6 +269,11 @@ func (adapter LocalTargetGitAdapter) inspect(
 	); err != nil {
 		return LocalTargetInspection{}, err
 	}
+	if err := validateBoundLocalTargetFeatureRefStorage(
+		commonRoot, target.FeatureRef(),
+	); err != nil {
+		return LocalTargetInspection{}, err
+	}
 
 	featureExists, featureHead, marker, err := adapter.inspectFeatureRef(
 		ctx, target.root, target.FeatureRef(), objectFormat,
@@ -640,6 +645,18 @@ func rejectUnsupportedLocalTargetConfiguration(
 			strings.HasSuffix(lower, ".driver"):
 			return fmt.Errorf(
 				"external merge driver configuration %s is not supported", key,
+			)
+		case lower == "log.showsignature" && configTrue(values):
+			return fmt.Errorf(
+				"signature display configuration is not supported",
+			)
+		case lower == "gpg.program" ||
+			(strings.HasPrefix(lower, "gpg.") &&
+				strings.HasSuffix(lower, ".program")) ||
+			lower == "gpg.ssh.defaultkeycommand":
+			return fmt.Errorf(
+				"external signature program configuration %s is not supported",
+				key,
 			)
 		case lower == "core.alternaterefscommand":
 			return fmt.Errorf("alternate refs command is not supported")
@@ -1236,7 +1253,8 @@ func (adapter LocalTargetGitAdapter) inspectFeatureRef(
 	}
 	reflog, reflogExit, err := adapter.git.run(
 		ctx, root,
-		"reflog", "show", "--format=%gs", "-n", "1", featureRef,
+		"reflog", "show", "--no-show-signature",
+		"--format=%gs", "-n", "1", featureRef, "--",
 	)
 	if err != nil {
 		return false, GitObjectID{}, "", err

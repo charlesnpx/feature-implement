@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -218,6 +219,198 @@ func TestLocalTargetRefCreationDoesNotMutateReplacementGitDirectory(t *testing.T
 		t, root, "--git-dir="+originalGit, "branch", "--list", branch,
 	)); got != "" {
 		t.Fatalf("retained original repository was mutated after replacement %q", got)
+	}
+}
+
+func TestLocalTargetRefCreationDoesNotFollowReplacedCommonDirectory(t *testing.T) {
+	root, base := initializeTargetRepository(t, workspace.GitHashSHA1)
+	linked := filepath.Join(canonicalTestDirectory(t), "linked")
+	runTargetGitTest(
+		t, root,
+		"worktree", "add", "--quiet", "--detach",
+		linked, baseObjectHex(base),
+	)
+	definition := localTargetDefinition(
+		t, linked, base, "feature/replaced-common-directory",
+	)
+	replacement, _ := initializeTargetRepository(t, workspace.GitHashSHA1)
+	gitDirectory := strings.TrimSpace(runTargetGitTest(
+		t, linked, "rev-parse", "--absolute-git-dir",
+	))
+	runtimeRoot := canonicalTestDirectory(t)
+	replaced := false
+	_, err := workspace.InitializeWorkspaceV2WithOptions(
+		context.Background(),
+		runtimeRoot,
+		definition,
+		mustTime(t, "2026-07-24T12:25:30Z"),
+		workspace.WorkspaceInitializationOptions{
+			TargetFault: func(
+				point workspace.LocalTargetInitializationFaultPoint,
+			) error {
+				if point != workspace.LocalTargetFaultBeforeRefUpdate || replaced {
+					return nil
+				}
+				replaced = true
+				return os.WriteFile(
+					filepath.Join(gitDirectory, "commondir"),
+					[]byte(filepath.Join(replacement, ".git")+"\n"),
+					0o600,
+				)
+			},
+		},
+	)
+	if err == nil || !replaced || !strings.Contains(
+		err.Error(), "common-directory administration points to",
+	) {
+		t.Fatalf("common-directory replacement error = %v replaced=%t", err, replaced)
+	}
+	branch := definition.Workspace().FeatureBranch()
+	if got := strings.TrimSpace(runTargetGitTest(
+		t, replacement, "branch", "--list", branch,
+	)); got != "" {
+		t.Fatalf("replacement common repository received feature branch %q", got)
+	}
+	if got := strings.TrimSpace(runTargetGitTest(
+		t, root, "branch", "--list", branch,
+	)); got != "" {
+		t.Fatalf("retained common repository was mutated after replacement %q", got)
+	}
+}
+
+func TestLocalTargetRefCreationRejectsExternalRefAndReflogStorage(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*testing.T, string, string, string) (string, []byte)
+	}{
+		{
+			name: "ref parent symlink",
+			setup: func(
+				t *testing.T,
+				commonDirectory string,
+				_ string,
+				externalDirectory string,
+			) (string, []byte) {
+				parent := filepath.Join(
+					commonDirectory, "refs", "heads", "feature",
+				)
+				if err := os.Symlink(externalDirectory, parent); err != nil {
+					t.Fatal(err)
+				}
+				return filepath.Join(
+					externalDirectory, "external-ref-storage",
+				), nil
+			},
+		},
+		{
+			name: "reflog parent symlink",
+			setup: func(
+				t *testing.T,
+				commonDirectory string,
+				_ string,
+				externalDirectory string,
+			) (string, []byte) {
+				parent := filepath.Join(
+					commonDirectory, "logs", "refs", "heads", "feature",
+				)
+				if err := os.Symlink(externalDirectory, parent); err != nil {
+					t.Fatal(err)
+				}
+				return filepath.Join(
+					externalDirectory, "external-ref-storage",
+				), nil
+			},
+		},
+		{
+			name: "reflog hard link",
+			setup: func(
+				t *testing.T,
+				commonDirectory string,
+				featureRef string,
+				externalDirectory string,
+			) (string, []byte) {
+				reflog := filepath.Join(
+					commonDirectory, "logs", filepath.FromSlash(featureRef),
+				)
+				if err := os.MkdirAll(filepath.Dir(reflog), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				content := []byte("external victim must remain unchanged\n")
+				victim := filepath.Join(externalDirectory, "victim")
+				if err := os.WriteFile(victim, content, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Link(victim, reflog); err != nil {
+					t.Fatal(err)
+				}
+				return victim, content
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root, base := initializeTargetRepository(t, workspace.GitHashSHA1)
+			definition := localTargetDefinition(
+				t, root, base, "feature/external-ref-storage",
+			)
+			commonDirectory := filepath.Join(root, ".git")
+			externalDirectory := canonicalTestDirectory(t)
+			runtimeRoot := canonicalTestDirectory(t)
+			var victim string
+			var original []byte
+			changed := false
+			_, err := workspace.InitializeWorkspaceV2WithOptions(
+				context.Background(),
+				runtimeRoot,
+				definition,
+				mustTime(t, "2026-07-24T12:25:40Z"),
+				workspace.WorkspaceInitializationOptions{
+					TargetFault: func(
+						point workspace.LocalTargetInitializationFaultPoint,
+					) error {
+						if point != workspace.LocalTargetFaultBeforeRefUpdate ||
+							changed {
+							return nil
+						}
+						changed = true
+						victim, original = test.setup(
+							t,
+							commonDirectory,
+							definition.Workspace().FeatureRef(),
+							externalDirectory,
+						)
+						return nil
+					},
+				},
+			)
+			if err == nil || !changed ||
+				!strings.Contains(err.Error(), "storage") {
+				t.Fatalf(
+					"external ref storage error = %v changed=%t",
+					err, changed,
+				)
+			}
+			content, readErr := os.ReadFile(victim)
+			if len(original) == 0 {
+				if !errors.Is(readErr, os.ErrNotExist) {
+					t.Fatalf(
+						"external ref storage was created: %v %q",
+						readErr, content,
+					)
+				}
+			} else if readErr != nil || string(content) != string(original) {
+				t.Fatalf(
+					"external reflog victim changed: %v %q",
+					readErr, content,
+				)
+			}
+			branch := definition.Workspace().FeatureBranch()
+			if got := strings.TrimSpace(runTargetGitTest(
+				t, root, "branch", "--list", branch,
+			)); got != "" {
+				t.Fatalf("repository received feature branch %q", got)
+			}
+		})
 	}
 }
 
@@ -485,6 +678,90 @@ func TestLocalTargetInitializationRejectsDiscoveredRootOverlap(t *testing.T) {
 				t.Fatalf("rejected runtime root was created: %v", err)
 			}
 		})
+	}
+}
+
+func TestLocalTargetInitializationRejectsPrunableRegisteredRuntimePath(
+	t *testing.T,
+) {
+	root, base := initializeTargetRepository(t, workspace.GitHashSHA1)
+	parent := canonicalTestDirectory(t)
+	runtimeRoot := filepath.Join(parent, "prunable-worktree")
+	runTargetGitTest(
+		t, root,
+		"worktree", "add", "--quiet", "--detach",
+		runtimeRoot, baseObjectHex(base),
+	)
+	if err := os.RemoveAll(runtimeRoot); err != nil {
+		t.Fatal(err)
+	}
+	definition := localTargetDefinition(
+		t, root, base, "feature/prunable-runtime-overlap",
+	)
+	_, err := workspace.InitializeWorkspaceV2(
+		runtimeRoot,
+		definition,
+		mustTime(t, "2026-07-24T12:35:10Z"),
+	)
+	if err == nil || !strings.Contains(
+		err.Error(), "unsafe workspace root overlap",
+	) {
+		t.Fatalf("prunable registered-worktree overlap error = %v", err)
+	}
+	if _, statErr := os.Lstat(runtimeRoot); !errors.Is(
+		statErr, os.ErrNotExist,
+	) {
+		t.Fatalf("prunable registered path was recreated: %v", statErr)
+	}
+}
+
+func TestLocalTargetInitializationRejectsConcurrentRegisteredWorktree(
+	t *testing.T,
+) {
+	root, base := initializeTargetRepository(t, workspace.GitHashSHA1)
+	definition := localTargetDefinition(
+		t, root, base, "feature/concurrent-worktree-registration",
+	)
+	runtimeRoot := canonicalTestDirectory(t)
+	lateWorktree := filepath.Join(runtimeRoot, "late-worktree")
+	registered := false
+	_, err := workspace.InitializeWorkspaceV2WithOptions(
+		context.Background(),
+		runtimeRoot,
+		definition,
+		mustTime(t, "2026-07-24T12:35:20Z"),
+		workspace.WorkspaceInitializationOptions{
+			TargetFault: func(
+				point workspace.LocalTargetInitializationFaultPoint,
+			) error {
+				if point != workspace.LocalTargetFaultBeforeRefUpdate ||
+					registered {
+					return nil
+				}
+				registered = true
+				runTargetGitTest(
+					t, root,
+					"worktree", "add", "--quiet", "--detach",
+					lateWorktree, baseObjectHex(base),
+				)
+				return nil
+			},
+		},
+	)
+	if err == nil || !registered || !strings.Contains(
+		err.Error(),
+		"registered Git worktree inventory changed during workspace initialization",
+	) {
+		t.Fatalf(
+			"concurrent registered-worktree error = %v registered=%t",
+			err, registered,
+		)
+	}
+	branch := definition.Workspace().FeatureBranch()
+	if got := strings.TrimSpace(runTargetGitTest(
+		t, root, "branch", "--list", branch,
+	)); got != "" {
+		t.Fatalf("concurrent registration allowed feature ref %q", got)
 	}
 }
 
@@ -795,6 +1072,42 @@ func TestLocalTargetRejectsUnsupportedRepositoryProfiles(t *testing.T) {
 			want: "external diff/text conversion",
 		},
 		{
+			name: "signature display",
+			setup: func(t *testing.T, root string, _ workspace.GitObjectID) {
+				runTargetGitTest(
+					t, root, "config", "log.showSignature", "true",
+				)
+			},
+			want: "signature display",
+		},
+		{
+			name: "generic signature program",
+			setup: func(t *testing.T, root string, _ workspace.GitObjectID) {
+				runTargetGitTest(
+					t, root, "config", "gpg.program", "false",
+				)
+			},
+			want: "external signature program",
+		},
+		{
+			name: "format-specific signature program",
+			setup: func(t *testing.T, root string, _ workspace.GitObjectID) {
+				runTargetGitTest(
+					t, root, "config", "gpg.openpgp.program", "false",
+				)
+			},
+			want: "external signature program",
+		},
+		{
+			name: "SSH default-key command",
+			setup: func(t *testing.T, root string, _ workspace.GitObjectID) {
+				runTargetGitTest(
+					t, root, "config", "gpg.ssh.defaultKeyCommand", "false",
+				)
+			},
+			want: "external signature program",
+		},
+		{
 			name: "configuration include",
 			setup: func(t *testing.T, root string, _ workspace.GitObjectID) {
 				runTargetGitTest(
@@ -1030,6 +1343,71 @@ func TestLocalTargetRejectsEscapingSymlinkAndRepositoryReplacement(t *testing.T)
 			t.Fatalf("repository replacement error = %v", err)
 		}
 	})
+}
+
+func TestLocalTargetRejectsConfiguredSignatureVerifierWithoutInvocation(
+	t *testing.T,
+) {
+	sshKeygen, err := exec.LookPath("ssh-keygen")
+	if err != nil {
+		t.Skip("ssh-keygen is required for signed-commit coverage")
+	}
+	root := canonicalTestDirectory(t)
+	runTargetGitTest(
+		t, root,
+		"init", "--quiet", "--initial-branch=main",
+		"--object-format=sha1", ".",
+	)
+	if err := os.WriteFile(
+		filepath.Join(root, "seed.txt"),
+		[]byte("signed local target seed\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	runTargetGitTest(t, root, "add", "--", "seed.txt")
+	keyDirectory := canonicalTestDirectory(t)
+	signingKey := filepath.Join(keyDirectory, "signing-key")
+	command := exec.Command(
+		sshKeygen,
+		"-q", "-t", "ed25519", "-N", "", "-f", signingKey,
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("generate SSH signing key: %v\n%s", err, output)
+	}
+	runTargetGitTest(
+		t, root,
+		"-c", "user.name=Feature Implement Test",
+		"-c", "user.email=feature-implement@localhost",
+		"-c", "gpg.format=ssh",
+		"-c", "user.signingKey="+signingKey,
+		"commit", "--quiet", "-S", "-m", "signed seed local target",
+	)
+	base := targetHead(t, root, workspace.GitHashSHA1)
+	probeDirectory := canonicalTestDirectory(t)
+	probe := filepath.Join(probeDirectory, "signature-probe")
+	marker := filepath.Join(probeDirectory, "signature-program-invoked")
+	script := "#!/bin/sh\nmkdir " + shellSingleQuote(marker) + "\nexit 1\n"
+	if err := os.WriteFile(probe, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runTargetGitTest(t, root, "config", "log.showSignature", "true")
+	runTargetGitTest(t, root, "config", "gpg.format", "ssh")
+	runTargetGitTest(t, root, "config", "gpg.ssh.program", probe)
+	definition := localTargetDefinition(
+		t, root, base, "feature/inert-signature-verifier",
+	)
+	_, err = workspace.InitializeWorkspaceV2(
+		canonicalTestDirectory(t),
+		definition,
+		mustTime(t, "2026-07-24T12:45:00Z"),
+	)
+	if err == nil || !strings.Contains(err.Error(), "signature") {
+		t.Fatalf("configured signature verifier error = %v", err)
+	}
+	if _, statErr := os.Lstat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("configured signature verifier was invoked: %v", statErr)
+	}
 }
 
 func TestLocalTargetOperationsDoNotInvokeHooksCredentialsOrProtocols(t *testing.T) {

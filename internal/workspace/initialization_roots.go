@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -13,13 +14,17 @@ import (
 // a missing runtime candidate only so overlap can be rejected before the
 // command creates any durable runtime state.
 type WorkspaceInitializationRootGuard struct {
-	plan            *VerifiedRoot
-	runtime         *VerifiedRoot
-	target          *VerifiedRoot
-	gitDirectory    *VerifiedRoot
-	commonDirectory *VerifiedRoot
-	registered      []*VerifiedRoot
-	runtimePath     string
+	plan                       *VerifiedRoot
+	runtime                    *VerifiedRoot
+	target                     *VerifiedRoot
+	gitDirectory               *VerifiedRoot
+	commonDirectory            *VerifiedRoot
+	registered                 []*VerifiedRoot
+	registeredPaths            []string
+	registeredState            map[string]registeredWorktree
+	inspectRegisteredWorktrees func() (map[string]registeredWorktree, error)
+	targetSession              *localTargetGitSession
+	runtimePath                string
 }
 
 func OpenWorkspaceInitializationRootGuard(
@@ -73,15 +78,20 @@ func OpenWorkspaceInitializationRootGuard(
 }
 
 func (guard *WorkspaceInitializationRootGuard) bindLocalTarget(
+	ctx context.Context,
+	adapter LocalTargetGitAdapter,
 	inspection LocalTargetInspection,
 ) (resultErr error) {
-	if guard == nil || guard.target == nil || inspection.binding.IsZero() {
+	if ctx == nil || guard == nil || guard.target == nil ||
+		inspection.binding.IsZero() {
 		return fmt.Errorf(
 			"workspace initialization Git-root admission requires a target inspection",
 		)
 	}
 	if guard.gitDirectory != nil || guard.commonDirectory != nil ||
-		len(guard.registered) != 0 {
+		len(guard.registered) != 0 ||
+		guard.inspectRegisteredWorktrees != nil ||
+		guard.targetSession != nil {
 		return fmt.Errorf("workspace initialization Git roots are already bound")
 	}
 	binding := inspection.binding
@@ -119,7 +129,10 @@ func (guard *WorkspaceInitializationRootGuard) bindLocalTarget(
 			"workspace initialization Git-directory identity changed during admission",
 		)
 	}
-	registered := make([]*VerifiedRoot, 0, len(inspection.registeredWorktrees))
+	registeredPaths := sortedRegisteredWorktreePaths(
+		inspection.registeredWorktrees,
+	)
+	registered := make([]*VerifiedRoot, 0, len(registeredPaths))
 	defer func() {
 		if resultErr == nil {
 			return
@@ -128,9 +141,7 @@ func (guard *WorkspaceInitializationRootGuard) bindLocalTarget(
 			resultErr = errors.Join(resultErr, registered[index].Close())
 		}
 	}()
-	for _, registeredPath := range sortedRegisteredWorktreePaths(
-		inspection.registeredWorktrees,
-	) {
+	for _, registeredPath := range registeredPaths {
 		info, err := os.Lstat(registeredPath)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -155,13 +166,39 @@ func (guard *WorkspaceInitializationRootGuard) bindLocalTarget(
 		}
 		registered = append(registered, root)
 	}
+	session, err := adapter.openBoundSession(binding)
+	if err != nil {
+		return fmt.Errorf(
+			"retain workspace initialization target Git session: %w", err,
+		)
+	}
+	defer func() {
+		if resultErr != nil {
+			resultErr = errors.Join(resultErr, session.Close())
+		}
+	}()
 	guard.gitDirectory = gitDirectory
 	guard.commonDirectory = commonDirectory
 	guard.registered = registered
+	guard.registeredPaths = registeredPaths
+	guard.registeredState = cloneRegisteredWorktreeState(
+		inspection.registeredWorktrees,
+	)
+	guard.inspectRegisteredWorktrees = func() (
+		map[string]registeredWorktree,
+		error,
+	) {
+		return session.inspectRegisteredWorktrees(ctx)
+	}
+	guard.targetSession = session
 	if err := guard.validateLayout(); err != nil {
 		guard.gitDirectory = nil
 		guard.commonDirectory = nil
 		guard.registered = nil
+		guard.registeredPaths = nil
+		guard.registeredState = nil
+		guard.inspectRegisteredWorktrees = nil
+		guard.targetSession = nil
 		return err
 	}
 	return nil
@@ -245,6 +282,13 @@ func (guard *WorkspaceInitializationRootGuard) Close() error {
 		closeErrors = append(closeErrors, guard.registered[index].Close())
 	}
 	guard.registered = nil
+	guard.registeredPaths = nil
+	guard.registeredState = nil
+	guard.inspectRegisteredWorktrees = nil
+	if guard.targetSession != nil {
+		closeErrors = append(closeErrors, guard.targetSession.Close())
+		guard.targetSession = nil
+	}
 	if guard.commonDirectory != nil {
 		closeErrors = append(closeErrors, guard.commonDirectory.Close())
 		guard.commonDirectory = nil
@@ -281,6 +325,20 @@ func (guard *WorkspaceInitializationRootGuard) verifyHeldRoots() error {
 			return err
 		}
 	}
+	if guard.inspectRegisteredWorktrees != nil {
+		observed, err := guard.inspectRegisteredWorktrees()
+		if err != nil {
+			return fmt.Errorf(
+				"reinspect registered Git worktrees during workspace initialization: %w",
+				err,
+			)
+		}
+		if !sameRegisteredWorktrees(guard.registeredState, observed) {
+			return fmt.Errorf(
+				"registered Git worktree inventory changed during workspace initialization",
+			)
+		}
+	}
 	return nil
 }
 
@@ -294,6 +352,25 @@ func (guard *WorkspaceInitializationRootGuard) validateLayout() error {
 		guard.commonDirectory,
 	}
 	protected = append(protected, guard.registered...)
+	for _, registeredPath := range guard.registeredPaths {
+		if guard.plan != nil &&
+			initializationRootPathsOverlap(
+				registeredPath, guard.plan.Path(),
+			) {
+			return unsafeInitializationRootOverlap(
+				RootRoleRegisteredWorktree, registeredPath,
+				guard.plan.Role(), guard.plan.Path(),
+			)
+		}
+		if initializationRootPathsOverlap(
+			registeredPath, guard.runtimePath,
+		) {
+			return unsafeInitializationRootOverlap(
+				RootRoleRegisteredWorktree, registeredPath,
+				RootRoleRuntime, guard.runtimePath,
+			)
+		}
+	}
 	for _, root := range protected {
 		if root == nil {
 			continue
@@ -338,6 +415,20 @@ func (guard *WorkspaceInitializationRootGuard) validateLayout() error {
 		}
 	}
 	return nil
+}
+
+func cloneRegisteredWorktreeState(
+	source map[string]registeredWorktree,
+) map[string]registeredWorktree {
+	result := make(map[string]registeredWorktree, len(source))
+	for worktreePath, worktree := range source {
+		result[worktreePath] = worktree
+	}
+	return result
+}
+
+func initializationRootPathsOverlap(left string, right string) bool {
+	return pathContains(left, right) || pathContains(right, left)
 }
 
 func unsafeInitializationRootOverlap(

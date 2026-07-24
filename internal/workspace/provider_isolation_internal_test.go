@@ -81,6 +81,7 @@ func TestTrustedGitArgumentsDisableHooksHelpersPromptsAndAmbientHeaders(t *testi
 		"credential.interactive=false",
 		"core.askPass=" + os.DevNull,
 		"http.extraHeader=",
+		"log.showSignature=false",
 	} {
 		if !strings.Contains(joined, required) {
 			t.Fatalf("trusted Git arguments do not enforce %q: %#v", required, arguments)

@@ -180,7 +180,7 @@ func InitializeWorkspaceV2WithOptions(
 	if err != nil {
 		return WorkspaceInitializationResult{}, err
 	}
-	if err := roots.bindLocalTarget(targetInspection); err != nil {
+	if err := roots.bindLocalTarget(ctx, targetGit, targetInspection); err != nil {
 		return WorkspaceInitializationResult{}, err
 	}
 	if err := roots.VerifyBeforeRuntimeCreation(); err != nil {
@@ -191,6 +191,9 @@ func InitializeWorkspaceV2WithOptions(
 		return WorkspaceInitializationResult{}, err
 	}
 	defer store.Close()
+	if err := roots.VerifyAfterEffects(); err != nil {
+		return WorkspaceInitializationResult{}, err
+	}
 	journal, err := OpenWorkspaceJournal(workspaceDir, JournalReadWrite)
 	if err != nil {
 		return WorkspaceInitializationResult{}, err
@@ -276,6 +279,14 @@ func InitializeWorkspaceV2WithOptions(
 			return WorkspaceInitializationResult{}, err
 		}
 	}
+	targetFault := func(point LocalTargetInitializationFaultPoint) error {
+		if options.TargetFault != nil {
+			if err := options.TargetFault(point); err != nil {
+				return err
+			}
+		}
+		return roots.VerifyAfterEffects()
+	}
 	snapshot, err = initializeLocalTarget(
 		ctx,
 		journal,
@@ -283,7 +294,7 @@ func InitializeWorkspaceV2WithOptions(
 		definition,
 		occurredAt,
 		targetGit,
-		options.TargetFault,
+		targetFault,
 	)
 	if err != nil {
 		return WorkspaceInitializationResult{}, err

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
+	"path/filepath"
 	"strings"
 )
 
@@ -170,6 +172,146 @@ func (session *localTargetGitSession) Verify() error {
 	); err != nil {
 		return err
 	}
+	if err := validateBoundLocalTargetCommonDirectory(
+		session.git.root,
+		session.binding,
+	); err != nil {
+		return err
+	}
+	if err := validateBoundLocalTargetFeatureRefStorage(
+		session.common.root,
+		session.binding.featureRef,
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateBoundLocalTargetCommonDirectory(
+	gitRoot *VerifiedRoot,
+	binding LocalTargetBinding,
+) error {
+	if !binding.linkedWorktree {
+		return nil
+	}
+	content, err := gitRoot.ReadBounded(
+		"commondir",
+		maxLocalTargetAdministrationBytes,
+	)
+	if err != nil {
+		return fmt.Errorf("read linked-worktree common-directory administration: %w", err)
+	}
+	if bytes.IndexByte(content, 0) >= 0 ||
+		bytes.IndexByte(content, '\r') >= 0 {
+		return fmt.Errorf("linked-worktree common-directory administration is malformed")
+	}
+	value := strings.TrimSuffix(string(content), "\n")
+	if value == "" || strings.Contains(value, "\n") {
+		return fmt.Errorf("linked-worktree common-directory administration is malformed")
+	}
+	if !filepath.IsAbs(value) {
+		value = filepath.Join(binding.gitDirectory, value)
+	}
+	value, err = requireCanonicalObservedTargetPath(
+		"Git common administration", value,
+	)
+	if err != nil {
+		return err
+	}
+	if value != binding.commonDirectory {
+		return fmt.Errorf(
+			"linked-worktree common-directory administration points to %s, not %s",
+			value, binding.commonDirectory,
+		)
+	}
+	return nil
+}
+
+func validateBoundLocalTargetFeatureRefStorage(
+	commonRoot *VerifiedRoot,
+	featureRef string,
+) error {
+	if commonRoot == nil || commonRoot.adapter == nil {
+		return fmt.Errorf("bound local target Git common directory is closed")
+	}
+	if !strings.HasPrefix(featureRef, "refs/heads/feature/") ||
+		path.Clean(featureRef) != featureRef {
+		return fmt.Errorf("bound local target feature ref is invalid")
+	}
+	for _, candidate := range []struct {
+		path  string
+		label string
+	}{
+		{path: featureRef, label: "feature ref"},
+		{path: path.Join("logs", featureRef), label: "feature reflog"},
+	} {
+		if err := validateBoundLocalTargetStorageAncestors(
+			commonRoot, candidate.path, candidate.label,
+		); err != nil {
+			return err
+		}
+		info, exists, err := commonRoot.adapter.inspectExact(candidate.path)
+		if err != nil {
+			return fmt.Errorf(
+				"inspect bound local target %s storage: %w",
+				candidate.label, err,
+			)
+		}
+		if !exists {
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf(
+				"bound local target %s storage is not a regular file",
+				candidate.label,
+			)
+		}
+		file, _, err := commonRoot.adapter.openRegularFileExact(
+			candidate.path, os.O_RDONLY, 0, false,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"open bound local target %s storage: %w",
+				candidate.label, err,
+			)
+		}
+		verifyErr := commonRoot.verifyOwnedRegularFile(candidate.path, file)
+		closeErr := file.Close()
+		if verifyErr != nil || closeErr != nil {
+			return fmt.Errorf(
+				"verify bound local target %s storage: %w",
+				candidate.label, errors.Join(verifyErr, closeErr),
+			)
+		}
+	}
+	return commonRoot.VerifyPath()
+}
+
+func validateBoundLocalTargetStorageAncestors(
+	commonRoot *VerifiedRoot,
+	candidate string,
+	label string,
+) error {
+	ancestor := ""
+	for _, component := range strings.Split(path.Dir(candidate), "/") {
+		ancestor = path.Join(ancestor, component)
+		info, exists, err := commonRoot.adapter.inspectExact(ancestor)
+		if err != nil {
+			return fmt.Errorf(
+				"inspect bound local target %s storage ancestor %s: %w",
+				label, ancestor, err,
+			)
+		}
+		if !exists {
+			return nil
+		}
+		if !info.IsDir() {
+			return fmt.Errorf(
+				"bound local target %s has an ancestor namespace conflict at %s",
+				label, ancestor,
+			)
+		}
+	}
 	return nil
 }
 
@@ -217,10 +359,28 @@ func (session *localTargetGitSession) run(
 	if err != nil {
 		return nil, -1, err
 	}
-	command.Env = append(
-		environment,
-		"GIT_DIR=.",
-	)
+	command.Env = append(environment, "GIT_DIR=.")
+	if session.binding.linkedWorktree {
+		commonRelative, err := filepath.Rel(
+			session.binding.gitDirectory,
+			session.binding.commonDirectory,
+		)
+		if err != nil || commonRelative == "." ||
+			filepath.IsAbs(commonRelative) ||
+			(!strings.HasPrefix(commonRelative, ".."+string(filepath.Separator)) &&
+				commonRelative != "..") {
+			if err == nil {
+				err = fmt.Errorf("Git common directory is not an ancestor")
+			}
+			return nil, -1, fmt.Errorf(
+				"bind linked-worktree Git common directory: %w", err,
+			)
+		}
+		command.Env = append(
+			command.Env,
+			"GIT_COMMON_DIR="+commonRelative,
+		)
+	}
 	if input != nil {
 		command.Stdin = bytes.NewReader(input)
 	}
@@ -319,7 +479,7 @@ func (session *localTargetGitSession) inspectFeatureRef(
 	}
 	reflog, reflogExit, err := session.run(
 		ctx, nil,
-		"reflog", "show", "--format=%gs", "-n", "1",
+		"reflog", "show", "--no-show-signature", "--format=%gs", "-n", "1",
 		session.binding.featureRef, "--",
 	)
 	if err != nil {
@@ -396,28 +556,9 @@ func (session *localTargetGitSession) inspectOwnedState(
 	); err != nil {
 		return LocalTargetInspection{}, err
 	}
-	worktreeOutput, exitCode, err := session.run(
-		ctx, nil, "worktree", "list", "--porcelain", "-z",
-	)
+	worktrees, err := session.inspectRegisteredWorktrees(ctx)
 	if err != nil {
 		return LocalTargetInspection{}, err
-	}
-	if exitCode != 0 {
-		return LocalTargetInspection{}, fmt.Errorf(
-			"inspect target worktrees: Git exited with status %d", exitCode,
-		)
-	}
-	worktrees, err := parseRegisteredWorktrees(worktreeOutput)
-	if err != nil {
-		return LocalTargetInspection{}, err
-	}
-	for worktreePath, worktree := range worktrees {
-		if worktree.branch == session.binding.featureBranch {
-			return LocalTargetInspection{}, fmt.Errorf(
-				"feature branch %s is already checked out at %s",
-				session.binding.featureBranch, worktreePath,
-			)
-		}
 	}
 	if err := session.Verify(); err != nil {
 		return LocalTargetInspection{}, err
@@ -428,6 +569,35 @@ func (session *localTargetGitSession) inspectOwnedState(
 		featureReflogMarker: marker,
 		registeredWorktrees: worktrees,
 	}, nil
+}
+
+func (session *localTargetGitSession) inspectRegisteredWorktrees(
+	ctx context.Context,
+) (map[string]registeredWorktree, error) {
+	worktreeOutput, exitCode, err := session.run(
+		ctx, nil, "worktree", "list", "--porcelain", "-z",
+	)
+	if err != nil {
+		return nil, err
+	}
+	if exitCode != 0 {
+		return nil, fmt.Errorf(
+			"inspect target worktrees: Git exited with status %d", exitCode,
+		)
+	}
+	worktrees, err := parseRegisteredWorktrees(worktreeOutput)
+	if err != nil {
+		return nil, err
+	}
+	for worktreePath, worktree := range worktrees {
+		if worktree.branch == session.binding.featureBranch {
+			return nil, fmt.Errorf(
+				"feature branch %s is already checked out at %s",
+				session.binding.featureBranch, worktreePath,
+			)
+		}
+	}
+	return worktrees, nil
 }
 
 func (session *localTargetGitSession) createFeatureRef(
