@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -289,6 +290,35 @@ func TestLocalGitIntegrationUsesExactRegisteredAttemptWorktree(t *testing.T) {
 			reinitializedTarget, ok,
 		)
 	}
+	replayJournal, err := workspace.OpenWorkspaceJournal(
+		runtimeRoot, workspace.JournalReadWrite,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replayJournal.Close()
+	beforeReplay := journalRecordCount(t, replayJournal)
+	replayed, err := workspace.IntegrateMergeUnit(
+		context.Background(), replayJournal, definition, repository,
+		workspace.DefaultLocalIntegrationGitAdapter(),
+		workspace.IntegrateMergeUnitRequest{
+			AttemptID: attempt.AttemptID(),
+			OccurredAt: mustTime(
+				t, "2026-07-25T15:30:06Z",
+			),
+		},
+	)
+	if err != nil || replayed.MergeCommit() != result.MergeCommit() {
+		t.Fatalf(
+			"retry completed integration after worktree cleanup = %#v error=%v",
+			replayed, err,
+		)
+	}
+	if journalRecordCount(t, replayJournal) != beforeReplay {
+		t.Fatal(
+			"completed integration retry after worktree cleanup appended state",
+		)
+	}
 }
 
 func TestLocalGitIntegrationRejectsAncestorDescendantAndUnrelatedDrift(
@@ -381,6 +411,69 @@ func TestLocalGitIntegrationRejectsAncestorDescendantAndUnrelatedDrift(
 				rawGitObject(merge), rawGitObject(test.head),
 			)
 		})
+	}
+}
+
+func TestLocalGitIntegrationRejectsCompletedSameOIDFeatureRefRecreation(
+	t *testing.T,
+) {
+	scenario := newRealIntegrationScenario(
+		t, workspace.GitHashSHA1, true, workspace.GitObjectID{},
+	)
+	result, err := workspace.IntegrateMergeUnit(
+		context.Background(),
+		scenario.journal,
+		scenario.definition,
+		scenario.repository,
+		workspace.DefaultLocalIntegrationGitAdapter(),
+		workspace.IntegrateMergeUnitRequest{
+			AttemptID:  scenario.attempt.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-25T16:10:00Z"),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	featureRef := result.Intent().FeatureRef()
+	merge := result.MergeCommit()
+	runTargetGitTest(
+		t, scenario.repositoryRoot,
+		"update-ref", "-d", featureRef, rawGitObject(merge),
+	)
+	runTargetGitTest(
+		t, scenario.repositoryRoot,
+		"update-ref", "--create-reflog", "-m",
+		"external completed same-OID recreation",
+		featureRef, rawGitObject(merge),
+	)
+
+	before := journalRecordCount(t, scenario.journal)
+	_, err = workspace.IntegrateMergeUnit(
+		context.Background(),
+		scenario.journal,
+		scenario.definition,
+		scenario.repository,
+		workspace.DefaultLocalIntegrationGitAdapter(),
+		workspace.IntegrateMergeUnitRequest{
+			AttemptID:  scenario.attempt.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-25T16:10:01Z"),
+		},
+	)
+	if err == nil ||
+		!strings.Contains(
+			err.Error(),
+			"does not retain its exact merge and marker",
+		) {
+		t.Fatalf("completed same-OID recreation error = %v", err)
+	}
+	if journalRecordCount(t, scenario.journal) != before {
+		t.Fatal("rejected completed same-OID recreation appended state")
+	}
+	current := strings.TrimSpace(runTargetGitTest(
+		t, scenario.repositoryRoot, "rev-parse", featureRef,
+	))
+	if current != rawGitObject(merge) {
+		t.Fatalf("completed same-OID recreation was reset to %s", current)
 	}
 }
 
@@ -480,11 +573,47 @@ func TestLocalGitIntegrationRecoversCreatedObjectAndPublishedRef(
 				t, scenario.journal,
 				scenario.attempt.AttemptID(),
 			)
+			if test.point == workspace.IntegrationFaultAfterRefCAS {
+				runTargetGitTest(
+					t, scenario.repositoryRoot,
+					"worktree", "remove", "--force",
+					scenario.attempt.Worktree(),
+				)
+				if err := scenario.journal.Close(); err != nil {
+					t.Fatal(err)
+				}
+				reinitialized, err :=
+					workspace.InitializeWorkspaceV2WithOptions(
+						context.Background(),
+						scenario.workspace,
+						scenario.definition,
+						mustTime(
+							t, "2026-07-25T16:30:02Z",
+						),
+						workspace.WorkspaceInitializationOptions{
+							WorktreeRoot: scenario.worktrees,
+						},
+					)
+				if err != nil {
+					t.Fatalf(
+						"re-admit recovered published integration: %v",
+						err,
+					)
+				}
+				target, ok := reinitialized.Runtime().LocalTarget()
+				if !ok ||
+					target.CreatedHead() != expectedMerge {
+					t.Fatalf(
+						"re-admitted recovered target = %#v exists=%t",
+						target, ok,
+					)
+				}
+			}
 		})
 	}
 }
 
-func TestLocalGitIntegrationRecoversExternalMoveToExpectedMerge(
+func TestLocalGitIntegrationRejectsExternalMoveToExpectedMergeWithoutMarker(
 	t *testing.T,
 ) {
 	scenario := newRealIntegrationScenario(
@@ -498,7 +627,8 @@ func TestLocalGitIntegrationRecoversExternalMoveToExpectedMerge(
 		featureRef, rawGitObject(expectedMerge), rawGitObject(scenario.base),
 	)
 
-	result, err := workspace.IntegrateMergeUnit(
+	before := journalRecordCount(t, scenario.journal)
+	_, err := workspace.IntegrateMergeUnit(
 		context.Background(),
 		scenario.journal,
 		scenario.definition,
@@ -509,14 +639,12 @@ func TestLocalGitIntegrationRecoversExternalMoveToExpectedMerge(
 			OccurredAt: mustTime(t, "2026-07-25T16:40:00Z"),
 		},
 	)
-	if err != nil {
-		t.Fatalf("recover externally published expected merge: %v", err)
+	if err == nil ||
+		!strings.Contains(err.Error(), "no exact integration marker") {
+		t.Fatalf("externally published expected merge error = %v", err)
 	}
-	if result.MergeCommit() != expectedMerge {
-		t.Fatalf(
-			"externally published merge = %s, want %s",
-			result.MergeCommit(), expectedMerge,
-		)
+	if journalRecordCount(t, scenario.journal) != before {
+		t.Fatal("rejected external expected merge appended completion")
 	}
 	current := strings.TrimSpace(runTargetGitTest(
 		t, scenario.repositoryRoot, "rev-parse", featureRef,
@@ -531,9 +659,182 @@ func TestLocalGitIntegrationRecoversExternalMoveToExpectedMerge(
 	if marker != "external exact expected merge" {
 		t.Fatalf("external expected-merge reflog marker = %q", marker)
 	}
-	assertSingleIntegrationTransition(
-		t, scenario.journal, scenario.attempt.AttemptID(),
+}
+
+func TestLocalGitIntegrationRejectsSameOIDFeatureRefRecreationBeforeIntent(
+	t *testing.T,
+) {
+	scenario := newRealIntegrationScenario(
+		t, workspace.GitHashSHA1, true, workspace.GitObjectID{},
 	)
+	featureRef := scenario.definition.Workspace().FeatureRef()
+	runTargetGitTest(
+		t, scenario.repositoryRoot,
+		"update-ref", "-d", featureRef, rawGitObject(scenario.base),
+	)
+	runTargetGitTest(
+		t, scenario.repositoryRoot,
+		"update-ref", "--create-reflog", "-m",
+		"external same-OID recreation",
+		featureRef, rawGitObject(scenario.base),
+	)
+	assertRejectedRealIntegration(
+		t, scenario, "no exact durable workspace marker",
+	)
+}
+
+func TestLocalGitIntegrationRejectsSameOIDFeatureRefRecreationAfterIntent(
+	t *testing.T,
+) {
+	scenario := newRealIntegrationScenario(
+		t, workspace.GitHashSHA1, true, workspace.GitObjectID{},
+	)
+	expectedMerge := stopRealIntegrationAfterCommit(t, scenario)
+	featureRef := scenario.definition.Workspace().FeatureRef()
+	priorMarker := strings.TrimSpace(runTargetGitTest(
+		t, scenario.repositoryRoot,
+		"reflog", "show", "--format=%gs", "-n", "1",
+		featureRef, "--",
+	))
+	runTargetGitTest(
+		t, scenario.repositoryRoot,
+		"update-ref", "-d", featureRef, rawGitObject(scenario.base),
+	)
+	runTargetGitTest(
+		t, scenario.repositoryRoot,
+		"update-ref", "--create-reflog", "-m",
+		"external same-OID recreation after intent",
+		featureRef, rawGitObject(scenario.base),
+	)
+	if _, err := workspace.IntegrateMergeUnit(
+		context.Background(),
+		scenario.journal,
+		scenario.definition,
+		scenario.repository,
+		workspace.DefaultLocalIntegrationGitAdapter(),
+		workspace.IntegrateMergeUnitRequest{
+			AttemptID:  scenario.attempt.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-25T16:42:00Z"),
+		},
+	); err == nil ||
+		!strings.Contains(
+			err.Error(), "no exact durable workspace marker",
+		) {
+		t.Fatalf("same-OID recreation after intent error = %v", err)
+	}
+	runTargetGitTest(
+		t, scenario.repositoryRoot,
+		"update-ref", "-d", featureRef, rawGitObject(scenario.base),
+	)
+	runTargetGitTest(
+		t, scenario.repositoryRoot,
+		"update-ref", "--create-reflog", "-m", priorMarker,
+		featureRef, rawGitObject(scenario.base),
+	)
+	recovered, err := workspace.IntegrateMergeUnit(
+		context.Background(),
+		scenario.journal,
+		scenario.definition,
+		scenario.repository,
+		workspace.DefaultLocalIntegrationGitAdapter(),
+		workspace.IntegrateMergeUnitRequest{
+			AttemptID:  scenario.attempt.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-25T16:42:01Z"),
+		},
+	)
+	if err != nil || recovered.MergeCommit() != expectedMerge {
+		t.Fatalf(
+			"recover restored owned feature marker = %#v error=%v",
+			recovered, err,
+		)
+	}
+}
+
+func TestLocalGitIntegrationRevalidatesMergeMarkerBeforeCompletion(
+	t *testing.T,
+) {
+	scenario := newRealIntegrationScenario(
+		t, workspace.GitHashSHA1, true, workspace.GitObjectID{},
+	)
+	featureRef := scenario.definition.Workspace().FeatureRef()
+	var expectedMerge workspace.GitObjectID
+	var integrationMarker string
+	fired := false
+	fault := func(
+		point workspace.IntegrationLifecycleFaultPoint,
+	) error {
+		if point != workspace.IntegrationFaultBeforeCompletion ||
+			fired {
+			return nil
+		}
+		fired = true
+		expectedMerge = integrationMergeFromRuntime(
+			t, scenario.journal, scenario.attempt.AttemptID(),
+		)
+		integrationMarker = strings.TrimSpace(runTargetGitTest(
+			t, scenario.repositoryRoot,
+			"reflog", "show", "--format=%gs", "-n", "1",
+			featureRef, "--",
+		))
+		runTargetGitTest(
+			t, scenario.repositoryRoot,
+			"update-ref", "-d", featureRef,
+			rawGitObject(expectedMerge),
+		)
+		runTargetGitTest(
+			t, scenario.repositoryRoot,
+			"update-ref", "--create-reflog", "-m",
+			"external same-OID merge recreation before completion",
+			featureRef, rawGitObject(expectedMerge),
+		)
+		return nil
+	}
+	_, err := workspace.IntegrateMergeUnit(
+		context.Background(),
+		scenario.journal,
+		scenario.definition,
+		scenario.repository,
+		workspace.DefaultLocalIntegrationGitAdapter(),
+		workspace.IntegrateMergeUnitRequest{
+			AttemptID:  scenario.attempt.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-25T16:43:00Z"),
+			Fault:      fault,
+		},
+	)
+	if !fired || err == nil ||
+		!strings.Contains(err.Error(), "no exact integration marker") {
+		t.Fatalf(
+			"merge marker replacement fired=%t error=%v",
+			fired, err,
+		)
+	}
+	runTargetGitTest(
+		t, scenario.repositoryRoot,
+		"update-ref", "-d", featureRef,
+		rawGitObject(expectedMerge),
+	)
+	runTargetGitTest(
+		t, scenario.repositoryRoot,
+		"update-ref", "--create-reflog", "-m",
+		integrationMarker, featureRef, rawGitObject(expectedMerge),
+	)
+	recovered, err := workspace.IntegrateMergeUnit(
+		context.Background(),
+		scenario.journal,
+		scenario.definition,
+		scenario.repository,
+		workspace.DefaultLocalIntegrationGitAdapter(),
+		workspace.IntegrateMergeUnitRequest{
+			AttemptID:  scenario.attempt.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-25T16:43:01Z"),
+		},
+	)
+	if err != nil || recovered.MergeCommit() != expectedMerge {
+		t.Fatalf(
+			"recover restored integration marker = %#v error=%v",
+			recovered, err,
+		)
+	}
 }
 
 func TestWorkspaceReadmissionRejectsRecreatedIntegratedFeatureRef(
@@ -620,7 +921,10 @@ func TestLocalGitIntegrationRejectsRefChangesAfterIntent(t *testing.T) {
 				),
 			},
 		); err == nil ||
-			!strings.Contains(err.Error(), "accepted attempt ref") {
+			!strings.Contains(
+				err.Error(),
+				"exact registered clean attempt worktree",
+			) {
 			t.Fatalf("moved attempt ref error = %v", err)
 		}
 		featureHead := strings.TrimSpace(runTargetGitTest(
@@ -674,6 +978,11 @@ func TestLocalGitIntegrationRejectsRefChangesAfterIntent(t *testing.T) {
 			"feature ref attacker",
 		)
 		featureRef := scenario.definition.Workspace().FeatureRef()
+		priorMarker := strings.TrimSpace(runTargetGitTest(
+			t, scenario.repositoryRoot,
+			"reflog", "show", "--format=%gs", "-n", "1",
+			featureRef, "--",
+		))
 		runTargetGitTest(
 			t, scenario.repositoryRoot,
 			"update-ref", featureRef, rawGitObject(drift),
@@ -710,7 +1019,7 @@ func TestLocalGitIntegrationRejectsRefChangesAfterIntent(t *testing.T) {
 		}
 		runTargetGitTest(
 			t, scenario.repositoryRoot,
-			"update-ref", featureRef,
+			"update-ref", "-m", priorMarker, featureRef,
 			rawGitObject(scenario.base), rawGitObject(drift),
 		)
 		recovered, err := workspace.IntegrateMergeUnit(
@@ -735,6 +1044,214 @@ func TestLocalGitIntegrationRejectsRefChangesAfterIntent(t *testing.T) {
 	})
 }
 
+func TestLocalGitIntegrationRejectsAttemptPathChangesBeforeCAS(
+	t *testing.T,
+) {
+	tests := []struct {
+		name   string
+		point  workspace.IntegrationLifecycleFaultPoint
+		mutate func(*testing.T, *realIntegrationScenario) func()
+	}{
+		{
+			name: "symlink substitution",
+			mutate: func(
+				t *testing.T,
+				scenario *realIntegrationScenario,
+			) func() {
+				worktree := scenario.attempt.Worktree()
+				displaced := worktree + "-displaced"
+				if err := os.Rename(worktree, displaced); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(displaced, worktree); err != nil {
+					t.Fatal(err)
+				}
+				return func() {
+					if err := os.Remove(worktree); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Rename(
+						displaced, worktree,
+					); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+		},
+		{
+			name: "same-repository directory replacement",
+			mutate: func(
+				t *testing.T,
+				scenario *realIntegrationScenario,
+			) func() {
+				worktree := scenario.attempt.Worktree()
+				displaced := worktree + "-displaced"
+				if err := os.Rename(worktree, displaced); err != nil {
+					t.Fatal(err)
+				}
+				command := exec.Command("cp", "-R", displaced, worktree)
+				if output, err := command.CombinedOutput(); err != nil {
+					t.Fatalf(
+						"copy replacement attempt worktree: %v: %s",
+						err, output,
+					)
+				}
+				return func() {
+					if err := os.RemoveAll(worktree); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Rename(
+						displaced, worktree,
+					); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+		},
+		{
+			name: "registered worktree relocation",
+			mutate: func(
+				t *testing.T,
+				scenario *realIntegrationScenario,
+			) func() {
+				worktree := scenario.attempt.Worktree()
+				relocated := worktree + "-relocated"
+				runTargetGitTest(
+					t, scenario.repositoryRoot,
+					"worktree", "move", worktree, relocated,
+				)
+				return func() {
+					runTargetGitTest(
+						t, scenario.repositoryRoot,
+						"worktree", "move", relocated, worktree,
+					)
+				}
+			},
+		},
+		{
+			name:  "directory replacement before completion",
+			point: workspace.IntegrationFaultBeforeCompletion,
+			mutate: func(
+				t *testing.T,
+				scenario *realIntegrationScenario,
+			) func() {
+				worktree := scenario.attempt.Worktree()
+				displaced := worktree + "-displaced"
+				if err := os.Rename(worktree, displaced); err != nil {
+					t.Fatal(err)
+				}
+				command := exec.Command("cp", "-R", displaced, worktree)
+				if output, err := command.CombinedOutput(); err != nil {
+					t.Fatalf(
+						"copy replacement attempt worktree: %v: %s",
+						err, output,
+					)
+				}
+				return func() {
+					if err := os.RemoveAll(worktree); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Rename(
+						displaced, worktree,
+					); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scenario := newRealIntegrationScenario(
+				t, workspace.GitHashSHA1, true,
+				workspace.GitObjectID{},
+			)
+			var restore func()
+			fired := false
+			fault := func(
+				point workspace.IntegrationLifecycleFaultPoint,
+			) error {
+				mutationPoint := test.point
+				if mutationPoint == "" {
+					mutationPoint =
+						workspace.IntegrationFaultBeforeRefCAS
+				}
+				if point == mutationPoint &&
+					!fired {
+					fired = true
+					restore = test.mutate(t, scenario)
+				}
+				return nil
+			}
+			t.Cleanup(func() {
+				if restore != nil {
+					restore()
+				}
+			})
+			_, err := workspace.IntegrateMergeUnit(
+				context.Background(),
+				scenario.journal,
+				scenario.definition,
+				scenario.repository,
+				workspace.DefaultLocalIntegrationGitAdapter(),
+				workspace.IntegrateMergeUnitRequest{
+					AttemptID: scenario.attempt.AttemptID(),
+					OccurredAt: mustTime(
+						t, "2026-07-25T16:50:00Z",
+					),
+					Fault: fault,
+				},
+			)
+			if !fired || err == nil {
+				t.Fatalf(
+					"attempt path mutation fired=%t error=%v",
+					fired, err,
+				)
+			}
+			featureHead := strings.TrimSpace(runTargetGitTest(
+				t, scenario.repositoryRoot, "rev-parse",
+				scenario.definition.Workspace().FeatureRef(),
+			))
+			expectedFeatureHead := scenario.base
+			if test.point ==
+				workspace.IntegrationFaultBeforeCompletion {
+				expectedFeatureHead = integrationMergeFromRuntime(
+					t, scenario.journal,
+					scenario.attempt.AttemptID(),
+				)
+			}
+			if featureHead != rawGitObject(expectedFeatureHead) {
+				t.Fatalf(
+					"attempt path mutation left feature at %s, want %s",
+					featureHead, expectedFeatureHead,
+				)
+			}
+			restore()
+			restore = nil
+			recovered, err := workspace.IntegrateMergeUnit(
+				context.Background(),
+				scenario.journal,
+				scenario.definition,
+				scenario.repository,
+				workspace.DefaultLocalIntegrationGitAdapter(),
+				workspace.IntegrateMergeUnitRequest{
+					AttemptID: scenario.attempt.AttemptID(),
+					OccurredAt: mustTime(
+						t, "2026-07-25T16:50:01Z",
+					),
+				},
+			)
+			if err != nil ||
+				recovered.MergeCommit().IsZero() {
+				t.Fatalf(
+					"recover restored exact attempt worktree = %#v error=%v",
+					recovered, err,
+				)
+			}
+		})
+	}
+}
+
 func TestLocalGitIntegrationRejectsInvalidAcceptedAncestryTreeAndBase(
 	t *testing.T,
 ) {
@@ -754,7 +1271,8 @@ func TestLocalGitIntegrationRejectsInvalidAcceptedAncestryTreeAndBase(
 			t, workspace.GitHashSHA1, true, reportedTree,
 		)
 		assertRejectedRealIntegration(
-			t, scenario, "has tree",
+			t, scenario,
+			"exact registered clean attempt worktree",
 		)
 	})
 
@@ -827,9 +1345,17 @@ func newRealIntegrationScenario(
 	fixture := newDefinitionFixtureForHash(t, algorithm)
 	core := newAttemptHarnessFromFixture(t, fixture, "unit-one")
 	attempt := core.reserve(t, "2026-07-25T14:30:00Z")
-	attempt = core.materialize(
-		t, attempt.AttemptID(), "2026-07-25T14:30:01Z",
+	attempt, err := workspace.MaterializeAttempt(
+		context.Background(), core.journal, core.definition,
+		workspace.DefaultLocalAttemptGitAdapter(),
+		workspace.MaterializeAttemptRequest{
+			AttemptID:  attempt.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-25T14:30:01Z"),
+		},
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	repositoryRoot := core.definition.Workspace().RepositoryRoot()
 	treeText := strings.TrimSpace(runTargetGitTest(
 		t, repositoryRoot, "rev-parse",
@@ -851,6 +1377,9 @@ func newRealIntegrationScenario(
 	runTargetGitTest(
 		t, repositoryRoot, "update-ref",
 		"refs/heads/"+attempt.Branch(), rawGitObject(accepted),
+	)
+	runTargetGitTest(
+		t, attempt.Worktree(), "reset", "--hard", rawGitObject(accepted),
 	)
 	if reportedTree.IsZero() {
 		reportedTree = tree

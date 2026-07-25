@@ -84,6 +84,10 @@ func reduceIntegrationRuntime(
 			)
 		}
 		intent := attempt.integration.intent
+		expectedSerialSegment := ID{}
+		if attempt.serialSegmentHeld {
+			expectedSerialSegment = attempt.serialSegment
+		}
 		if event.mergeUnit != attempt.mergeUnit ||
 			event.intentDigest != intent.digest ||
 			event.featureRef != intent.featureRef ||
@@ -92,9 +96,11 @@ func reduceIntegrationRuntime(
 			event.acceptedTree != intent.acceptedTree ||
 			event.mergeCommit != intent.expectedMerge ||
 			target.binding.featureRef != intent.featureRef ||
-			target.createdHead != intent.expectedFeatureHead {
+			target.createdHead != intent.expectedFeatureHead ||
+			event.leaseID != attempt.leaseID ||
+			event.serialSegment != expectedSerialSegment {
 			return fmt.Errorf(
-				"integration completion does not match its exact intent and feature frontier",
+				"integration completion does not match its exact intent, feature frontier, lease, and serial segment",
 			)
 		}
 		updated := &next.attempts[index]

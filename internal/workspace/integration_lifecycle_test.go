@@ -3,6 +3,7 @@ package workspace_test
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -26,6 +27,17 @@ type concurrentIntegrationGitStub struct {
 	initialCount   int
 	initialRelease chan struct{}
 	objects        map[string]bool
+}
+
+func (git *integrationGitStub) InspectAttempt(
+	_ context.Context,
+	target workspace.LocalTargetBinding,
+	worktree, branch string,
+	expectedHead, expectedTree workspace.GitObjectID,
+) (workspace.AttemptGitInspection, error) {
+	return stubIntegrationAttemptInspection(
+		target, worktree, branch, expectedHead, expectedTree,
+	)
 }
 
 func (git *integrationGitStub) InspectIntegration(
@@ -80,6 +92,31 @@ func (git *integrationGitStub) PublishIntegration(
 	return nil
 }
 
+func (git *integrationGitStub) VerifyCompletedIntegration(
+	_ context.Context,
+	_ workspace.LocalTargetBinding,
+	intent workspace.MergeUnitIntegrationIntent,
+) error {
+	if git.featureHead != intent.ExpectedMerge() ||
+		!git.expectedCommit {
+		return errors.New(
+			"stub completed integration verification failed",
+		)
+	}
+	return nil
+}
+
+func (git *concurrentIntegrationGitStub) InspectAttempt(
+	_ context.Context,
+	target workspace.LocalTargetBinding,
+	worktree, branch string,
+	expectedHead, expectedTree workspace.GitObjectID,
+) (workspace.AttemptGitInspection, error) {
+	return stubIntegrationAttemptInspection(
+		target, worktree, branch, expectedHead, expectedTree,
+	)
+}
+
 func (git *concurrentIntegrationGitStub) InspectIntegration(
 	_ context.Context,
 	_ workspace.LocalTargetBinding,
@@ -118,6 +155,43 @@ func (git *concurrentIntegrationGitStub) InspectIntegration(
 	)
 }
 
+func stubIntegrationAttemptInspection(
+	target workspace.LocalTargetBinding,
+	worktree, branch string,
+	expectedHead, expectedTree workspace.GitObjectID,
+) (workspace.AttemptGitInspection, error) {
+	identitySeed := uint64(len(worktree) + len(branch) + 1)
+	binding, err := workspace.NewAttemptWorktreeGitBinding(
+		workspace.AttemptWorktreeGitBindingOptions{
+			Worktree: worktree,
+			WorktreeIdentity: workspace.PlatformFileIdentity{
+				Device: 1, Inode: identitySeed, Owner: 1,
+			},
+			GitDirectory: filepath.Join(
+				target.CommonDirectory(), "worktrees", branch,
+			),
+			GitDirectoryIdentity: workspace.PlatformFileIdentity{
+				Device: 1, Inode: identitySeed + 1, Owner: 1,
+			},
+			CommonDirectory:         target.CommonDirectory(),
+			CommonDirectoryIdentity: target.CommonIdentity(),
+			AdministrationDigest: workspace.DigestBytes(
+				[]byte("stub administration " + worktree),
+			),
+			ConfigurationDigest: workspace.DigestBytes(
+				[]byte("stub configuration " + worktree),
+			),
+		},
+	)
+	if err != nil {
+		return workspace.AttemptGitInspection{}, err
+	}
+	return workspace.NewBoundAttemptGitInspection(
+		expectedHead, branch, expectedHead, expectedTree,
+		binding, true,
+	)
+}
+
 func (git *concurrentIntegrationGitStub) CreateIntegrationCommit(
 	_ context.Context,
 	_ workspace.LocalTargetBinding,
@@ -146,6 +220,22 @@ func (git *concurrentIntegrationGitStub) PublishIntegration(
 		return errors.New("concurrent publication precondition failed")
 	}
 	git.featureHead = intent.ExpectedMerge()
+	return nil
+}
+
+func (git *concurrentIntegrationGitStub) VerifyCompletedIntegration(
+	_ context.Context,
+	_ workspace.LocalTargetBinding,
+	intent workspace.MergeUnitIntegrationIntent,
+) error {
+	git.mu.Lock()
+	defer git.mu.Unlock()
+	if git.featureHead != intent.ExpectedMerge() ||
+		!git.objects[intent.Digest().String()] {
+		return errors.New(
+			"concurrent completed integration verification failed",
+		)
+	}
 	return nil
 }
 
@@ -222,6 +312,124 @@ func TestNoReviewIntegrationRequiresDurableSameHeadAdoption(t *testing.T) {
 		t.Fatalf(
 			"same-head integration acceptance = %#v",
 			result.Intent(),
+		)
+	}
+}
+
+func TestIntegrationCompletionAccountsForAndReleasesLeaseAndSerialSegment(
+	t *testing.T,
+) {
+	fixture := newDefinitionFixture(t)
+	fixture.sources.Plans[0].Bytes = []byte(strings.Replace(
+		string(fixture.sources.Plans[0].Bytes),
+		"    dependencies:\n      - story-one",
+		"    dependencies: []",
+		1,
+	))
+	fixture.sources.ExecutionConfig.Bytes = []byte(strings.Replace(
+		string(fixture.sources.ExecutionConfig.Bytes),
+		"    boundary:\n      mode: complete_goal_and_wait",
+		"    boundary:\n      mode: complete_goal_and_wait\n      serial_segment: serial-alpha",
+		1,
+	))
+	core := newAttemptHarnessFromFixture(t, fixture, "unit-one")
+	attempt := core.reserve(t, "2026-07-25T10:10:00Z")
+	attempt = core.materialize(
+		t, attempt.AttemptID(), "2026-07-25T10:10:01Z",
+	)
+	head, tree := mustGitObject(t, 'c'), mustGitObject(t, 'd')
+	repository := adoptedIntegrationRepository(
+		t, core, attempt, head, tree, "2026-07-25T10:10:02Z",
+	)
+	snapshot, err := core.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := workspace.RebuildWorkspaceRuntime(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, _ = runtime.Attempt(attempt.AttemptID())
+	leaseResource := workspace.LeaseJournalResource(attempt.LeaseID())
+	segmentResource := workspace.SerialSegmentJournalResource(
+		attempt.SerialSegment(),
+	)
+	leaseRevision := snapshot.Revision(leaseResource)
+	segmentRevision := snapshot.Revision(segmentResource)
+	result, err := workspace.IntegrateMergeUnit(
+		context.Background(), core.journal, core.definition,
+		repository, &integrationGitStub{featureHead: core.base},
+		workspace.IntegrateMergeUnitRequest{
+			AttemptID:  attempt.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-25T10:10:03Z"),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertResourceRevision := func(
+		resource workspace.JournalResource,
+		revision uint64,
+	) {
+		t.Helper()
+		foundRead, foundWrite := false, false
+		for _, binding := range result.Record().ReadSet() {
+			if binding.Resource() == resource &&
+				binding.Revision() == revision {
+				foundRead = true
+			}
+		}
+		for _, written := range result.Record().WriteSet() {
+			if written == resource {
+				foundWrite = true
+			}
+		}
+		if !foundRead || !foundWrite {
+			t.Fatalf(
+				"integration completion resource %s/%s read=%t write=%t",
+				resource.Kind(), resource.Identity(),
+				foundRead, foundWrite,
+			)
+		}
+	}
+	assertResourceRevision(leaseResource, leaseRevision)
+	assertResourceRevision(segmentResource, segmentRevision)
+	completedSnapshot, err := core.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completedSnapshot.Revision(leaseResource) != leaseRevision+1 ||
+		completedSnapshot.Revision(segmentResource) !=
+			segmentRevision+1 {
+		t.Fatalf(
+			"integration completion revisions: lease=%d segment=%d",
+			completedSnapshot.Revision(leaseResource),
+			completedSnapshot.Revision(segmentResource),
+		)
+	}
+	completedRuntime, err := workspace.RebuildWorkspaceRuntime(
+		completedSnapshot,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, _ := completedRuntime.Attempt(attempt.AttemptID())
+	if !completed.LeaseID().IsZero() ||
+		completed.SerialSegmentHeld() {
+		t.Fatalf(
+			"integration did not release active resources: %#v",
+			completed,
+		)
+	}
+	core.unit = mustMergeUnitReference(
+		t, "alpha-plan", "unit-two",
+	)
+	next := core.reserve(t, "2026-07-25T10:10:04Z")
+	if !next.SerialSegmentHeld() ||
+		next.SerialSegment() != attempt.SerialSegment() {
+		t.Fatalf(
+			"released serial segment was not reusable: %#v",
+			next,
 		)
 	}
 }

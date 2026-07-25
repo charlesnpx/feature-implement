@@ -41,10 +41,14 @@ type MergeUnitIntegratedJournalEvent struct {
 	acceptedHead        GitObjectID
 	acceptedTree        GitObjectID
 	mergeCommit         GitObjectID
+	leaseID             ID
+	serialSegment       ID
 }
 
 func NewMergeUnitIntegratedJournalEvent(
 	intent MergeUnitIntegrationIntent,
+	leaseID ID,
+	serialSegment ID,
 ) (MergeUnitIntegratedJournalEvent, error) {
 	if err := intent.validate(); err != nil {
 		return MergeUnitIntegratedJournalEvent{}, err
@@ -60,6 +64,8 @@ func NewMergeUnitIntegratedJournalEvent(
 		acceptedHead:        intent.acceptedHead,
 		acceptedTree:        intent.acceptedTree,
 		mergeCommit:         intent.expectedMerge,
+		leaseID:             leaseID,
+		serialSegment:       serialSegment,
 	}
 	if err := event.validate(); err != nil {
 		return MergeUnitIntegratedJournalEvent{}, err
@@ -81,7 +87,7 @@ func (event MergeUnitIntegratedJournalEvent) validate() error {
 		event.intentDigest.IsZero() ||
 		event.expectedFeatureHead.IsZero() ||
 		event.acceptedHead.IsZero() || event.acceptedTree.IsZero() ||
-		event.mergeCommit.IsZero() {
+		event.mergeCommit.IsZero() || event.leaseID.IsZero() {
 		return fmt.Errorf(
 			"merge-unit integration completion requires exact intent, Git, and workspace bindings",
 		)
@@ -133,6 +139,12 @@ func (event MergeUnitIntegratedJournalEvent) AcceptedTree() GitObjectID {
 }
 func (event MergeUnitIntegratedJournalEvent) MergeCommit() GitObjectID {
 	return event.mergeCommit
+}
+func (event MergeUnitIntegratedJournalEvent) LeaseID() ID {
+	return event.leaseID
+}
+func (event MergeUnitIntegratedJournalEvent) SerialSegment() ID {
+	return event.serialSegment
 }
 
 func IntegrationJournalResource(attemptID ID) JournalResource {
@@ -190,6 +202,17 @@ func integrationJournalEventResources(
 		MergeUnitJournalResource(mergeUnit),
 		IntegrationJournalResource(attemptID),
 		featureRefJournalResource(workspaceID, featureRef),
+	}
+	if completed, ok := event.(MergeUnitIntegratedJournalEvent); ok {
+		lease := LeaseJournalResource(completed.leaseID)
+		reads, writes = append(reads, lease), append(writes, lease)
+		if !completed.serialSegment.IsZero() {
+			segment := SerialSegmentJournalResource(
+				completed.serialSegment,
+			)
+			reads, writes = append(reads, segment),
+				append(writes, segment)
+		}
 	}
 	return reads, writes, true
 }

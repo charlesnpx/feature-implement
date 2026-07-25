@@ -97,6 +97,19 @@ func IntegrateMergeUnit(
 		if err != nil {
 			return MergeUnitIntegrationResult{}, err
 		}
+		attemptInspection, err := git.InspectAttempt(
+			ctx, binding, attempt.worktree, attempt.branch,
+			evidence.head, evidence.tree,
+		)
+		if err != nil {
+			return MergeUnitIntegrationResult{}, err
+		}
+		expectedFeatureMarker, err := expectedLocalTargetReflogMarker(
+			runtime, target,
+		)
+		if err != nil {
+			return MergeUnitIntegrationResult{}, err
+		}
 		intent, err := NewMergeUnitIntegrationIntent(
 			MergeUnitIntegrationIntentOptions{
 				WorkspaceID:            runtime.workspaceID,
@@ -105,6 +118,8 @@ func IntegrateMergeUnit(
 				MergeUnit:              attempt.mergeUnit,
 				FeatureRef:             binding.featureRef,
 				ExpectedFeatureHead:    target.createdHead,
+				ExpectedFeatureMarker:  expectedFeatureMarker,
+				AttemptWorktreeBinding: attemptInspection.worktreeBinding,
 				AcceptedHead:           evidence.head,
 				AcceptedTree:           evidence.tree,
 				ReviewReadinessDigest:  evidence.reviewReadiness,
@@ -177,16 +192,10 @@ func IntegrateMergeUnit(
 				"completed integration projection is inconsistent",
 			)
 		}
-		inspection, err := git.InspectIntegration(
-			ctx, binding, attempt.branch, intent,
-		)
-		if err != nil {
+		if err := git.VerifyCompletedIntegration(
+			ctx, binding, intent,
+		); err != nil {
 			return MergeUnitIntegrationResult{}, err
-		}
-		if inspection.refState != IntegrationRefExpectedMerge ||
-			!inspection.expectedCommit {
-			return MergeUnitIntegrationResult{},
-				integrationDriftError(inspection)
 		}
 		return MergeUnitIntegrationResult{
 			attempt: attempt, intent: intent,
@@ -250,6 +259,19 @@ func IntegrateMergeUnit(
 			request.Fault, IntegrationFaultBeforeRefCAS,
 		); err != nil {
 			return MergeUnitIntegrationResult{}, err
+		}
+		attemptInspection, err := git.InspectAttempt(
+			ctx, binding, intent.attemptWorktreeBinding.worktree,
+			attempt.branch, intent.acceptedHead, intent.acceptedTree,
+		)
+		if err != nil {
+			return MergeUnitIntegrationResult{}, err
+		}
+		if attemptInspection.worktreeBinding !=
+			intent.attemptWorktreeBinding {
+			return MergeUnitIntegrationResult{}, fmt.Errorf(
+				"attempt worktree Git binding changed immediately before feature-ref publication",
+			)
 		}
 		if err := git.PublishIntegration(
 			ctx, binding, attempt.branch, intent,
@@ -315,7 +337,26 @@ func IntegrateMergeUnit(
 	); err != nil {
 		return MergeUnitIntegrationResult{}, err
 	}
-	event, err := NewMergeUnitIntegratedJournalEvent(intent)
+	completionInspection, err := git.InspectIntegration(
+		ctx, binding, attempt.branch, intent,
+	)
+	if err != nil {
+		return MergeUnitIntegrationResult{}, err
+	}
+	if completionInspection.refState !=
+		IntegrationRefExpectedMerge ||
+		!completionInspection.expectedCommit {
+		return MergeUnitIntegrationResult{}, fmt.Errorf(
+			"integration completion did not retain its exact published Git state",
+		)
+	}
+	serialSegment := ID{}
+	if attempt.serialSegmentHeld {
+		serialSegment = attempt.serialSegment
+	}
+	event, err := NewMergeUnitIntegratedJournalEvent(
+		intent, attempt.leaseID, serialSegment,
+	)
 	if err != nil {
 		return MergeUnitIntegrationResult{}, err
 	}

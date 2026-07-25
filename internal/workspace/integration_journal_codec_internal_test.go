@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -104,7 +105,9 @@ func TestIntegrationJournalCodecRoundTripsAndRejectsTampering(t *testing.T) {
 		t.Fatalf("replayed integration intent = %#v", decoded)
 	}
 
-	completed, err := NewMergeUnitIntegratedJournalEvent(intent)
+	completed, err := NewMergeUnitIntegratedJournalEvent(
+		intent, MustID("lease-one"), MustID("serial-one"),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,6 +162,41 @@ func TestIntegrationJournalCodecRoundTripsAndRejectsTampering(t *testing.T) {
 	); err == nil {
 		t.Fatal("tampered integration parent order was accepted")
 	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*integrationIntentDigestWire)
+	}{
+		{
+			name: "feature marker",
+			mutate: func(wire *integrationIntentDigestWire) {
+				wire.ExpectedFeatureMarker = "external replacement"
+			},
+		},
+		{
+			name: "attempt directory identity",
+			mutate: func(wire *integrationIntentDigestWire) {
+				wire.AttemptWorktreeBinding.WorktreeIdentity.Inode++
+			},
+		},
+	} {
+		wire = integrationIntentDigestValue(intent)
+		test.mutate(&wire)
+		tampered, err = json.Marshal(integrationIntendedPayloadWire{
+			Intent:       wire,
+			IntentDigest: intent.digest.String(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := decodeIntegrationJournalEvent(
+			JournalEventMergeUnitIntegrationIntended, tampered,
+		); err == nil {
+			t.Fatalf(
+				"tampered integration %s was accepted",
+				test.name,
+			)
+		}
+	}
 
 	var object map[string]any
 	if err := json.Unmarshal(payload, &object); err != nil {
@@ -201,6 +239,129 @@ func TestIntegrationIntentRequiresExactlyOneAcceptanceMode(t *testing.T) {
 	}
 }
 
+func TestIntegrationCompletionReducerRequiresExactLeaseAndSerialSegment(
+	t *testing.T,
+) {
+	intent, err := NewMergeUnitIntegrationIntent(
+		integrationIntentTestOptions(t, GitHashSHA1),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetRoot := t.TempDir()
+	commonDirectory := filepath.Join(targetRoot, "git")
+	targetBinding, err := NewLocalTargetBinding(
+		LocalTargetBindingOptions{
+			Root: targetRoot,
+			RootIdentity: PlatformFileIdentity{
+				Device: 2, Inode: 10, Owner: 3,
+			},
+			GitDirectory: commonDirectory,
+			GitDirectoryIdentity: PlatformFileIdentity{
+				Device: 2, Inode: 11, Owner: 3,
+			},
+			CommonDirectory: commonDirectory,
+			CommonIdentity: PlatformFileIdentity{
+				Device: 2, Inode: 11, Owner: 3,
+			},
+			RepositoryFormat: 0,
+			ObjectFormat:     GitHashSHA1,
+			LinkedWorktree:   false,
+			BaseRef:          "refs/heads/main",
+			BaseCommit:       intent.expectedFeatureHead,
+			FeatureBranch:    "feature/example-workspace",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaseID := MustID("lease-one")
+	serialSegment := MustID("serial-one")
+	current := WorkspaceRuntimeProjection{
+		workspaceID:      intent.workspaceID,
+		activeGeneration: intent.generation,
+		localTarget: RuntimeLocalTargetProjection{
+			binding: targetBinding, intentDigest: DigestBytes(
+				[]byte("target intent"),
+			),
+			intentRecord: 1, createdHead: intent.expectedFeatureHead,
+			createdRecord: 2, headRecord: 2,
+		},
+		attempts: []RuntimeAttemptProjection{
+			{
+				attemptID:         intent.attemptID,
+				mergeUnit:         intent.mergeUnit,
+				generation:        intent.generation,
+				base:              intent.expectedFeatureHead,
+				phase:             AttemptActive,
+				verifiedHead:      intent.acceptedHead,
+				leaseID:           leaseID,
+				serialSegment:     serialSegment,
+				serialSegmentHeld: true,
+				integration: &RuntimeIntegrationProjection{
+					intent: intent, intentRecord: 3,
+				},
+			},
+		},
+	}
+	for _, test := range []struct {
+		name    string
+		lease   ID
+		segment ID
+	}{
+		{
+			name:  "wrong lease",
+			lease: MustID("lease-other"), segment: serialSegment,
+		},
+		{
+			name:  "missing segment",
+			lease: leaseID,
+		},
+		{
+			name:  "wrong segment",
+			lease: leaseID, segment: MustID("serial-other"),
+		},
+	} {
+		event, err := NewMergeUnitIntegratedJournalEvent(
+			intent, test.lease, test.segment,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		next := cloneWorkspaceRuntime(current)
+		err = reduceIntegrationRuntime(
+			current, &next, JournalRecord{
+				sequence: 4, generation: intent.generation,
+				event: event,
+			},
+		)
+		if err == nil ||
+			!strings.Contains(err.Error(), "lease") {
+			t.Fatalf("%s completion reducer error = %v", test.name, err)
+		}
+	}
+	event, err := NewMergeUnitIntegratedJournalEvent(
+		intent, leaseID, serialSegment,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := cloneWorkspaceRuntime(current)
+	if err := reduceIntegrationRuntime(
+		current, &next, JournalRecord{
+			sequence: 4, generation: intent.generation,
+			event: event,
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if next.attempts[0].phase != AttemptCompleted ||
+		!next.attempts[0].leaseID.IsZero() ||
+		next.attempts[0].serialSegmentHeld {
+		t.Fatalf("exact completion reducer result = %#v", next.attempts[0])
+	}
+}
+
 func TestIntegrationCommitTreeInspectionDoesNotImposeMessagePolicy(
 	t *testing.T,
 ) {
@@ -239,6 +400,32 @@ func integrationIntentTestOptions(
 	if err != nil {
 		t.Fatal(err)
 	}
+	bindingRoot := t.TempDir()
+	attemptBinding, err := NewAttemptWorktreeGitBinding(
+		AttemptWorktreeGitBindingOptions{
+			Worktree: filepath.Join(bindingRoot, "attempt"),
+			WorktreeIdentity: PlatformFileIdentity{
+				Device: 1, Inode: 2, Owner: 3,
+			},
+			GitDirectory: filepath.Join(bindingRoot, "git", "worktrees", "attempt"),
+			GitDirectoryIdentity: PlatformFileIdentity{
+				Device: 1, Inode: 4, Owner: 3,
+			},
+			CommonDirectory: filepath.Join(bindingRoot, "git"),
+			CommonDirectoryIdentity: PlatformFileIdentity{
+				Device: 1, Inode: 5, Owner: 3,
+			},
+			AdministrationDigest: DigestBytes(
+				[]byte("attempt-administration"),
+			),
+			ConfigurationDigest: DigestBytes(
+				[]byte("attempt-configuration"),
+			),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return MergeUnitIntegrationIntentOptions{
 		WorkspaceID:         MustID("example-workspace"),
 		Generation:          DigestBytes([]byte("integration-generation")),
@@ -246,8 +433,12 @@ func integrationIntentTestOptions(
 		MergeUnit:           mergeUnit,
 		FeatureRef:          "refs/heads/feature/example-workspace",
 		ExpectedFeatureHead: integrationTestObject(t, algorithm, 'a'),
-		AcceptedHead:        integrationTestObject(t, algorithm, 'b'),
-		AcceptedTree:        integrationTestObject(t, algorithm, 'c'),
+		ExpectedFeatureMarker: localTargetReflogMessage(
+			DigestBytes([]byte("prior-feature-marker")),
+		),
+		AttemptWorktreeBinding: attemptBinding,
+		AcceptedHead:           integrationTestObject(t, algorithm, 'b'),
+		AcceptedTree:           integrationTestObject(t, algorithm, 'c'),
 		AdoptedHeadEventDigest: DigestBytes(
 			[]byte("adopted-head-event"),
 		),

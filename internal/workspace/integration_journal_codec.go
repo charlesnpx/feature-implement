@@ -25,6 +25,8 @@ type integrationCompletedPayloadWire struct {
 	AcceptedHead        string `json:"accepted_head"`
 	AcceptedTree        string `json:"accepted_tree"`
 	MergeCommit         string `json:"merge_commit"`
+	LeaseID             string `json:"lease_id"`
+	SerialSegment       string `json:"serial_segment,omitempty"`
 }
 
 func marshalIntegrationJournalEvent(
@@ -50,6 +52,8 @@ func marshalIntegrationJournalEvent(
 			AcceptedHead:        event.acceptedHead.String(),
 			AcceptedTree:        event.acceptedTree.String(),
 			MergeCommit:         event.mergeCommit.String(),
+			LeaseID:             event.leaseID.String(),
+			SerialSegment:       event.serialSegment.String(),
 		}
 	default:
 		return nil, false, nil
@@ -140,6 +144,14 @@ func decodeIntegrationJournalEvent(
 		if err != nil {
 			return nil, true, err
 		}
+		leaseID, err := NewID(wire.LeaseID)
+		if err != nil {
+			return nil, true, err
+		}
+		serialSegment, err := parseOptionalID(wire.SerialSegment)
+		if err != nil {
+			return nil, true, err
+		}
 		event := MergeUnitIntegratedJournalEvent{
 			workspaceID:         workspaceID,
 			generation:          generation,
@@ -151,6 +163,8 @@ func decodeIntegrationJournalEvent(
 			acceptedHead:        acceptedHead,
 			acceptedTree:        acceptedTree,
 			mergeCommit:         mergeCommit,
+			leaseID:             leaseID,
+			serialSegment:       serialSegment,
 		}
 		if err := event.validate(); err != nil {
 			return nil, true, err
@@ -200,6 +214,12 @@ func integrationIntentFromWire(
 	if err != nil {
 		return MergeUnitIntegrationIntent{}, err
 	}
+	attemptWorktreeBinding, err := attemptWorktreeGitBindingFromWire(
+		wire.AttemptWorktreeBinding,
+	)
+	if err != nil {
+		return MergeUnitIntegrationIntent{}, err
+	}
 	acceptedHead, err := ParseGitObjectID(wire.AcceptedHead)
 	if err != nil {
 		return MergeUnitIntegrationIntent{}, err
@@ -241,6 +261,8 @@ func integrationIntentFromWire(
 			MergeUnit:              mergeUnit,
 			FeatureRef:             wire.FeatureRef,
 			ExpectedFeatureHead:    expectedFeatureHead,
+			ExpectedFeatureMarker:  wire.ExpectedFeatureMarker,
+			AttemptWorktreeBinding: attemptWorktreeBinding,
 			AcceptedHead:           acceptedHead,
 			AcceptedTree:           acceptedTree,
 			ReviewReadinessDigest:  reviewReadiness,

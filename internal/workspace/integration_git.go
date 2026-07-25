@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -28,6 +29,53 @@ func DefaultLocalIntegrationGitAdapter() LocalIntegrationGitAdapter {
 	return adapter
 }
 
+func (adapter LocalIntegrationGitAdapter) InspectAttempt(
+	ctx context.Context,
+	binding LocalTargetBinding,
+	worktree, branch string,
+	expectedHead, expectedTree GitObjectID,
+) (result AttemptGitInspection, resultErr error) {
+	if ctx == nil {
+		return AttemptGitInspection{}, fmt.Errorf(
+			"integration attempt inspection requires context",
+		)
+	}
+	if binding.IsZero() || expectedHead.IsZero() ||
+		expectedTree.IsZero() ||
+		expectedHead.Algorithm() != binding.objectFormat ||
+		expectedTree.Algorithm() != binding.objectFormat {
+		return AttemptGitInspection{}, fmt.Errorf(
+			"integration attempt inspection requires target-format head and tree bindings",
+		)
+	}
+	if err := validateAttemptBranchSyntax(branch); err != nil {
+		return AttemptGitInspection{}, err
+	}
+	session, err := adapter.target.openBoundSession(binding)
+	if err != nil {
+		return AttemptGitInspection{}, err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, session.Close())
+	}()
+	inspection, err := adapter.target.git.InspectAttemptWorktree(
+		ctx, binding.root, branch, worktree,
+	)
+	if err != nil {
+		return AttemptGitInspection{}, err
+	}
+	if err := verifyIntegrationAttemptInspection(
+		binding, filepath.Clean(worktree), branch,
+		expectedHead, expectedTree, inspection,
+	); err != nil {
+		return AttemptGitInspection{}, err
+	}
+	if err := session.Verify(); err != nil {
+		return AttemptGitInspection{}, err
+	}
+	return inspection, nil
+}
+
 func (adapter LocalIntegrationGitAdapter) InspectIntegration(
 	ctx context.Context,
 	binding LocalTargetBinding,
@@ -41,6 +89,11 @@ func (adapter LocalIntegrationGitAdapter) InspectIntegration(
 	}
 	if err := validateIntegrationGitRequest(
 		binding, attemptBranch, intent,
+	); err != nil {
+		return IntegrationGitInspection{}, err
+	}
+	if _, err := adapter.inspectBoundAttempt(
+		ctx, binding, attemptBranch, intent,
 	); err != nil {
 		return IntegrationGitInspection{}, err
 	}
@@ -69,6 +122,11 @@ func (adapter LocalIntegrationGitAdapter) CreateIntegrationCommit(
 	}
 	if err := validateIntegrationGitRequest(
 		binding, attemptBranch, intent,
+	); err != nil {
+		return err
+	}
+	if _, err := adapter.inspectBoundAttempt(
+		ctx, binding, attemptBranch, intent,
 	); err != nil {
 		return err
 	}
@@ -144,6 +202,11 @@ func (adapter LocalIntegrationGitAdapter) PublishIntegration(
 	); err != nil {
 		return err
 	}
+	if _, err := adapter.inspectBoundAttempt(
+		ctx, binding, attemptBranch, intent,
+	); err != nil {
+		return err
+	}
 	session, err := adapter.target.openBoundSession(binding)
 	if err != nil {
 		return err
@@ -174,6 +237,28 @@ func (adapter LocalIntegrationGitAdapter) PublishIntegration(
 			intent.expectedMerge,
 		)
 	}
+	if _, err := adapter.inspectBoundAttempt(
+		ctx, binding, attemptBranch, intent,
+	); err != nil {
+		return fmt.Errorf(
+			"verify exact attempt worktree immediately before feature-ref publication: %w",
+			err,
+		)
+	}
+	exists, preCASHead, preCASMarker, err :=
+		session.inspectFeatureRef(ctx)
+	if err != nil {
+		return err
+	}
+	if !exists || preCASHead != intent.expectedFeatureHead ||
+		preCASMarker != intent.expectedFeatureMarker {
+		return fmt.Errorf(
+			"feature ref changed from its exact owned head and marker immediately before publication",
+		)
+	}
+	if err := session.Verify(); err != nil {
+		return err
+	}
 	attemptRef := "refs/heads/" + attemptBranch
 	// The update command's old-object field is the feature-ref verification.
 	// Listing a separate verify for the same ref would make update-ref reject
@@ -198,6 +283,14 @@ func (adapter LocalIntegrationGitAdapter) PublishIntegration(
 			exitCode, err,
 		)
 	}
+	if _, err := adapter.inspectBoundAttempt(
+		ctx, binding, attemptBranch, intent,
+	); err != nil {
+		return fmt.Errorf(
+			"verify exact attempt worktree after feature-ref publication: %w",
+			err,
+		)
+	}
 	verified, err := inspectIntegrationSession(
 		ctx, session, attemptBranch, intent,
 	)
@@ -217,18 +310,156 @@ func integrationReflogMessage(intentDigest Digest) string {
 	return "feature workspace integration " + intentDigest.String()
 }
 
+func (adapter LocalIntegrationGitAdapter) VerifyCompletedIntegration(
+	ctx context.Context,
+	binding LocalTargetBinding,
+	intent MergeUnitIntegrationIntent,
+) (resultErr error) {
+	if ctx == nil {
+		return fmt.Errorf(
+			"completed integration verification requires context",
+		)
+	}
+	if err := validateIntegrationTargetRequest(
+		binding, intent,
+	); err != nil {
+		return err
+	}
+	session, err := adapter.target.openBoundSession(binding)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, session.Close())
+	}()
+	exists, featureHead, featureMarker, err :=
+		session.inspectFeatureRef(ctx)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf(
+			"owned feature ref %s is absent", intent.featureRef,
+		)
+	}
+	if err := verifyIntegrationCommitObject(
+		ctx, session, featureHead, GitObjectID{},
+	); err != nil {
+		return fmt.Errorf(
+			"inspect completed integration feature head: %w", err,
+		)
+	}
+	expectedCommit, err := integrationCommitExists(
+		ctx, session, intent,
+	)
+	if err != nil {
+		return err
+	}
+	refState, err := classifyIntegrationRefState(
+		ctx, session, featureHead, intent, expectedCommit,
+	)
+	if err != nil {
+		return err
+	}
+	inspection, err := NewIntegrationGitInspection(
+		featureHead, refState, expectedCommit,
+	)
+	if err != nil {
+		return err
+	}
+	if refState != IntegrationRefExpectedMerge {
+		return integrationDriftError(inspection)
+	}
+	if featureMarker != integrationReflogMessage(intent.digest) {
+		return fmt.Errorf(
+			"completed integration feature ref does not retain its exact merge and marker",
+		)
+	}
+	return session.Verify()
+}
+
+func (adapter LocalIntegrationGitAdapter) inspectBoundAttempt(
+	ctx context.Context,
+	binding LocalTargetBinding,
+	attemptBranch string,
+	intent MergeUnitIntegrationIntent,
+) (AttemptGitInspection, error) {
+	inspection, err := adapter.InspectAttempt(
+		ctx, binding, intent.attemptWorktreeBinding.worktree,
+		attemptBranch, intent.acceptedHead, intent.acceptedTree,
+	)
+	if err != nil {
+		return AttemptGitInspection{}, err
+	}
+	if inspection.worktreeBinding != intent.attemptWorktreeBinding {
+		return AttemptGitInspection{}, fmt.Errorf(
+			"attempt worktree Git binding changed after durable integration intent",
+		)
+	}
+	return inspection, nil
+}
+
+func verifyIntegrationAttemptInspection(
+	target LocalTargetBinding,
+	worktree, branch string,
+	expectedHead, expectedTree GitObjectID,
+	inspection AttemptGitInspection,
+) error {
+	if !inspection.branchExists || !inspection.worktreeExists ||
+		!inspection.worktreeRegistered || !inspection.clean ||
+		inspection.worktreeBranch != branch ||
+		inspection.branchHead != expectedHead ||
+		inspection.worktreeHead != expectedHead ||
+		inspection.worktreeTree != expectedTree ||
+		inspection.worktreeBinding.IsZero() {
+		return fmt.Errorf(
+			"integration requires the exact registered clean attempt worktree at its accepted head and tree",
+		)
+	}
+	attemptBinding := inspection.worktreeBinding
+	if attemptBinding.worktree != worktree {
+		return fmt.Errorf(
+			"integration attempt worktree path changed during exact inspection",
+		)
+	}
+	if attemptBinding.commonDirectory != target.commonDirectory ||
+		attemptBinding.commonDirectoryIdentity != target.commonIdentity {
+		return fmt.Errorf(
+			"integration attempt worktree does not share the bound target repository",
+		)
+	}
+	return nil
+}
+
 func validateIntegrationGitRequest(
 	binding LocalTargetBinding,
 	attemptBranch string,
+	intent MergeUnitIntegrationIntent,
+) error {
+	if err := validateIntegrationTargetRequest(
+		binding, intent,
+	); err != nil {
+		return err
+	}
+	if err := validateAttemptBranchSyntax(attemptBranch); err != nil {
+		return err
+	}
+	if "refs/heads/"+attemptBranch == binding.featureRef {
+		return fmt.Errorf(
+			"integration attempt and feature refs must be distinct",
+		)
+	}
+	return nil
+}
+
+func validateIntegrationTargetRequest(
+	binding LocalTargetBinding,
 	intent MergeUnitIntegrationIntent,
 ) error {
 	if binding.IsZero() {
 		return fmt.Errorf(
 			"integration Git request requires a local target binding",
 		)
-	}
-	if err := validateAttemptBranchSyntax(attemptBranch); err != nil {
-		return err
 	}
 	if err := intent.validate(); err != nil {
 		return err
@@ -237,11 +468,6 @@ func validateIntegrationGitRequest(
 		binding.objectFormat != intent.expectedFeatureHead.Algorithm() {
 		return fmt.Errorf(
 			"integration intent does not match the bound local target",
-		)
-	}
-	if "refs/heads/"+attemptBranch == binding.featureRef {
-		return fmt.Errorf(
-			"integration attempt and feature refs must be distinct",
 		)
 	}
 	return nil
@@ -259,7 +485,7 @@ func inspectIntegrationSession(
 	if _, err := session.inspectRegisteredWorktrees(ctx); err != nil {
 		return IntegrationGitInspection{}, err
 	}
-	exists, featureHead, _, err := session.inspectFeatureRef(ctx)
+	exists, featureHead, featureMarker, err := session.inspectFeatureRef(ctx)
 	if err != nil {
 		return IntegrationGitInspection{}, err
 	}
@@ -267,6 +493,22 @@ func inspectIntegrationSession(
 		return IntegrationGitInspection{}, fmt.Errorf(
 			"owned feature ref %s is absent", intent.featureRef,
 		)
+	}
+	switch featureHead {
+	case intent.expectedFeatureHead:
+		if featureMarker != intent.expectedFeatureMarker {
+			return IntegrationGitInspection{}, fmt.Errorf(
+				"feature ref %s at the expected prior head has no exact durable workspace marker",
+				intent.featureRef,
+			)
+		}
+	case intent.expectedMerge:
+		if featureMarker != integrationReflogMessage(intent.digest) {
+			return IntegrationGitInspection{}, fmt.Errorf(
+				"feature ref %s at the expected merge has no exact integration marker",
+				intent.featureRef,
+			)
+		}
 	}
 	if err := verifyIntegrationCommitObject(
 		ctx, session, featureHead, GitObjectID{},
