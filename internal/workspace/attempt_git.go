@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"os"
 	"os/exec"
 	pathpkg "path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 )
@@ -670,25 +672,34 @@ func (adapter LocalAttemptGitAdapter) materializeAttemptWorktree(
 	}
 	target := LocalTargetGitAdapter{git: adapter}
 	for _, entry := range entries {
-		content, err := target.readBlob(ctx, source.root, entry.object)
-		if err != nil {
-			return fmt.Errorf("read attempt tree path %s: %w", entry.path, err)
-		}
-		object, err := gitBlobObjectID(algorithm, content)
-		if err != nil {
-			return err
-		}
-		if object != entry.object {
-			return fmt.Errorf("attempt tree path %s did not resolve to its recorded blob", entry.path)
-		}
 		switch entry.mode {
 		case GitModeRegular:
-			err = root.adapter.writeFileExclusive(entry.path, content, 0o644)
+			err = adapter.materializeAttemptBlob(
+				ctx, source.root, root.adapter, entry, algorithm, 0o644,
+			)
 		case GitModeExecutable:
-			err = root.adapter.writeFileExclusive(entry.path, content, 0o755)
+			err = adapter.materializeAttemptBlob(
+				ctx, source.root, root.adapter, entry, algorithm, 0o755,
+			)
 		case GitModeSymlink:
-			if err = validateRepositorySymlink(entry.path, content); err == nil {
-				err = root.adapter.writeSymlinkExclusive(entry.path, string(content))
+			var content []byte
+			content, err = target.readBlob(ctx, source.root, entry.object)
+			if err == nil {
+				var object GitObjectID
+				object, err = gitBlobObjectID(algorithm, content)
+				if err == nil && object != entry.object {
+					err = fmt.Errorf(
+						"attempt tree path did not resolve to its recorded blob",
+					)
+				}
+			}
+			if err == nil {
+				err = validateRepositorySymlink(entry.path, content)
+			}
+			if err == nil {
+				err = root.adapter.writeSymlinkExclusive(
+					entry.path, string(content),
+				)
 			}
 		default:
 			err = fmt.Errorf("unsupported attempt tree mode %s", entry.mode)
@@ -718,6 +729,106 @@ func (adapter LocalAttemptGitAdapter) materializeAttemptWorktree(
 		return fmt.Errorf("confirm exact attempt Git state: %w", err)
 	}
 	return nil
+}
+
+func (adapter LocalAttemptGitAdapter) materializeAttemptBlob(
+	ctx context.Context,
+	sourceRoot string,
+	root *RootedFilesystemAdapter,
+	entry rawGitTreeEntry,
+	algorithm GitHashAlgorithm,
+	permission os.FileMode,
+) error {
+	size, err := adapter.gitBlobSize(ctx, sourceRoot, entry.object)
+	if err != nil {
+		return err
+	}
+	digest, err := newGitBlobHasher(algorithm, size)
+	if err != nil {
+		return err
+	}
+	return root.writeFileExclusiveWith(
+		entry.path, permission,
+		func(file *os.File) error {
+			writer := exactGitBlobWriter{
+				file: file, digest: digest,
+				expected: size, remaining: size,
+			}
+			if err := adapter.streamGitBlob(
+				ctx, sourceRoot, entry.object, &writer,
+			); err != nil {
+				return fmt.Errorf("read Git blob %s: %w", entry.object, err)
+			}
+			if writer.remaining != 0 {
+				return fmt.Errorf(
+					"read Git blob %s produced %d bytes, expected %d",
+					entry.object, writer.expected-writer.remaining, writer.expected,
+				)
+			}
+			object, err := gitObjectIDFromHash(algorithm, digest)
+			if err != nil {
+				return err
+			}
+			if object != entry.object {
+				return fmt.Errorf(
+					"attempt tree path did not resolve to its recorded blob",
+				)
+			}
+			return nil
+		},
+	)
+}
+
+func (adapter LocalAttemptGitAdapter) gitBlobSize(
+	ctx context.Context,
+	sourceRoot string,
+	object GitObjectID,
+) (int64, error) {
+	output, exitCode, err := adapter.run(
+		ctx, sourceRoot, "cat-file", "-s", gitObjectHex(object),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("read Git blob %s size: %w", object, err)
+	}
+	if exitCode != 0 {
+		return 0, fmt.Errorf(
+			"read Git blob %s size: Git exited with status %d",
+			object, exitCode,
+		)
+	}
+	size, err := strconv.ParseInt(strings.TrimSpace(string(output)), 10, 64)
+	if err != nil || size < 0 {
+		return 0, fmt.Errorf("read Git blob %s returned an invalid size", object)
+	}
+	return size, nil
+}
+
+type exactGitBlobWriter struct {
+	file      *os.File
+	digest    hash.Hash
+	expected  int64
+	remaining int64
+}
+
+func (writer *exactGitBlobWriter) Write(content []byte) (int, error) {
+	if writer == nil || writer.file == nil || writer.digest == nil ||
+		writer.remaining < 0 {
+		return 0, fmt.Errorf("Git blob writer is not initialized")
+	}
+	if int64(len(content)) > writer.remaining {
+		return 0, fmt.Errorf(
+			"Git blob output exceeds its declared size of %d bytes",
+			writer.expected,
+		)
+	}
+	if err := writeAll(writer.file, content); err != nil {
+		return 0, err
+	}
+	if err := writeAll(writer.digest, content); err != nil {
+		return 0, err
+	}
+	writer.remaining -= int64(len(content))
+	return len(content), nil
 }
 
 func validateAttemptTreeEntries(entries []rawGitTreeEntry) ([]string, error) {
@@ -1329,6 +1440,52 @@ func (adapter LocalAttemptGitAdapter) run(
 		return nil, -1, fmt.Errorf("Git output exceeded its bound")
 	}
 	return stdout.bytes(), exitCode, nil
+}
+
+func (adapter LocalAttemptGitAdapter) streamGitBlob(
+	ctx context.Context,
+	repositoryRoot string,
+	object GitObjectID,
+	destination *exactGitBlobWriter,
+) error {
+	repositoryRoot = filepath.Clean(strings.TrimSpace(repositoryRoot))
+	if !filepath.IsAbs(repositoryRoot) {
+		return fmt.Errorf("Git repository root must be absolute")
+	}
+	if destination == nil {
+		return fmt.Errorf("Git blob destination is required")
+	}
+	command := exec.CommandContext(
+		ctx, adapter.executable,
+		trustedGitArguments(
+			repositoryRoot, "cat-file", "blob", gitObjectHex(object),
+		)...,
+	)
+	environment, err := BuildIsolatedProcessEnvironment(
+		os.Environ(), adapter.environment,
+	)
+	if err != nil {
+		return err
+	}
+	command.Env = environment
+	var stderr boundedProcessBuffer
+	stderr.maximum = 64 * 1024
+	command.Stdout = destination
+	command.Stderr = &stderr
+	err = command.Run()
+	if stderr.exceeded {
+		return fmt.Errorf("Git output exceeded its bound")
+	}
+	if err != nil {
+		var exitError *exec.ExitError
+		if errors.As(err, &exitError) {
+			return fmt.Errorf(
+				"Git exited with status %d", exitError.ExitCode(),
+			)
+		}
+		return err
+	}
+	return nil
 }
 
 type boundedProcessBuffer struct {

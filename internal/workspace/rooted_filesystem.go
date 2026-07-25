@@ -567,6 +567,22 @@ func (adapter *RootedFilesystemAdapter) makeDirectory(relative string, permissio
 }
 
 func (adapter *RootedFilesystemAdapter) writeFileExclusive(relative string, content []byte, permission os.FileMode) error {
+	return adapter.writeFileExclusiveWith(
+		relative, permission,
+		func(file *os.File) error {
+			return writeAll(file, content)
+		},
+	)
+}
+
+func (adapter *RootedFilesystemAdapter) writeFileExclusiveWith(
+	relative string,
+	permission os.FileMode,
+	populate func(*os.File) error,
+) error {
+	if populate == nil {
+		return fmt.Errorf("rooted file population is required")
+	}
 	rooted, err := NewRootedPath(adapter.rootPath, relative)
 	if err != nil {
 		return err
@@ -594,7 +610,7 @@ func (adapter *RootedFilesystemAdapter) writeFileExclusive(relative string, cont
 			_ = directory.Remove(base)
 		}
 	}()
-	if err := writeAll(file, content); err != nil {
+	if err := populate(file); err != nil {
 		return err
 	}
 	if err := file.Chmod(permission.Perm()); err != nil {

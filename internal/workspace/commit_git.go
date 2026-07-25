@@ -18,6 +18,18 @@ import (
 )
 
 func gitBlobObjectID(algorithm GitHashAlgorithm, content []byte) (GitObjectID, error) {
+	digest, err := newGitBlobHasher(algorithm, int64(len(content)))
+	if err != nil {
+		return GitObjectID{}, err
+	}
+	_, _ = digest.Write(content)
+	return gitObjectIDFromHash(algorithm, digest)
+}
+
+func newGitBlobHasher(algorithm GitHashAlgorithm, size int64) (hash.Hash, error) {
+	if size < 0 {
+		return nil, fmt.Errorf("Git blob size cannot be negative")
+	}
 	var digest hash.Hash
 	switch algorithm {
 	case GitHashSHA1:
@@ -25,11 +37,33 @@ func gitBlobObjectID(algorithm GitHashAlgorithm, content []byte) (GitObjectID, e
 	case GitHashSHA256:
 		digest = sha256.New()
 	default:
-		return GitObjectID{}, fmt.Errorf("unsupported Git blob algorithm %q", algorithm)
+		return nil, fmt.Errorf("unsupported Git blob algorithm %q", algorithm)
 	}
-	_, _ = fmt.Fprintf(digest, "blob %d%c", len(content), byte(0))
-	_, _ = digest.Write(content)
+	_, _ = fmt.Fprintf(digest, "blob %d%c", size, byte(0))
+	return digest, nil
+}
+
+func gitObjectIDFromHash(
+	algorithm GitHashAlgorithm,
+	digest hash.Hash,
+) (GitObjectID, error) {
+	if digest == nil {
+		return GitObjectID{}, fmt.Errorf("Git object digest is required")
+	}
 	raw := digest.Sum(nil)
+	expected := 0
+	switch algorithm {
+	case GitHashSHA1:
+		expected = sha1.Size
+	case GitHashSHA256:
+		expected = sha256.Size
+	}
+	if expected == 0 || len(raw) != expected {
+		return GitObjectID{}, fmt.Errorf(
+			"Git object digest length %d does not match %s",
+			len(raw), algorithm,
+		)
+	}
 	var object GitObjectID
 	object.algorithm = algorithm
 	object.length = uint8(len(raw))

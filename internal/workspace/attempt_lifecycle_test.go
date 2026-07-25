@@ -1354,6 +1354,67 @@ func TestAttemptWorktreeMaterializesExactRawTreeWithoutCheckoutPrograms(t *testi
 	}
 }
 
+func TestAttemptWorktreeStreamsBlobLargerThanBufferedGitOutputLimit(t *testing.T) {
+	repositoryRoot, _ := newRawAttemptTreeRepository(t)
+	content := bytes.Repeat([]byte{0xa5}, 8*1024*1024+1)
+	largePath := filepath.Join(repositoryRoot, "large.bin")
+	if err := os.WriteFile(largePath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitSetup(t, repositoryRoot, "add", "--", "large.bin")
+	runGitSetup(
+		t, repositoryRoot,
+		"-c", "user.name=Attempt Test",
+		"-c", "user.email=attempt@example.invalid",
+		"commit", "-m", "add large raw blob",
+	)
+	baseText := strings.TrimSpace(string(
+		runGitSetup(t, repositoryRoot, "rev-parse", "HEAD"),
+	))
+	base, err := workspace.ParseGitObjectID("sha1:" + baseText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree := filepath.Join(canonicalTestDirectory(t), "attempt")
+	claim, err := workspace.NewAttemptWorktreeClaim(
+		workspace.MustID("large-blob-attempt"),
+		workspace.DigestBytes([]byte("large-blob-generation")),
+		base,
+		"mu/large-blob-attempt",
+		worktree,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := workspace.DefaultLocalAttemptGitAdapter()
+	if err := adapter.PrepareAttemptWorktree(
+		context.Background(), repositoryRoot, claim, false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.CreateAttemptWorktree(
+		context.Background(), repositoryRoot, claim, true, false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	materialized, err := os.ReadFile(filepath.Join(worktree, "large.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(materialized, content) {
+		t.Fatalf(
+			"large raw blob differs: got %d bytes, want %d",
+			len(materialized), len(content),
+		)
+	}
+	inspection, err := adapter.InspectAttemptWorktree(
+		context.Background(), repositoryRoot, claim.Branch(), worktree,
+	)
+	if err != nil || !inspection.Clean() || inspection.WorktreeHead() != base {
+		t.Fatalf("large raw attempt inspection = %#v, %v", inspection, err)
+	}
+}
+
 func TestAttemptWorktreeRecoversInterruptedRawPublication(t *testing.T) {
 	crash := errors.New("simulated raw materialization interruption")
 	for _, point := range []workspace.AttemptWorktreeMaterializationFaultPoint{
