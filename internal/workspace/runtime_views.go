@@ -666,9 +666,3 @@ func unitExecutionsByMergeUnit(definition EffectiveWorkspaceDefinition) map[stri
 	}
 	return result
 }
-
-func authorizationStateSafe(state AuthorizationState) bool {
-	safety := state.safety
-	return !safety.gatesBlocked && !safety.reconciliationPending && !safety.driftDetected && !safety.ambiguousEffect &&
-		len(state.obligations) == 0
-}

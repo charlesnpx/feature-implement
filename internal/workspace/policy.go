@@ -47,16 +47,15 @@ func (policy AttemptBoundaryPolicy) SerialSegment() ID         { return policy.s
 // defined below. Required controls may only become true, permissions may only
 // become false, and positive budgets may only decrease.
 type ExecutionPolicy struct {
-	requirePassingChecks  bool
-	requireSignedReceipts bool
-	allowWriteNetwork     bool
-	maxAttempts           uint16
-	maxReviewRounds       uint16
-	maxReviewFixes        uint16
+	requirePassingChecks bool
+	allowWriteNetwork    bool
+	maxAttempts          uint16
+	maxReviewRounds      uint16
+	maxReviewFixes       uint16
 }
 
 func newExecutionPolicy(wire executionPolicyWire, location string) (ExecutionPolicy, error) {
-	if wire.RequirePassingChecks == nil || wire.RequireSignedReceipts == nil || wire.AllowWriteNetwork == nil ||
+	if wire.RequirePassingChecks == nil || wire.AllowWriteNetwork == nil ||
 		wire.MaxAttempts == nil || wire.MaxReviewRounds == nil || wire.MaxReviewFixes == nil {
 		return ExecutionPolicy{}, fmt.Errorf("%s must explicitly define every policy field", location)
 	}
@@ -64,28 +63,23 @@ func newExecutionPolicy(wire executionPolicyWire, location string) (ExecutionPol
 		return ExecutionPolicy{}, fmt.Errorf("%s budgets must be positive", location)
 	}
 	return ExecutionPolicy{
-		requirePassingChecks:  *wire.RequirePassingChecks,
-		requireSignedReceipts: *wire.RequireSignedReceipts,
-		allowWriteNetwork:     *wire.AllowWriteNetwork,
-		maxAttempts:           *wire.MaxAttempts,
-		maxReviewRounds:       *wire.MaxReviewRounds,
-		maxReviewFixes:        *wire.MaxReviewFixes,
+		requirePassingChecks: *wire.RequirePassingChecks,
+		allowWriteNetwork:    *wire.AllowWriteNetwork,
+		maxAttempts:          *wire.MaxAttempts,
+		maxReviewRounds:      *wire.MaxReviewRounds,
+		maxReviewFixes:       *wire.MaxReviewFixes,
 	}, nil
 }
 
-func (policy ExecutionPolicy) RequirePassingChecks() bool  { return policy.requirePassingChecks }
-func (policy ExecutionPolicy) RequireSignedReceipts() bool { return policy.requireSignedReceipts }
-func (policy ExecutionPolicy) AllowWriteNetwork() bool     { return policy.allowWriteNetwork }
-func (policy ExecutionPolicy) MaxAttempts() uint16         { return policy.maxAttempts }
-func (policy ExecutionPolicy) MaxReviewRounds() uint16     { return policy.maxReviewRounds }
-func (policy ExecutionPolicy) MaxReviewFixes() uint16      { return policy.maxReviewFixes }
+func (policy ExecutionPolicy) RequirePassingChecks() bool { return policy.requirePassingChecks }
+func (policy ExecutionPolicy) AllowWriteNetwork() bool    { return policy.allowWriteNetwork }
+func (policy ExecutionPolicy) MaxAttempts() uint16        { return policy.maxAttempts }
+func (policy ExecutionPolicy) MaxReviewRounds() uint16    { return policy.maxReviewRounds }
+func (policy ExecutionPolicy) MaxReviewFixes() uint16     { return policy.maxReviewFixes }
 
 func (policy ExecutionPolicy) validateStrengthens(base ExecutionPolicy, location string) error {
 	if base.requirePassingChecks && !policy.requirePassingChecks {
 		return fmt.Errorf("%s weakens require_passing_checks", location)
-	}
-	if base.requireSignedReceipts && !policy.requireSignedReceipts {
-		return fmt.Errorf("%s weakens require_signed_receipts", location)
 	}
 	if !base.allowWriteNetwork && policy.allowWriteNetwork {
 		return fmt.Errorf("%s weakens allow_write_network", location)

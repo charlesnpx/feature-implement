@@ -18,7 +18,6 @@ import (
 
 type fakeAttemptGit struct {
 	local                []string
-	remote               []string
 	inspection           workspace.AttemptGitInspection
 	createCalls          int
 	prepareCalls         int
@@ -38,11 +37,11 @@ func (git *fakeAttemptGit) ValidateAttemptWorktreeRoot(context.Context, string, 
 	return git.validateErr
 }
 
-func (git *fakeAttemptGit) InspectAttemptRefs(context.Context, string, string) (workspace.AttemptRefInventory, error) {
+func (git *fakeAttemptGit) InspectAttemptRefs(context.Context, string) (workspace.AttemptRefInventory, error) {
 	if git.inspectErr != nil {
 		return workspace.AttemptRefInventory{}, git.inspectErr
 	}
-	return workspace.NewAttemptRefInventory(git.local, git.remote)
+	return workspace.NewAttemptRefInventory(git.local)
 }
 
 func (git *fakeAttemptGit) InspectAttemptWorktree(context.Context, string, string, string) (workspace.AttemptGitInspection, error) {
@@ -227,10 +226,8 @@ func (h attemptHarness) materialize(t *testing.T, attemptID workspace.ID, at str
 }
 
 func TestAttemptIdentityIsFlatBoundedDigestBackedAndRejectsRefConflicts(t *testing.T) {
-	repository, err := workspace.NewRepositoryIdentity("https://github.com/example/project.git")
-	if err != nil {
-		t.Fatal(err)
-	}
+	workspaceID := workspace.MustID("workspace-one")
+	generation := workspace.DigestBytes([]byte("generation-one"))
 	plan := workspace.MustID("p" + strings.Repeat("1", 90))
 	unit := workspace.MustID("u" + strings.Repeat("2", 90))
 	reference, err := workspace.NewMergeUnitReference(plan, unit)
@@ -238,7 +235,7 @@ func TestAttemptIdentityIsFlatBoundedDigestBackedAndRejectsRefConflicts(t *testi
 		t.Fatal(err)
 	}
 	base, _ := workspace.ParseGitObjectID("sha1:" + strings.Repeat("a", 40))
-	identity, err := workspace.DeriveAttemptIdentity(repository, reference, 7, base)
+	identity, err := workspace.DeriveAttemptIdentity(workspaceID, generation, reference, 7, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,33 +243,46 @@ func TestAttemptIdentityIsFlatBoundedDigestBackedAndRejectsRefConflicts(t *testi
 		!strings.HasPrefix(identity.Branch(), "mu/") || !strings.Contains(identity.Branch(), "-a7-") {
 		t.Fatalf("attempt branch is not flat and bounded: %q (%d)", identity.Branch(), len(identity.Branch()))
 	}
-	repeated, err := workspace.DeriveAttemptIdentity(repository, reference, 7, base)
+	repeated, err := workspace.DeriveAttemptIdentity(workspaceID, generation, reference, 7, base)
 	if err != nil || repeated.Branch() != identity.Branch() || repeated.AttemptID() != identity.AttemptID() {
 		t.Fatalf("attempt identity is not stable: %#v, %v", repeated, err)
 	}
 	otherBase, _ := workspace.ParseGitObjectID("sha1:" + strings.Repeat("b", 40))
-	changed, _ := workspace.DeriveAttemptIdentity(repository, reference, 7, otherBase)
+	changed, _ := workspace.DeriveAttemptIdentity(workspaceID, generation, reference, 7, otherBase)
 	if changed.Branch() == identity.Branch() || changed.AttemptID() == identity.AttemptID() {
 		t.Fatal("attempt identity does not bind the exact base")
 	}
+	changed, _ = workspace.DeriveAttemptIdentity(
+		workspaceID, workspace.DigestBytes([]byte("generation-two")),
+		reference, 7, base,
+	)
+	if changed.Branch() == identity.Branch() ||
+		changed.AttemptID() == identity.AttemptID() {
+		t.Fatal("attempt identity does not bind the generation")
+	}
+	changed, _ = workspace.DeriveAttemptIdentity(
+		workspace.MustID("workspace-two"), generation,
+		reference, 7, base,
+	)
+	if changed.Branch() == identity.Branch() ||
+		changed.AttemptID() == identity.AttemptID() {
+		t.Fatal("attempt identity does not bind the workspace")
+	}
 
 	tests := []struct {
-		name   string
-		local  []string
-		remote []string
-		kind   workspace.AttemptRefConflictKind
-		scope  workspace.AttemptRefScope
+		name string
+		refs []string
+		kind workspace.AttemptRefConflictKind
 	}{
-		{"local exact", []string{identity.Branch()}, nil, workspace.AttemptRefExact, workspace.AttemptRefLocal},
-		{"remote exact", nil, []string{identity.Branch()}, workspace.AttemptRefExact, workspace.AttemptRefRemote},
-		{"ancestor", []string{"mu"}, nil, workspace.AttemptRefAncestor, workspace.AttemptRefLocal},
-		{"descendant", nil, []string{identity.Branch() + "/child"}, workspace.AttemptRefDescendant, workspace.AttemptRefRemote},
+		{"exact", []string{identity.Branch()}, workspace.AttemptRefExact},
+		{"ancestor", []string{"mu"}, workspace.AttemptRefAncestor},
+		{"descendant", []string{identity.Branch() + "/child"}, workspace.AttemptRefDescendant},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := workspace.CheckAttemptRefConflicts(identity.Branch(), test.local, test.remote, false)
+			err := workspace.CheckAttemptRefConflicts(identity.Branch(), test.refs, false)
 			var conflict workspace.AttemptRefConflict
-			if !errors.As(err, &conflict) || conflict.Kind() != test.kind || conflict.Scope() != test.scope {
+			if !errors.As(err, &conflict) || conflict.Kind() != test.kind {
 				t.Fatalf("conflict = %#v, %v", conflict, err)
 			}
 		})
@@ -335,31 +345,25 @@ func TestExecutionConfigRequiresExplicitSupportedBoundaryPolicy(t *testing.T) {
 	}
 }
 
-func TestReserveAttemptRejectsLocalAndRemoteRefCollisions(t *testing.T) {
+func TestReserveAttemptRejectsLocalRefCollisions(t *testing.T) {
 	for _, test := range []struct {
-		name   string
-		local  func(string) []string
-		remote func(string) []string
+		name  string
+		local func(string) []string
 	}{
-		{"local exact", func(branch string) []string { return []string{branch} }, nil},
-		{"local ancestor", func(string) []string { return []string{"mu"} }, nil},
-		{"remote exact", nil, func(branch string) []string { return []string{"refs/heads/" + branch} }},
-		{"remote descendant", nil, func(branch string) []string { return []string{branch + "/child"} }},
+		{"exact", func(branch string) []string { return []string{branch} }},
+		{"ancestor", func(string) []string { return []string{"mu"} }},
+		{"descendant", func(branch string) []string { return []string{branch + "/child"} }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			harness := newAttemptHarness(t, "unit-one")
 			identity, err := workspace.DeriveAttemptIdentity(
-				harness.definition.Workspace().Repository(), harness.unit, 1, harness.base,
+				harness.definition.Workspace().ID(), harness.definition.Generation(),
+				harness.unit, 1, harness.base,
 			)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if test.local != nil {
-				harness.git.local = test.local(identity.Branch())
-			}
-			if test.remote != nil {
-				harness.git.remote = test.remote(identity.Branch())
-			}
+			harness.git.local = test.local(identity.Branch())
 			_, err = workspace.ReserveAttempt(
 				context.Background(), harness.journal, harness.definition, harness.git,
 				workspace.ReserveAttemptRequest{
@@ -379,7 +383,8 @@ func TestAttemptMaterializationRecoversAcrossEveryCrashPoint(t *testing.T) {
 	harness := newAttemptHarness(t, "unit-one")
 	crash := errors.New("simulated crash")
 	identity, err := workspace.DeriveAttemptIdentity(
-		harness.definition.Workspace().Repository(), harness.unit, 1, harness.base,
+		harness.definition.Workspace().ID(), harness.definition.Generation(),
+		harness.unit, 1, harness.base,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -454,7 +459,7 @@ func TestAttemptMaterializationRecoversAcrossEveryCrashPoint(t *testing.T) {
 	}
 	started := mustRuntimeAttempt(t, harness.journal, attempt.AttemptID())
 	if started.Phase() != workspace.AttemptActive || started.VerifiedHead() != harness.base ||
-		started.LeaseID().IsZero() || started.AuthorizationID().IsZero() || harness.git.createCalls != 1 {
+		started.LeaseID().IsZero() || harness.git.createCalls != 1 {
 		t.Fatalf("started attempt = %#v, creates %d", started, harness.git.createCalls)
 	}
 	startedAgain := harness.materialize(t, attempt.AttemptID(), "2026-07-21T10:06:00Z")
@@ -1262,7 +1267,7 @@ func TestPauseOnlyBoundaryAtomicallyPausesAndResumesSameGoal(t *testing.T) {
 	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T11:02:00Z")
 	unconstrainedHead := mustGitObject(t, 'b')
 	harness.git.setHead(t, attempt.Branch(), unconstrainedHead, true)
-	lease, authorization := attempt.LeaseID(), attempt.AuthorizationID()
+	lease := attempt.LeaseID()
 	evidence := boundaryEvidence(t, "pause-only")
 	result, err := workspace.RecordAttemptBoundary(
 		context.Background(), harness.journal, harness.definition, harness.git,
@@ -1274,13 +1279,13 @@ func TestPauseOnlyBoundaryAtomicallyPausesAndResumesSameGoal(t *testing.T) {
 		t.Fatal(err)
 	}
 	paused := result.Attempt()
-	if paused.Phase() != workspace.AttemptPaused || !paused.LeaseID().IsZero() || !paused.AuthorizationID().IsZero() ||
+	if paused.Phase() != workspace.AttemptPaused || !paused.LeaseID().IsZero() ||
 		paused.SerialSegmentHeld() || len(result.Directives()) != 1 {
 		t.Fatalf("pause-only boundary did not atomically close and release: %#v", paused)
 	}
 	boundary := result.Boundary()
-	if boundary.LeaseID() != lease || boundary.AuthorizationID() != authorization || boundary.EvidenceDigest().IsZero() ||
-		boundary.Head() != unconstrainedHead || !boundary.AuthorizationClosed() || !boundary.LeaseFencedAndReleased() {
+	if boundary.LeaseID() != lease || boundary.EvidenceDigest().IsZero() ||
+		boundary.Head() != unconstrainedHead || !boundary.LeaseFencedAndReleased() {
 		t.Fatalf("boundary did not checkpoint closed bindings: %#v", boundary)
 	}
 	ownerDirective, ok := result.Directives()[0].(workspace.OwnerGateDirective)
@@ -1303,8 +1308,7 @@ func TestPauseOnlyBoundaryAtomicallyPausesAndResumesSameGoal(t *testing.T) {
 	}
 	for _, kind := range []workspace.JournalResourceKind{
 		workspace.JournalResourceAttempt, workspace.JournalResourceLease,
-		workspace.JournalResourceAuthorization, workspace.JournalResourceEvidence,
-		workspace.JournalResourceSerialSegment,
+		workspace.JournalResourceEvidence, workspace.JournalResourceSerialSegment,
 	} {
 		if !writtenKinds[kind] {
 			t.Fatalf("atomic boundary did not write %s resource", kind)
@@ -1340,7 +1344,7 @@ func TestPauseOnlyBoundaryAtomicallyPausesAndResumesSameGoal(t *testing.T) {
 		t.Fatal(err)
 	}
 	if resumed.Phase() != workspace.AttemptActive || resumed.Goal() != harness.goal ||
-		resumed.LeaseID() == lease || resumed.AuthorizationID() == authorization || !resumed.SerialSegmentHeld() {
+		resumed.LeaseID() == lease || !resumed.SerialSegmentHeld() {
 		t.Fatalf("pause-only resume bindings = %#v", resumed)
 	}
 }
@@ -1787,61 +1791,6 @@ func TestSerialSegmentsFenceOnlyMatchingSegments(t *testing.T) {
 	}
 }
 
-type boundaryVerifier struct {
-	expectedRequest workspace.Digest
-	calls           int
-}
-
-func (verifier *boundaryVerifier) Verify(
-	_ context.Context,
-	verification workspace.ControlPlaneVerification,
-	receipt workspace.ControlPlaneReceiptV2,
-) error {
-	verifier.calls++
-	if receipt.Binding() != verification.Binding() {
-		return fmt.Errorf("receipt binding does not match verification")
-	}
-	if !verifier.expectedRequest.IsZero() && verification.RequestDigest() != verifier.expectedRequest {
-		return fmt.Errorf("request = %s, expected %s", verification.RequestDigest(), verifier.expectedRequest)
-	}
-	return nil
-}
-
-func controlPlaneReceipt(t *testing.T, binding workspace.ControlPlaneBinding, nonce string) workspace.ControlPlaneReceiptV2 {
-	t.Helper()
-	envelope, err := workspace.NewControlPlaneEnvelopeV2(
-		binding, workspace.MustID("owner-key"), nonce,
-		mustTime(t, "2026-07-22T00:00:00Z"), workspace.MustID("test-coordinator"),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	signature := make([]byte, 64)
-	signature[0] = 1
-	receipt, err := workspace.NewControlPlaneReceiptV2(envelope, signature)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return receipt
-}
-
-func placeholderControlPlaneReceipt(t *testing.T, request workspace.Digest, nonce string) workspace.ControlPlaneReceiptV2 {
-	t.Helper()
-	repository, err := workspace.NewRepositoryIdentity("https://example.invalid/repository.git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	binding, err := workspace.NewControlPlaneBinding(workspace.ControlPlaneBindingOptions{
-		Kind: workspace.ControlPlaneReceiptReconciliation, WorkspaceID: workspace.MustID("placeholder-workspace"),
-		Generation: workspace.DigestBytes([]byte("placeholder-generation")), RequestDigest: request,
-		Repository: repository, Remote: "origin",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return controlPlaneReceipt(t, binding, nonce)
-}
-
 func boundaryEvidence(t *testing.T, label string) []workspace.Evidence {
 	t.Helper()
 	item, err := workspace.NewEvidenceItem(workspace.MustID("result"), label)
@@ -1909,4 +1858,3 @@ func runGitSetup(t *testing.T, directory string, arguments ...string) []byte {
 }
 
 var _ workspace.AttemptGitPort = (*fakeAttemptGit)(nil)
-var _ workspace.ControlPlaneVerifierPort = (*boundaryVerifier)(nil)

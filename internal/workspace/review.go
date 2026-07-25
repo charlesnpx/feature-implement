@@ -142,57 +142,53 @@ func normalizeReviewFindings(values []ReviewFinding) ([]ReviewFinding, error) {
 }
 
 type ReviewIsolationProof struct {
-	repositoryReadOnly   bool
-	scratchEphemeral     bool
-	credentialsAvailable bool
-	repositoryHooks      bool
-	writeNetwork         bool
-	externalWrite        bool
-	digest               Digest
+	repositoryReadOnly bool
+	scratchEphemeral   bool
+	repositoryHooks    bool
+	writeNetwork       bool
+	externalWrite      bool
+	digest             Digest
 }
 
 func NewReviewIsolationProof(
-	repositoryReadOnly, scratchEphemeral, credentialsAvailable, repositoryHooks,
+	repositoryReadOnly, scratchEphemeral, repositoryHooks,
 	writeNetwork, externalWrite bool,
 ) ReviewIsolationProof {
 	type proofJSON struct {
-		SchemaVersion        int  `json:"schema_version"`
-		RepositoryReadOnly   bool `json:"repository_read_only"`
-		ScratchEphemeral     bool `json:"scratch_ephemeral"`
-		CredentialsAvailable bool `json:"credentials_available"`
-		RepositoryHooks      bool `json:"repository_hooks"`
-		WriteNetwork         bool `json:"write_network"`
-		ExternalWrite        bool `json:"external_write"`
+		SchemaVersion      int  `json:"schema_version"`
+		RepositoryReadOnly bool `json:"repository_read_only"`
+		ScratchEphemeral   bool `json:"scratch_ephemeral"`
+		RepositoryHooks    bool `json:"repository_hooks"`
+		WriteNetwork       bool `json:"write_network"`
+		ExternalWrite      bool `json:"external_write"`
 	}
 	canonical, _ := json.Marshal(proofJSON{
 		SchemaVersion:      2,
 		RepositoryReadOnly: repositoryReadOnly, ScratchEphemeral: scratchEphemeral,
-		CredentialsAvailable: credentialsAvailable, RepositoryHooks: repositoryHooks,
-		WriteNetwork: writeNetwork, ExternalWrite: externalWrite,
+		RepositoryHooks: repositoryHooks,
+		WriteNetwork:    writeNetwork, ExternalWrite: externalWrite,
 	})
 	return ReviewIsolationProof{
 		repositoryReadOnly: repositoryReadOnly, scratchEphemeral: scratchEphemeral,
-		credentialsAvailable: credentialsAvailable, repositoryHooks: repositoryHooks,
-		writeNetwork: writeNetwork, externalWrite: externalWrite,
+		repositoryHooks: repositoryHooks,
+		writeNetwork:    writeNetwork, externalWrite: externalWrite,
 		digest: DigestBytes(canonical),
 	}
 }
 
 func StrictReviewIsolationProof() ReviewIsolationProof {
-	return NewReviewIsolationProof(true, true, false, false, false, false)
+	return NewReviewIsolationProof(true, true, false, false, false)
 }
 
-func (proof ReviewIsolationProof) RepositoryReadOnly() bool   { return proof.repositoryReadOnly }
-func (proof ReviewIsolationProof) ScratchEphemeral() bool     { return proof.scratchEphemeral }
-func (proof ReviewIsolationProof) CredentialsAvailable() bool { return proof.credentialsAvailable }
-func (proof ReviewIsolationProof) RepositoryHooks() bool      { return proof.repositoryHooks }
-func (proof ReviewIsolationProof) WriteNetwork() bool         { return proof.writeNetwork }
-func (proof ReviewIsolationProof) ExternalWrite() bool        { return proof.externalWrite }
-func (proof ReviewIsolationProof) Digest() Digest             { return proof.digest }
+func (proof ReviewIsolationProof) RepositoryReadOnly() bool { return proof.repositoryReadOnly }
+func (proof ReviewIsolationProof) ScratchEphemeral() bool   { return proof.scratchEphemeral }
+func (proof ReviewIsolationProof) RepositoryHooks() bool    { return proof.repositoryHooks }
+func (proof ReviewIsolationProof) WriteNetwork() bool       { return proof.writeNetwork }
+func (proof ReviewIsolationProof) ExternalWrite() bool      { return proof.externalWrite }
+func (proof ReviewIsolationProof) Digest() Digest           { return proof.digest }
 func (proof ReviewIsolationProof) Strict() bool {
 	return !proof.digest.IsZero() && proof.repositoryReadOnly && proof.scratchEphemeral &&
-		!proof.credentialsAvailable && !proof.repositoryHooks && !proof.writeNetwork &&
-		!proof.externalWrite
+		!proof.repositoryHooks && !proof.writeNetwork && !proof.externalWrite
 }
 
 type ReviewResultStatus string

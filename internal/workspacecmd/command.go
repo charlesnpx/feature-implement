@@ -208,8 +208,7 @@ func BundleExample() string {
   "schema_version": 2,
   "workspace": "feature.workspace.yaml",
   "plans": ["plans/example.yaml"],
-  "execution_config": "config/execution.yaml",
-  "authorities": []
+  "execution_config": "config/execution.yaml"
 }
 `
 }
@@ -258,11 +257,11 @@ func RequestSchemas() map[string]any {
 	}
 	isolation := map[string]any{
 		"type": "object", "additionalProperties": false,
-		"required": []string{"repository_read_only", "scratch_ephemeral", "credentials_available", "repository_hooks", "write_network", "external_write"},
+		"required": []string{"repository_read_only", "scratch_ephemeral", "repository_hooks", "write_network", "external_write"},
 		"properties": map[string]any{
 			"repository_read_only": booleanProperty(), "scratch_ephemeral": booleanProperty(),
-			"credentials_available": booleanProperty(), "repository_hooks": booleanProperty(),
-			"write_network": booleanProperty(), "external_write": booleanProperty(),
+			"repository_hooks": booleanProperty(), "write_network": booleanProperty(),
+			"external_write": booleanProperty(),
 		},
 	}
 	occurred := func(properties map[string]any) map[string]any {

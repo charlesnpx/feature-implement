@@ -56,7 +56,6 @@ func (response OwnerBoundaryResponse) valid() bool { return response == OwnerBou
 type AttemptReservedJournalEvent struct {
 	workspaceID   ID
 	generation    Digest
-	repository    RepositoryIdentity
 	attemptID     ID
 	mergeUnit     MergeUnitReference
 	attemptNumber uint64
@@ -71,7 +70,6 @@ type AttemptReservedJournalEvent struct {
 func NewAttemptReservedJournalEvent(
 	workspaceID ID,
 	generation Digest,
-	repository RepositoryIdentity,
 	attemptID ID,
 	mergeUnit MergeUnitReference,
 	attemptNumber uint64,
@@ -82,7 +80,7 @@ func NewAttemptReservedJournalEvent(
 	goal GoalBinding,
 ) (AttemptReservedJournalEvent, error) {
 	event := AttemptReservedJournalEvent{
-		workspaceID: workspaceID, generation: generation, repository: repository,
+		workspaceID: workspaceID, generation: generation,
 		attemptID: attemptID, mergeUnit: mergeUnit, attemptNumber: attemptNumber,
 		base: base, branch: branch, worktree: filepath.Clean(worktree),
 		boundaryMode: boundaryMode, serialSegment: serialSegment, goal: goal,
@@ -99,10 +97,10 @@ func (event AttemptReservedJournalEvent) boundGeneration() Digest {
 	return event.generation
 }
 func (event AttemptReservedJournalEvent) validate() error {
-	if event.workspaceID.IsZero() || event.generation.IsZero() || event.repository.String() == "" ||
+	if event.workspaceID.IsZero() || event.generation.IsZero() ||
 		event.attemptID.IsZero() || event.mergeUnit.planID.IsZero() || event.mergeUnit.mergeUnitID.IsZero() ||
 		event.attemptNumber == 0 || event.base.IsZero() || !event.boundaryMode.valid() || event.goal.IsZero() {
-		return fmt.Errorf("attempt reservation requires immutable workspace, generation, repository, unit, attempt, base, and boundary bindings")
+		return fmt.Errorf("attempt reservation requires immutable workspace, generation, unit, attempt, base, and boundary bindings")
 	}
 	if !filepath.IsAbs(event.worktree) || filepath.Clean(event.worktree) != event.worktree {
 		return fmt.Errorf("attempt worktree must be a clean absolute path")
@@ -110,7 +108,10 @@ func (event AttemptReservedJournalEvent) validate() error {
 	if err := validateBoundedText("attempt worktree", event.worktree, 4096); err != nil {
 		return err
 	}
-	expectedID, expectedBranch, err := deriveAttemptIdentity(event.repository, event.mergeUnit, event.attemptNumber, event.base)
+	expectedID, expectedBranch, err := deriveAttemptIdentity(
+		event.workspaceID, event.generation,
+		event.mergeUnit, event.attemptNumber, event.base,
+	)
 	if err != nil {
 		return err
 	}
@@ -119,15 +120,14 @@ func (event AttemptReservedJournalEvent) validate() error {
 	}
 	return nil
 }
-func (event AttemptReservedJournalEvent) WorkspaceID() ID                { return event.workspaceID }
-func (event AttemptReservedJournalEvent) Generation() Digest             { return event.generation }
-func (event AttemptReservedJournalEvent) Repository() RepositoryIdentity { return event.repository }
-func (event AttemptReservedJournalEvent) AttemptID() ID                  { return event.attemptID }
-func (event AttemptReservedJournalEvent) MergeUnit() MergeUnitReference  { return event.mergeUnit }
-func (event AttemptReservedJournalEvent) AttemptNumber() uint64          { return event.attemptNumber }
-func (event AttemptReservedJournalEvent) Base() GitObjectID              { return event.base }
-func (event AttemptReservedJournalEvent) Branch() string                 { return event.branch }
-func (event AttemptReservedJournalEvent) Worktree() string               { return event.worktree }
+func (event AttemptReservedJournalEvent) WorkspaceID() ID               { return event.workspaceID }
+func (event AttemptReservedJournalEvent) Generation() Digest            { return event.generation }
+func (event AttemptReservedJournalEvent) AttemptID() ID                 { return event.attemptID }
+func (event AttemptReservedJournalEvent) MergeUnit() MergeUnitReference { return event.mergeUnit }
+func (event AttemptReservedJournalEvent) AttemptNumber() uint64         { return event.attemptNumber }
+func (event AttemptReservedJournalEvent) Base() GitObjectID             { return event.base }
+func (event AttemptReservedJournalEvent) Branch() string                { return event.branch }
+func (event AttemptReservedJournalEvent) Worktree() string              { return event.worktree }
 func (event AttemptReservedJournalEvent) BoundaryMode() AttemptBoundaryMode {
 	return event.boundaryMode
 }
@@ -190,7 +190,6 @@ type AttemptStartedJournalEvent struct {
 	verifiedHead     GitObjectID
 	inspectionDigest Digest
 	leaseID          ID
-	authorizationID  ID
 	goal             GoalBinding
 }
 
@@ -199,13 +198,13 @@ func NewAttemptStartedJournalEvent(
 	generation Digest,
 	verifiedHead GitObjectID,
 	inspectionDigest Digest,
-	leaseID, authorizationID ID,
+	leaseID ID,
 	goal GoalBinding,
 ) (AttemptStartedJournalEvent, error) {
 	event := AttemptStartedJournalEvent{
 		workspaceID: workspaceID, generation: generation, attemptID: attemptID,
 		verifiedHead: verifiedHead, inspectionDigest: inspectionDigest,
-		leaseID: leaseID, authorizationID: authorizationID, goal: goal,
+		leaseID: leaseID, goal: goal,
 	}
 	if err := event.validate(); err != nil {
 		return AttemptStartedJournalEvent{}, err
@@ -221,8 +220,8 @@ func (event AttemptStartedJournalEvent) boundGeneration() Digest {
 func (event AttemptStartedJournalEvent) validate() error {
 	if event.workspaceID.IsZero() || event.generation.IsZero() || event.attemptID.IsZero() ||
 		event.verifiedHead.IsZero() || event.inspectionDigest.IsZero() || event.leaseID.IsZero() ||
-		event.authorizationID.IsZero() || event.goal.IsZero() {
-		return fmt.Errorf("attempt start requires verified Git, lease, authorization, and goal bindings")
+		event.goal.IsZero() {
+		return fmt.Errorf("attempt start requires verified Git, lease, and goal bindings")
 	}
 	return nil
 }
@@ -232,7 +231,6 @@ func (event AttemptStartedJournalEvent) AttemptID() ID             { return even
 func (event AttemptStartedJournalEvent) VerifiedHead() GitObjectID { return event.verifiedHead }
 func (event AttemptStartedJournalEvent) InspectionDigest() Digest  { return event.inspectionDigest }
 func (event AttemptStartedJournalEvent) LeaseID() ID               { return event.leaseID }
-func (event AttemptStartedJournalEvent) AuthorizationID() ID       { return event.authorizationID }
 func (event AttemptStartedJournalEvent) Goal() GoalBinding         { return event.goal }
 
 type AttemptBoundaryReachedJournalEvent struct {
@@ -244,7 +242,6 @@ type AttemptBoundaryReachedJournalEvent struct {
 	mode            AttemptBoundaryMode
 	serialSegment   ID
 	leaseID         ID
-	authorizationID ID
 	goal            GoalBinding
 	head            GitObjectID
 	evidence        []Evidence
@@ -258,7 +255,7 @@ func NewAttemptBoundaryReachedJournalEvent(
 	generation Digest,
 	ordinal uint64,
 	mode AttemptBoundaryMode,
-	serialSegment, leaseID, authorizationID ID,
+	serialSegment, leaseID ID,
 	goal GoalBinding,
 	head GitObjectID,
 	evidence []Evidence,
@@ -281,7 +278,7 @@ func NewAttemptBoundaryReachedJournalEvent(
 	event := AttemptBoundaryReachedJournalEvent{
 		workspaceID: workspaceID, generation: generation, attemptID: attemptID,
 		boundaryID: boundaryID, ordinal: ordinal, mode: mode, serialSegment: serialSegment,
-		leaseID: leaseID, authorizationID: authorizationID, goal: goal, head: head,
+		leaseID: leaseID, goal: goal, head: head,
 		evidence: evidenceCopy, evidenceDigest: evidenceDigest,
 		directiveDigest: directiveDigest, idempotencyKey: idempotencyKey,
 	}
@@ -299,9 +296,9 @@ func (event AttemptBoundaryReachedJournalEvent) boundGeneration() Digest { retur
 func (event AttemptBoundaryReachedJournalEvent) validate() error {
 	if event.workspaceID.IsZero() || event.generation.IsZero() || event.attemptID.IsZero() ||
 		event.boundaryID.IsZero() || event.ordinal == 0 || !event.mode.valid() || event.leaseID.IsZero() ||
-		event.authorizationID.IsZero() || event.goal.IsZero() || event.head.IsZero() ||
+		event.goal.IsZero() || event.head.IsZero() ||
 		len(event.evidence) == 0 || event.evidenceDigest.IsZero() {
-		return fmt.Errorf("attempt boundary requires attempt, lease, authorization, goal, head, and evidence bindings")
+		return fmt.Errorf("attempt boundary requires attempt, lease, goal, head, and evidence bindings")
 	}
 	for _, item := range event.evidence {
 		if err := item.validate(); err != nil {
@@ -333,8 +330,6 @@ func (event AttemptBoundaryReachedJournalEvent) Ordinal() uint64           { ret
 func (event AttemptBoundaryReachedJournalEvent) Mode() AttemptBoundaryMode { return event.mode }
 func (event AttemptBoundaryReachedJournalEvent) SerialSegment() ID         { return event.serialSegment }
 func (event AttemptBoundaryReachedJournalEvent) LeaseID() ID               { return event.leaseID }
-func (event AttemptBoundaryReachedJournalEvent) AuthorizationID() ID       { return event.authorizationID }
-func (AttemptBoundaryReachedJournalEvent) ClosesAuthorization() bool       { return true }
 func (AttemptBoundaryReachedJournalEvent) FencesAndReleasesLease() bool    { return true }
 func (event AttemptBoundaryReachedJournalEvent) Goal() GoalBinding         { return event.goal }
 func (event AttemptBoundaryReachedJournalEvent) Head() GitObjectID         { return event.head }
@@ -546,7 +541,6 @@ type AttemptResumedJournalEvent struct {
 	verifiedHead     GitObjectID
 	inspectionDigest Digest
 	leaseID          ID
-	authorizationID  ID
 	goal             GoalBinding
 	serialSegment    ID
 }
@@ -556,14 +550,14 @@ func NewAttemptResumedJournalEvent(
 	generation Digest,
 	verifiedHead GitObjectID,
 	inspectionDigest Digest,
-	leaseID, authorizationID ID,
+	leaseID ID,
 	goal GoalBinding,
 	serialSegment ID,
 ) (AttemptResumedJournalEvent, error) {
 	event := AttemptResumedJournalEvent{
 		workspaceID: workspaceID, generation: generation, attemptID: attemptID,
 		boundaryID: boundaryID, verifiedHead: verifiedHead, inspectionDigest: inspectionDigest,
-		leaseID: leaseID, authorizationID: authorizationID, goal: goal, serialSegment: serialSegment,
+		leaseID: leaseID, goal: goal, serialSegment: serialSegment,
 	}
 	if err := event.validate(); err != nil {
 		return AttemptResumedJournalEvent{}, err
@@ -579,8 +573,8 @@ func (event AttemptResumedJournalEvent) boundGeneration() Digest {
 func (event AttemptResumedJournalEvent) validate() error {
 	if event.workspaceID.IsZero() || event.generation.IsZero() || event.attemptID.IsZero() ||
 		event.boundaryID.IsZero() || event.verifiedHead.IsZero() || event.inspectionDigest.IsZero() ||
-		event.leaseID.IsZero() || event.authorizationID.IsZero() || event.goal.IsZero() {
-		return fmt.Errorf("attempt resume requires boundary, verified Git, lease, authorization, and goal bindings")
+		event.leaseID.IsZero() || event.goal.IsZero() {
+		return fmt.Errorf("attempt resume requires boundary, verified Git, lease, and goal bindings")
 	}
 	return nil
 }
@@ -591,7 +585,6 @@ func (event AttemptResumedJournalEvent) BoundaryID() ID            { return even
 func (event AttemptResumedJournalEvent) VerifiedHead() GitObjectID { return event.verifiedHead }
 func (event AttemptResumedJournalEvent) InspectionDigest() Digest  { return event.inspectionDigest }
 func (event AttemptResumedJournalEvent) LeaseID() ID               { return event.leaseID }
-func (event AttemptResumedJournalEvent) AuthorizationID() ID       { return event.authorizationID }
 func (event AttemptResumedJournalEvent) Goal() GoalBinding         { return event.goal }
 func (event AttemptResumedJournalEvent) SerialSegment() ID         { return event.serialSegment }
 
@@ -607,11 +600,6 @@ func MergeUnitJournalResource(reference MergeUnitReference) JournalResource {
 
 func LeaseJournalResource(leaseID ID) JournalResource {
 	resource, _ := NewJournalResource(JournalResourceLease, leaseID.String())
-	return resource
-}
-
-func AuthorizationJournalResource(authorizationID ID) JournalResource {
-	resource, _ := NewJournalResource(JournalResourceAuthorization, authorizationID.String())
 	return resource
 }
 
@@ -689,14 +677,14 @@ func attemptJournalEventResources(event WorkspaceJournalEvent) ([]JournalResourc
 		workspaceID, generation = event.workspaceID, event.generation
 		reads = []JournalResource{
 			AttemptJournalResource(event.attemptID), LeaseJournalResource(event.leaseID),
-			AuthorizationJournalResource(event.authorizationID), GoalJournalResource(event.goal),
+			GoalJournalResource(event.goal),
 		}
 		writes = append([]JournalResource(nil), reads...)
 	case AttemptBoundaryReachedJournalEvent:
 		workspaceID, generation = event.workspaceID, event.generation
 		reads = []JournalResource{
 			AttemptJournalResource(event.attemptID), LeaseJournalResource(event.leaseID),
-			AuthorizationJournalResource(event.authorizationID), GoalJournalResource(event.goal),
+			GoalJournalResource(event.goal),
 			EvidenceJournalResource(event.evidenceDigest),
 		}
 		writes = append([]JournalResource(nil), reads...)
@@ -733,7 +721,7 @@ func attemptJournalEventResources(event WorkspaceJournalEvent) ([]JournalResourc
 		workspaceID, generation = event.workspaceID, event.generation
 		reads = []JournalResource{
 			AttemptJournalResource(event.attemptID), LeaseJournalResource(event.leaseID),
-			AuthorizationJournalResource(event.authorizationID), GoalJournalResource(event.goal),
+			GoalJournalResource(event.goal),
 		}
 		writes = append([]JournalResource(nil), reads...)
 		if !event.serialSegment.IsZero() {

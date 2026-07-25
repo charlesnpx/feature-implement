@@ -334,7 +334,7 @@ func identityForPlanBundle(bundle WorkspaceBundle) (planBundleIdentity, error) {
 		Source   string `json:"source"`
 		Semantic string `json:"semantic"`
 	}
-	sourceItems := make([]item, 0, len(bundle.definition.artifacts)+len(bundle.definition.authorities))
+	sourceItems := make([]item, 0, len(bundle.definition.artifacts))
 	semanticItems := make([]item, 0, cap(sourceItems))
 	for _, artifact := range bundle.definition.artifacts {
 		base := item{
@@ -346,15 +346,6 @@ func identityForPlanBundle(bundle WorkspaceBundle) (planBundleIdentity, error) {
 		})
 		semanticItems = append(semanticItems, item{
 			Kind: base.Kind, ID: base.ID, Path: base.Path, Semantic: base.Semantic,
-		})
-	}
-	for _, authority := range bundle.definition.authorities {
-		kind := "authority/" + string(authority.kind)
-		sourceItems = append(sourceItems, item{
-			Kind: kind, ID: authority.id.String(), Source: authority.sourceHash.String(),
-		})
-		semanticItems = append(semanticItems, item{
-			Kind: kind, ID: authority.id.String(), Semantic: authority.semanticHash.String(),
 		})
 	}
 	sourceBytes, err := json.Marshal(sourceItems)

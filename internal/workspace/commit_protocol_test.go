@@ -1176,7 +1176,6 @@ func protocolExecutionYAML(configured bool) string {
 	return `schema_version: 2
 policy:
   require_passing_checks: true
-  require_signed_receipts: true
   allow_write_network: false
   max_attempts: 3
   max_review_rounds: 3
@@ -1186,7 +1185,6 @@ profiles:
     runner: codex
     policy:
       require_passing_checks: true
-      require_signed_receipts: true
       allow_write_network: false
       max_attempts: 3
       max_review_rounds: 3
@@ -1199,7 +1197,6 @@ merge_units:
       mode: pause_only
     policy:
       require_passing_checks: true
-      require_signed_receipts: true
       allow_write_network: false
       max_attempts: 3
       max_review_rounds: 3

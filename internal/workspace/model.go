@@ -20,7 +20,7 @@ var featureBranchPattern = regexp.MustCompile(
 	`^feature/[a-z0-9]+(?:-[a-z0-9]+)*$`,
 )
 
-// LocalTarget describes the immutable local repository authority carried by
+// LocalTarget describes the immutable local repository binding carried by
 // a workspace definition. Runtime admission adds opened filesystem identities
 // and observed Git layout metadata without changing this semantic binding.
 type LocalTarget struct {
@@ -39,25 +39,6 @@ func (target LocalTarget) IsZero() bool {
 	return target.root == "" || target.baseRef == "" ||
 		target.baseCommit.IsZero() || target.featureBranch == ""
 }
-
-type ProviderIdentity struct {
-	kind       ID
-	repository string
-}
-
-func NewProviderIdentity(kind ID, repository string) (ProviderIdentity, error) {
-	if kind.IsZero() {
-		return ProviderIdentity{}, fmt.Errorf("provider kind is required")
-	}
-	repository = strings.TrimSpace(repository)
-	if err := validateBoundedText("provider repository", repository, 2048); err != nil {
-		return ProviderIdentity{}, err
-	}
-	return ProviderIdentity{kind: kind, repository: repository}, nil
-}
-
-func (identity ProviderIdentity) Kind() ID           { return identity.kind }
-func (identity ProviderIdentity) Repository() string { return identity.repository }
 
 type PlanReference struct {
 	id     ID
@@ -100,42 +81,15 @@ type WorkspaceDependency struct {
 func (dependency WorkspaceDependency) Before() MergeUnitReference { return dependency.before }
 func (dependency WorkspaceDependency) After() MergeUnitReference  { return dependency.after }
 
-type AuthorityKind string
-
-const (
-	AuthorityGitBlob        AuthorityKind = "git_blob"
-	AuthorityExternalDigest AuthorityKind = "external_digest"
-)
-
-func (kind AuthorityKind) valid() bool {
-	return kind == AuthorityGitBlob || kind == AuthorityExternalDigest
-}
-
-type AuthorityReference struct {
-	id       ID
-	kind     AuthorityKind
-	location string
-}
-
-func (reference AuthorityReference) ID() ID              { return reference.id }
-func (reference AuthorityReference) Kind() AuthorityKind { return reference.kind }
-func (reference AuthorityReference) Location() string    { return reference.location }
-
 // WorkspaceManifest is the sole owner of workspace composition and discovery
 // metadata. Its fields are private and collection accessors return copies.
 type WorkspaceManifest struct {
-	id               ID
-	mode             WorkspaceMode
-	target           LocalTarget
-	repositoryRoot   string
-	repository       RepositoryIdentity
-	provider         ProviderIdentity
-	baseRef          string
-	remote           string
-	executionConfig  string
-	plans            []PlanReference
-	dependencies     []WorkspaceDependency
-	authoritySources []AuthorityReference
+	id              ID
+	mode            WorkspaceMode
+	target          LocalTarget
+	executionConfig string
+	plans           []PlanReference
+	dependencies    []WorkspaceDependency
 }
 
 func DecodeWorkspaceManifest(source []byte) (WorkspaceManifest, error) {
@@ -177,19 +131,6 @@ func normalizeWorkspace(wire workspaceWire) (WorkspaceManifest, error) {
 		return WorkspaceManifest{}, err
 	}
 
-	// Provider/runtime code is removed in Story 6. Until then its private
-	// compatibility identity is deliberately derived from the local root and
-	// is not represented in, or authoritative over, the workspace schema.
-	repository, err := NewRepositoryIdentity("local:" + repositoryRoot)
-	if err != nil {
-		return WorkspaceManifest{}, err
-	}
-	providerKind, _ := NewID("github")
-	provider, err := NewProviderIdentity(providerKind, "local/target")
-	if err != nil {
-		return WorkspaceManifest{}, err
-	}
-	remote := "origin"
 	executionConfig, err := normalizeSourcePath(wire.ExecutionConfig)
 	if err != nil {
 		return WorkspaceManifest{}, fmt.Errorf("execution_config: %w", err)
@@ -200,10 +141,6 @@ func normalizeWorkspace(wire workspaceWire) (WorkspaceManifest, error) {
 	if wire.Dependencies == nil {
 		return WorkspaceManifest{}, fmt.Errorf("workspace dependencies must be explicit, including an empty list")
 	}
-	if wire.AuthoritySources == nil {
-		return WorkspaceManifest{}, fmt.Errorf("workspace authority_sources must be explicit, including an empty list")
-	}
-
 	plans := make([]PlanReference, 0, len(wire.Plans))
 	planIDs := make(map[string]struct{}, len(wire.Plans))
 	planSources := make(map[string]struct{}, len(wire.Plans))
@@ -258,43 +195,14 @@ func normalizeWorkspace(wire workspaceWire) (WorkspaceManifest, error) {
 		return WorkspaceManifest{}, err
 	}
 
-	authorities := make([]AuthorityReference, 0, len(*wire.AuthoritySources))
-	authorityIDs := make(map[string]struct{}, len(*wire.AuthoritySources))
-	for index, item := range *wire.AuthoritySources {
-		authorityID, err := NewID(item.ID)
-		if err != nil {
-			return WorkspaceManifest{}, fmt.Errorf("authority_sources[%d].id: %w", index, err)
-		}
-		kind := AuthorityKind(strings.TrimSpace(item.Kind))
-		if !kind.valid() {
-			return WorkspaceManifest{}, fmt.Errorf("authority source %s has unsupported kind %q", authorityID, item.Kind)
-		}
-		location := strings.TrimSpace(item.Location)
-		if kind == AuthorityGitBlob {
-			location, err = normalizeSourcePath(location)
-		} else {
-			err = validateBoundedText("external authority location", location, 4096)
-		}
-		if err != nil {
-			return WorkspaceManifest{}, fmt.Errorf("authority source %s: %w", authorityID, err)
-		}
-		if _, exists := authorityIDs[authorityID.String()]; exists {
-			return WorkspaceManifest{}, fmt.Errorf("duplicate authority source %s", authorityID)
-		}
-		authorityIDs[authorityID.String()] = struct{}{}
-		authorities = append(authorities, AuthorityReference{id: authorityID, kind: kind, location: location})
-	}
-	sort.Slice(authorities, func(i, j int) bool { return authorities[i].id.String() < authorities[j].id.String() })
-
 	return WorkspaceManifest{
 		id: id, mode: mode,
 		target: LocalTarget{
 			root: repositoryRoot, baseRef: baseRef, baseCommit: baseCommit,
 			featureBranch: featureBranch,
 		},
-		repositoryRoot: repositoryRoot, repository: repository, provider: provider,
-		baseRef: baseRef, remote: remote, executionConfig: executionConfig,
-		plans: plans, dependencies: dependencies, authoritySources: authorities,
+		executionConfig: executionConfig,
+		plans:           plans, dependencies: dependencies,
 	}, nil
 }
 
@@ -325,26 +233,20 @@ func normalizeFeatureBranch(value string) (string, error) {
 	return value, nil
 }
 
-func (manifest WorkspaceManifest) ID() ID                         { return manifest.id }
-func (manifest WorkspaceManifest) Mode() WorkspaceMode            { return manifest.mode }
-func (manifest WorkspaceManifest) Target() LocalTarget            { return manifest.target }
-func (manifest WorkspaceManifest) RepositoryRoot() string         { return manifest.repositoryRoot }
-func (manifest WorkspaceManifest) Repository() RepositoryIdentity { return manifest.repository }
-func (manifest WorkspaceManifest) Provider() ProviderIdentity     { return manifest.provider }
-func (manifest WorkspaceManifest) BaseRef() string                { return manifest.baseRef }
-func (manifest WorkspaceManifest) BaseCommit() GitObjectID        { return manifest.target.baseCommit }
-func (manifest WorkspaceManifest) FeatureBranch() string          { return manifest.target.featureBranch }
-func (manifest WorkspaceManifest) FeatureRef() string             { return manifest.target.FeatureRef() }
-func (manifest WorkspaceManifest) Remote() string                 { return manifest.remote }
-func (manifest WorkspaceManifest) ExecutionConfigSource() string  { return manifest.executionConfig }
+func (manifest WorkspaceManifest) ID() ID                        { return manifest.id }
+func (manifest WorkspaceManifest) Mode() WorkspaceMode           { return manifest.mode }
+func (manifest WorkspaceManifest) Target() LocalTarget           { return manifest.target }
+func (manifest WorkspaceManifest) RepositoryRoot() string        { return manifest.target.root }
+func (manifest WorkspaceManifest) BaseRef() string               { return manifest.target.baseRef }
+func (manifest WorkspaceManifest) BaseCommit() GitObjectID       { return manifest.target.baseCommit }
+func (manifest WorkspaceManifest) FeatureBranch() string         { return manifest.target.featureBranch }
+func (manifest WorkspaceManifest) FeatureRef() string            { return manifest.target.FeatureRef() }
+func (manifest WorkspaceManifest) ExecutionConfigSource() string { return manifest.executionConfig }
 func (manifest WorkspaceManifest) Plans() []PlanReference {
 	return append([]PlanReference(nil), manifest.plans...)
 }
 func (manifest WorkspaceManifest) Dependencies() []WorkspaceDependency {
 	return append([]WorkspaceDependency(nil), manifest.dependencies...)
-}
-func (manifest WorkspaceManifest) AuthoritySources() []AuthorityReference {
-	return append([]AuthorityReference(nil), manifest.authoritySources...)
 }
 
 type Story struct {

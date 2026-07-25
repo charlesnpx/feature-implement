@@ -18,31 +18,24 @@ const maxAttemptGitOutputBytes = 8 * 1024 * 1024
 const maxAttemptWorktreeClaimBytes = 16 * 1024
 
 type AttemptRefInventory struct {
-	local  []string
-	remote []string
+	local []string
 }
 
-func NewAttemptRefInventory(local, remote []string) (AttemptRefInventory, error) {
+func NewAttemptRefInventory(local []string) (AttemptRefInventory, error) {
 	inventory := AttemptRefInventory{
-		local: append([]string(nil), local...), remote: append([]string(nil), remote...),
+		local: append([]string(nil), local...),
 	}
-	for _, values := range [][]string{inventory.local, inventory.remote} {
-		for _, value := range values {
-			if _, err := normalizeHeadRef(value); err != nil {
-				return AttemptRefInventory{}, err
-			}
+	for _, value := range inventory.local {
+		if _, err := normalizeHeadRef(value); err != nil {
+			return AttemptRefInventory{}, err
 		}
 	}
 	sort.Strings(inventory.local)
-	sort.Strings(inventory.remote)
 	return inventory, nil
 }
 
 func (inventory AttemptRefInventory) Local() []string {
 	return append([]string(nil), inventory.local...)
-}
-func (inventory AttemptRefInventory) Remote() []string {
-	return append([]string(nil), inventory.remote...)
 }
 
 type AttemptGitInspection struct {
@@ -140,7 +133,7 @@ func (claim AttemptWorktreeClaim) Worktree() string   { return claim.worktree }
 type AttemptGitPort interface {
 	ValidateAttemptBranch(context.Context, string, string) error
 	ValidateAttemptWorktreeRoot(context.Context, string, string) error
-	InspectAttemptRefs(context.Context, string, string) (AttemptRefInventory, error)
+	InspectAttemptRefs(context.Context, string) (AttemptRefInventory, error)
 	InspectAttemptWorktree(context.Context, string, string, string) (AttemptGitInspection, error)
 	PrepareAttemptWorktree(context.Context, string, AttemptWorktreeClaim, bool) error
 	ReleaseAttemptWorktreeClaim(context.Context, AttemptWorktreeClaim) error
@@ -214,7 +207,7 @@ func (adapter LocalAttemptGitAdapter) ValidateAttemptBranch(ctx context.Context,
 
 func (adapter LocalAttemptGitAdapter) InspectAttemptRefs(
 	ctx context.Context,
-	repositoryRoot, _ string,
+	repositoryRoot string,
 ) (AttemptRefInventory, error) {
 	localOutput, exitCode, err := adapter.run(ctx, repositoryRoot, "for-each-ref", "--format=%(refname)", "refs/heads")
 	if err != nil || exitCode != 0 {
@@ -227,7 +220,7 @@ func (adapter LocalAttemptGitAdapter) InspectAttemptRefs(
 	if err != nil {
 		return AttemptRefInventory{}, err
 	}
-	return NewAttemptRefInventory(local, nil)
+	return NewAttemptRefInventory(local)
 }
 
 func (adapter LocalAttemptGitAdapter) InspectAttemptWorktree(
@@ -1020,22 +1013,6 @@ func parseLocalHeadRefs(content []byte) ([]string, error) {
 	return result, nil
 }
 
-func parseRemoteHeadRefs(content []byte) ([]string, error) {
-	var result []string
-	for _, line := range strings.Split(strings.TrimSpace(string(content)), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) != 2 || !strings.HasPrefix(fields[1], "refs/heads/") {
-			return nil, fmt.Errorf("Git returned malformed remote head record")
-		}
-		result = append(result, strings.TrimPrefix(fields[1], "refs/heads/"))
-	}
-	return result, nil
-}
-
 func qualifyGitObjectID(algorithm GitHashAlgorithm, raw string) (GitObjectID, error) {
 	return ParseGitObjectID(string(algorithm) + ":" + strings.TrimSpace(raw))
 }
@@ -1066,7 +1043,7 @@ func (adapter LocalAttemptGitAdapter) run(
 	}
 	argv := trustedGitArguments(repositoryRoot, arguments...)
 	command := exec.CommandContext(ctx, adapter.executable, argv...)
-	environment, err := BuildNonProviderProcessEnvironment(os.Environ(), adapter.environment)
+	environment, err := BuildIsolatedProcessEnvironment(os.Environ(), adapter.environment)
 	if err != nil {
 		return nil, -1, err
 	}
@@ -1117,7 +1094,7 @@ func mergeProcessEnvironment(base []string, additions []EnvironmentVariable) []s
 	values := make(map[string]string, len(additions)+20)
 	for _, entry := range base {
 		name, value, found := strings.Cut(entry, "=")
-		if found && allowedNonProviderAmbientEnvironment(name) {
+		if found && allowedAmbientProcessEnvironment(name) {
 			values[name] = value
 		}
 	}
@@ -1152,7 +1129,7 @@ func mergeProcessEnvironment(base []string, additions []EnvironmentVariable) []s
 	return result
 }
 
-func allowedNonProviderAmbientEnvironment(name string) bool {
+func allowedAmbientProcessEnvironment(name string) bool {
 	switch strings.ToUpper(strings.TrimSpace(name)) {
 	case "PATH", "TMPDIR", "TMP", "TEMP", "TZ", "LANG", "LC_ALL", "LC_CTYPE",
 		"SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT":
@@ -1162,19 +1139,19 @@ func allowedNonProviderAmbientEnvironment(name string) bool {
 	}
 }
 
-// BuildNonProviderProcessEnvironment is the shared environment boundary for
+// BuildIsolatedProcessEnvironment is the shared environment boundary for
 // local Git, checks, implementation processes, and reviewers. It removes
 // all ambient state except a small operational allowlist, then forces
-// credential helpers, prompts, SSH identities, and system/global Git config
-// off. Network sandboxing and provider-broker exclusion remain mandatory
-// responsibilities of the typed runner port.
-func BuildNonProviderProcessEnvironment(
+// authentication helpers, prompts, SSH identities, and system/global Git
+// configuration off. Network sandboxing remains a responsibility of the
+// typed runner port.
+func BuildIsolatedProcessEnvironment(
 	base []string,
 	additions []EnvironmentVariable,
 ) ([]string, error) {
 	for _, variable := range additions {
 		if variable.name == "" || unsafeAttemptGitEnvironment(variable.name) {
-			return nil, fmt.Errorf("non-provider environment variable %s is unsafe", variable.name)
+			return nil, fmt.Errorf("isolated environment variable %s is unsafe", variable.name)
 		}
 	}
 	return mergeProcessEnvironment(base, additions), nil
@@ -1182,7 +1159,7 @@ func BuildNonProviderProcessEnvironment(
 
 func unsafeAttemptGitEnvironment(name string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(name))
-	if providerCredentialEnvironment(upper) || upper == "GIT_CONFIG" || strings.HasPrefix(upper, "GIT_CONFIG_") {
+	if sensitiveEnvironmentVariable(upper) || upper == "GIT_CONFIG" || strings.HasPrefix(upper, "GIT_CONFIG_") {
 		return true
 	}
 	switch upper {
@@ -1199,23 +1176,23 @@ func unsafeAttemptGitEnvironment(name string) bool {
 	}
 }
 
-func providerCredentialEnvironment(name string) bool {
+func sensitiveEnvironmentVariable(name string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(name))
 	switch upper {
 	case "TOKEN", "PAT", "PASSWORD", "PASS", "PASSPHRASE", "SECRET", "API_KEY", "ACCESS_KEY",
 		"PRIVATE_KEY", "CREDENTIAL", "CREDENTIALS", "AUTHORIZATION", "AUTH_HEADER",
-		"GH_TOKEN", "GITHUB_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GITLAB_TOKEN",
-		"BITBUCKET_TOKEN", "AZURE_DEVOPS_EXT_PAT", "SYSTEM_ACCESSTOKEN", "ADO_PAT",
+		"SYSTEM_ACCESSTOKEN",
 		"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
 		"AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE",
 		"GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_API_KEY", "GCLOUD_ACCESS_TOKEN",
 		"CLOUDSDK_CONFIG", "AZURE_CLIENT_SECRET", "AZURE_CONFIG_DIR", "ARM_CLIENT_SECRET",
-		"DOCKER_CONFIG", "KUBECONFIG", "NETRC", "GH_CONFIG_DIR", "CI_JOB_TOKEN", "NPM_TOKEN":
+		"DOCKER_CONFIG", "KUBECONFIG", "NETRC":
 		return true
 	}
 	for _, suffix := range []string{
 		"_TOKEN", "_PAT", "_PASSWORD", "_PASS", "_PASSPHRASE", "_SECRET",
 		"_API_KEY", "_ACCESS_KEY", "_PRIVATE_KEY", "_CLIENT_SECRET", "_CREDENTIAL", "_CREDENTIALS",
+		"_CONFIG_DIR",
 	} {
 		if strings.HasSuffix(upper, suffix) {
 			return true

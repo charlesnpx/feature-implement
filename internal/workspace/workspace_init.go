@@ -105,7 +105,7 @@ func InitializeWorkspaceV2WithOptions(
 		planRoot = checkpoint.root
 	}
 	roots, err := OpenWorkspaceInitializationRootGuard(
-		planRoot, workspaceDir, definition.workspace.repositoryRoot,
+		planRoot, workspaceDir, definition.workspace.target.root,
 		worktreeRoot,
 	)
 	if err != nil {

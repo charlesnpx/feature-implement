@@ -94,7 +94,6 @@ func TestLocalCommandDecodersRequireExactReceiptFreeFields(t *testing.T) {
   "isolation": {
     "repository_read_only": true,
     "scratch_ephemeral": true,
-    "credentials_available": false,
     "repository_hooks": false,
     "write_network": false,
     "external_write": false

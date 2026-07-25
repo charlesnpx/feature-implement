@@ -75,7 +75,8 @@ func ReserveAttempt(
 	}
 	base := target.CreatedHead()
 	identity, err := DeriveAttemptIdentity(
-		manifest.repository, request.MergeUnit, request.AttemptNumber, base,
+		manifest.id, definition.generation,
+		request.MergeUnit, request.AttemptNumber, base,
 	)
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
@@ -87,7 +88,7 @@ func ReserveAttempt(
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
-	if err := git.ValidateAttemptWorktreeRoot(ctx, manifest.repositoryRoot, worktree); err != nil {
+	if err := git.ValidateAttemptWorktreeRoot(ctx, manifest.target.root, worktree); err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
 	if existing, exists := runtime.Attempt(identity.attemptID); exists {
@@ -133,18 +134,18 @@ func ReserveAttempt(
 			"merge unit %s is not scheduler-ready (status=%s blockers=%v)", request.MergeUnit, status, blockers,
 		)
 	}
-	if err := git.ValidateAttemptBranch(ctx, manifest.repositoryRoot, identity.branch); err != nil {
+	if err := git.ValidateAttemptBranch(ctx, manifest.target.root, identity.branch); err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
-	inventory, err := git.InspectAttemptRefs(ctx, manifest.repositoryRoot, manifest.remote)
+	inventory, err := git.InspectAttemptRefs(ctx, manifest.target.root)
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
-	if err := CheckAttemptRefConflicts(identity.branch, inventory.local, inventory.remote, false); err != nil {
+	if err := CheckAttemptRefConflicts(identity.branch, inventory.local, false); err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
 	event, err := NewAttemptReservedJournalEvent(
-		manifest.id, definition.generation, manifest.repository, identity.attemptID,
+		manifest.id, definition.generation, identity.attemptID,
 		request.MergeUnit, request.AttemptNumber, base, identity.branch, worktree,
 		unitExecution.boundary.mode, unitExecution.boundary.serialSegment, request.Goal,
 	)
@@ -214,10 +215,10 @@ func MaterializeAttempt(
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
-	if err := git.ValidateAttemptBranch(ctx, manifest.repositoryRoot, attempt.branch); err != nil {
+	if err := git.ValidateAttemptBranch(ctx, manifest.target.root, attempt.branch); err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
-	inventory, err := git.InspectAttemptRefs(ctx, manifest.repositoryRoot, manifest.remote)
+	inventory, err := git.InspectAttemptRefs(ctx, manifest.target.root)
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
@@ -231,10 +232,10 @@ func MaterializeAttempt(
 			localWithoutExact = append(localWithoutExact, normalized)
 		}
 	}
-	if err := CheckAttemptRefConflicts(attempt.branch, localWithoutExact, inventory.remote, false); err != nil {
+	if err := CheckAttemptRefConflicts(attempt.branch, localWithoutExact, false); err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
-	inspection, err := git.InspectAttemptWorktree(ctx, manifest.repositoryRoot, attempt.branch, attempt.worktree)
+	inspection, err := git.InspectAttemptWorktree(ctx, manifest.target.root, attempt.branch, attempt.worktree)
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
@@ -246,24 +247,24 @@ func MaterializeAttempt(
 			return RuntimeAttemptProjection{}, fmt.Errorf("interrupted worktree registration does not match the attempt intent")
 		}
 		if err := git.CreateAttemptWorktree(
-			ctx, manifest.repositoryRoot, claim, false, true,
+			ctx, manifest.target.root, claim, false, true,
 		); err != nil {
 			return RuntimeAttemptProjection{}, err
 		}
 		if err := injectAttemptLifecycleFault(request.Fault, AttemptFaultAfterWorktreeCreation); err != nil {
 			return RuntimeAttemptProjection{}, err
 		}
-		inspection, err = git.InspectAttemptWorktree(ctx, manifest.repositoryRoot, attempt.branch, attempt.worktree)
+		inspection, err = git.InspectAttemptWorktree(ctx, manifest.target.root, attempt.branch, attempt.worktree)
 		if err != nil {
 			return RuntimeAttemptProjection{}, err
 		}
 	} else if !inspection.worktreeRegistered {
 		if err := git.PrepareAttemptWorktree(
-			ctx, manifest.repositoryRoot, claim, inspection.worktreeExists,
+			ctx, manifest.target.root, claim, inspection.worktreeExists,
 		); err != nil {
 			return RuntimeAttemptProjection{}, err
 		}
-		inspection, err = git.InspectAttemptWorktree(ctx, manifest.repositoryRoot, attempt.branch, attempt.worktree)
+		inspection, err = git.InspectAttemptWorktree(ctx, manifest.target.root, attempt.branch, attempt.worktree)
 		if err != nil {
 			return RuntimeAttemptProjection{}, err
 		}
@@ -271,14 +272,14 @@ func MaterializeAttempt(
 			return RuntimeAttemptProjection{}, fmt.Errorf("attempt worktree recovery did not produce an absent unregistered target")
 		}
 		if err := git.CreateAttemptWorktree(
-			ctx, manifest.repositoryRoot, claim, !inspection.branchExists, false,
+			ctx, manifest.target.root, claim, !inspection.branchExists, false,
 		); err != nil {
 			return RuntimeAttemptProjection{}, err
 		}
 		if err := injectAttemptLifecycleFault(request.Fault, AttemptFaultAfterWorktreeCreation); err != nil {
 			return RuntimeAttemptProjection{}, err
 		}
-		inspection, err = git.InspectAttemptWorktree(ctx, manifest.repositoryRoot, attempt.branch, attempt.worktree)
+		inspection, err = git.InspectAttemptWorktree(ctx, manifest.target.root, attempt.branch, attempt.worktree)
 		if err != nil {
 			return RuntimeAttemptProjection{}, err
 		}
@@ -289,7 +290,7 @@ func MaterializeAttempt(
 	if err := injectAttemptLifecycleFault(request.Fault, AttemptFaultAfterGitVerification); err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
-	confirmed, err := git.InspectAttemptWorktree(ctx, manifest.repositoryRoot, attempt.branch, attempt.worktree)
+	confirmed, err := git.InspectAttemptWorktree(ctx, manifest.target.root, attempt.branch, attempt.worktree)
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
@@ -302,13 +303,13 @@ func MaterializeAttempt(
 	if err := git.ReleaseAttemptWorktreeClaim(ctx, claim); err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
-	leaseID, authorizationID, err := deriveAttemptEpochBindings(attempt.attemptID, 1)
+	leaseID, err := deriveAttemptEpochBinding(attempt.attemptID, 1)
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
 	event, err := NewAttemptStartedJournalEvent(
 		runtime.workspaceID, attempt.attemptID, attempt.generation,
-		confirmed.worktreeHead, confirmed.digest, leaseID, authorizationID, attempt.goal,
+		confirmed.worktreeHead, confirmed.digest, leaseID, attempt.goal,
 	)
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
@@ -508,7 +509,7 @@ func RecordAttemptBoundary(
 		)
 	}
 	inspection, err := git.InspectAttemptWorktree(
-		ctx, definition.workspace.repositoryRoot, attempt.branch, attempt.worktree,
+		ctx, definition.workspace.target.root, attempt.branch, attempt.worktree,
 	)
 	if err != nil {
 		return AttemptBoundaryResult{}, err
@@ -523,7 +524,7 @@ func RecordAttemptBoundary(
 	event, err := NewAttemptBoundaryReachedJournalEvent(
 		runtime.workspaceID, attempt.attemptID, attempt.generation,
 		uint64(len(attempt.boundaries)+1), attempt.boundaryMode, attempt.serialSegment,
-		attempt.leaseID, attempt.authorizationID, attempt.goal, inspection.worktreeHead,
+		attempt.leaseID, attempt.goal, inspection.worktreeHead,
 		sortedEvidenceForProjection(request.Evidence),
 	)
 	if err != nil {
@@ -908,7 +909,7 @@ func ResumeAttempt(
 		goal = boundary.nextGoal.goal
 	}
 	inspection, err := git.InspectAttemptWorktree(
-		ctx, definition.workspace.repositoryRoot, attempt.branch, attempt.worktree,
+		ctx, definition.workspace.target.root, attempt.branch, attempt.worktree,
 	)
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
@@ -920,13 +921,13 @@ func ResumeAttempt(
 		return RuntimeAttemptProjection{}, err
 	}
 	epoch := uint64(len(attempt.boundaries) + 1)
-	leaseID, authorizationID, err := deriveAttemptEpochBindings(attempt.attemptID, epoch)
+	leaseID, err := deriveAttemptEpochBinding(attempt.attemptID, epoch)
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
 	event, err := NewAttemptResumedJournalEvent(
 		runtime.workspaceID, attempt.attemptID, boundary.boundaryID, attempt.generation,
-		inspection.worktreeHead, inspection.digest, leaseID, authorizationID, goal, attempt.serialSegment,
+		inspection.worktreeHead, inspection.digest, leaseID, goal, attempt.serialSegment,
 	)
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
@@ -1030,21 +1031,17 @@ func verifyAttemptGitInspection(
 	return nil
 }
 
-func deriveAttemptEpochBindings(attemptID ID, epoch uint64) (ID, ID, error) {
+func deriveAttemptEpochBinding(attemptID ID, epoch uint64) (ID, error) {
 	if attemptID.IsZero() || epoch == 0 {
-		return ID{}, ID{}, fmt.Errorf("attempt epoch bindings require attempt and positive epoch")
+		return ID{}, fmt.Errorf("attempt epoch binding requires attempt and positive epoch")
 	}
 	bindings := fmt.Sprintf("attempt_epoch_v2\nattempt_id=%s\nepoch=%d\n", attemptID, epoch)
 	digest := hex.EncodeToString(DigestBytes([]byte(bindings)).Bytes())[:16]
 	leaseID, err := NewID("lease-" + digest)
 	if err != nil {
-		return ID{}, ID{}, err
+		return ID{}, err
 	}
-	authorizationID, err := NewID("authorization-" + digest)
-	if err != nil {
-		return ID{}, ID{}, err
-	}
-	return leaseID, authorizationID, nil
+	return leaseID, nil
 }
 
 func loadRuntimeAttempt(journal *WorkspaceJournal, attemptID ID) (RuntimeAttemptProjection, error) {

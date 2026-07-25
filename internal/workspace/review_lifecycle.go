@@ -10,29 +10,27 @@ import (
 )
 
 type ReviewRepositoryRequest struct {
-	repository RepositoryIdentity
-	worktree   string
-	branch     string
-	head       GitObjectID
+	worktree string
+	branch   string
+	head     GitObjectID
 }
 
 func NewReviewRepositoryRequest(
-	repository RepositoryIdentity, worktree, branch string, head GitObjectID,
+	worktree, branch string, head GitObjectID,
 ) (ReviewRepositoryRequest, error) {
 	worktree = filepath.Clean(strings.TrimSpace(worktree))
-	if repository.String() == "" || !filepath.IsAbs(worktree) || head.IsZero() {
-		return ReviewRepositoryRequest{}, fmt.Errorf("review repository request requires repository, absolute worktree, and head")
+	if !filepath.IsAbs(worktree) || head.IsZero() {
+		return ReviewRepositoryRequest{}, fmt.Errorf("review repository request requires absolute worktree and head")
 	}
 	if err := validateAttemptBranchSyntax(branch); err != nil {
 		return ReviewRepositoryRequest{}, err
 	}
-	return ReviewRepositoryRequest{repository: repository, worktree: worktree, branch: branch, head: head}, nil
+	return ReviewRepositoryRequest{worktree: worktree, branch: branch, head: head}, nil
 }
 
-func (request ReviewRepositoryRequest) Repository() RepositoryIdentity { return request.repository }
-func (request ReviewRepositoryRequest) Worktree() string               { return request.worktree }
-func (request ReviewRepositoryRequest) Branch() string                 { return request.branch }
-func (request ReviewRepositoryRequest) Head() GitObjectID              { return request.head }
+func (request ReviewRepositoryRequest) Worktree() string  { return request.worktree }
+func (request ReviewRepositoryRequest) Branch() string    { return request.branch }
+func (request ReviewRepositoryRequest) Head() GitObjectID { return request.head }
 
 type ReviewRepositorySnapshot struct {
 	head   GitObjectID
@@ -61,32 +59,30 @@ func (snapshot ReviewRepositorySnapshot) Clean() bool       { return snapshot.cl
 func (snapshot ReviewRepositorySnapshot) Digest() Digest    { return snapshot.digest }
 
 // ReviewRepositoryPort is deliberately read-only. It can inspect and confirm
-// an exact clean head/tree but has no mutation, commit, push, provider, or
-// process-execution method.
+// an exact clean head/tree but has no mutation or process-execution method.
 type ReviewRepositoryPort interface {
 	InspectReviewSnapshot(context.Context, ReviewRepositoryRequest) (ReviewRepositorySnapshot, error)
 }
 
 type ReviewInvocation struct {
 	reservation ReviewInvocationReservation
-	repository  RepositoryIdentity
 	worktree    string
 	branch      string
 }
 
 func newReviewInvocation(
-	reservation ReviewInvocationReservation, repository RepositoryIdentity, worktree, branch string,
+	reservation ReviewInvocationReservation, worktree, branch string,
 ) (ReviewInvocation, error) {
 	request := reservation.request
-	repositoryRequest, err := NewReviewRepositoryRequest(repository, worktree, branch, request.head)
+	repositoryRequest, err := NewReviewRepositoryRequest(worktree, branch, request.head)
 	canonical, reservationErr := canonicalReviewInvocationReservation(reservation)
 	if err != nil || reservationErr != nil || reservation.digest != DigestBytes(canonical) ||
 		request.digest.IsZero() || !request.isolationRequired.Strict() {
 		return ReviewInvocation{}, fmt.Errorf("review invocation requires exact request and repository input")
 	}
 	return ReviewInvocation{
-		reservation: reservation, repository: repositoryRequest.repository,
-		worktree: repositoryRequest.worktree, branch: repositoryRequest.branch,
+		reservation: reservation, worktree: repositoryRequest.worktree,
+		branch: repositoryRequest.branch,
 	}, nil
 }
 
@@ -97,9 +93,8 @@ func (invocation ReviewInvocation) Reservation() ReviewInvocationReservation {
 func (invocation ReviewInvocation) ReviewerInstance() ID {
 	return invocation.reservation.reviewerInstance
 }
-func (invocation ReviewInvocation) Repository() RepositoryIdentity { return invocation.repository }
-func (invocation ReviewInvocation) Worktree() string               { return invocation.worktree }
-func (invocation ReviewInvocation) Branch() string                 { return invocation.branch }
+func (invocation ReviewInvocation) Worktree() string { return invocation.worktree }
+func (invocation ReviewInvocation) Branch() string   { return invocation.branch }
 
 type ReviewRunnerOutput struct {
 	submission ReviewResultSubmission
@@ -122,8 +117,8 @@ func (output ReviewRunnerOutput) Submission() ReviewResultSubmission {
 
 // ReviewRunnerPort is a capability boundary, not a generic process or agent
 // port. Implementations must materialize request.Head/Tree as read-only input,
-// provide fresh ephemeral writable scratch, deny credentials, hooks,
-// write-capable network, provider broker, and external-write tools, then attest
+// provide fresh ephemeral writable scratch, deny hooks, write-capable network,
+// and external-write tools, then attest
 // the actual isolation in the returned result. The workflow verifies the
 // repository again after the runner returns and rejects any weaker proof.
 type ReviewRunnerPort interface {
@@ -164,7 +159,7 @@ func (result AttemptHeadAdoptionResult) Adopted() bool         { return result.a
 
 // AdoptAttemptHead records ordinary local commits for an active attempt that
 // has no durable commit or review-fix protocol. It is usable independently of
-// governed review so protocol-free merge units can reach the provider surface.
+// governed review so protocol-free merge units can reach local integration.
 func AdoptAttemptHead(
 	ctx context.Context,
 	journal *WorkspaceJournal,
@@ -194,7 +189,7 @@ func AdoptAttemptHead(
 		return AttemptHeadAdoptionResult{}, fmt.Errorf("ordinary head adoption is unavailable after durable review state")
 	}
 	repositoryRequest, err := NewReviewRepositoryRequest(
-		attempt.repository, attempt.worktree, attempt.branch, attempt.verifiedHead,
+		attempt.worktree, attempt.branch, attempt.verifiedHead,
 	)
 	if err != nil {
 		return AttemptHeadAdoptionResult{}, err
@@ -264,7 +259,7 @@ func StartAttemptReviewRound(
 		return ReviewRoundStartResult{}, err
 	}
 	repositoryRequest, err := NewReviewRepositoryRequest(
-		attempt.repository, attempt.worktree, attempt.branch, attempt.verifiedHead,
+		attempt.worktree, attempt.branch, attempt.verifiedHead,
 	)
 	if err != nil {
 		return ReviewRoundStartResult{}, err
@@ -554,7 +549,7 @@ func RecordAttemptReviewResult(
 	if err := validateAttemptReviewProtocolState(definition, unit, attempt, state, true, false); err != nil {
 		return VerifiedReviewResult{}, JournalRecord{}, err
 	}
-	repositoryRequest, err := NewReviewRepositoryRequest(attempt.repository, attempt.worktree, attempt.branch, pending.head)
+	repositoryRequest, err := NewReviewRepositoryRequest(attempt.worktree, attempt.branch, pending.head)
 	if err != nil {
 		return VerifiedReviewResult{}, JournalRecord{}, err
 	}
@@ -736,7 +731,7 @@ func ExecuteNextReviewProfile(
 	if err := validateAttemptReviewProtocolState(definition, unit, attempt, state, true, false); err != nil {
 		return VerifiedReviewResult{}, JournalRecord{}, err
 	}
-	repositoryRequest, err := NewReviewRepositoryRequest(attempt.repository, attempt.worktree, attempt.branch, pending.head)
+	repositoryRequest, err := NewReviewRepositoryRequest(attempt.worktree, attempt.branch, pending.head)
 	if err != nil {
 		return VerifiedReviewResult{}, JournalRecord{}, err
 	}
@@ -748,7 +743,7 @@ func ExecuteNextReviewProfile(
 		}
 		return VerifiedReviewResult{}, JournalRecord{}, failure
 	}
-	invocation, err := newReviewInvocation(reserved.reservation, attempt.repository, attempt.worktree, attempt.branch)
+	invocation, err := newReviewInvocation(reserved.reservation, attempt.worktree, attempt.branch)
 	if err != nil {
 		if recordErr := recordReviewRunnerFailure(journal, definition, request, reserved.reservation.digest, err); recordErr != nil {
 			return VerifiedReviewResult{}, JournalRecord{}, recordErr
@@ -1016,25 +1011,21 @@ type ReviewReadiness struct {
 	generation Digest
 	attemptID  ID
 	mergeUnit  MergeUnitReference
-	repository RepositoryIdentity
-	remote     string
 	round      uint16
 	head       GitObjectID
 	tree       GitObjectID
 	digest     Digest
 }
 
-func (readiness ReviewReadiness) Purpose() string                { return readiness.purpose }
-func (readiness ReviewReadiness) WorkspaceID() ID                { return readiness.workspace }
-func (readiness ReviewReadiness) Generation() Digest             { return readiness.generation }
-func (readiness ReviewReadiness) AttemptID() ID                  { return readiness.attemptID }
-func (readiness ReviewReadiness) MergeUnit() MergeUnitReference  { return readiness.mergeUnit }
-func (readiness ReviewReadiness) Repository() RepositoryIdentity { return readiness.repository }
-func (readiness ReviewReadiness) Remote() string                 { return readiness.remote }
-func (readiness ReviewReadiness) Round() uint16                  { return readiness.round }
-func (readiness ReviewReadiness) Head() GitObjectID              { return readiness.head }
-func (readiness ReviewReadiness) Tree() GitObjectID              { return readiness.tree }
-func (readiness ReviewReadiness) Digest() Digest                 { return readiness.digest }
+func (readiness ReviewReadiness) Purpose() string               { return readiness.purpose }
+func (readiness ReviewReadiness) WorkspaceID() ID               { return readiness.workspace }
+func (readiness ReviewReadiness) Generation() Digest            { return readiness.generation }
+func (readiness ReviewReadiness) AttemptID() ID                 { return readiness.attemptID }
+func (readiness ReviewReadiness) MergeUnit() MergeUnitReference { return readiness.mergeUnit }
+func (readiness ReviewReadiness) Round() uint16                 { return readiness.round }
+func (readiness ReviewReadiness) Head() GitObjectID             { return readiness.head }
+func (readiness ReviewReadiness) Tree() GitObjectID             { return readiness.tree }
+func (readiness ReviewReadiness) Digest() Digest                { return readiness.digest }
 
 func ConfirmReviewMergeReadiness(
 	ctx context.Context,
@@ -1065,7 +1056,7 @@ func ConfirmReviewMergeReadiness(
 	if err := validateAttemptReviewProtocolState(definition, unit, attempt, state, true, false); err != nil {
 		return ReviewReadiness{}, err
 	}
-	repositoryRequest, err := NewReviewRepositoryRequest(attempt.repository, attempt.worktree, attempt.branch, state.head)
+	repositoryRequest, err := NewReviewRepositoryRequest(attempt.worktree, attempt.branch, state.head)
 	if err != nil {
 		return ReviewReadiness{}, err
 	}
@@ -1090,7 +1081,6 @@ func newReviewMergeReadiness(
 	readiness := ReviewReadiness{
 		purpose: ReviewMergeReadinessPurpose, workspace: definition.workspace.id,
 		generation: definition.generation, attemptID: attempt.attemptID, mergeUnit: attempt.mergeUnit,
-		repository: attempt.repository, remote: definition.workspace.remote,
 		round: state.RoundsUsed(), head: state.head, tree: state.tree,
 	}
 	type readinessJSON struct {
@@ -1100,8 +1090,6 @@ func newReviewMergeReadiness(
 		Generation    string `json:"generation"`
 		PlanID        string `json:"plan_id"`
 		MergeUnitID   string `json:"merge_unit_id"`
-		Repository    string `json:"repository"`
-		Remote        string `json:"remote"`
 		AttemptID     string `json:"attempt_id"`
 		Round         uint16 `json:"round"`
 		Head          string `json:"head"`
@@ -1111,8 +1099,8 @@ func newReviewMergeReadiness(
 	canonical, _ := json.Marshal(readinessJSON{
 		SchemaVersion: 2, Purpose: readiness.purpose, WorkspaceID: readiness.workspace.String(),
 		Generation: readiness.generation.String(), PlanID: readiness.mergeUnit.planID.String(),
-		MergeUnitID: readiness.mergeUnit.mergeUnitID.String(), Repository: readiness.repository.String(),
-		Remote: readiness.remote, AttemptID: attempt.attemptID.String(), Round: readiness.round,
+		MergeUnitID: readiness.mergeUnit.mergeUnitID.String(),
+		AttemptID:   attempt.attemptID.String(), Round: readiness.round,
 		Head: readiness.head.String(), Tree: readiness.tree.String(), Loop: state.loop.digest.String(),
 	})
 	readiness.digest = DigestBytes(canonical)

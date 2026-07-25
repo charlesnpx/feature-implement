@@ -17,12 +17,15 @@ type AttemptIdentity struct {
 }
 
 func DeriveAttemptIdentity(
-	repository RepositoryIdentity,
+	workspaceID ID,
+	generation Digest,
 	mergeUnit MergeUnitReference,
 	attemptNumber uint64,
 	base GitObjectID,
 ) (AttemptIdentity, error) {
-	attemptID, branch, err := deriveAttemptIdentity(repository, mergeUnit, attemptNumber, base)
+	attemptID, branch, err := deriveAttemptIdentity(
+		workspaceID, generation, mergeUnit, attemptNumber, base,
+	)
 	if err != nil {
 		return AttemptIdentity{}, err
 	}
@@ -33,22 +36,23 @@ func (identity AttemptIdentity) AttemptID() ID  { return identity.attemptID }
 func (identity AttemptIdentity) Branch() string { return identity.branch }
 
 func deriveAttemptIdentity(
-	repository RepositoryIdentity,
+	workspaceID ID,
+	generation Digest,
 	mergeUnit MergeUnitReference,
 	attemptNumber uint64,
 	base GitObjectID,
 ) (ID, string, error) {
-	if repository.String() == "" || mergeUnit.planID.IsZero() || mergeUnit.mergeUnitID.IsZero() ||
+	if workspaceID.IsZero() || generation.IsZero() ||
+		mergeUnit.planID.IsZero() || mergeUnit.mergeUnitID.IsZero() ||
 		attemptNumber == 0 || base.IsZero() {
-		return ID{}, "", fmt.Errorf("attempt identity requires repository, merge unit, positive attempt, and base")
-	}
-	if strings.ContainsAny(repository.String(), "\r\n") {
-		return ID{}, "", fmt.Errorf("attempt repository identity cannot contain line breaks")
+		return ID{}, "", fmt.Errorf(
+			"attempt identity requires workspace, generation, merge unit, positive attempt, and base",
+		)
 	}
 	baseSHA := hex.EncodeToString(base.Bytes())
 	bindings := fmt.Sprintf(
-		"repository_identity=%s\nplan_id=%s\nmerge_unit_id=%s\nattempt=%d\nbase_sha=%s\n",
-		repository.String(), mergeUnit.planID, mergeUnit.mergeUnitID, attemptNumber, baseSHA,
+		"workspace_id=%s\ngeneration=%s\nplan_id=%s\nmerge_unit_id=%s\nattempt=%d\nbase_sha=%s\n",
+		workspaceID, generation, mergeUnit.planID, mergeUnit.mergeUnitID, attemptNumber, baseSHA,
 	)
 	digestHex := hex.EncodeToString(DigestBytes([]byte(bindings)).Bytes())
 	attemptID, err := NewID("attempt-" + digestHex[:16])
@@ -97,13 +101,6 @@ func AttemptWorktreePath(root string, identity AttemptIdentity, mergeUnit MergeU
 	return path, nil
 }
 
-type AttemptRefScope string
-
-const (
-	AttemptRefLocal  AttemptRefScope = "local"
-	AttemptRefRemote AttemptRefScope = "remote"
-)
-
 type AttemptRefConflictKind string
 
 const (
@@ -113,7 +110,6 @@ const (
 )
 
 type AttemptRefConflict struct {
-	scope     AttemptRefScope
 	kind      AttemptRefConflictKind
 	existing  string
 	candidate string
@@ -121,47 +117,40 @@ type AttemptRefConflict struct {
 
 func (conflict AttemptRefConflict) Error() string {
 	return fmt.Sprintf(
-		"attempt branch %q has a %s %s ref conflict with %q",
-		conflict.candidate, conflict.scope, conflict.kind, conflict.existing,
+		"attempt branch %q has a %s local ref conflict with %q",
+		conflict.candidate, conflict.kind, conflict.existing,
 	)
 }
 
-func (conflict AttemptRefConflict) Scope() AttemptRefScope       { return conflict.scope }
 func (conflict AttemptRefConflict) Kind() AttemptRefConflictKind { return conflict.kind }
 func (conflict AttemptRefConflict) Existing() string             { return conflict.existing }
 func (conflict AttemptRefConflict) Candidate() string            { return conflict.candidate }
 
-func CheckAttemptRefConflicts(candidate string, local, remote []string, allowExact bool) error {
+func CheckAttemptRefConflicts(candidate string, refs []string, allowExact bool) error {
 	if err := validateAttemptBranchSyntax(candidate); err != nil {
 		return err
 	}
-	checks := []struct {
-		scope AttemptRefScope
-		refs  []string
-	}{{AttemptRefLocal, local}, {AttemptRefRemote, remote}}
-	for _, check := range checks {
-		refs := append([]string(nil), check.refs...)
-		sort.Strings(refs)
-		for _, raw := range refs {
-			existing, err := normalizeHeadRef(raw)
-			if err != nil {
-				return fmt.Errorf("inspect %s attempt refs: %w", check.scope, err)
+	refs = append([]string(nil), refs...)
+	sort.Strings(refs)
+	for _, raw := range refs {
+		existing, err := normalizeHeadRef(raw)
+		if err != nil {
+			return fmt.Errorf("inspect local attempt refs: %w", err)
+		}
+		kind := AttemptRefConflictKind("")
+		switch {
+		case existing == candidate:
+			if allowExact {
+				continue
 			}
-			kind := AttemptRefConflictKind("")
-			switch {
-			case existing == candidate:
-				if allowExact {
-					continue
-				}
-				kind = AttemptRefExact
-			case strings.HasPrefix(candidate, existing+"/"):
-				kind = AttemptRefAncestor
-			case strings.HasPrefix(existing, candidate+"/"):
-				kind = AttemptRefDescendant
-			}
-			if kind != "" {
-				return AttemptRefConflict{scope: check.scope, kind: kind, existing: existing, candidate: candidate}
-			}
+			kind = AttemptRefExact
+		case strings.HasPrefix(candidate, existing+"/"):
+			kind = AttemptRefAncestor
+		case strings.HasPrefix(existing, candidate+"/"):
+			kind = AttemptRefDescendant
+		}
+		if kind != "" {
+			return AttemptRefConflict{kind: kind, existing: existing, candidate: candidate}
 		}
 	}
 	return nil

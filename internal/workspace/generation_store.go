@@ -24,18 +24,11 @@ type storedArtifactDocumentWire struct {
 	Canonical json.RawMessage `json:"canonical"`
 }
 
-type storedAuthorityDocumentWire struct {
-	ID        string          `json:"id"`
-	Kind      AuthorityKind   `json:"kind"`
-	Canonical json.RawMessage `json:"canonical"`
-}
-
 type storedGenerationWire struct {
-	SchemaVersion int                           `json:"schema_version"`
-	Generation    string                        `json:"generation"`
-	Identity      canonicalGeneration           `json:"identity"`
-	Artifacts     []storedArtifactDocumentWire  `json:"artifacts"`
-	Authorities   []storedAuthorityDocumentWire `json:"authorities"`
+	SchemaVersion int                          `json:"schema_version"`
+	Generation    string                       `json:"generation"`
+	Identity      canonicalGeneration          `json:"identity"`
+	Artifacts     []storedArtifactDocumentWire `json:"artifacts"`
 }
 
 type StoredGeneration struct {
@@ -252,38 +245,21 @@ func marshalStoredGeneration(definition EffectiveWorkspaceDefinition) ([]byte, e
 			Canonical: json.RawMessage(append([]byte(nil), artifact.canonical...)),
 		})
 	}
-	authorities := make([]storedAuthorityDocumentWire, 0, len(definition.authorities))
-	for _, authority := range definition.authorities {
-		canonical, err := canonicalAuthorityBytes(authority)
-		if err != nil {
-			return nil, err
-		}
-		authorities = append(authorities, storedAuthorityDocumentWire{
-			ID: authority.id.String(), Kind: authority.kind, Canonical: json.RawMessage(canonical),
-		})
-	}
 	return json.Marshal(storedGenerationWire{
 		SchemaVersion: JournalSchemaVersion, Generation: definition.generation.String(),
-		Identity: identity, Artifacts: artifacts, Authorities: authorities,
+		Identity: identity, Artifacts: artifacts,
 	})
 }
 
 func canonicalGenerationIdentity(definition EffectiveWorkspaceDefinition) canonicalGeneration {
 	identity := canonicalGeneration{
 		SchemaVersion: JournalSchemaVersion, WorkspaceID: definition.workspace.id.String(),
-		Artifacts:   make([]canonicalArtifactIdentity, 0, len(definition.artifacts)),
-		Authorities: make([]canonicalAuthorityIdentity, 0, len(definition.authorities)),
+		Artifacts: make([]canonicalArtifactIdentity, 0, len(definition.artifacts)),
 	}
 	for _, artifact := range definition.artifacts {
 		identity.Artifacts = append(identity.Artifacts, canonicalArtifactIdentity{
 			Kind: artifact.kind, ID: artifact.id.String(), Path: artifact.path,
 			SourceHash: artifact.sourceHash.String(), SemanticHash: artifact.semanticHash.String(),
-		})
-	}
-	for _, authority := range definition.authorities {
-		identity.Authorities = append(identity.Authorities, canonicalAuthorityIdentity{
-			ID: authority.id.String(), Kind: authority.kind,
-			SourceHash: authority.sourceHash.String(), SemanticHash: authority.semanticHash.String(),
 		})
 	}
 	return identity
@@ -318,7 +294,7 @@ func parseStoredGeneration(content []byte, expected Digest) (StoredGeneration, e
 	if DigestBytes(identityBytes) != generation {
 		return StoredGeneration{}, fmt.Errorf("stored generation canonical identity does not match %s", generation)
 	}
-	if len(wire.Artifacts) != len(wire.Identity.Artifacts) || len(wire.Authorities) != len(wire.Identity.Authorities) {
+	if len(wire.Artifacts) != len(wire.Identity.Artifacts) {
 		return StoredGeneration{}, fmt.Errorf("stored generation documents do not match identity cardinality")
 	}
 	for index, artifact := range wire.Artifacts {
@@ -335,22 +311,6 @@ func parseStoredGeneration(content []byte, expected Digest) (StoredGeneration, e
 		}
 		if !json.Valid(artifact.Canonical) || DigestBytes(artifact.Canonical) != semanticHash {
 			return StoredGeneration{}, fmt.Errorf("stored artifact %s canonical bytes do not match semantic hash", artifact.ID)
-		}
-	}
-	for index, authority := range wire.Authorities {
-		identity := wire.Identity.Authorities[index]
-		if authority.ID != identity.ID || authority.Kind != identity.Kind {
-			return StoredGeneration{}, fmt.Errorf("stored authority %d does not match its identity", index)
-		}
-		semanticHash, err := ParseDigest(identity.SemanticHash)
-		if err != nil {
-			return StoredGeneration{}, err
-		}
-		if !json.Valid(authority.Canonical) || DigestBytes(authority.Canonical) != semanticHash {
-			return StoredGeneration{}, fmt.Errorf("stored authority %s canonical bytes do not match semantic hash", authority.ID)
-		}
-		if _, err := ParseDigest(identity.SourceHash); err != nil {
-			return StoredGeneration{}, err
 		}
 	}
 	workspaceID, err := NewID(wire.Identity.WorkspaceID)

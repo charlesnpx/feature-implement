@@ -3,6 +3,7 @@ package workspacecmd
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -100,23 +101,31 @@ func (runner isolatedCheckRunner) materializeExactCommit(
 		{"-C", destination, "remote", "remove", "origin"},
 	}
 	for _, arguments := range commands {
-		if _, err := runNonProviderSetup(ctx, executable, arguments...); err != nil {
+		if _, err := runIsolatedSetup(ctx, executable, arguments...); err != nil {
 			return fmt.Errorf("materialize configured check commit: %w", err)
 		}
 	}
-	output, err := runNonProviderSetup(ctx, executable, "-C", destination, "rev-parse", "HEAD^{tree}")
+	output, err := runIsolatedSetup(ctx, executable, "-C", destination, "rev-parse", "HEAD^{tree}")
 	if err != nil {
 		return fmt.Errorf("verify configured check tree: %w", err)
 	}
-	observed, err := parseGitHubObject(strings.TrimSpace(string(output)), invocation.Tree().Algorithm())
+	observed, err := parseRawGitObject(strings.TrimSpace(string(output)), invocation.Tree().Algorithm())
 	if err != nil || observed != invocation.Tree() {
 		return fmt.Errorf("configured check materialization tree %q (%v) does not match %s", strings.TrimSpace(string(output)), err, invocation.Tree())
 	}
 	return nil
 }
 
-func runNonProviderSetup(ctx context.Context, executable string, arguments ...string) ([]byte, error) {
-	environment, err := workspace.BuildNonProviderProcessEnvironment(os.Environ(), nil)
+func parseRawGitObject(value string, algorithm workspace.GitHashAlgorithm) (workspace.GitObjectID, error) {
+	return workspace.ParseGitObjectID(string(algorithm) + ":" + strings.TrimSpace(value))
+}
+
+func gitObjectHex(object workspace.GitObjectID) string {
+	return hex.EncodeToString(object.Bytes())
+}
+
+func runIsolatedSetup(ctx context.Context, executable string, arguments ...string) ([]byte, error) {
+	environment, err := workspace.BuildIsolatedProcessEnvironment(os.Environ(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -203,7 +212,7 @@ func configuredCheckEnvironment(scratch string) ([]string, string, error) {
 		}
 		additions = append(additions, variable)
 	}
-	environment, err := workspace.BuildNonProviderProcessEnvironment(os.Environ(), additions)
+	environment, err := workspace.BuildIsolatedProcessEnvironment(os.Environ(), additions)
 	return environment, moduleCache, err
 }
 

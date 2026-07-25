@@ -1,7 +1,6 @@
 package workspace_test
 
 import (
-	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -16,8 +15,6 @@ import (
 
 type definitionFixture struct {
 	sources workspace.DefinitionSources
-	gitData []byte
-	extData []byte
 	base    workspace.GitObjectID
 }
 
@@ -33,8 +30,6 @@ func newDefinitionFixtureForHash(
 	repositoryRoot, baseCommit := initializeTargetRepository(
 		t, algorithm,
 	)
-	gitData := []byte("owner-policy: strict\n")
-	externalData := []byte("organization-policy: strict\n")
 	workspaceYAML := fmt.Sprintf(`schema_version: 2
 id: example-workspace
 mode: local
@@ -48,13 +43,6 @@ plans:
   - id: alpha-plan
     source: plans/alpha.yaml
 dependencies: []
-authority_sources:
-  - id: owner-policy
-    kind: git_blob
-    location: policy/owner.yaml
-  - id: organization-policy
-    kind: external_digest
-    location: https://policy.example/v2
 `, repositoryRoot, baseCommit)
 	planYAML := `schema_version: 2
 id: alpha-plan
@@ -92,7 +80,6 @@ merge_units:
 	executionYAML := `schema_version: 2
 policy:
   require_passing_checks: true
-  require_signed_receipts: true
   allow_write_network: false
   max_attempts: 5
   max_review_rounds: 4
@@ -102,7 +89,6 @@ profiles:
     runner: codex
     policy:
       require_passing_checks: true
-      require_signed_receipts: true
       allow_write_network: false
       max_attempts: 4
       max_review_rounds: 3
@@ -116,7 +102,6 @@ merge_units:
       serial_segment: serial-alpha
     policy:
       require_passing_checks: true
-      require_signed_receipts: true
       allow_write_network: false
       max_attempts: 3
       max_review_rounds: 3
@@ -128,37 +113,22 @@ merge_units:
       mode: complete_goal_and_wait
     policy:
       require_passing_checks: true
-      require_signed_receipts: true
       allow_write_network: false
       max_attempts: 2
       max_review_rounds: 2
       max_review_fixes: 2
 `
 	return definitionFixture{
-		gitData: gitData,
-		extData: externalData,
-		base:    baseCommit,
+		base: baseCommit,
 		sources: workspace.DefinitionSources{
 			Workspace:       workspace.SourceArtifact{Path: "feature.workspace.yaml", Bytes: []byte(workspaceYAML)},
 			Plans:           []workspace.SourceArtifact{{Path: "plans/alpha.yaml", Bytes: []byte(planYAML)}},
 			ExecutionConfig: workspace.SourceArtifact{Path: "config/execution.yaml", Bytes: []byte(executionYAML)},
-			Authorities: []workspace.AuthorityMaterial{
-				{
-					ID: "owner-policy", Kind: workspace.AuthorityGitBlob, Content: gitData,
-					RepositoryIdentity: "https://github.com/example/policy.git",
-					CommitObject:       "sha1:" + strings.Repeat("1", 40),
-					BlobObject:         gitSHA1Blob(gitData),
-				},
-				{
-					ID: "organization-policy", Kind: workspace.AuthorityExternalDigest, Content: externalData,
-					ExpectedSourceDigest: workspace.DigestBytes(externalData).String(),
-				},
-			},
 		},
 	}
 }
 
-func TestValidateDefinitionBuildsContentAddressedEffectiveAuthority(t *testing.T) {
+func TestValidateDefinitionBuildsContentAddressedEffectiveInputs(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	definition, err := workspace.ValidateDefinition(fixture.sources)
 	if err != nil {
@@ -180,7 +150,7 @@ func TestValidateDefinitionBuildsContentAddressedEffectiveAuthority(t *testing.T
 	if manifest.BaseRef() != "refs/heads/main" ||
 		manifest.BaseCommit() != fixture.base ||
 		manifest.FeatureBranch() != "feature/example-workspace" {
-		t.Fatalf("workspace local target authority is incomplete: %#v", manifest)
+		t.Fatalf("workspace local target binding is incomplete: %#v", manifest)
 	}
 	if got := manifest.ExecutionConfigSource(); got != "config/execution.yaml" {
 		t.Fatalf("execution config path = %q", got)
@@ -199,32 +169,8 @@ func TestValidateDefinitionBuildsContentAddressedEffectiveAuthority(t *testing.T
 			t.Fatalf("artifact is not fully hashed: kind=%s path=%s", artifact.Kind(), artifact.Path())
 		}
 	}
-	snapshots := definition.AuthoritySnapshots()
-	if len(snapshots) != 2 {
-		t.Fatalf("authority snapshots = %d", len(snapshots))
-	}
-	for _, snapshot := range snapshots {
-		if snapshot.SourceHash().IsZero() || snapshot.SemanticHash().IsZero() {
-			t.Fatalf("authority snapshot is not hashed: %s", snapshot.ID())
-		}
-		switch snapshot.Kind() {
-		case workspace.AuthorityGitBlob:
-			pin, ok := snapshot.GitPin()
-			if !ok || pin.Blob().String() != gitSHA1Blob(fixture.gitData) {
-				t.Fatalf("invalid Git authority pin: %#v", pin)
-			}
-		case workspace.AuthorityExternalDigest:
-			digest, ok := snapshot.ExternalDigest()
-			if !ok || digest != workspace.DigestBytes(fixture.extData) {
-				t.Fatalf("invalid external authority pin: %s", digest)
-			}
-		default:
-			t.Fatalf("unexpected authority kind %q", snapshot.Kind())
-		}
-	}
-
 	workspaceLock := workspace.ProjectWorkspaceLock(definition)
-	if workspaceLock.SchemaVersion() != 2 || workspaceLock.Generation() != definition.Generation() || len(workspaceLock.Artifacts()) != 3 || len(workspaceLock.Authorities()) != 2 {
+	if workspaceLock.SchemaVersion() != 2 || workspaceLock.Generation() != definition.Generation() || len(workspaceLock.Artifacts()) != 3 {
 		t.Fatalf("workspace projection = %#v", workspaceLock)
 	}
 	planLocks := workspace.ProjectPlanLocks(definition)
@@ -242,7 +188,7 @@ func TestValidateDefinitionBuildsContentAddressedEffectiveAuthority(t *testing.T
 	for _, encoded := range [][]byte{workspaceLockJSON, planLockJSON} {
 		text := string(encoded)
 		if !strings.Contains(text, definition.Generation().String()) || strings.Contains(text, "runtime") || strings.Contains(text, "status") || strings.Contains(text, "base_ref") || strings.Contains(text, "remote") {
-			t.Fatalf("projection JSON has mutable or misplaced authority: %s", text)
+			t.Fatalf("projection JSON has mutable or misplaced state: %s", text)
 		}
 	}
 }
@@ -344,48 +290,18 @@ func TestSourceAndSemanticHashesHaveDistinctContracts(t *testing.T) {
 	}
 }
 
-func TestNoReviewExecutionCanonicalFormPreservesPreReviewSemanticHash(t *testing.T) {
+func TestNoReviewExecutionCanonicalFormOmitsUnusedAndRemovedFields(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	definition, err := workspace.ValidateDefinition(fixture.sources)
 	if err != nil {
 		t.Fatal(err)
 	}
 	execution := artifactByKind(t, definition, workspace.ArtifactExecutionConfig)
-	if strings.Contains(string(execution.CanonicalBytes()), "review_profiles") {
-		t.Fatalf("no-review canonical execution gained a review_profiles field: %s", execution.CanonicalBytes())
-	}
-	const preReviewSemanticHash = "sha256:005977c9af3bfe559b2adf55ec1e15bac02989dadf09e305c5174c3fe9ebba6d"
-	if got := execution.SemanticHash().String(); got != preReviewSemanticHash {
-		t.Fatalf("no-review execution semantic hash = %s, want %s", got, preReviewSemanticHash)
-	}
-}
-
-func TestAuthorityChangesCreateNewGeneration(t *testing.T) {
-	fixture := newDefinitionFixture(t)
-	first, err := workspace.ValidateDefinition(fixture.sources)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	contentChanged := cloneDefinitionSources(fixture.sources)
-	contentChanged.Authorities[1].Content = []byte("organization-policy: stricter\n")
-	contentChanged.Authorities[1].ExpectedSourceDigest = workspace.DigestBytes(contentChanged.Authorities[1].Content).String()
-	second, err := workspace.ValidateDefinition(contentChanged)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.Generation() == second.Generation() {
-		t.Fatal("authority content change must create a new generation")
-	}
-
-	pinChanged := cloneDefinitionSources(fixture.sources)
-	pinChanged.Authorities[0].CommitObject = "sha1:" + strings.Repeat("2", 40)
-	third, err := workspace.ValidateDefinition(pinChanged)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.Generation() == third.Generation() {
-		t.Fatal("authority Git pin change must create a new generation")
+	canonical := string(execution.CanonicalBytes())
+	for _, field := range []string{"review_profiles", "require_signed_receipts"} {
+		if strings.Contains(canonical, field) {
+			t.Fatalf("canonical execution retained %q: %s", field, canonical)
+		}
 	}
 }
 
@@ -425,7 +341,6 @@ merge_units:
       mode: pause_only
     policy:
       require_passing_checks: true
-      require_signed_receipts: true
       allow_write_network: false
       max_attempts: 2
       max_review_rounds: 2
@@ -461,7 +376,6 @@ func TestEffectiveDefinitionRejectsCombinedCrossPlanCycle(t *testing.T) {
       mode: pause_only
     policy:
       require_passing_checks: true
-      require_signed_receipts: true
       allow_write_network: false
       max_attempts: 2
       max_review_rounds: 2
@@ -473,7 +387,6 @@ func TestEffectiveDefinitionRejectsCombinedCrossPlanCycle(t *testing.T) {
       mode: pause_only
     policy:
       require_passing_checks: true
-      require_signed_receipts: true
       allow_write_network: false
       max_attempts: 2
       max_review_rounds: 2
@@ -590,7 +503,6 @@ func TestDefinitionDefensivelyCopiesNestedInputsAndOutputs(t *testing.T) {
 	wantGeneration := definition.Generation()
 	sources.Workspace.Bytes[0] = 'X'
 	sources.Plans[0].Bytes[0] = 'X'
-	sources.Authorities[0].Content[0] = 'X'
 	artifacts := definition.Artifacts()
 	canonical := artifacts[0].CanonicalBytes()
 	canonical[0] = 'X'
@@ -599,9 +511,6 @@ func TestDefinitionDefensivelyCopiesNestedInputsAndOutputs(t *testing.T) {
 	plans[0] = workspace.Plan{}
 	profiles := definition.Profiles()
 	profiles[0] = workspace.ExecutionProfile{}
-	snapshots := definition.AuthoritySnapshots()
-	snapshots[0] = workspace.AuthoritySnapshot{}
-
 	if definition.Generation() != wantGeneration || definition.Plans()[0].ID().String() != "alpha-plan" || len(definition.Artifacts()[0].CanonicalBytes()) == 0 {
 		t.Fatal("caller mutation escaped a definition boundary")
 	}
@@ -613,7 +522,7 @@ func TestDefinitionDefensivelyCopiesNestedInputsAndOutputs(t *testing.T) {
 	}
 }
 
-func TestV2PlanAndLockProjectionsCannotOwnRuntimeOrWorkspaceAuthority(t *testing.T) {
+func TestV2PlanAndLockProjectionsCannotOwnRuntimeOrWorkspaceState(t *testing.T) {
 	assertTypeOmitsFields(t, reflect.TypeOf(workspace.Plan{}), "base", "remote", "policy", "runtime", "state", "status")
 	assertTypeOmitsFields(t, reflect.TypeOf(workspace.PlanLockProjection{}), "base", "remote", "policy", "runtime", "state", "status")
 	assertTypeOmitsFields(t, reflect.TypeOf(workspace.WorkspaceLockProjection{}), "runtime", "state", "status", "approval", "attempt")
@@ -638,18 +547,7 @@ func cloneDefinitionSources(source workspace.DefinitionSources) workspace.Defini
 	for index := range result.Plans {
 		result.Plans[index].Bytes = append([]byte(nil), source.Plans[index].Bytes...)
 	}
-	result.Authorities = append([]workspace.AuthorityMaterial(nil), source.Authorities...)
-	for index := range result.Authorities {
-		result.Authorities[index].Content = append([]byte(nil), source.Authorities[index].Content...)
-	}
 	return result
-}
-
-func gitSHA1Blob(content []byte) string {
-	digest := sha1.New()
-	_, _ = fmt.Fprintf(digest, "blob %d%c", len(content), byte(0))
-	_, _ = digest.Write(content)
-	return fmt.Sprintf("sha1:%x", digest.Sum(nil))
 }
 
 func assertTypeOmitsFields(t *testing.T, typ reflect.Type, forbidden ...string) {

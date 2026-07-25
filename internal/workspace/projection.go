@@ -18,20 +18,6 @@ func (projection ArtifactProjection) Path() string         { return projection.p
 func (projection ArtifactProjection) SourceHash() Digest   { return projection.sourceHash }
 func (projection ArtifactProjection) SemanticHash() Digest { return projection.semanticHash }
 
-type AuthorityProjection struct {
-	id           ID
-	kind         AuthorityKind
-	location     string
-	sourceHash   Digest
-	semanticHash Digest
-}
-
-func (projection AuthorityProjection) ID() ID               { return projection.id }
-func (projection AuthorityProjection) Kind() AuthorityKind  { return projection.kind }
-func (projection AuthorityProjection) Location() string     { return projection.location }
-func (projection AuthorityProjection) SourceHash() Digest   { return projection.sourceHash }
-func (projection AuthorityProjection) SemanticHash() Digest { return projection.semanticHash }
-
 // WorkspaceLockProjection deliberately contains no runtime state. It is a
 // disposable projection of an EffectiveWorkspaceDefinition.
 type WorkspaceLockProjection struct {
@@ -39,7 +25,6 @@ type WorkspaceLockProjection struct {
 	workspaceID   ID
 	generation    Digest
 	artifacts     []ArtifactProjection
-	authorities   []AuthorityProjection
 }
 
 func ProjectWorkspaceLock(definition EffectiveWorkspaceDefinition) WorkspaceLockProjection {
@@ -50,16 +35,9 @@ func ProjectWorkspaceLock(definition EffectiveWorkspaceDefinition) WorkspaceLock
 			sourceHash: artifact.sourceHash, semanticHash: artifact.semanticHash,
 		})
 	}
-	authorities := make([]AuthorityProjection, 0, len(definition.authorities))
-	for _, authority := range definition.authorities {
-		authorities = append(authorities, AuthorityProjection{
-			id: authority.id, kind: authority.kind, location: authority.location,
-			sourceHash: authority.sourceHash, semanticHash: authority.semanticHash,
-		})
-	}
 	return WorkspaceLockProjection{
 		schemaVersion: 2, workspaceID: definition.workspace.id,
-		generation: definition.generation, artifacts: artifacts, authorities: authorities,
+		generation: definition.generation, artifacts: artifacts,
 	}
 }
 
@@ -69,10 +47,6 @@ func (projection WorkspaceLockProjection) Generation() Digest { return projectio
 func (projection WorkspaceLockProjection) Artifacts() []ArtifactProjection {
 	return append([]ArtifactProjection(nil), projection.artifacts...)
 }
-func (projection WorkspaceLockProjection) Authorities() []AuthorityProjection {
-	return append([]AuthorityProjection(nil), projection.authorities...)
-}
-
 func (projection WorkspaceLockProjection) MarshalJSON() ([]byte, error) {
 	type artifactJSON struct {
 		Kind         ArtifactKind `json:"kind"`
@@ -81,37 +55,22 @@ func (projection WorkspaceLockProjection) MarshalJSON() ([]byte, error) {
 		SourceHash   string       `json:"source_hash"`
 		SemanticHash string       `json:"semantic_hash"`
 	}
-	type authorityJSON struct {
-		ID           string        `json:"id"`
-		Kind         AuthorityKind `json:"kind"`
-		Location     string        `json:"location"`
-		SourceHash   string        `json:"source_hash"`
-		SemanticHash string        `json:"semantic_hash"`
-	}
 	type workspaceLockJSON struct {
-		SchemaVersion int             `json:"schema_version"`
-		WorkspaceID   string          `json:"workspace_id"`
-		Generation    string          `json:"generation"`
-		Artifacts     []artifactJSON  `json:"artifacts"`
-		Authorities   []authorityJSON `json:"authorities"`
+		SchemaVersion int            `json:"schema_version"`
+		WorkspaceID   string         `json:"workspace_id"`
+		Generation    string         `json:"generation"`
+		Artifacts     []artifactJSON `json:"artifacts"`
 	}
 	value := workspaceLockJSON{
 		SchemaVersion: projection.schemaVersion,
 		WorkspaceID:   projection.workspaceID.String(),
 		Generation:    projection.generation.String(),
 		Artifacts:     make([]artifactJSON, 0, len(projection.artifacts)),
-		Authorities:   make([]authorityJSON, 0, len(projection.authorities)),
 	}
 	for _, artifact := range projection.artifacts {
 		value.Artifacts = append(value.Artifacts, artifactJSON{
 			Kind: artifact.kind, ID: artifact.id.String(), Path: artifact.path,
 			SourceHash: artifact.sourceHash.String(), SemanticHash: artifact.semanticHash.String(),
-		})
-	}
-	for _, authority := range projection.authorities {
-		value.Authorities = append(value.Authorities, authorityJSON{
-			ID: authority.id.String(), Kind: authority.kind, Location: authority.location,
-			SourceHash: authority.sourceHash.String(), SemanticHash: authority.semanticHash.String(),
 		})
 	}
 	return json.Marshal(value)

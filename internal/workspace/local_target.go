@@ -8,7 +8,7 @@ import (
 )
 
 // LocalTargetBinding is the durable admission result for the selected target
-// worktree. It binds both semantic Git authority and the opened filesystem
+// worktree. It binds both semantic Git state and the opened filesystem
 // objects that were used to establish it.
 type LocalTargetBinding struct {
 	root                 string

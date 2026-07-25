@@ -2243,7 +2243,7 @@ func (adapter planCheckpointGitAdapter) run(
 			additions = append(additions, variable)
 		}
 	}
-	environment, err := BuildNonProviderProcessEnvironment(os.Environ(), additions)
+	environment, err := BuildIsolatedProcessEnvironment(os.Environ(), additions)
 	if err != nil {
 		return nil, nil, -1, err
 	}
