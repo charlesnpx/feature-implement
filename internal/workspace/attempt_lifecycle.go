@@ -99,6 +99,15 @@ func ReserveAttempt(
 		return existing, nil
 	}
 	for _, attempt := range runtime.attempts {
+		if attempt.integration != nil &&
+			!attempt.integration.Integrated() {
+			return RuntimeAttemptProjection{}, fmt.Errorf(
+				"attempt reservation conflicts with pending integration attempt %s",
+				attempt.attemptID,
+			)
+		}
+	}
+	for _, attempt := range runtime.attempts {
 		if attempt.mergeUnit == request.MergeUnit && attempt.attemptNumber == request.AttemptNumber {
 			return RuntimeAttemptProjection{}, fmt.Errorf("attempt number %d is already bound to %s", request.AttemptNumber, attempt.attemptID)
 		}

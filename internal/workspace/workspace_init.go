@@ -392,8 +392,15 @@ func inspectLocalTargetForInitializationAdmission(
 		)
 	}
 	if target.Created() {
-		return adapter.verifyOwnedFeatureRef(
-			ctx, target.binding, target.intentDigest,
+		expectedMarker, err := expectedLocalTargetReflogMarker(
+			runtime, target,
+		)
+		if err != nil {
+			return LocalTargetInspection{}, err
+		}
+		return adapter.verifyOwnedFeatureRefAt(
+			ctx, target.binding, target.createdHead,
+			expectedMarker,
 		)
 	}
 	return adapter.inspectIntendedTarget(

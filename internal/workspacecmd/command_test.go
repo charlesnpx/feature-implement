@@ -1,9 +1,14 @@
 package workspacecmd
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charlesnpx/feature-implement/internal/workspace"
 )
@@ -263,6 +268,7 @@ func TestDeferredLocalCommandsStrictlyDecodeTheirFinalEnvelopes(
 	t *testing.T,
 ) {
 	_, err := executeIntegration(
+		context.Background(),
 		workspace.WorkspaceBundle{},
 		Options{
 			Subaction: "merge-unit",
@@ -273,7 +279,8 @@ func TestDeferredLocalCommandsStrictlyDecodeTheirFinalEnvelopes(
 }`),
 		},
 	)
-	if err == nil || !strings.Contains(err.Error(), "not implemented") {
+	if err == nil ||
+		!strings.Contains(err.Error(), "workspace directory is required") {
 		t.Fatalf("valid integration envelope error = %v", err)
 	}
 	_, err = executeCompletion(
@@ -288,5 +295,319 @@ func TestDeferredLocalCommandsStrictlyDecodeTheirFinalEnvelopes(
 	)
 	if err == nil || !strings.Contains(err.Error(), "not implemented") {
 		t.Fatalf("valid completion envelope error = %v", err)
+	}
+}
+
+func TestExecuteIntegrationSucceedsAndRetriesIdempotently(t *testing.T) {
+	repositoryRoot := canonicalWorkspaceCommandTempDir(t)
+	runGitTest(t, repositoryRoot, "init", "-b", "main")
+	runGitTest(t, repositoryRoot, "config", "user.name", "Feature Test")
+	runGitTest(
+		t, repositoryRoot, "config", "user.email",
+		"feature@example.test",
+	)
+	if err := os.WriteFile(
+		filepath.Join(repositoryRoot, "tracked.txt"),
+		[]byte("base\n"), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repositoryRoot, "add", "tracked.txt")
+	runGitTest(t, repositoryRoot, "commit", "-m", "Base")
+	base := parseWorkspaceCommandGitObject(
+		t, strings.TrimSpace(runGitTest(
+			t, repositoryRoot, "rev-parse", "HEAD",
+		)),
+	)
+
+	bundleRoot := canonicalWorkspaceCommandTempDir(t)
+	if err := os.MkdirAll(
+		filepath.Join(bundleRoot, "plans"), 0o700,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(
+		filepath.Join(bundleRoot, "config"), 0o700,
+	); err != nil {
+		t.Fatal(err)
+	}
+	write := func(relative, content string) {
+		t.Helper()
+		if err := os.WriteFile(
+			filepath.Join(bundleRoot, relative),
+			[]byte(content), 0o600,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(workspace.WorkspaceBundleFileName, `{
+  "schema_version": 2,
+  "workspace": "feature.workspace.yaml",
+  "plans": ["plans/alpha.yaml"],
+  "execution_config": "config/execution.yaml"
+}`)
+	write("feature.workspace.yaml", fmt.Sprintf(`schema_version: 2
+id: command-workspace
+mode: local
+repository:
+  root: %q
+base_ref: refs/heads/main
+base_commit: %s
+feature_branch: feature/command-workspace
+execution_config: config/execution.yaml
+plans:
+  - id: alpha-plan
+    source: plans/alpha.yaml
+dependencies: []
+`, repositoryRoot, base))
+	write("plans/alpha.yaml", `schema_version: 2
+id: alpha-plan
+title: Alpha Plan
+stories:
+  - id: story-one
+    summary: Implement the command integration path.
+    acceptance:
+      - Command integration succeeds.
+    implementation:
+      - Integrate the accepted attempt.
+    testing:
+      - Retry integration idempotently.
+    dependencies: []
+merge_units:
+  - id: unit-one
+    name: Unit One
+    story_ids:
+      - story-one
+`)
+	write("config/execution.yaml", `schema_version: 2
+policy:
+  require_passing_checks: true
+  allow_write_network: false
+  max_attempts: 2
+  max_review_rounds: 2
+  max_review_fixes: 1
+profiles:
+  - id: standard
+    runner: codex
+    policy:
+      require_passing_checks: true
+      allow_write_network: false
+      max_attempts: 2
+      max_review_rounds: 2
+      max_review_fixes: 1
+merge_units:
+  - plan_id: alpha-plan
+    merge_unit_id: unit-one
+    profile: standard
+    boundary:
+      mode: pause_only
+      serial_segment: command-segment
+    policy:
+      require_passing_checks: true
+      allow_write_network: false
+      max_attempts: 2
+      max_review_rounds: 2
+      max_review_fixes: 1
+`)
+	checkpointInput := func(occurredAt string) []byte {
+		return []byte(fmt.Sprintf(`{
+  "schema_version": 2,
+  "occurred_at": %q
+}`, occurredAt))
+	}
+	if _, err := workspace.CheckpointPlanRepository(
+		context.Background(),
+		workspace.PlanCheckpointOptions{
+			Root: bundleRoot, Kind: workspace.PlanCheckpointInitial,
+			Input: checkpointInput("2026-07-25T17:59:58Z"),
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.CheckpointPlanRepository(
+		context.Background(),
+		workspace.PlanCheckpointOptions{
+			Root: bundleRoot, Kind: workspace.PlanCheckpointLock,
+			Input: checkpointInput("2026-07-25T17:59:59Z"),
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := workspace.LoadWorkspaceBundle(bundleRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceDir := canonicalWorkspaceCommandTempDir(t)
+	worktreeRoot := canonicalWorkspaceCommandTempDir(t)
+	if _, err := initializeWorkspace(
+		context.Background(), bundle,
+		Options{
+			WorkspaceDir: workspaceDir,
+			Input: []byte(fmt.Sprintf(`{
+  "schema_version": 2,
+  "occurred_at": "2026-07-25T18:00:00Z",
+  "worktree_root": %q
+}`, worktreeRoot)),
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := workspace.OpenWorkspaceJournal(
+		workspaceDir, workspace.JournalReadWrite,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptGit := workspace.DefaultLocalAttemptGitAdapter()
+	goal, err := workspace.NewGoalBinding(
+		workspace.MustID("command-goal"),
+		workspace.GoalScopeMergeUnit,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mergeUnit, err := workspace.NewMergeUnitReference(
+		workspace.MustID("alpha-plan"),
+		workspace.MustID("unit-one"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := workspace.ReserveAttempt(
+		context.Background(), journal, bundle.Definition(), attemptGit,
+		workspace.ReserveAttemptRequest{
+			MergeUnit: mergeUnit, AttemptNumber: 1, Goal: goal,
+			OccurredAt: time.Date(
+				2026, time.July, 25, 18, 0, 1, 0, time.UTC,
+			),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err = workspace.MaterializeAttempt(
+		context.Background(), journal, bundle.Definition(), attemptGit,
+		workspace.MaterializeAttemptRequest{
+			AttemptID: attempt.AttemptID(),
+			OccurredAt: time.Date(
+				2026, time.July, 25, 18, 0, 2, 0, time.UTC,
+			),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(attempt.Worktree(), "integration.txt"),
+		[]byte("accepted\n"), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, attempt.Worktree(), "add", "integration.txt")
+	runGitTest(
+		t, attempt.Worktree(), "commit", "-m",
+		"Accepted command implementation",
+	)
+	repository := localReviewRepository{
+		git: workspace.DefaultLocalCommitGitAdapter(),
+	}
+	if _, err := workspace.AdoptAttemptHead(
+		context.Background(), journal, bundle.Definition(), repository,
+		workspace.AdoptAttemptHeadRequest{
+			AttemptID: attempt.AttemptID(),
+			OccurredAt: time.Date(
+				2026, time.July, 25, 18, 0, 3, 0, time.UTC,
+			),
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	options := Options{
+		Subaction:    "merge-unit",
+		WorkspaceDir: workspaceDir,
+		Input: []byte(fmt.Sprintf(`{
+  "schema_version": 2,
+  "occurred_at": "2026-07-25T18:00:04Z",
+  "attempt_id": %q
+}`, attempt.AttemptID().String())),
+	}
+	first, err := executeIntegration(
+		context.Background(), bundle, options,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Status != "recorded" ||
+		first.Action != "integrate.merge-unit" ||
+		first.Report.Target.FeatureHead == base.String() {
+		t.Fatalf("successful integration result = %#v", first)
+	}
+	integrated := false
+	for _, unit := range first.Report.Integration.Units {
+		if unit.AttemptID == attempt.AttemptID().String() &&
+			unit.Status == "integrated" {
+			integrated = true
+		}
+	}
+	if !integrated {
+		t.Fatalf(
+			"successful integration report = %#v",
+			first.Report.Integration,
+		)
+	}
+	journal, err = workspace.OpenWorkspaceJournal(
+		workspaceDir, workspace.JournalReadOnly,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstSnapshot, err := journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRecords := len(firstSnapshot.Records())
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	options.Input = []byte(fmt.Sprintf(`{
+  "schema_version": 2,
+  "occurred_at": "2026-07-25T18:00:05Z",
+  "attempt_id": %q
+}`, attempt.AttemptID().String()))
+	retried, err := executeIntegration(
+		context.Background(), bundle, options,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.Report.Target.FeatureHead !=
+		first.Report.Target.FeatureHead {
+		t.Fatalf(
+			"idempotent integration retry moved feature head: first=%s retry=%s",
+			first.Report.Target.FeatureHead,
+			retried.Report.Target.FeatureHead,
+		)
+	}
+	journal, err = workspace.OpenWorkspaceJournal(
+		workspaceDir, workspace.JournalReadOnly,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+	retriedSnapshot, err := journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(retriedSnapshot.Records()) != firstRecords {
+		t.Fatalf(
+			"idempotent integration retry appended records: first=%d retry=%d",
+			firstRecords, len(retriedSnapshot.Records()),
+		)
 	}
 }

@@ -157,9 +157,10 @@ func (result AttemptHeadAdoptionResult) Tree() GitObjectID     { return result.t
 func (result AttemptHeadAdoptionResult) Record() JournalRecord { return result.record }
 func (result AttemptHeadAdoptionResult) Adopted() bool         { return result.adopted }
 
-// AdoptAttemptHead records ordinary local commits for an active attempt that
-// has no durable commit or review-fix protocol. It is usable independently of
-// governed review so protocol-free merge units can reach local integration.
+// AdoptAttemptHead records exact clean-head acceptance for an active attempt
+// without a review loop. Protocol-free attempts may advance to an ordinary
+// local commit; configured commit protocols record a same-head confirmation
+// after their durable protocol has completed.
 func AdoptAttemptHead(
 	ctx context.Context,
 	journal *WorkspaceJournal,
@@ -182,8 +183,10 @@ func AdoptAttemptHead(
 	if err != nil {
 		return AttemptHeadAdoptionResult{}, err
 	}
-	if _, configured := unit.CommitProtocol(); configured || attempt.reviewFixes != nil {
-		return AttemptHeadAdoptionResult{}, fmt.Errorf("ordinary head adoption is unavailable after durable commit or review-fix state")
+	if _, configured := unit.ReviewLoop(); configured {
+		return AttemptHeadAdoptionResult{}, fmt.Errorf(
+			"ordinary head adoption is unavailable for a configured review loop",
+		)
 	}
 	if _, hasState := projection.State(request.AttemptID); hasState {
 		return AttemptHeadAdoptionResult{}, fmt.Errorf("ordinary head adoption is unavailable after durable review state")
@@ -202,8 +205,31 @@ func AdoptAttemptHead(
 		return AttemptHeadAdoptionResult{}, fmt.Errorf("head adoption requires a clean attempt worktree")
 	}
 	result := AttemptHeadAdoptionResult{head: repositorySnapshot.head, tree: repositorySnapshot.tree}
-	if repositorySnapshot.head == attempt.verifiedHead {
+	if _, exists := exactAdoptedHeadRecord(
+		snapshot, attempt.attemptID, repositorySnapshot,
+	); exists {
 		return result, nil
+	}
+	if protocol, configured := unit.CommitProtocol(); configured {
+		if attempt.commitProtocol == nil ||
+			attempt.commitProtocol.protocol.digest != protocol.digest ||
+			attempt.commitProtocol.phase != CommitProtocolComplete ||
+			attempt.commitProtocol.Head() != repositorySnapshot.head ||
+			attempt.verifiedHead != repositorySnapshot.head {
+			return AttemptHeadAdoptionResult{}, fmt.Errorf(
+				"head adoption requires the completed configured commit protocol at the exact clean head",
+			)
+		}
+	} else if attempt.commitProtocol != nil {
+		return AttemptHeadAdoptionResult{}, fmt.Errorf(
+			"head adoption found an unconfigured commit protocol",
+		)
+	}
+	if repositorySnapshot.head != attempt.verifiedHead &&
+		(attempt.commitProtocol != nil || attempt.reviewFixes != nil) {
+		return AttemptHeadAdoptionResult{}, fmt.Errorf(
+			"ordinary head adoption cannot advance a durable commit protocol",
+		)
 	}
 	adoption, err := NewReviewHeadAdoptedJournalEvent(
 		definition.workspace.id, definition.generation, attempt.attemptID, attempt.mergeUnit,
@@ -226,6 +252,27 @@ func AdoptAttemptHead(
 	}
 	result.record, result.adopted = record, true
 	return result, nil
+}
+
+func exactAdoptedHeadRecord(
+	snapshot JournalSnapshot,
+	attemptID ID,
+	repository ReviewRepositorySnapshot,
+) (JournalRecord, bool) {
+	for index := len(snapshot.records) - 1; index >= 0; index-- {
+		record := snapshot.records[index]
+		event, ok := record.event.(ReviewHeadAdoptedJournalEvent)
+		if !ok || event.attemptID != attemptID {
+			continue
+		}
+		if event.head == repository.head &&
+			event.tree == repository.tree &&
+			event.snapshotDigest == repository.digest {
+			return record, true
+		}
+		return JournalRecord{}, false
+	}
+	return JournalRecord{}, false
 }
 
 func StartAttemptReviewRound(

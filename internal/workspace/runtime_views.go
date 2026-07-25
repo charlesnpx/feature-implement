@@ -205,9 +205,20 @@ func RebuildSchedulerView(snapshot JournalSnapshot, definition EffectiveWorkspac
 		}
 		for _, dependency := range dependencies[key] {
 			unit.Dependencies = append(unit.Dependencies, dependency.String())
-			unit.Blockers = append(unit.Blockers, "dependency:"+dependency.String())
+			dependencyAttempt, completed := attempts[dependency.key()]
+			if !completed ||
+				dependencyAttempt.phase != AttemptCompleted {
+				unit.Blockers = append(
+					unit.Blockers,
+					"dependency:"+dependency.String(),
+				)
+			}
 		}
-		if attempt, ok := attempts[key]; ok {
+		attempt, hasAttempt := attempts[key]
+		if hasAttempt && attempt.phase.retryableTerminal() {
+			hasAttempt = false
+		}
+		if hasAttempt {
 			unit.Status = schedulerStatusForAttempt(attempt)
 			unit.AttemptID = attempt.attemptID.String()
 			unit.AttemptNumber = attempt.attemptNumber
@@ -215,9 +226,13 @@ func RebuildSchedulerView(snapshot JournalSnapshot, definition EffectiveWorkspac
 			unit.Worktree = attempt.worktree
 			unit.Head = attempt.verifiedHead.String()
 			unit.BoundaryPending, unit.BoundaryReason, unit.PendingDirectives = attemptBoundaryStatus(core, attempt)
-			if state, exists := reviews.State(attempt.attemptID); exists {
-				if _, exhausted := state.Exhaustion(); exhausted {
-					unit.Status = SchedulerUnitReviewExhausted
+			if attempt.phase == AttemptActive {
+				if state, exists := reviews.State(
+					attempt.attemptID,
+				); exists {
+					if _, exhausted := state.Exhaustion(); exhausted {
+						unit.Status = SchedulerUnitReviewExhausted
+					}
 				}
 			}
 		} else if len(unit.Blockers) == 0 {
@@ -258,6 +273,9 @@ func RebuildGateView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefi
 		unit.Checks = append(unit.Checks, dependencyGate)
 
 		attempt, hasAttempt := attempts[key]
+		if hasAttempt && attempt.phase.retryableTerminal() {
+			hasAttempt = false
+		}
 		if hasAttempt {
 			unit.AttemptID = attempt.attemptID.String()
 		}
@@ -654,6 +672,10 @@ func schedulerStatusForAttempt(attempt RuntimeAttemptProjection) SchedulerUnitSt
 		return SchedulerUnitPaused
 	case AttemptReviewExhausted:
 		return SchedulerUnitReviewExhausted
+	case AttemptSuperseded, AttemptFailed, AttemptAbandoned:
+		return SchedulerUnitReady
+	case AttemptCompleted:
+		return SchedulerUnitCompleted
 	default:
 		return SchedulerUnitActive
 	}

@@ -48,7 +48,6 @@ func (event ReviewHeadAdoptedJournalEvent) validate() error {
 	if event.workspaceID.IsZero() || event.generation.IsZero() || event.attemptID.IsZero() ||
 		event.mergeUnit.planID.IsZero() || event.mergeUnit.mergeUnitID.IsZero() || event.priorHead.IsZero() ||
 		event.head.IsZero() || event.tree.IsZero() || event.snapshotDigest.IsZero() ||
-		event.priorHead == event.head ||
 		event.priorHead.Algorithm() != event.head.Algorithm() || event.head.Algorithm() != event.tree.Algorithm() {
 		return fmt.Errorf("review head adoption requires exact workspace, attempt, Git, and snapshot bindings")
 	}

@@ -101,8 +101,15 @@ func initializeLocalTarget(
 		)
 	}
 	if targetProjection.Created() {
-		if _, err := adapter.verifyOwnedFeatureRef(
-			ctx, binding, targetProjection.intentDigest,
+		expectedMarker, err := expectedLocalTargetReflogMarker(
+			runtime, targetProjection,
+		)
+		if err != nil {
+			return JournalSnapshot{}, err
+		}
+		if _, err := adapter.verifyOwnedFeatureRefAt(
+			ctx, binding, targetProjection.createdHead,
+			expectedMarker,
 		); err != nil {
 			return JournalSnapshot{}, err
 		}
@@ -203,6 +210,43 @@ func initializeLocalTarget(
 		)
 	}
 	return snapshot, nil
+}
+
+func expectedLocalTargetReflogMarker(
+	runtime WorkspaceRuntimeProjection,
+	target RuntimeLocalTargetProjection,
+) (string, error) {
+	if target.createdRecord == 0 || target.headRecord == 0 ||
+		target.createdHead.IsZero() {
+		return "", fmt.Errorf(
+			"durable local target has no exact feature-head record",
+		)
+	}
+	if target.headRecord == target.createdRecord {
+		if target.createdHead != target.binding.baseCommit {
+			return "", fmt.Errorf(
+				"initial local target head does not match its bound base",
+			)
+		}
+		return localTargetReflogMessage(target.intentDigest), nil
+	}
+	for _, attempt := range runtime.attempts {
+		if attempt.integration == nil ||
+			attempt.integration.integratedRecord != target.headRecord {
+			continue
+		}
+		intent := attempt.integration.intent
+		if intent.featureRef != target.binding.featureRef ||
+			intent.expectedMerge != target.createdHead {
+			return "", fmt.Errorf(
+				"local target feature-head record does not match its integration",
+			)
+		}
+		return integrationReflogMessage(intent.digest), nil
+	}
+	return "", fmt.Errorf(
+		"local target feature head has no exact durable transition",
+	)
 }
 
 func localTargetJournalAppend(

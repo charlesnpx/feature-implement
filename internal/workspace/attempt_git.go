@@ -51,6 +51,8 @@ type AttemptGitInspection struct {
 	worktreeRegistered bool
 	worktreeBranch     string
 	worktreeHead       GitObjectID
+	worktreeTree       GitObjectID
+	worktreeBinding    AttemptWorktreeGitBinding
 	clean              bool
 	digest             Digest
 }
@@ -68,17 +70,62 @@ func NewAttemptGitInspection(
 		worktreeExists: worktreeExists, worktreeRegistered: worktreeRegistered,
 		worktreeBranch: worktreeBranch, worktreeHead: worktreeHead, clean: clean,
 	}
-	if branchExists != !branchHead.IsZero() {
+	return newAttemptGitInspection(inspection)
+}
+
+func NewBoundAttemptGitInspection(
+	branchHead GitObjectID,
+	worktreeBranch string,
+	worktreeHead GitObjectID,
+	worktreeTree GitObjectID,
+	worktreeBinding AttemptWorktreeGitBinding,
+	clean bool,
+) (AttemptGitInspection, error) {
+	return newAttemptGitInspection(AttemptGitInspection{
+		branchExists: true, branchHead: branchHead,
+		worktreeExists: true, worktreeRegistered: true,
+		worktreeBranch: worktreeBranch, worktreeHead: worktreeHead,
+		worktreeTree: worktreeTree, worktreeBinding: worktreeBinding,
+		clean: clean,
+	})
+}
+
+func newAttemptGitInspection(
+	inspection AttemptGitInspection,
+) (AttemptGitInspection, error) {
+	if inspection.branchExists != !inspection.branchHead.IsZero() {
 		return AttemptGitInspection{}, fmt.Errorf("branch existence and object identity disagree")
 	}
-	if worktreeRegistered && strings.TrimSpace(worktreeBranch) == "" {
+	if inspection.worktreeRegistered &&
+		strings.TrimSpace(inspection.worktreeBranch) == "" {
 		return AttemptGitInspection{}, fmt.Errorf("registered worktree requires its branch")
 	}
-	if worktreeRegistered && worktreeExists && worktreeHead.IsZero() {
+	if inspection.worktreeRegistered && inspection.worktreeExists &&
+		inspection.worktreeHead.IsZero() {
 		return AttemptGitInspection{}, fmt.Errorf("existing registered worktree requires its head")
 	}
-	if clean && (!worktreeExists || !worktreeRegistered || worktreeHead.IsZero()) {
+	if inspection.clean && (!inspection.worktreeExists ||
+		!inspection.worktreeRegistered || inspection.worktreeHead.IsZero()) {
 		return AttemptGitInspection{}, fmt.Errorf("clean state requires an existing registered worktree")
+	}
+	if !inspection.worktreeBinding.IsZero() &&
+		(!inspection.worktreeExists || !inspection.worktreeRegistered ||
+			inspection.worktreeHead.IsZero() ||
+			inspection.worktreeTree.IsZero()) {
+		return AttemptGitInspection{}, fmt.Errorf(
+			"bound attempt worktree inspection requires exact worktree Git state",
+		)
+	}
+	if inspection.worktreeBinding.IsZero() !=
+		inspection.worktreeTree.IsZero() {
+		return AttemptGitInspection{}, fmt.Errorf(
+			"attempt worktree tree and exact binding must be recorded together",
+		)
+	}
+	if !inspection.worktreeBinding.IsZero() {
+		if err := inspection.worktreeBinding.validate(); err != nil {
+			return AttemptGitInspection{}, err
+		}
 	}
 	digest, err := digestAttemptGitInspection(inspection)
 	if err != nil {
@@ -96,8 +143,12 @@ func (inspection AttemptGitInspection) WorktreeRegistered() bool {
 }
 func (inspection AttemptGitInspection) WorktreeBranch() string    { return inspection.worktreeBranch }
 func (inspection AttemptGitInspection) WorktreeHead() GitObjectID { return inspection.worktreeHead }
-func (inspection AttemptGitInspection) Clean() bool               { return inspection.clean }
-func (inspection AttemptGitInspection) Digest() Digest            { return inspection.digest }
+func (inspection AttemptGitInspection) WorktreeTree() GitObjectID { return inspection.worktreeTree }
+func (inspection AttemptGitInspection) WorktreeGitBinding() AttemptWorktreeGitBinding {
+	return inspection.worktreeBinding
+}
+func (inspection AttemptGitInspection) Clean() bool    { return inspection.clean }
+func (inspection AttemptGitInspection) Digest() Digest { return inspection.digest }
 
 // AttemptWorktreeClaim is the durable ownership proof used while Git is
 // materializing an attempt worktree. The claim is written beside the target
@@ -392,6 +443,39 @@ func (adapter LocalAttemptGitAdapter) InspectAttemptWorktree(
 			"attempt Git top-level does not match its exact worktree path",
 		)
 	}
+	gitRoot, err := OpenVerifiedRoot(
+		RootRoleGitDirectory, binding.gitDir, false,
+	)
+	if err != nil {
+		return AttemptGitInspection{}, fmt.Errorf(
+			"open attempt worktree Git directory: %w", err,
+		)
+	}
+	defer gitRoot.Close()
+	commonRoot, err := OpenVerifiedRoot(
+		RootRoleGitCommon, binding.commonDir, false,
+	)
+	if err != nil {
+		return AttemptGitInspection{}, fmt.Errorf(
+			"open attempt worktree Git common directory: %w", err,
+		)
+	}
+	defer commonRoot.Close()
+	exactBinding, err := NewAttemptWorktreeGitBinding(
+		AttemptWorktreeGitBindingOptions{
+			Worktree:                worktreeRoot.Path(),
+			WorktreeIdentity:        worktreeRoot.Identity(),
+			GitDirectory:            gitRoot.Path(),
+			GitDirectoryIdentity:    gitRoot.Identity(),
+			CommonDirectory:         commonRoot.Path(),
+			CommonDirectoryIdentity: commonRoot.Identity(),
+			AdministrationDigest:    binding.admin,
+			ConfigurationDigest:     binding.config,
+		},
+	)
+	if err != nil {
+		return AttemptGitInspection{}, err
+	}
 	worktree = worktreeRoot.Path()
 	headOutput, headExit, err := adapter.run(ctx, worktree, "rev-parse", "--verify", "HEAD")
 	if err != nil || headExit != 0 {
@@ -464,8 +548,18 @@ func (adapter LocalAttemptGitAdapter) InspectAttemptWorktree(
 			"verify attempt worktree parent after inspection: %w", err,
 		)
 	}
-	return NewAttemptGitInspection(
-		branchExists, branchHead, true, true, worktreeBranch, head, clean,
+	if err := gitRoot.VerifyPath(); err != nil {
+		return AttemptGitInspection{}, fmt.Errorf(
+			"verify attempt worktree Git directory after inspection: %w", err,
+		)
+	}
+	if err := commonRoot.VerifyPath(); err != nil {
+		return AttemptGitInspection{}, fmt.Errorf(
+			"verify attempt worktree common directory after inspection: %w", err,
+		)
+	}
+	return NewBoundAttemptGitInspection(
+		branchHead, worktreeBranch, head, tree, exactBinding, clean,
 	)
 }
 
@@ -2512,21 +2606,31 @@ func trustedGitArguments(repositoryRoot string, arguments ...string) []string {
 
 func digestAttemptGitInspection(inspection AttemptGitInspection) (Digest, error) {
 	type inspectionJSON struct {
-		SchemaVersion      int    `json:"schema_version"`
-		BranchExists       bool   `json:"branch_exists"`
-		BranchHead         string `json:"branch_head,omitempty"`
-		WorktreeExists     bool   `json:"worktree_exists"`
-		WorktreeRegistered bool   `json:"worktree_registered"`
-		WorktreeBranch     string `json:"worktree_branch,omitempty"`
-		WorktreeHead       string `json:"worktree_head,omitempty"`
-		Clean              bool   `json:"clean"`
+		SchemaVersion      int                            `json:"schema_version"`
+		BranchExists       bool                           `json:"branch_exists"`
+		BranchHead         string                         `json:"branch_head,omitempty"`
+		WorktreeExists     bool                           `json:"worktree_exists"`
+		WorktreeRegistered bool                           `json:"worktree_registered"`
+		WorktreeBranch     string                         `json:"worktree_branch,omitempty"`
+		WorktreeHead       string                         `json:"worktree_head,omitempty"`
+		WorktreeTree       string                         `json:"worktree_tree,omitempty"`
+		WorktreeBinding    *attemptWorktreeGitBindingWire `json:"worktree_binding,omitempty"`
+		Clean              bool                           `json:"clean"`
+	}
+	var worktreeBinding *attemptWorktreeGitBindingWire
+	if !inspection.worktreeBinding.IsZero() {
+		wire := attemptWorktreeGitBindingToWire(
+			inspection.worktreeBinding,
+		)
+		worktreeBinding = &wire
 	}
 	content, err := json.Marshal(inspectionJSON{
 		SchemaVersion: JournalSchemaVersion,
 		BranchExists:  inspection.branchExists, BranchHead: inspection.branchHead.String(),
 		WorktreeExists: inspection.worktreeExists, WorktreeRegistered: inspection.worktreeRegistered,
 		WorktreeBranch: inspection.worktreeBranch, WorktreeHead: inspection.worktreeHead.String(),
-		Clean: inspection.clean,
+		WorktreeTree:    inspection.worktreeTree.String(),
+		WorktreeBinding: worktreeBinding, Clean: inspection.clean,
 	})
 	if err != nil {
 		return Digest{}, err

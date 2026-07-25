@@ -13,6 +13,7 @@ const (
 	AttemptActive          AttemptRuntimePhase = "active"
 	AttemptPaused          AttemptRuntimePhase = "paused"
 	AttemptReviewExhausted AttemptRuntimePhase = "review_exhausted"
+	AttemptSuperseded      AttemptRuntimePhase = "superseded"
 	AttemptCompleted       AttemptRuntimePhase = "completed"
 	AttemptFailed          AttemptRuntimePhase = "failed"
 	AttemptAbandoned       AttemptRuntimePhase = "abandoned"
@@ -21,7 +22,8 @@ const (
 func (phase AttemptRuntimePhase) valid() bool {
 	switch phase {
 	case AttemptReserved, AttemptMaterializing, AttemptActive, AttemptPaused,
-		AttemptReviewExhausted, AttemptCompleted, AttemptFailed, AttemptAbandoned:
+		AttemptReviewExhausted, AttemptSuperseded, AttemptCompleted,
+		AttemptFailed, AttemptAbandoned:
 		return true
 	default:
 		return false
@@ -32,6 +34,12 @@ func (phase AttemptRuntimePhase) nonterminal() bool {
 	return phase == AttemptReserved || phase == AttemptMaterializing ||
 		phase == AttemptActive || phase == AttemptPaused ||
 		phase == AttemptReviewExhausted
+}
+
+func (phase AttemptRuntimePhase) retryableTerminal() bool {
+	return phase == AttemptSuperseded ||
+		phase == AttemptFailed ||
+		phase == AttemptAbandoned
 }
 
 type AttemptGenerationBinding struct {
@@ -199,6 +207,7 @@ type RuntimeAttemptProjection struct {
 	boundaries            []RuntimeBoundaryProjection
 	commitProtocol        *CommitProtocolState
 	reviewFixes           *ReviewFixState
+	integration           *RuntimeIntegrationProjection
 }
 
 func (attempt RuntimeAttemptProjection) AttemptID() ID                 { return attempt.attemptID }
@@ -237,6 +246,15 @@ func (attempt RuntimeAttemptProjection) ReviewFixes() (ReviewFixState, bool) {
 		return ReviewFixState{}, false
 	}
 	return cloneReviewFixState(*attempt.reviewFixes), true
+}
+func (attempt RuntimeAttemptProjection) Integration() (
+	RuntimeIntegrationProjection,
+	bool,
+) {
+	if attempt.integration == nil {
+		return RuntimeIntegrationProjection{}, false
+	}
+	return *attempt.integration, true
 }
 func (attempt RuntimeAttemptProjection) CurrentBoundary() (RuntimeBoundaryProjection, bool) {
 	if attempt.phase != AttemptPaused || len(attempt.boundaries) == 0 {
@@ -288,6 +306,15 @@ func reduceAttemptRuntime(
 	case AttemptReservedJournalEvent:
 		if event.workspaceID != current.workspaceID || event.generation != current.activeGeneration {
 			return fmt.Errorf("attempt reservation does not match the active workspace generation")
+		}
+		for _, attempt := range current.attempts {
+			if attempt.integration != nil &&
+				!attempt.integration.Integrated() {
+				return fmt.Errorf(
+					"attempt reservation conflicts with pending integration attempt %s",
+					attempt.attemptID,
+				)
+			}
 		}
 		if _, exists := findRuntimeAttempt(current.attempts, event.attemptID); exists {
 			return fmt.Errorf("attempt %s is already reserved", event.attemptID)
@@ -596,6 +623,10 @@ func cloneRuntimeAttempt(value RuntimeAttemptProjection) RuntimeAttemptProjectio
 		state := cloneReviewFixState(*value.reviewFixes)
 		value.reviewFixes = &state
 	}
+	if value.integration != nil {
+		integration := *value.integration
+		value.integration = &integration
+	}
 	return value
 }
 
@@ -651,6 +682,17 @@ func canonicalAttemptRuntime(attempt RuntimeAttemptProjection) (json.RawMessage,
 		NextGoalIntent  *nextGoalIntentJSON  `json:"next_goal_intent,omitempty"`
 		NextGoal        *acknowledgementJSON `json:"next_goal,omitempty"`
 	}
+	type integrationJSON struct {
+		IntentDigest     string `json:"intent_digest"`
+		IntentRecord     uint64 `json:"intent_record"`
+		Integrated       bool   `json:"integrated"`
+		IntegratedRecord uint64 `json:"integrated_record,omitempty"`
+		ExpectedHead     string `json:"expected_feature_head"`
+		AcceptedHead     string `json:"accepted_head"`
+		AcceptedTree     string `json:"accepted_tree"`
+		MergeCommit      string `json:"merge_commit"`
+		AcceptanceMode   string `json:"acceptance_mode"`
+	}
 	type attemptJSON struct {
 		AttemptID             string              `json:"attempt_id"`
 		PlanID                string              `json:"plan_id"`
@@ -675,6 +717,7 @@ func canonicalAttemptRuntime(attempt RuntimeAttemptProjection) (json.RawMessage,
 		Boundaries            []boundaryJSON      `json:"boundaries"`
 		CommitProtocol        json.RawMessage     `json:"commit_protocol,omitempty"`
 		ReviewFixes           json.RawMessage     `json:"review_fixes,omitempty"`
+		Integration           *integrationJSON    `json:"integration,omitempty"`
 	}
 	ackJSON := func(value RuntimeOrchestrationAcknowledgement) *acknowledgementJSON {
 		return &acknowledgementJSON{
@@ -708,6 +751,20 @@ func canonicalAttemptRuntime(attempt RuntimeAttemptProjection) (json.RawMessage,
 			return nil, err
 		}
 		value.ReviewFixes = reviewFixes
+	}
+	if attempt.integration != nil {
+		intent := attempt.integration.intent
+		value.Integration = &integrationJSON{
+			IntentDigest:     intent.digest.String(),
+			IntentRecord:     attempt.integration.intentRecord,
+			Integrated:       attempt.integration.integratedRecord != 0,
+			IntegratedRecord: attempt.integration.integratedRecord,
+			ExpectedHead:     intent.expectedFeatureHead.String(),
+			AcceptedHead:     intent.acceptedHead.String(),
+			AcceptedTree:     intent.acceptedTree.String(),
+			MergeCommit:      intent.expectedMerge.String(),
+			AcceptanceMode:   string(intent.acceptanceMode),
+		}
 	}
 	for _, boundary := range attempt.boundaries {
 		item := boundaryJSON{

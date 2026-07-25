@@ -146,7 +146,7 @@ func Execute(ctx context.Context, options Options) (any, error) {
 	case "review":
 		return executeReview(ctx, bundle, options)
 	case "integrate":
-		return executeIntegration(bundle, options)
+		return executeIntegration(ctx, bundle, options)
 	case "complete":
 		return executeCompletion(bundle, options)
 	default:

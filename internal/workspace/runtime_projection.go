@@ -85,6 +85,7 @@ type RuntimeLocalTargetProjection struct {
 	intentRecord  uint64
 	createdHead   GitObjectID
 	createdRecord uint64
+	headRecord    uint64
 }
 
 func (projection RuntimeLocalTargetProjection) Binding() LocalTargetBinding {
@@ -104,6 +105,9 @@ func (projection RuntimeLocalTargetProjection) CreatedHead() GitObjectID {
 }
 func (projection RuntimeLocalTargetProjection) CreatedRecord() uint64 {
 	return projection.createdRecord
+}
+func (projection RuntimeLocalTargetProjection) HeadRecord() uint64 {
+	return projection.headRecord
 }
 func (projection RuntimeLocalTargetProjection) IsZero() bool {
 	return projection.binding.IsZero()
@@ -176,6 +180,20 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 			}
 		}
 	}
+	if !isIntegrationJournalEvent(record.event) {
+		for _, attempt := range current.attempts {
+			if attempt.integration != nil &&
+				journalResourcesContain(
+					record.writeSet,
+					AttemptJournalResource(attempt.attemptID),
+				) {
+				return WorkspaceRuntimeProjection{}, fmt.Errorf(
+					"attempt %s is frozen after durable integration intent",
+					attempt.attemptID,
+				)
+			}
+		}
+	}
 	switch event := record.event.(type) {
 	case WorkspaceInitializedJournalEvent:
 		if !current.activeGeneration.IsZero() || !current.localTarget.IsZero() ||
@@ -235,6 +253,7 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 		}
 		next.localTarget.createdHead = event.head
 		next.localTarget.createdRecord = record.sequence
+		next.localTarget.headRecord = record.sequence
 	case JournalTailRecoveredEvent:
 		if current.activeGeneration.IsZero() {
 			if current.workspaceID.IsZero() {
@@ -261,6 +280,13 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 			discardOffset: event.discardOffset, discardSize: event.discardSize,
 			discardDigest: event.discardDigest, resultingHead: event.resultingHead,
 		})
+	case MergeUnitIntegrationIntendedJournalEvent,
+		MergeUnitIntegratedJournalEvent:
+		if err := reduceIntegrationRuntime(
+			current, &next, record,
+		); err != nil {
+			return WorkspaceRuntimeProjection{}, err
+		}
 	default:
 		if event, ok := record.event.(ReviewHeadAdoptedJournalEvent); ok {
 			if err := reduceReviewHeadAdoption(current, &next, record, event); err != nil {
@@ -282,6 +308,18 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 		}
 	}
 	return next, nil
+}
+
+func journalResourcesContain(
+	values []JournalResource,
+	wanted JournalResource,
+) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func requireReadyLocalTarget(runtime WorkspaceRuntimeProjection) error {
@@ -316,8 +354,25 @@ func reduceReviewHeadAdoption(
 		attempt.verifiedHead != event.priorHead {
 		return fmt.Errorf("review head adoption does not match the active attempt and prior head")
 	}
-	if attempt.commitProtocol != nil || attempt.reviewFixes != nil {
+	if event.head != event.priorHead &&
+		(attempt.commitProtocol != nil || attempt.reviewFixes != nil) {
 		return fmt.Errorf("review head adoption is only allowed without durable commit protocols")
+	}
+	if event.head == event.priorHead {
+		if attempt.commitProtocol != nil &&
+			(attempt.commitProtocol.phase != CommitProtocolComplete ||
+				attempt.commitProtocol.Head() != event.head) {
+			return fmt.Errorf(
+				"same-head adoption does not match the completed commit protocol",
+			)
+		}
+		if attempt.reviewFixes != nil &&
+			(!attempt.reviewFixes.Quiescent() ||
+				attempt.reviewFixes.Head() != event.head) {
+			return fmt.Errorf(
+				"same-head adoption does not match completed review fixes",
+			)
+		}
 	}
 	updated := &next.attempts[index]
 	updated.verifiedHead = event.head
@@ -349,6 +404,7 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 		Created       bool                   `json:"created"`
 		CreatedHead   string                 `json:"created_head,omitempty"`
 		CreatedRecord uint64                 `json:"created_record,omitempty"`
+		HeadRecord    uint64                 `json:"head_record,omitempty"`
 	}
 	type runtimeJSON struct {
 		SchemaVersion    int                  `json:"schema_version"`
@@ -381,6 +437,7 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 			Created:       projection.localTarget.createdRecord != 0,
 			CreatedHead:   projection.localTarget.createdHead.String(),
 			CreatedRecord: projection.localTarget.createdRecord,
+			HeadRecord:    projection.localTarget.headRecord,
 		}
 	}
 	for _, recovery := range projection.recoveries {
