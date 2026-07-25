@@ -1618,6 +1618,57 @@ func TestAttemptWorktreeRejectsConcurrentRegistrationChange(t *testing.T) {
 	}
 }
 
+func TestAttemptWorktreeRejectsExternalHardLinkDuringRawPublication(t *testing.T) {
+	repositoryRoot, base := newRawAttemptTreeRepository(t)
+	probeDirectory := canonicalTestDirectory(t)
+	outside := filepath.Join(probeDirectory, "outside-link")
+	worktree := filepath.Join(canonicalTestDirectory(t), "attempt")
+	claim, err := workspace.NewAttemptWorktreeClaim(
+		workspace.MustID("hard-link-race-attempt"),
+		workspace.DigestBytes([]byte("hard-link-race-generation")),
+		base,
+		"mu/hard-link-race-attempt",
+		worktree,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	linked := false
+	adapter := workspace.DefaultLocalAttemptGitAdapter().
+		WithAttemptWorktreeMaterializationFaultInjector(
+			func(point workspace.AttemptWorktreeMaterializationFaultPoint) error {
+				if point != workspace.AttemptMaterializationFaultAfterPath || linked {
+					return nil
+				}
+				for _, relative := range []string{".gitattributes", "payload.txt", "script.sh"} {
+					err := os.Link(filepath.Join(worktree, relative), outside)
+					if err == nil {
+						linked = true
+						return nil
+					}
+					if !errors.Is(err, os.ErrNotExist) {
+						return err
+					}
+				}
+				return nil
+			},
+		)
+	if err := adapter.PrepareAttemptWorktree(
+		context.Background(), repositoryRoot, claim, false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	err = adapter.CreateAttemptWorktree(
+		context.Background(), repositoryRoot, claim, true, false,
+	)
+	if err == nil || !strings.Contains(err.Error(), "hard links") {
+		t.Fatalf("external hard-link publication error = %v", err)
+	}
+	if !linked {
+		t.Fatal("external hard link was not created during raw publication")
+	}
+}
+
 func newRawAttemptTreeRepository(
 	t *testing.T,
 ) (repositoryRoot string, base workspace.GitObjectID) {

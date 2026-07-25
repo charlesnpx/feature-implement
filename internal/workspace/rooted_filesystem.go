@@ -513,6 +513,30 @@ func (adapter *RootedFilesystemAdapter) verifyOpenedFileExact(relative string, o
 	return nil
 }
 
+func (adapter *RootedFilesystemAdapter) verifyOpenedFileSingleLink(
+	relative string,
+	opened *os.File,
+) error {
+	if err := adapter.verifyOpenedFileExact(relative, opened); err != nil {
+		return err
+	}
+	info, err := opened.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect opened rooted file %s hard links: %w", relative, err)
+	}
+	links, err := platformFileLinkCount(info)
+	if err != nil {
+		return fmt.Errorf("inspect opened rooted file %s hard links: %w", relative, err)
+	}
+	if links != 1 {
+		return fmt.Errorf(
+			"opened rooted file %s has %d hard links; exactly one is required",
+			relative, links,
+		)
+	}
+	return adapter.verifyOpenedFileExact(relative, opened)
+}
+
 func (adapter *RootedFilesystemAdapter) synchronizeOpenedFile(relative string, opened *os.File) error {
 	if err := adapter.verifyOpenedFileExact(relative, opened); err != nil {
 		return err
@@ -618,6 +642,9 @@ func (adapter *RootedFilesystemAdapter) writeFileExclusiveWith(
 	}
 	if err := file.Sync(); err != nil {
 		return fmt.Errorf("synchronize rooted file %s: %w", relative, err)
+	}
+	if err := adapter.verifyOpenedFileSingleLink(relative, file); err != nil {
+		return err
 	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close rooted file %s: %w", relative, err)

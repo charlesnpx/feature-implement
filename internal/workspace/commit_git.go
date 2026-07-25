@@ -802,6 +802,9 @@ func (adapter LocalCommitGitAdapter) verifyRawTreeMaterializationAtDepth(
 			if !info.Mode().IsRegular() {
 				return rawTreeMismatchf("raw worktree path %s is not a regular file", entry.path)
 			}
+			if err := verifyRawWorktreeSingleLink(entry.path, info); err != nil {
+				return err
+			}
 			executable := info.Mode().Perm()&0o111 != 0
 			if executable != (entry.mode == GitModeExecutable) {
 				return rawTreeMismatchf("raw worktree path %s executable mode differs from tree", entry.path)
@@ -992,7 +995,24 @@ func (adapter LocalCommitGitAdapter) hashRawWorktreeFile(
 		!before.ModTime().Equal(after.ModTime()) {
 		return GitObjectID{}, fmt.Errorf("raw worktree file %s changed during verification", relative)
 	}
+	if err := verifyRawWorktreeSingleLink(relative, after); err != nil {
+		return GitObjectID{}, err
+	}
 	return qualifyGitObjectID(algorithm, strings.TrimSpace(string(output)))
+}
+
+func verifyRawWorktreeSingleLink(relative string, info os.FileInfo) error {
+	links, err := platformFileLinkCount(info)
+	if err != nil {
+		return fmt.Errorf("inspect raw worktree file %s hard links: %w", relative, err)
+	}
+	if links != 1 {
+		return rawTreeMismatchf(
+			"raw worktree file %s has %d hard links; exactly one is required",
+			relative, links,
+		)
+	}
+	return nil
 }
 
 func (adapter LocalCommitGitAdapter) captureTrustedWorktreeBinding(
