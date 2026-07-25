@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	pathpkg "path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -95,8 +96,8 @@ func (inspection AttemptGitInspection) Digest() Digest            { return inspe
 
 // AttemptWorktreeClaim is the durable ownership proof used while Git is
 // materializing an attempt worktree. The claim is written beside the target
-// before Git is invoked, so an unregistered partial checkout can be removed on
-// retry without treating an unrelated pre-existing path as attempt-owned.
+// before Git is invoked, so a partial worktree can be recovered on retry
+// without treating an unrelated pre-existing path as attempt-owned.
 type AttemptWorktreeClaim struct {
 	attemptID  ID
 	generation Digest
@@ -151,10 +152,23 @@ const (
 
 type AttemptWorktreeClaimFaultInjector func(AttemptWorktreeClaimFaultPoint) error
 
+type AttemptWorktreeMaterializationFaultPoint string
+
+const (
+	AttemptMaterializationFaultAfterRegistration AttemptWorktreeMaterializationFaultPoint = "after_registration"
+	AttemptMaterializationFaultAfterIndex        AttemptWorktreeMaterializationFaultPoint = "after_index"
+	AttemptMaterializationFaultAfterPath         AttemptWorktreeMaterializationFaultPoint = "after_path"
+)
+
+type AttemptWorktreeMaterializationFaultInjector func(
+	AttemptWorktreeMaterializationFaultPoint,
+) error
+
 type LocalAttemptGitAdapter struct {
-	executable         string
-	environment        []EnvironmentVariable
-	worktreeClaimFault AttemptWorktreeClaimFaultInjector
+	executable               string
+	environment              []EnvironmentVariable
+	worktreeClaimFault       AttemptWorktreeClaimFaultInjector
+	worktreeMaterializeFault AttemptWorktreeMaterializationFaultInjector
 }
 
 func NewLocalAttemptGitAdapter(executable string, environment []EnvironmentVariable) (LocalAttemptGitAdapter, error) {
@@ -188,6 +202,13 @@ func (adapter LocalAttemptGitAdapter) WithAttemptWorktreeClaimFaultInjector(
 	injector AttemptWorktreeClaimFaultInjector,
 ) LocalAttemptGitAdapter {
 	adapter.worktreeClaimFault = injector
+	return adapter
+}
+
+func (adapter LocalAttemptGitAdapter) WithAttemptWorktreeMaterializationFaultInjector(
+	injector AttemptWorktreeMaterializationFaultInjector,
+) LocalAttemptGitAdapter {
+	adapter.worktreeMaterializeFault = injector
 	return adapter
 }
 
@@ -323,27 +344,18 @@ func (adapter LocalAttemptGitAdapter) InspectAttemptWorktree(
 	if err := rejectFSMonitorIndexRecords(fsmonitorOutput); err != nil {
 		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree fsmonitor flags: %w", err)
 	}
-	statusOutput, statusExit, err := adapter.run(
-		ctx, worktree, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching",
-		"--ignore-submodules=none",
-	)
-	if err != nil || statusExit != 0 {
-		if err == nil {
-			err = fmt.Errorf("Git exited with status %d", statusExit)
-		}
-		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree status: %w", err)
+	tree, err := commitAdapter.resolveObject(ctx, worktree, algorithm, objectHex(head)+"^{tree}")
+	if err != nil {
+		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree tree: %w", err)
 	}
-	clean := len(statusOutput) == 0
+	clean := indexTree == tree
 	if clean {
-		tree, err := commitAdapter.resolveObject(ctx, worktree, algorithm, objectHex(head)+"^{tree}")
-		if err != nil {
-			return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree tree: %w", err)
-		}
-		if indexTree != tree {
-			return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree index tree does not match head tree")
-		}
 		if err := commitAdapter.verifyRawTreeMaterialization(ctx, worktree, tree); err != nil {
-			return AttemptGitInspection{}, fmt.Errorf("inspect attempt raw worktree: %w", err)
+			if isRawTreeMaterializationMismatch(err) {
+				clean = false
+			} else {
+				return AttemptGitInspection{}, fmt.Errorf("inspect attempt raw worktree: %w", err)
+			}
 		}
 	}
 	if err := commitAdapter.confirmTrustedCommitState(ctx, binding, worktreeBranch, head, indexTree); err != nil {
@@ -417,33 +429,49 @@ func (adapter LocalAttemptGitAdapter) CreateAttemptWorktree(
 	if err != nil {
 		return fmt.Errorf("inspect attempt materialization Git binding: %w", err)
 	}
+	registered, err := adapter.inspectRegisteredWorktrees(ctx, binding.root)
+	if err != nil {
+		return err
+	}
+	registeredPath := canonicalWorktreePath(worktree)
+	record, worktreeRegistered := registered[registeredPath]
+	_, worktreeExists, err := parent.adapter.inspectExact(filepath.Base(worktree))
+	if err != nil {
+		return fmt.Errorf("inspect claimed attempt worktree before Git creation: %w", err)
+	}
+	switch {
+	case worktreeRegistered:
+		if createBranch || !recoverRegistered {
+			return fmt.Errorf("existing attempt worktree registration was not admitted for recovery")
+		}
+		if record.detached || record.branch != claim.branch {
+			return fmt.Errorf("existing attempt worktree registration does not match branch %s", claim.branch)
+		}
+	case recoverRegistered:
+		return fmt.Errorf("attempt worktree registration changed before recovery")
+	}
 	baseText := strings.TrimPrefix(
 		claim.base.String(), string(claim.base.algorithm)+":",
 	)
-	arguments := []string{"worktree", "add"}
-	if createBranch {
-		if recoverRegistered {
-			return fmt.Errorf("new attempt branch cannot recover an existing worktree registration")
+	var arguments []string
+	if !worktreeRegistered || !worktreeExists {
+		arguments = []string{"worktree", "add", "--no-checkout"}
+		if createBranch {
+			if recoverRegistered {
+				return fmt.Errorf("new attempt branch cannot recover an existing worktree registration")
+			}
+			arguments = append(
+				arguments, "--no-track", "-b", claim.branch, worktree, baseText,
+			)
+		} else {
+			if recoverRegistered {
+				arguments = append(arguments, "--force")
+			}
+			arguments = append(arguments, worktree, claim.branch)
 		}
-		arguments = append(
-			arguments, "--no-track", "-b", claim.branch, worktree, baseText,
-		)
-	} else {
-		if recoverRegistered {
-			arguments = append(arguments, "--force")
-		}
-		arguments = append(arguments, worktree, claim.branch)
 	}
 	if err := parent.VerifyPath(); err != nil {
 		return fmt.Errorf("revalidate claimed attempt worktree root before Git effect: %w", err)
-	}
-	if err := adapter.validateAttemptCheckoutProfile(
-		ctx, binding, claim.base,
-	); err != nil {
-		return err
-	}
-	if err := parent.VerifyPath(); err != nil {
-		return fmt.Errorf("revalidate claimed attempt worktree root after checkout-profile inspection: %w", err)
 	}
 	preEffectClaim, err := readAttemptWorktreeClaim(parent, markerName)
 	if err != nil {
@@ -452,14 +480,23 @@ func (adapter LocalAttemptGitAdapter) CreateAttemptWorktree(
 	if !bytes.Equal(preEffectClaim, expectedClaim) {
 		return fmt.Errorf("durable attempt worktree claim changed before Git creation")
 	}
-	_, exitCode, gitErr := adapter.run(ctx, repositoryRoot, arguments...)
 	var effectErr error
-	if gitErr != nil {
-		effectErr = fmt.Errorf("create attempt worktree: %w", gitErr)
-	} else if exitCode != 0 {
-		effectErr = fmt.Errorf(
-			"create attempt worktree: Git exited with status %d", exitCode,
-		)
+	registrationCompleted := worktreeRegistered && worktreeExists
+	if len(arguments) != 0 {
+		_, exitCode, gitErr := adapter.run(ctx, repositoryRoot, arguments...)
+		if gitErr != nil {
+			effectErr = fmt.Errorf("create no-checkout attempt worktree: %w", gitErr)
+		} else if exitCode != 0 {
+			effectErr = fmt.Errorf(
+				"create no-checkout attempt worktree: Git exited with status %d", exitCode,
+			)
+		} else {
+			registrationCompleted = true
+			effectErr = injectAttemptWorktreeMaterializationFault(
+				adapter.worktreeMaterializeFault,
+				AttemptMaterializationFaultAfterRegistration,
+			)
+		}
 	}
 	if err := parent.VerifyPath(); err != nil {
 		return errors.Join(
@@ -480,6 +517,30 @@ func (adapter LocalAttemptGitAdapter) CreateAttemptWorktree(
 			fmt.Errorf("durable attempt worktree claim changed during Git creation"),
 		)
 	}
+	var expectedRegistered map[string]registeredWorktree
+	if registrationCompleted {
+		expectedRegistered = make(
+			map[string]registeredWorktree, len(registered)+1,
+		)
+		for path, registeredRecord := range registered {
+			expectedRegistered[path] = registeredRecord
+		}
+		expectedRegistered[registeredPath] = registeredWorktree{
+			branch: claim.branch,
+		}
+		confirmedRegistered, registrationErr := adapter.inspectRegisteredWorktrees(
+			ctx, binding.root,
+		)
+		if registrationErr != nil {
+			return errors.Join(effectErr, registrationErr)
+		}
+		if !sameRegisteredWorktrees(expectedRegistered, confirmedRegistered) {
+			return errors.Join(
+				effectErr,
+				fmt.Errorf("registered Git worktrees changed during attempt creation"),
+			)
+		}
+	}
 	if effectErr != nil {
 		return effectErr
 	}
@@ -489,6 +550,18 @@ func (adapter LocalAttemptGitAdapter) CreateAttemptWorktree(
 	}
 	if confirmed != binding {
 		return fmt.Errorf("Git worktree administration changed during attempt materialization")
+	}
+	if err := adapter.materializeAttemptWorktree(
+		ctx, binding, claim, worktree,
+	); err != nil {
+		return err
+	}
+	finalRegistered, err := adapter.inspectRegisteredWorktrees(ctx, binding.root)
+	if err != nil {
+		return err
+	}
+	if !sameRegisteredWorktrees(expectedRegistered, finalRegistered) {
+		return fmt.Errorf("registered Git worktrees changed during attempt materialization")
 	}
 	if err := parent.VerifyPath(); err != nil {
 		return fmt.Errorf("finalize claimed attempt worktree root verification: %w", err)
@@ -503,41 +576,231 @@ func (adapter LocalAttemptGitAdapter) CreateAttemptWorktree(
 	return nil
 }
 
-func (adapter LocalAttemptGitAdapter) validateAttemptCheckoutProfile(
+func (adapter LocalAttemptGitAdapter) materializeAttemptWorktree(
 	ctx context.Context,
-	binding trustedWorktreeBinding,
-	base GitObjectID,
+	source trustedWorktreeBinding,
+	claim AttemptWorktreeClaim,
+	worktree string,
 ) (resultErr error) {
-	if binding.root == "" || binding.commonDir == "" || base.IsZero() {
-		return fmt.Errorf("attempt checkout profile requires bound Git administration and an exact base")
+	commitAdapter := LocalCommitGitAdapter{git: adapter}
+	binding, err := commitAdapter.captureTrustedWorktreeBinding(ctx, worktree)
+	if err != nil {
+		return fmt.Errorf("open no-checkout attempt worktree binding: %w", err)
 	}
-	target := LocalTargetGitAdapter{git: adapter}
-	if err := target.inspectBaseTree(ctx, binding.root, base); err != nil {
-		return fmt.Errorf("inspect exact attempt checkout tree: %w", err)
+	if binding.commonDir != source.commonDir {
+		return fmt.Errorf("attempt worktree does not share the bound repository administration")
 	}
-	commonRoot, err := OpenVerifiedRoot(
-		RootRoleGitCommon, binding.commonDir, false,
+	algorithm, err := adapter.objectFormat(ctx, binding.root)
+	if err != nil {
+		return err
+	}
+	if claim.base.Algorithm() != algorithm {
+		return fmt.Errorf("attempt base does not match the repository object format")
+	}
+	branch, err := commitAdapter.symbolicBranch(ctx, binding.root)
+	if err != nil {
+		return fmt.Errorf("inspect no-checkout attempt branch: %w", err)
+	}
+	if branch != claim.branch {
+		return fmt.Errorf("no-checkout attempt branch is %q, expected %q", branch, claim.branch)
+	}
+	head, err := commitAdapter.resolveObject(ctx, binding.root, algorithm, "HEAD")
+	if err != nil {
+		return fmt.Errorf("inspect no-checkout attempt head: %w", err)
+	}
+	if head != claim.base {
+		return fmt.Errorf("no-checkout attempt head is %s, expected %s", head, claim.base)
+	}
+	tree, err := commitAdapter.resolveObject(
+		ctx, binding.root, algorithm, objectHex(claim.base)+"^{tree}",
 	)
 	if err != nil {
-		return fmt.Errorf("open attempt checkout Git common directory: %w", err)
+		return fmt.Errorf("resolve exact attempt base tree: %w", err)
+	}
+	entries, err := commitAdapter.inspectRawTreeEntries(ctx, binding.root, tree)
+	if err != nil {
+		return fmt.Errorf("inspect exact attempt base tree: %w", err)
+	}
+	directories, err := validateAttemptTreeEntries(entries)
+	if err != nil {
+		return err
+	}
+	root, err := OpenVerifiedRoot(RootRoleWorktree, binding.root, false)
+	if err != nil {
+		return fmt.Errorf("open no-checkout attempt filesystem root: %w", err)
 	}
 	defer func() {
-		resultErr = errors.Join(resultErr, commonRoot.Close())
+		resultErr = errors.Join(resultErr, root.Close())
 	}()
-	_, exists, err := commonRoot.adapter.inspectExact("info/attributes")
+	if err := clearAttemptWorktree(root); err != nil {
+		return fmt.Errorf("clear partial attempt materialization: %w", err)
+	}
+	if err := root.VerifyPath(); err != nil {
+		return fmt.Errorf("verify attempt root before index population: %w", err)
+	}
+	_, exitCode, err := adapter.run(
+		ctx, binding.root, "read-tree", "--reset", objectHex(claim.base),
+	)
+	if err != nil || exitCode != 0 {
+		if err == nil {
+			err = fmt.Errorf("Git exited with status %d", exitCode)
+		}
+		return fmt.Errorf("populate exact attempt index: %w", err)
+	}
+	if err := injectAttemptWorktreeMaterializationFault(
+		adapter.worktreeMaterializeFault,
+		AttemptMaterializationFaultAfterIndex,
+	); err != nil {
+		return err
+	}
+	if err := commitAdapter.rejectHiddenIndexEntries(ctx, binding.root); err != nil {
+		return fmt.Errorf("verify populated attempt index flags: %w", err)
+	}
+	indexTree, err := commitAdapter.writeTree(ctx, binding.root, algorithm)
 	if err != nil {
-		return fmt.Errorf("inspect attempt checkout Git attributes: %w", err)
+		return fmt.Errorf("write populated attempt index tree: %w", err)
 	}
-	if exists {
-		return fmt.Errorf(
-			"external Git attributes metadata %s is not supported during attempt checkout",
-			filepath.Join(binding.commonDir, "info", "attributes"),
-		)
+	if indexTree != tree {
+		return fmt.Errorf("populated attempt index tree is %s, expected %s", indexTree, tree)
 	}
-	if err := commonRoot.VerifyPath(); err != nil {
-		return fmt.Errorf("verify attempt checkout Git common directory: %w", err)
+	for _, directory := range directories {
+		if _, err := root.adapter.makeDirectory(directory, 0o755); err != nil {
+			return fmt.Errorf("create attempt tree directory %s: %w", directory, err)
+		}
+	}
+	target := LocalTargetGitAdapter{git: adapter}
+	for _, entry := range entries {
+		content, err := target.readBlob(ctx, source.root, entry.object)
+		if err != nil {
+			return fmt.Errorf("read attempt tree path %s: %w", entry.path, err)
+		}
+		object, err := gitBlobObjectID(algorithm, content)
+		if err != nil {
+			return err
+		}
+		if object != entry.object {
+			return fmt.Errorf("attempt tree path %s did not resolve to its recorded blob", entry.path)
+		}
+		switch entry.mode {
+		case GitModeRegular:
+			err = root.adapter.writeFileExclusive(entry.path, content, 0o644)
+		case GitModeExecutable:
+			err = root.adapter.writeFileExclusive(entry.path, content, 0o755)
+		case GitModeSymlink:
+			if err = validateRepositorySymlink(entry.path, content); err == nil {
+				err = root.adapter.writeSymlinkExclusive(entry.path, string(content))
+			}
+		default:
+			err = fmt.Errorf("unsupported attempt tree mode %s", entry.mode)
+		}
+		if err != nil {
+			return fmt.Errorf("materialize attempt tree path %s: %w", entry.path, err)
+		}
+		if err := injectAttemptWorktreeMaterializationFault(
+			adapter.worktreeMaterializeFault,
+			AttemptMaterializationFaultAfterPath,
+		); err != nil {
+			return err
+		}
+	}
+	if err := root.Sync(); err != nil {
+		return fmt.Errorf("synchronize exact attempt tree: %w", err)
+	}
+	if err := root.VerifyPath(); err != nil {
+		return fmt.Errorf("verify attempt root after tree publication: %w", err)
+	}
+	if err := commitAdapter.verifyRawTreeMaterialization(ctx, binding.root, tree); err != nil {
+		return fmt.Errorf("verify exact attempt tree publication: %w", err)
+	}
+	if err := commitAdapter.confirmTrustedCommitState(
+		ctx, binding, claim.branch, claim.base, tree,
+	); err != nil {
+		return fmt.Errorf("confirm exact attempt Git state: %w", err)
 	}
 	return nil
+}
+
+func validateAttemptTreeEntries(entries []rawGitTreeEntry) ([]string, error) {
+	spellings := make(map[string]string, len(entries)*2)
+	directories := make(map[string]struct{})
+	for _, entry := range entries {
+		switch entry.mode {
+		case GitModeRegular, GitModeExecutable, GitModeSymlink:
+		default:
+			return nil, fmt.Errorf(
+				"attempt tree path %s has unsupported mode %s",
+				entry.path, entry.mode,
+			)
+		}
+		components := strings.Split(entry.path, "/")
+		for _, component := range components {
+			if materializationCollisionKey(component) == materializationCollisionKey(".git") {
+				return nil, fmt.Errorf(
+					"attempt tree path %s collides with Git administration",
+					entry.path,
+				)
+			}
+		}
+		paths := []string{entry.path}
+		for directory := pathpkg.Dir(entry.path); directory != "."; directory = pathpkg.Dir(directory) {
+			paths = append(paths, directory)
+			directories[directory] = struct{}{}
+		}
+		for _, candidate := range paths {
+			key := materializationCollisionKey(candidate)
+			if prior, exists := spellings[key]; exists && prior != candidate {
+				return nil, fmt.Errorf(
+					"attempt tree paths %q and %q collide",
+					prior, candidate,
+				)
+			}
+			spellings[key] = candidate
+		}
+	}
+	result := make([]string, 0, len(directories))
+	for directory := range directories {
+		result = append(result, directory)
+	}
+	sort.Slice(result, func(left, right int) bool {
+		leftDepth := strings.Count(result[left], "/")
+		rightDepth := strings.Count(result[right], "/")
+		if leftDepth != rightDepth {
+			return leftDepth < rightDepth
+		}
+		return result[left] < result[right]
+	})
+	return result, nil
+}
+
+func clearAttemptWorktree(root *VerifiedRoot) error {
+	if root == nil || root.adapter == nil {
+		return fmt.Errorf("attempt worktree root is closed")
+	}
+	directory, err := root.adapter.openDirectoryExact("")
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	admin, exists, err := inspectRootEntryExact(directory, ".git")
+	if err != nil {
+		return err
+	}
+	if !exists || !admin.Mode().IsRegular() {
+		return fmt.Errorf("attempt worktree Git administration is missing or invalid")
+	}
+	return removeRootContentsExceptExact(
+		directory, root.Path(), map[string]struct{}{".git": {}},
+	)
+}
+
+func injectAttemptWorktreeMaterializationFault(
+	injector AttemptWorktreeMaterializationFaultInjector,
+	point AttemptWorktreeMaterializationFaultPoint,
+) error {
+	if injector == nil {
+		return nil
+	}
+	return injector(point)
 }
 
 func (adapter LocalAttemptGitAdapter) PrepareAttemptWorktree(
@@ -1221,6 +1484,9 @@ func trustedGitArguments(repositoryRoot string, arguments ...string) []string {
 		"-c", "fetch.recurseSubmodules=false",
 		"-c", "core.attributesFile=" + os.DevNull,
 		"-c", "core.fsmonitor=false",
+		"-c", "core.sparseCheckout=false",
+		"-c", "core.sparseCheckoutCone=false",
+		"-c", "index.sparse=false",
 		"-c", "log.showSignature=false",
 		"-c", "core.untrackedCache=false",
 		"-c", "maintenance.auto=false",

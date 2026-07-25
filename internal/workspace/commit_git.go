@@ -683,6 +683,25 @@ type rawGitTreeEntry struct {
 	object GitObjectID
 }
 
+type rawTreeMaterializationMismatch struct {
+	message string
+}
+
+func (mismatch rawTreeMaterializationMismatch) Error() string {
+	return mismatch.message
+}
+
+func rawTreeMismatchf(format string, arguments ...any) error {
+	return rawTreeMaterializationMismatch{
+		message: fmt.Sprintf(format, arguments...),
+	}
+}
+
+func isRawTreeMaterializationMismatch(err error) bool {
+	var mismatch rawTreeMaterializationMismatch
+	return errors.As(err, &mismatch)
+}
+
 func (adapter LocalCommitGitAdapter) verifyRawTreeMaterialization(
 	ctx context.Context,
 	worktree string,
@@ -739,27 +758,30 @@ func (adapter LocalCommitGitAdapter) verifyRawTreeMaterializationAtDepth(
 		absolute := filepath.Join(binding.root, filepath.FromSlash(entry.path))
 		info, err := os.Lstat(absolute)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return rawTreeMismatchf("raw worktree path %s: %v", entry.path, err)
+			}
 			return fmt.Errorf("raw worktree path %s: %w", entry.path, err)
 		}
 		switch entry.mode {
 		case GitModeRegular, GitModeExecutable:
 			if !info.Mode().IsRegular() {
-				return fmt.Errorf("raw worktree path %s is not a regular file", entry.path)
+				return rawTreeMismatchf("raw worktree path %s is not a regular file", entry.path)
 			}
 			executable := info.Mode().Perm()&0o111 != 0
 			if executable != (entry.mode == GitModeExecutable) {
-				return fmt.Errorf("raw worktree path %s executable mode differs from tree", entry.path)
+				return rawTreeMismatchf("raw worktree path %s executable mode differs from tree", entry.path)
 			}
 			object, err := adapter.hashRawWorktreeFile(ctx, binding.root, entry.path, algorithm, info)
 			if err != nil {
 				return err
 			}
 			if object != entry.object {
-				return fmt.Errorf("raw worktree path %s bytes differ from tree", entry.path)
+				return rawTreeMismatchf("raw worktree path %s bytes differ from tree", entry.path)
 			}
 		case GitModeSymlink:
 			if info.Mode()&os.ModeSymlink == 0 {
-				return fmt.Errorf("raw worktree path %s is not a symbolic link", entry.path)
+				return rawTreeMismatchf("raw worktree path %s is not a symbolic link", entry.path)
 			}
 			target, err := os.Readlink(absolute)
 			if err != nil {
@@ -771,14 +793,14 @@ func (adapter LocalCommitGitAdapter) verifyRawTreeMaterializationAtDepth(
 			}
 			confirmedTarget, err := os.Readlink(absolute)
 			if err != nil || confirmedTarget != target {
-				return fmt.Errorf("raw worktree symlink %s changed during verification", entry.path)
+				return rawTreeMismatchf("raw worktree symlink %s changed during verification", entry.path)
 			}
 			if object != entry.object {
-				return fmt.Errorf("raw worktree symlink %s target differs from tree", entry.path)
+				return rawTreeMismatchf("raw worktree symlink %s target differs from tree", entry.path)
 			}
 		case GitModeSubmodule:
 			if !info.IsDir() {
-				return fmt.Errorf("raw worktree submodule %s is not a directory", entry.path)
+				return rawTreeMismatchf("raw worktree submodule %s is not a directory", entry.path)
 			}
 			submoduleRoot := absolute
 			submoduleAlgorithm, err := adapter.git.objectFormat(ctx, submoduleRoot)
@@ -786,14 +808,14 @@ func (adapter LocalCommitGitAdapter) verifyRawTreeMaterializationAtDepth(
 				return fmt.Errorf("inspect raw submodule %s object format: %w", entry.path, err)
 			}
 			if submoduleAlgorithm != entry.object.Algorithm() {
-				return fmt.Errorf("raw worktree submodule %s object format differs from gitlink", entry.path)
+				return rawTreeMismatchf("raw worktree submodule %s object format differs from gitlink", entry.path)
 			}
 			head, err := adapter.resolveObject(ctx, submoduleRoot, submoduleAlgorithm, "HEAD")
 			if err != nil {
 				return fmt.Errorf("inspect raw submodule %s head: %w", entry.path, err)
 			}
 			if head != entry.object {
-				return fmt.Errorf("raw worktree submodule %s head differs from gitlink", entry.path)
+				return rawTreeMismatchf("raw worktree submodule %s head differs from gitlink", entry.path)
 			}
 			submoduleTree, err := adapter.resolveObject(
 				ctx, submoduleRoot, submoduleAlgorithm, objectHex(head)+"^{tree}",
@@ -839,10 +861,10 @@ func (adapter LocalCommitGitAdapter) verifyRawTreeMaterializationAtDepth(
 			if _, expectedDirectory := expectedDirectories[relative]; expectedDirectory {
 				return nil
 			}
-			return fmt.Errorf("raw worktree contains untracked directory %s", relative)
+			return rawTreeMismatchf("raw worktree contains untracked directory %s", relative)
 		}
 		if !tracked || entry.mode == GitModeSubmodule {
-			return fmt.Errorf("raw worktree contains untracked path %s", relative)
+			return rawTreeMismatchf("raw worktree contains untracked path %s", relative)
 		}
 		materialized[relative] = struct{}{}
 		return nil
@@ -852,7 +874,10 @@ func (adapter LocalCommitGitAdapter) verifyRawTreeMaterializationAtDepth(
 	}
 	for expectedPath := range expected {
 		if _, exists := materialized[expectedPath]; !exists {
-			return fmt.Errorf("raw worktree tree path %s was not materialized as an exact filesystem pathname", expectedPath)
+			return rawTreeMismatchf(
+				"raw worktree tree path %s was not materialized as an exact filesystem pathname",
+				expectedPath,
+			)
 		}
 	}
 	confirmed, err := adapter.captureTrustedWorktreeBinding(ctx, binding.root)

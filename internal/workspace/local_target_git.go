@@ -1067,20 +1067,6 @@ func (adapter LocalTargetGitAdapter) inspectBaseTree(
 				"submodules are not supported (tree entry %s)", entry.path,
 			)
 		}
-		if path.Base(entry.path) == ".gitattributes" {
-			attributes, readErr := adapter.readBlob(
-				ctx, root, entry.object,
-			)
-			if readErr != nil {
-				return readErr
-			}
-			if len(bytes.TrimSpace(attributes)) != 0 {
-				return fmt.Errorf(
-					"repository-defined Git attributes are not supported (%s)",
-					entry.path,
-				)
-			}
-		}
 		if entry.mode == "120000" {
 			target, readErr := adapter.readBlob(
 				ctx, root, entry.object,
@@ -1162,6 +1148,14 @@ func validateRepositorySymlink(entryPath string, rawTarget []byte) error {
 			"symlink %s escapes the repository root via %q",
 			entryPath, target,
 		)
+	}
+	for _, component := range strings.Split(resolved, "/") {
+		if materializationCollisionKey(component) == materializationCollisionKey(".git") {
+			return fmt.Errorf(
+				"symlink %s targets Git administration via %q",
+				entryPath, target,
+			)
+		}
 	}
 	return nil
 }

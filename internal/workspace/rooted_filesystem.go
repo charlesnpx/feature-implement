@@ -597,6 +597,9 @@ func (adapter *RootedFilesystemAdapter) writeFileExclusive(relative string, cont
 	if err := writeAll(file, content); err != nil {
 		return err
 	}
+	if err := file.Chmod(permission.Perm()); err != nil {
+		return fmt.Errorf("set rooted file mode %s: %w", relative, err)
+	}
 	if err := file.Sync(); err != nil {
 		return fmt.Errorf("synchronize rooted file %s: %w", relative, err)
 	}
@@ -604,6 +607,43 @@ func (adapter *RootedFilesystemAdapter) writeFileExclusive(relative string, cont
 		return fmt.Errorf("close rooted file %s: %w", relative, err)
 	}
 	remove = false
+	return syncRootHandle(directory)
+}
+
+func (adapter *RootedFilesystemAdapter) writeSymlinkExclusive(relative, target string) error {
+	rooted, err := NewRootedPath(adapter.rootPath, relative)
+	if err != nil {
+		return err
+	}
+	parent := path.Dir(rooted.Relative())
+	base := path.Base(rooted.Relative())
+	directory, err := adapter.openDirectoryExact(parent)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	if _, exists, err := inspectRootEntryExact(directory, base); err != nil {
+		return err
+	} else if exists {
+		return fmt.Errorf("rooted path %s already exists", relative)
+	}
+	if err := directory.Symlink(target, base); err != nil {
+		return fmt.Errorf("create rooted symlink %s: %w", relative, err)
+	}
+	info, exists, err := inspectRootEntryExact(directory, base)
+	if err != nil || !exists || info.Mode()&os.ModeSymlink == 0 {
+		if err == nil {
+			err = fmt.Errorf("created path is not a symbolic link")
+		}
+		return fmt.Errorf("verify rooted symlink %s: %w", relative, err)
+	}
+	confirmed, err := directory.Readlink(base)
+	if err != nil || confirmed != target {
+		if err == nil {
+			err = fmt.Errorf("symbolic-link target changed")
+		}
+		return fmt.Errorf("verify rooted symlink %s: %w", relative, err)
+	}
 	return syncRootHandle(directory)
 }
 
@@ -1192,11 +1232,22 @@ func (adapter *RootedFilesystemAdapter) removeDirectoryTreeExact(relative string
 }
 
 func removeRootContentsExact(directory *os.Root, display string) error {
+	return removeRootContentsExceptExact(directory, display, nil)
+}
+
+func removeRootContentsExceptExact(
+	directory *os.Root,
+	display string,
+	preserved map[string]struct{},
+) error {
 	entries, err := readRootDirectoryEntries(directory)
 	if err != nil {
 		return fmt.Errorf("read rooted tree %s: %w", display, err)
 	}
 	for _, entry := range entries {
+		if _, keep := preserved[entry.name]; keep {
+			continue
+		}
 		current, exists, err := inspectRootEntryExact(directory, entry.name)
 		if err != nil {
 			return fmt.Errorf("inspect rooted tree entry %s/%s: %w", display, entry.name, err)
