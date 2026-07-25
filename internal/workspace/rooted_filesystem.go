@@ -691,14 +691,25 @@ func (adapter *RootedFilesystemAdapter) writeSymlinkExclusive(relative, target s
 }
 
 func (adapter *RootedFilesystemAdapter) renameFileNoReplace(source, destination string) error {
-	return adapter.renamePathNoReplace(source, destination, false)
+	return adapter.renamePathNoReplace(source, destination, false, nil)
 }
 
 func (adapter *RootedFilesystemAdapter) renameDirectoryNoReplace(source, destination string) error {
-	return adapter.renamePathNoReplace(source, destination, true)
+	return adapter.renamePathNoReplace(source, destination, true, nil)
 }
 
-func (adapter *RootedFilesystemAdapter) renamePathNoReplace(source, destination string, directorySource bool) error {
+func (adapter *RootedFilesystemAdapter) renameDirectoryIdentityNoReplace(
+	source, destination string,
+	expected PlatformFileIdentity,
+) error {
+	return adapter.renamePathNoReplace(source, destination, true, &expected)
+}
+
+func (adapter *RootedFilesystemAdapter) renamePathNoReplace(
+	source, destination string,
+	directorySource bool,
+	expected *PlatformFileIdentity,
+) error {
 	sourceDirectory, err := adapter.openDirectoryExact(path.Dir(source))
 	if err != nil {
 		return err
@@ -740,6 +751,20 @@ func (adapter *RootedFilesystemAdapter) renamePathNoReplace(source, destination 
 			err = fmt.Errorf("source identity changed")
 		}
 		return fmt.Errorf("verify rooted quarantine source %s: %w", source, err)
+	}
+	if expected != nil {
+		identity, identityErr := platformFileIdentity(openedInfo)
+		if identityErr != nil {
+			return fmt.Errorf(
+				"identify rooted quarantine source %s: %w", source, identityErr,
+			)
+		}
+		if identity != *expected {
+			return fmt.Errorf(
+				"rooted quarantine source %s identity does not match its durable binding",
+				source,
+			)
+		}
 	}
 	if _, exists, err := inspectRootEntryExact(destinationDirectory, destinationBase); err != nil {
 		return err
@@ -1222,6 +1247,20 @@ func (adapter *RootedFilesystemAdapter) removeEmptyDirectoryExact(
 // permission. It is reserved for directories whose absence was claimed
 // before tool-owned materialization began.
 func (adapter *RootedFilesystemAdapter) removeDirectoryTreeExact(relative string) error {
+	return adapter.removeDirectoryTreeBound(relative, nil)
+}
+
+func (adapter *RootedFilesystemAdapter) removeDirectoryTreeIdentityExact(
+	relative string,
+	expected PlatformFileIdentity,
+) error {
+	return adapter.removeDirectoryTreeBound(relative, &expected)
+}
+
+func (adapter *RootedFilesystemAdapter) removeDirectoryTreeBound(
+	relative string,
+	expected *PlatformFileIdentity,
+) error {
 	rooted, err := NewRootedPath(adapter.rootPath, relative)
 	if err != nil {
 		return err
@@ -1253,6 +1292,20 @@ func (adapter *RootedFilesystemAdapter) removeDirectoryTreeExact(relative string
 			err = fmt.Errorf("directory identity changed")
 		}
 		return fmt.Errorf("verify rooted tree %s: %w", relative, err)
+	}
+	if expected != nil {
+		identity, identityErr := platformFileIdentity(openedInfo)
+		if identityErr != nil {
+			_ = tree.Close()
+			return fmt.Errorf("identify rooted tree %s: %w", relative, identityErr)
+		}
+		if identity != *expected {
+			_ = tree.Close()
+			return fmt.Errorf(
+				"rooted tree %s identity does not match its durable binding",
+				relative,
+			)
+		}
 	}
 	if err := removeRootContentsExact(tree, relative); err != nil {
 		_ = tree.Close()

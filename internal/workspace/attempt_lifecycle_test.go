@@ -1058,16 +1058,37 @@ func TestLocalGitAttemptMaterializationPreservesDirtyPrimaryCheckout(t *testing.
 	if err := os.MkdirAll(attempt.Worktree(), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := adapter.PrepareAttemptWorktree(
+		context.Background(), repositoryRoot, claim, true,
+	); err != nil {
+		t.Fatalf("recover empty unbound worktree: %v", err)
+	}
+	if _, err := os.Lstat(attempt.Worktree()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("empty unbound worktree still exists: %v", err)
+	}
+	if err := os.MkdirAll(attempt.Worktree(), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(attempt.Worktree(), "partial.txt"), []byte("partial\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := adapter.PrepareAttemptWorktree(
 		context.Background(), repositoryRoot, claim, true,
-	); err != nil {
-		t.Fatalf("recover claimed partial worktree: %v", err)
+	); err == nil || !strings.Contains(err.Error(), "without a durable directory identity") {
+		t.Fatalf("unbound partial worktree recovery error = %v", err)
 	}
-	if _, err := os.Lstat(attempt.Worktree()); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("claimed partial worktree still exists: %v", err)
+	if content, err := os.ReadFile(
+		filepath.Join(attempt.Worktree(), "partial.txt"),
+	); err != nil || string(content) != "partial\n" {
+		t.Fatalf("unbound partial worktree was modified: %q, %v", content, err)
+	}
+	if err := os.RemoveAll(attempt.Worktree()); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.PrepareAttemptWorktree(
+		context.Background(), repositoryRoot, claim, false,
+	); err != nil {
+		t.Fatalf("revalidate absent partial worktree: %v", err)
 	}
 	if err := adapter.ReleaseAttemptWorktreeClaim(context.Background(), claim); err != nil {
 		t.Fatal(err)
@@ -1094,6 +1115,9 @@ func TestLocalGitAttemptMaterializationPreservesDirtyPrimaryCheckout(t *testing.
 	}
 	if started.Phase() != workspace.AttemptActive || started.VerifiedHead() != base {
 		t.Fatalf("real Git attempt = %#v", started)
+	}
+	if _, err := os.Lstat(attempt.Worktree() + "-interrupted"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("displaced registered worktree was not restored exactly: %v", err)
 	}
 	if _, err := os.Lstat(attempt.Worktree() + ".feature-attempt-claim"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("completed materialization retained its ownership claim: %v", err)
@@ -1418,6 +1442,7 @@ func TestAttemptWorktreeStreamsBlobLargerThanBufferedGitOutputLimit(t *testing.T
 func TestAttemptWorktreeRecoversInterruptedRawPublication(t *testing.T) {
 	crash := errors.New("simulated raw materialization interruption")
 	for _, point := range []workspace.AttemptWorktreeMaterializationFaultPoint{
+		workspace.AttemptMaterializationFaultAfterDirectoryBinding,
 		workspace.AttemptMaterializationFaultAfterRegistration,
 		workspace.AttemptMaterializationFaultAfterIndex,
 		workspace.AttemptMaterializationFaultAfterPath,
@@ -1459,10 +1484,23 @@ func TestAttemptWorktreeRecoversInterruptedRawPublication(t *testing.T) {
 				t.Fatalf("interrupted materialization lost its ownership claim: %v", err)
 			}
 			recovery := workspace.DefaultLocalAttemptGitAdapter()
-			if err := recovery.CreateAttemptWorktree(
-				context.Background(), repositoryRoot, claim, false, true,
-			); err != nil {
-				t.Fatalf("recover interrupted raw materialization: %v", err)
+			if point == workspace.AttemptMaterializationFaultAfterDirectoryBinding {
+				if err := recovery.PrepareAttemptWorktree(
+					context.Background(), repositoryRoot, claim, true,
+				); err != nil {
+					t.Fatalf("recover interrupted directory binding: %v", err)
+				}
+				if err := recovery.CreateAttemptWorktree(
+					context.Background(), repositoryRoot, claim, true, false,
+				); err != nil {
+					t.Fatalf("restart after interrupted directory binding: %v", err)
+				}
+			} else {
+				if err := recovery.CreateAttemptWorktree(
+					context.Background(), repositoryRoot, claim, false, true,
+				); err != nil {
+					t.Fatalf("recover interrupted raw materialization: %v", err)
+				}
 			}
 			inspection, err := recovery.InspectAttemptWorktree(
 				context.Background(), repositoryRoot, claim.Branch(), worktree,
@@ -1666,6 +1704,137 @@ func TestAttemptWorktreeRejectsExternalHardLinkDuringRawPublication(t *testing.T
 	}
 	if !linked {
 		t.Fatal("external hard link was not created during raw publication")
+	}
+}
+
+func TestAttemptWorktreeRejectsPostRegistrationSymlinkWithoutTouchingOutsideDirectory(
+	t *testing.T,
+) {
+	repositoryRoot, base := newRawAttemptTreeRepository(t)
+	worktreeParent := canonicalTestDirectory(t)
+	worktree := filepath.Join(worktreeParent, "attempt")
+	displaced := filepath.Join(worktreeParent, "displaced-attempt")
+	outside := canonicalTestDirectory(t)
+	victim := filepath.Join(outside, "outside-victim.txt")
+	if err := os.WriteFile(victim, []byte("must survive\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := workspace.NewAttemptWorktreeClaim(
+		workspace.MustID("symlink-race-attempt"),
+		workspace.DigestBytes([]byte("symlink-race-generation")),
+		base,
+		"mu/symlink-race-attempt",
+		worktree,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaced := false
+	adapter := workspace.DefaultLocalAttemptGitAdapter().
+		WithAttemptWorktreeMaterializationFaultInjector(
+			func(point workspace.AttemptWorktreeMaterializationFaultPoint) error {
+				if point != workspace.AttemptMaterializationFaultAfterRegistration || replaced {
+					return nil
+				}
+				administration, err := os.ReadFile(filepath.Join(worktree, ".git"))
+				if err != nil {
+					return err
+				}
+				if err := os.Rename(worktree, displaced); err != nil {
+					return err
+				}
+				if err := os.WriteFile(
+					filepath.Join(outside, ".git"), administration, 0o600,
+				); err != nil {
+					return err
+				}
+				if err := os.Symlink(outside, worktree); err != nil {
+					return err
+				}
+				replaced = true
+				return nil
+			},
+		)
+	if err := adapter.PrepareAttemptWorktree(
+		context.Background(), repositoryRoot, claim, false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	err = adapter.CreateAttemptWorktree(
+		context.Background(), repositoryRoot, claim, true, false,
+	)
+	if err == nil {
+		t.Fatal("post-registration worktree replacement was accepted")
+	}
+	if !replaced {
+		t.Fatal("post-registration worktree replacement did not run")
+	}
+	content, readErr := os.ReadFile(victim)
+	if readErr != nil || string(content) != "must survive\n" {
+		t.Fatalf("outside victim was modified or removed: %q, %v", content, readErr)
+	}
+}
+
+func TestAttemptWorktreeDoesNotRecreateMissingBoundDirectoryOutsideVerifiedParent(
+	t *testing.T,
+) {
+	repositoryRoot, base := newRawAttemptTreeRepository(t)
+	worktreeParent := canonicalTestDirectory(t)
+	worktree := filepath.Join(worktreeParent, "attempt")
+	displaced := filepath.Join(canonicalTestDirectory(t), "displaced-attempt")
+	claim, err := workspace.NewAttemptWorktreeClaim(
+		workspace.MustID("outside-move-attempt"),
+		workspace.DigestBytes([]byte("outside-move-generation")),
+		base,
+		"mu/outside-move-attempt",
+		worktree,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crash := errors.New("stop after durable registration")
+	adapter := workspace.DefaultLocalAttemptGitAdapter().
+		WithAttemptWorktreeMaterializationFaultInjector(
+			func(point workspace.AttemptWorktreeMaterializationFaultPoint) error {
+				if point == workspace.AttemptMaterializationFaultAfterRegistration {
+					return crash
+				}
+				return nil
+			},
+		)
+	if err := adapter.PrepareAttemptWorktree(
+		context.Background(), repositoryRoot, claim, false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.CreateAttemptWorktree(
+		context.Background(), repositoryRoot, claim, true, false,
+	); !errors.Is(err, crash) {
+		t.Fatalf("registration interruption = %v", err)
+	}
+	if err := os.Rename(worktree, displaced); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(displaced, "must-survive.txt")
+	if err := os.WriteFile(sentinel, []byte("preserve me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = workspace.DefaultLocalAttemptGitAdapter().CreateAttemptWorktree(
+		context.Background(), repositoryRoot, claim, false, true,
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "identity is not present beneath the verified parent") {
+		t.Fatalf("missing bound directory recovery error = %v", err)
+	}
+	if _, statErr := os.Lstat(worktree); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("missing bound worktree was recreated: %v", statErr)
+	}
+	content, readErr := os.ReadFile(sentinel)
+	if readErr != nil || string(content) != "preserve me\n" {
+		t.Fatalf("displaced bound directory was modified: %q, %v", content, readErr)
+	}
+	if _, statErr := os.Lstat(worktree + ".feature-attempt-claim.binding"); statErr != nil {
+		t.Fatalf("durable identity binding was discarded: %v", statErr)
 	}
 }
 

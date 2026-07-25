@@ -19,6 +19,7 @@ import (
 
 const maxAttemptGitOutputBytes = 8 * 1024 * 1024
 const maxAttemptWorktreeClaimBytes = 16 * 1024
+const maxAttemptWorktreeBindingBytes = 16 * 1024
 
 type AttemptRefInventory struct {
 	local []string
@@ -157,9 +158,10 @@ type AttemptWorktreeClaimFaultInjector func(AttemptWorktreeClaimFaultPoint) erro
 type AttemptWorktreeMaterializationFaultPoint string
 
 const (
-	AttemptMaterializationFaultAfterRegistration AttemptWorktreeMaterializationFaultPoint = "after_registration"
-	AttemptMaterializationFaultAfterIndex        AttemptWorktreeMaterializationFaultPoint = "after_index"
-	AttemptMaterializationFaultAfterPath         AttemptWorktreeMaterializationFaultPoint = "after_path"
+	AttemptMaterializationFaultAfterDirectoryBinding AttemptWorktreeMaterializationFaultPoint = "after_directory_binding"
+	AttemptMaterializationFaultAfterRegistration     AttemptWorktreeMaterializationFaultPoint = "after_registration"
+	AttemptMaterializationFaultAfterIndex            AttemptWorktreeMaterializationFaultPoint = "after_index"
+	AttemptMaterializationFaultAfterPath             AttemptWorktreeMaterializationFaultPoint = "after_path"
 )
 
 type AttemptWorktreeMaterializationFaultInjector func(
@@ -297,12 +299,78 @@ func (adapter LocalAttemptGitAdapter) InspectAttemptWorktree(
 	if record.detached {
 		return AttemptGitInspection{}, fmt.Errorf("attempt worktree %s is detached", worktree)
 	}
+	parentPath, err := canonicalizeTrustedRootPath(filepath.Dir(worktree))
+	if err != nil {
+		return AttemptGitInspection{}, err
+	}
+	parent, err := OpenVerifiedRoot(RootRoleWorktree, parentPath, false)
+	if err != nil {
+		return AttemptGitInspection{}, fmt.Errorf(
+			"open attempt worktree parent for inspection: %w", err,
+		)
+	}
+	defer parent.Close()
+	worktreeName := filepath.Base(worktree)
+	worktree = filepath.Join(parent.Path(), worktreeName)
+	claimMarkerName := filepath.Base(attemptWorktreeClaimPath(worktree))
+	bindingMarkerName := filepath.Base(attemptWorktreeBindingPath(worktree))
+	_, claimExists, err := parent.adapter.inspectExact(claimMarkerName)
+	if err != nil {
+		return AttemptGitInspection{}, fmt.Errorf(
+			"inspect attempt worktree claim during Git inspection: %w", err,
+		)
+	}
+	_, bindingExists, err := parent.adapter.inspectExact(bindingMarkerName)
+	if err != nil {
+		return AttemptGitInspection{}, fmt.Errorf(
+			"inspect attempt worktree identity binding during Git inspection: %w", err,
+		)
+	}
+	var expectedIdentity *PlatformFileIdentity
+	switch {
+	case claimExists && !bindingExists:
+		return AttemptGitInspection{}, fmt.Errorf(
+			"registered claimed attempt worktree is missing its durable identity binding",
+		)
+	case !claimExists && bindingExists:
+		return AttemptGitInspection{}, fmt.Errorf(
+			"attempt worktree identity binding exists without its ownership claim",
+		)
+	case claimExists:
+		claimPayload, err := readAttemptWorktreeClaim(parent, claimMarkerName)
+		if err != nil {
+			return AttemptGitInspection{}, err
+		}
+		identity, _, err := readAttemptWorktreeBinding(
+			parent, bindingMarkerName, claimPayload, worktree,
+		)
+		if err != nil {
+			return AttemptGitInspection{}, err
+		}
+		expectedIdentity = &identity
+	}
+	worktreeRoot, err := openClaimedAttemptWorktreeDirectory(
+		parent, worktreeName, worktree, expectedIdentity,
+	)
+	if err != nil {
+		return AttemptGitInspection{}, fmt.Errorf(
+			"open exact attempt worktree for inspection: %w", err,
+		)
+	}
+	defer worktreeRoot.Close()
 	commitAdapter := LocalCommitGitAdapter{git: adapter}
-	binding, err := commitAdapter.captureTrustedWorktreeBinding(ctx, worktree)
+	binding, err := commitAdapter.captureTrustedWorktreeBinding(
+		ctx, worktreeRoot.Path(),
+	)
 	if err != nil {
 		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree binding: %w", err)
 	}
-	worktree = binding.root
+	if binding.root != worktreeRoot.Path() {
+		return AttemptGitInspection{}, fmt.Errorf(
+			"attempt Git top-level does not match its exact worktree path",
+		)
+	}
+	worktree = worktreeRoot.Path()
 	headOutput, headExit, err := adapter.run(ctx, worktree, "rev-parse", "--verify", "HEAD")
 	if err != nil || headExit != 0 {
 		if err == nil {
@@ -379,6 +447,16 @@ func (adapter LocalAttemptGitAdapter) InspectAttemptWorktree(
 	if !branchExists || confirmedBranchHead != branchHead {
 		return AttemptGitInspection{}, fmt.Errorf("attempt branch changed during worktree verification")
 	}
+	if err := worktreeRoot.VerifyPath(); err != nil {
+		return AttemptGitInspection{}, fmt.Errorf(
+			"verify exact attempt worktree after inspection: %w", err,
+		)
+	}
+	if err := parent.VerifyPath(); err != nil {
+		return AttemptGitInspection{}, fmt.Errorf(
+			"verify attempt worktree parent after inspection: %w", err,
+		)
+	}
 	return NewAttemptGitInspection(
 		branchExists, branchHead, true, true, worktreeBranch, head, clean,
 	)
@@ -413,6 +491,7 @@ func (adapter LocalAttemptGitAdapter) CreateAttemptWorktree(
 		return err
 	}
 	markerName := filepath.Base(marker)
+	bindingMarkerName := filepath.Base(attemptWorktreeBindingPath(worktree))
 	durableClaim, err := readAttemptWorktreeClaim(parent, markerName)
 	if err != nil {
 		return fmt.Errorf("reopen durable attempt worktree claim: %w", err)
@@ -452,6 +531,56 @@ func (adapter LocalAttemptGitAdapter) CreateAttemptWorktree(
 	case recoverRegistered:
 		return fmt.Errorf("attempt worktree registration changed before recovery")
 	}
+	var expectedWorktreeIdentity *PlatformFileIdentity
+	_, bindingExists, err := parent.adapter.inspectExact(bindingMarkerName)
+	if err != nil {
+		return fmt.Errorf("inspect durable attempt worktree identity binding: %w", err)
+	}
+	if bindingExists {
+		identity, _, readErr := readAttemptWorktreeBinding(
+			parent, bindingMarkerName, expectedClaim, worktree,
+		)
+		if readErr != nil {
+			return readErr
+		}
+		expectedWorktreeIdentity = &identity
+	}
+	switch {
+	case worktreeRegistered && worktreeExists:
+		if expectedWorktreeIdentity == nil {
+			return fmt.Errorf(
+				"registered attempt worktree is missing its durable identity binding",
+			)
+		}
+	case worktreeRegistered && !worktreeExists:
+		if expectedWorktreeIdentity == nil {
+			return fmt.Errorf(
+				"registered attempt worktree is missing its durable identity binding",
+			)
+		}
+		restored, err := restoreBoundAttemptWorktreeDirectory(
+			parent, filepath.Base(worktree), *expectedWorktreeIdentity,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"restore missing registered attempt worktree identity: %w", err,
+			)
+		}
+		if !restored {
+			return fmt.Errorf(
+				"registered attempt worktree is missing and its durable directory identity is not present beneath the verified parent",
+			)
+		}
+		worktreeExists = true
+	case !worktreeRegistered && worktreeExists:
+		return fmt.Errorf(
+			"unregistered attempt worktree appeared before exact directory binding",
+		)
+	case expectedWorktreeIdentity != nil:
+		return fmt.Errorf(
+			"unregistered attempt worktree has a durable registered identity binding",
+		)
+	}
 	baseText := strings.TrimPrefix(
 		claim.base.String(), string(claim.base.algorithm)+":",
 	)
@@ -482,6 +611,47 @@ func (adapter LocalAttemptGitAdapter) CreateAttemptWorktree(
 	if !bytes.Equal(preEffectClaim, expectedClaim) {
 		return fmt.Errorf("durable attempt worktree claim changed before Git creation")
 	}
+	var attemptRoot *VerifiedRoot
+	if len(arguments) != 0 && !worktreeExists {
+		created, err := parent.adapter.makeDirectory(
+			filepath.Base(worktree), 0o700,
+		)
+		if err != nil {
+			return fmt.Errorf("create bound attempt worktree directory: %w", err)
+		}
+		if !created {
+			return fmt.Errorf(
+				"attempt worktree directory appeared before exact identity binding",
+			)
+		}
+		attemptRoot, err = openClaimedAttemptWorktreeDirectory(
+			parent, filepath.Base(worktree), worktree, nil,
+		)
+		if err != nil {
+			return fmt.Errorf("open pre-registered attempt worktree directory: %w", err)
+		}
+		defer attemptRoot.Close()
+		identity := attemptRoot.Identity()
+		if _, err := createOrVerifyAttemptWorktreeBinding(
+			parent, bindingMarkerName, expectedClaim, worktree, identity,
+		); err != nil {
+			return fmt.Errorf("bind pre-registered attempt worktree directory: %w", err)
+		}
+		expectedWorktreeIdentity = &identity
+		worktreeExists = true
+		if err := parent.VerifyPath(); err != nil {
+			return fmt.Errorf(
+				"verify attempt parent after pre-registration identity binding: %w",
+				err,
+			)
+		}
+		if err := injectAttemptWorktreeMaterializationFault(
+			adapter.worktreeMaterializeFault,
+			AttemptMaterializationFaultAfterDirectoryBinding,
+		); err != nil {
+			return err
+		}
+	}
 	var effectErr error
 	registrationCompleted := worktreeRegistered && worktreeExists
 	if len(arguments) != 0 {
@@ -494,10 +664,6 @@ func (adapter LocalAttemptGitAdapter) CreateAttemptWorktree(
 			)
 		} else {
 			registrationCompleted = true
-			effectErr = injectAttemptWorktreeMaterializationFault(
-				adapter.worktreeMaterializeFault,
-				AttemptMaterializationFaultAfterRegistration,
-			)
 		}
 	}
 	if err := parent.VerifyPath(); err != nil {
@@ -553,8 +719,53 @@ func (adapter LocalAttemptGitAdapter) CreateAttemptWorktree(
 	if confirmed != binding {
 		return fmt.Errorf("Git worktree administration changed during attempt materialization")
 	}
+	if attemptRoot == nil {
+		attemptRoot, err = openClaimedAttemptWorktreeDirectory(
+			parent, filepath.Base(worktree), worktree, expectedWorktreeIdentity,
+		)
+		if err != nil {
+			return fmt.Errorf("bind claimed attempt worktree directory: %w", err)
+		}
+		defer attemptRoot.Close()
+	} else if err := attemptRoot.VerifyPath(); err != nil {
+		return fmt.Errorf(
+			"verify retained attempt worktree directory after Git registration: %w",
+			err,
+		)
+	}
+	attemptBinding, err := commitAdapter.captureTrustedWorktreeBinding(
+		ctx, attemptRoot.Path(),
+	)
+	if err != nil {
+		return fmt.Errorf("inspect claimed attempt worktree Git binding: %w", err)
+	}
+	if attemptBinding.root != attemptRoot.Path() ||
+		attemptBinding.commonDir != binding.commonDir {
+		return fmt.Errorf(
+			"claimed attempt worktree Git top-level or common directory does not match its exact binding",
+		)
+	}
+	if err := attemptRoot.VerifyPath(); err != nil {
+		return fmt.Errorf("verify claimed attempt worktree after Git inspection: %w", err)
+	}
+	bindingPayload, err := createOrVerifyAttemptWorktreeBinding(
+		parent, bindingMarkerName, expectedClaim, worktree,
+		attemptRoot.Identity(),
+	)
+	if err != nil {
+		return err
+	}
+	if err := parent.VerifyPath(); err != nil {
+		return fmt.Errorf("verify attempt parent after identity binding: %w", err)
+	}
+	if err := injectAttemptWorktreeMaterializationFault(
+		adapter.worktreeMaterializeFault,
+		AttemptMaterializationFaultAfterRegistration,
+	); err != nil {
+		return err
+	}
 	if err := adapter.materializeAttemptWorktree(
-		ctx, binding, claim, worktree,
+		ctx, binding, attemptBinding, attemptRoot, claim,
 	); err != nil {
 		return err
 	}
@@ -575,22 +786,41 @@ func (adapter LocalAttemptGitAdapter) CreateAttemptWorktree(
 	if !bytes.Equal(finalClaim, expectedClaim) {
 		return fmt.Errorf("durable attempt worktree claim changed after Git creation")
 	}
+	finalIdentity, finalBinding, err := readAttemptWorktreeBinding(
+		parent, bindingMarkerName, expectedClaim, worktree,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"finalize durable attempt worktree identity verification: %w", err,
+		)
+	}
+	if finalIdentity != attemptRoot.Identity() ||
+		!bytes.Equal(finalBinding, bindingPayload) {
+		return fmt.Errorf(
+			"durable attempt worktree identity binding changed after Git creation",
+		)
+	}
 	return nil
 }
 
 func (adapter LocalAttemptGitAdapter) materializeAttemptWorktree(
 	ctx context.Context,
 	source trustedWorktreeBinding,
+	binding trustedWorktreeBinding,
+	root *VerifiedRoot,
 	claim AttemptWorktreeClaim,
-	worktree string,
 ) (resultErr error) {
 	commitAdapter := LocalCommitGitAdapter{git: adapter}
-	binding, err := commitAdapter.captureTrustedWorktreeBinding(ctx, worktree)
-	if err != nil {
-		return fmt.Errorf("open no-checkout attempt worktree binding: %w", err)
+	if root == nil || binding.root != root.Path() {
+		return fmt.Errorf(
+			"no-checkout attempt worktree requires its retained exact directory binding",
+		)
 	}
 	if binding.commonDir != source.commonDir {
 		return fmt.Errorf("attempt worktree does not share the bound repository administration")
+	}
+	if err := root.VerifyPath(); err != nil {
+		return fmt.Errorf("verify retained no-checkout attempt worktree: %w", err)
 	}
 	algorithm, err := adapter.objectFormat(ctx, binding.root)
 	if err != nil {
@@ -627,13 +857,6 @@ func (adapter LocalAttemptGitAdapter) materializeAttemptWorktree(
 	if err != nil {
 		return err
 	}
-	root, err := OpenVerifiedRoot(RootRoleWorktree, binding.root, false)
-	if err != nil {
-		return fmt.Errorf("open no-checkout attempt filesystem root: %w", err)
-	}
-	defer func() {
-		resultErr = errors.Join(resultErr, root.Close())
-	}()
 	if err := clearAttemptWorktree(root); err != nil {
 		return fmt.Errorf("clear partial attempt materialization: %w", err)
 	}
@@ -946,6 +1169,7 @@ func (adapter LocalAttemptGitAdapter) PrepareAttemptWorktree(
 	marker := attemptWorktreeClaimPath(claim.worktree)
 	worktreeName := filepath.Base(filepath.Clean(claim.worktree))
 	markerName := filepath.Base(marker)
+	bindingMarkerName := filepath.Base(attemptWorktreeBindingPath(claim.worktree))
 	canonicalWorktree := filepath.Join(parent.Path(), worktreeName)
 	payload, err := canonicalAttemptWorktreeClaim(claim, canonicalWorktree, parent.Identity())
 	if err != nil {
@@ -980,8 +1204,43 @@ func (adapter LocalAttemptGitAdapter) PrepareAttemptWorktree(
 			guard.verifyAfterEffect(ctx, adapter, "raced claim cleanup"),
 		)
 	}
+	var boundIdentity *PlatformFileIdentity
+	_, bindingExists, err := parent.adapter.inspectExact(bindingMarkerName)
+	if err != nil {
+		return fmt.Errorf("inspect attempt worktree identity binding: %w", err)
+	}
+	if bindingExists {
+		identity, _, readErr := readAttemptWorktreeBinding(
+			parent, bindingMarkerName, payload, canonicalWorktree,
+		)
+		if readErr != nil {
+			return readErr
+		}
+		boundIdentity = &identity
+	}
 	if !worktreeExists {
-		return nil
+		if boundIdentity != nil {
+			restored, restoreErr := restoreBoundAttemptWorktreeDirectory(
+				parent, worktreeName, *boundIdentity,
+			)
+			if restoreErr != nil {
+				return fmt.Errorf(
+					"restore missing attempt worktree identity: %w", restoreErr,
+				)
+			}
+			if !restored {
+				return fmt.Errorf(
+					"attempt worktree is missing and its durable directory identity is not present beneath the verified parent",
+				)
+			}
+			info, worktreeExists, err = parent.adapter.inspectExact(worktreeName)
+			if err != nil {
+				return fmt.Errorf("reinspect restored attempt worktree: %w", err)
+			}
+			recoverUnregistered = true
+		} else {
+			return nil
+		}
 	}
 	if !recoverUnregistered {
 		return fmt.Errorf("attempt worktree path %s exists but recovery was not requested", canonicalWorktree)
@@ -989,14 +1248,60 @@ func (adapter LocalAttemptGitAdapter) PrepareAttemptWorktree(
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return fmt.Errorf("claimed attempt worktree path %s is not a recoverable directory", canonicalWorktree)
 	}
+	if boundIdentity == nil {
+		removed, effectErr := parent.adapter.removeEmptyDirectoryExact(
+			worktreeName,
+			func() error {
+				return guard.Verify(ctx, adapter)
+			},
+		)
+		if effectErr != nil {
+			return errors.Join(
+				fmt.Errorf(
+					"remove empty unbound attempt worktree %s: %w",
+					canonicalWorktree, effectErr,
+				),
+				guard.verifyAfterEffect(ctx, adapter, "empty unbound recovery"),
+			)
+		}
+		if removed {
+			if err := guard.Verify(ctx, adapter); err != nil {
+				return fmt.Errorf(
+					"synchronize empty unbound attempt worktree recovery: %w",
+					err,
+				)
+			}
+			return nil
+		}
+		return fmt.Errorf(
+			"claimed attempt worktree path %s cannot be recovered without a durable directory identity",
+			canonicalWorktree,
+		)
+	}
+	boundRoot, err := openClaimedAttemptWorktreeDirectory(
+		parent, worktreeName, canonicalWorktree, boundIdentity,
+	)
+	if err != nil {
+		return fmt.Errorf("verify recoverable attempt worktree identity: %w", err)
+	}
+	if err := boundRoot.Close(); err != nil {
+		return err
+	}
 	if err := guard.Verify(ctx, adapter); err != nil {
 		return fmt.Errorf("verify attempt worktree roots before partial recovery: %w", err)
 	}
-	if effectErr := parent.adapter.removeDirectoryTreeExact(worktreeName); effectErr != nil {
+	if effectErr := parent.adapter.removeDirectoryTreeIdentityExact(
+		worktreeName, *boundIdentity,
+	); effectErr != nil {
 		return errors.Join(
 			fmt.Errorf("remove partial attempt worktree %s: %w", canonicalWorktree, effectErr),
 			guard.verifyAfterEffect(ctx, adapter, "partial recovery"),
 		)
+	}
+	if _, err := removeAttemptWorktreeBinding(
+		parent, bindingMarkerName, payload, canonicalWorktree, boundIdentity,
+	); err != nil {
+		return fmt.Errorf("remove recovered attempt worktree identity binding: %w", err)
 	}
 	if err := guard.Verify(ctx, adapter); err != nil {
 		return fmt.Errorf("synchronize recovered attempt worktree roots: %w", err)
@@ -1036,6 +1341,35 @@ func (adapter LocalAttemptGitAdapter) ReleaseAttemptWorktreeClaim(
 	}
 	if !bytes.Equal(existing, payload) {
 		return fmt.Errorf("attempt worktree claim %s belongs to different immutable bindings", marker)
+	}
+	bindingMarkerName := filepath.Base(attemptWorktreeBindingPath(canonicalWorktree))
+	_, bindingExists, err := parent.adapter.inspectExact(bindingMarkerName)
+	if err != nil {
+		return fmt.Errorf("inspect releasable attempt worktree identity binding: %w", err)
+	}
+	if bindingExists {
+		identity, _, err := readAttemptWorktreeBinding(
+			parent, bindingMarkerName, payload, canonicalWorktree,
+		)
+		if err != nil {
+			return err
+		}
+		worktreeRoot, err := openClaimedAttemptWorktreeDirectory(
+			parent, filepath.Base(canonicalWorktree), canonicalWorktree, &identity,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"verify attempt worktree identity before claim release: %w", err,
+			)
+		}
+		if err := worktreeRoot.Close(); err != nil {
+			return err
+		}
+		if _, err := removeAttemptWorktreeBinding(
+			parent, bindingMarkerName, payload, canonicalWorktree, &identity,
+		); err != nil {
+			return fmt.Errorf("release attempt worktree identity binding: %w", err)
+		}
 	}
 	removed, err := parent.adapter.removeFileContentExact(
 		markerName, payload, int64(len(payload)), parent.VerifyPath,
@@ -1081,6 +1415,300 @@ func canonicalAttemptWorktreeClaim(
 
 func attemptWorktreeClaimPath(worktree string) string {
 	return filepath.Clean(worktree) + ".feature-attempt-claim"
+}
+
+func attemptWorktreeBindingPath(worktree string) string {
+	return attemptWorktreeClaimPath(worktree) + ".binding"
+}
+
+type attemptWorktreeBindingJSON struct {
+	SchemaVersion    int                  `json:"schema_version"`
+	Kind             string               `json:"kind"`
+	Claim            string               `json:"claim"`
+	Worktree         string               `json:"worktree"`
+	WorktreeIdentity PlatformFileIdentity `json:"worktree_identity"`
+}
+
+func canonicalAttemptWorktreeBinding(
+	claimPayload []byte,
+	worktree string,
+	identity PlatformFileIdentity,
+) ([]byte, error) {
+	worktree = filepath.Clean(strings.TrimSpace(worktree))
+	if len(claimPayload) == 0 || !filepath.IsAbs(worktree) ||
+		zeroPlatformFileIdentity(identity) {
+		return nil, fmt.Errorf("attempt worktree identity binding is incomplete")
+	}
+	return json.Marshal(attemptWorktreeBindingJSON{
+		SchemaVersion:    RuntimeFormatSchemaVersion,
+		Kind:             "attempt_worktree_identity_binding",
+		Claim:            DigestBytes(claimPayload).String(),
+		Worktree:         worktree,
+		WorktreeIdentity: identity,
+	})
+}
+
+func parseAttemptWorktreeBinding(
+	content, claimPayload []byte,
+	worktree string,
+) (PlatformFileIdentity, error) {
+	var wire attemptWorktreeBindingJSON
+	if err := decodeStrictJSON(content, &wire); err != nil {
+		return PlatformFileIdentity{}, fmt.Errorf(
+			"decode attempt worktree identity binding: %w", err,
+		)
+	}
+	worktree = filepath.Clean(strings.TrimSpace(worktree))
+	claimDigest, err := ParseDigest(wire.Claim)
+	if err != nil {
+		return PlatformFileIdentity{}, fmt.Errorf(
+			"decode attempt worktree identity binding claim: %w", err,
+		)
+	}
+	if wire.SchemaVersion != RuntimeFormatSchemaVersion ||
+		wire.Kind != "attempt_worktree_identity_binding" ||
+		claimDigest != DigestBytes(claimPayload) ||
+		wire.Worktree != worktree {
+		return PlatformFileIdentity{}, fmt.Errorf(
+			"attempt worktree identity binding does not match its immutable claim",
+		)
+	}
+	canonical, err := canonicalAttemptWorktreeBinding(
+		claimPayload, worktree, wire.WorktreeIdentity,
+	)
+	if err != nil {
+		return PlatformFileIdentity{}, err
+	}
+	if !bytes.Equal(content, canonical) {
+		return PlatformFileIdentity{}, fmt.Errorf(
+			"attempt worktree identity binding is not canonical",
+		)
+	}
+	return wire.WorktreeIdentity, nil
+}
+
+func readAttemptWorktreeBinding(
+	root *VerifiedRoot,
+	marker string,
+	claimPayload []byte,
+	worktree string,
+) (PlatformFileIdentity, []byte, error) {
+	content, err := root.ReadBounded(marker, maxAttemptWorktreeBindingBytes)
+	if err != nil {
+		return PlatformFileIdentity{}, nil, fmt.Errorf(
+			"read attempt worktree identity binding: %w", err,
+		)
+	}
+	identity, err := parseAttemptWorktreeBinding(
+		content, claimPayload, worktree,
+	)
+	if err != nil {
+		return PlatformFileIdentity{}, nil, err
+	}
+	return identity, content, nil
+}
+
+func createOrVerifyAttemptWorktreeBinding(
+	root *VerifiedRoot,
+	marker string,
+	claimPayload []byte,
+	worktree string,
+	identity PlatformFileIdentity,
+) ([]byte, error) {
+	payload, err := canonicalAttemptWorktreeBinding(
+		claimPayload, worktree, identity,
+	)
+	if err != nil {
+		return nil, err
+	}
+	existingIdentity, existing, readErr := readAttemptWorktreeBinding(
+		root, marker, claimPayload, worktree,
+	)
+	if readErr == nil {
+		if existingIdentity != identity || !bytes.Equal(existing, payload) {
+			return nil, fmt.Errorf(
+				"attempt worktree identity binding records a different directory",
+			)
+		}
+		return payload, nil
+	}
+	if !errors.Is(readErr, os.ErrNotExist) {
+		return nil, readErr
+	}
+	if err := root.WriteExclusive(marker, payload, 0o600); err != nil {
+		existingIdentity, existing, readErr = readAttemptWorktreeBinding(
+			root, marker, claimPayload, worktree,
+		)
+		if readErr == nil &&
+			existingIdentity == identity &&
+			bytes.Equal(existing, payload) {
+			return payload, nil
+		}
+		return nil, fmt.Errorf(
+			"publish attempt worktree identity binding: %w", err,
+		)
+	}
+	existingIdentity, existing, err = readAttemptWorktreeBinding(
+		root, marker, claimPayload, worktree,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if existingIdentity != identity || !bytes.Equal(existing, payload) {
+		return nil, fmt.Errorf(
+			"published attempt worktree identity binding changed",
+		)
+	}
+	return payload, nil
+}
+
+func removeAttemptWorktreeBinding(
+	root *VerifiedRoot,
+	marker string,
+	claimPayload []byte,
+	worktree string,
+	expected *PlatformFileIdentity,
+) (bool, error) {
+	identity, content, err := readAttemptWorktreeBinding(
+		root, marker, claimPayload, worktree,
+	)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if expected != nil && identity != *expected {
+		return false, fmt.Errorf(
+			"attempt worktree identity binding changed before removal",
+		)
+	}
+	removed, err := root.adapter.removeFileContentExact(
+		marker, content, int64(len(content)), root.VerifyPath,
+	)
+	if err != nil {
+		return false, err
+	}
+	if !removed {
+		return false, fmt.Errorf(
+			"attempt worktree identity binding disappeared before removal",
+		)
+	}
+	return true, nil
+}
+
+func openClaimedAttemptWorktreeDirectory(
+	parent *VerifiedRoot,
+	worktreeName, worktree string,
+	expected *PlatformFileIdentity,
+) (*VerifiedRoot, error) {
+	if parent == nil {
+		return nil, fmt.Errorf("claimed attempt worktree parent is required")
+	}
+	worktree = filepath.Clean(strings.TrimSpace(worktree))
+	if worktree != filepath.Join(parent.Path(), worktreeName) {
+		return nil, fmt.Errorf(
+			"claimed attempt worktree path does not match its verified parent",
+		)
+	}
+	if err := parent.VerifyPath(); err != nil {
+		return nil, err
+	}
+	info, exists, err := parent.adapter.inspectExact(worktreeName)
+	if err != nil {
+		return nil, err
+	}
+	if !exists || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return nil, fmt.Errorf(
+			"claimed attempt worktree %s is missing or is not an exact directory",
+			worktree,
+		)
+	}
+	root, err := OpenVerifiedRoot(
+		RootRoleRegisteredWorktree, worktree, false,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("open claimed attempt worktree: %w", err)
+	}
+	closeRoot := true
+	defer func() {
+		if closeRoot {
+			_ = root.Close()
+		}
+	}()
+	if !os.SameFile(info, root.info) {
+		return nil, fmt.Errorf(
+			"claimed attempt worktree identity changed while it was opened",
+		)
+	}
+	if expected != nil && root.Identity() != *expected {
+		return nil, fmt.Errorf(
+			"claimed attempt worktree identity does not match its durable binding",
+		)
+	}
+	if err := parent.VerifyPath(); err != nil {
+		return nil, err
+	}
+	if err := root.VerifyPath(); err != nil {
+		return nil, err
+	}
+	closeRoot = false
+	return root, nil
+}
+
+func restoreBoundAttemptWorktreeDirectory(
+	parent *VerifiedRoot,
+	worktreeName string,
+	expected PlatformFileIdentity,
+) (bool, error) {
+	if parent == nil || zeroPlatformFileIdentity(expected) {
+		return false, fmt.Errorf(
+			"attempt worktree restoration requires a verified parent and directory identity",
+		)
+	}
+	if err := parent.VerifyPath(); err != nil {
+		return false, err
+	}
+	entries, err := parent.adapter.readDirectory("")
+	if err != nil {
+		return false, err
+	}
+	var matched string
+	for _, entry := range entries {
+		if entry.name == worktreeName ||
+			entry.info.Mode()&os.ModeSymlink != 0 ||
+			!entry.info.IsDir() {
+			continue
+		}
+		identity, err := platformFileIdentity(entry.info)
+		if err != nil {
+			return false, fmt.Errorf(
+				"identify possible displaced attempt worktree %s: %w",
+				entry.name, err,
+			)
+		}
+		if identity != expected {
+			continue
+		}
+		if matched != "" {
+			return false, fmt.Errorf(
+				"durable attempt worktree identity appears under multiple sibling names",
+			)
+		}
+		matched = entry.name
+	}
+	if matched == "" {
+		return false, nil
+	}
+	if err := parent.adapter.renameDirectoryIdentityNoReplace(
+		matched, worktreeName, expected,
+	); err != nil {
+		return false, err
+	}
+	if err := parent.VerifyPath(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func createOrVerifyAttemptWorktreeClaim(
