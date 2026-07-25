@@ -372,7 +372,8 @@ func (journal *WorkspaceJournal) appendToSnapshot(snapshot JournalSnapshot, requ
 	if err != nil {
 		return JournalRecord{}, fmt.Errorf("validate current journal runtime: %w", err)
 	}
-	if _, err := reduceWorkspaceRuntime(runtime, record); err != nil {
+	nextRuntime, err := reduceWorkspaceRuntime(runtime, record)
+	if err != nil {
 		return JournalRecord{}, fmt.Errorf("validate journal event %s: %w", record.event.eventType(), err)
 	}
 	encoded, err := marshalJournalRecord(record)
@@ -383,8 +384,21 @@ func (journal *WorkspaceJournal) appendToSnapshot(snapshot JournalSnapshot, requ
 		return JournalRecord{}, fmt.Errorf("journal record is empty or exceeds %d bytes", MaxJournalRecordBytes)
 	}
 	encoded = append(encoded, '\n')
-	if snapshot.byteLength+int64(len(encoded)) > MaxJournalBytes {
-		return JournalRecord{}, fmt.Errorf("journal exceeds %d bytes", MaxJournalBytes)
+	reserved, err := integrationCompletionReservationBytes(
+		nextRuntime,
+	)
+	if err != nil {
+		return JournalRecord{}, fmt.Errorf(
+			"reserve pending integration completion capacity: %w",
+			err,
+		)
+	}
+	if err := validateJournalAppendCapacity(
+		snapshot.byteLength,
+		int64(len(encoded)),
+		reserved,
+	); err != nil {
+		return JournalRecord{}, err
 	}
 	file, _, err := journal.runtime.state.openOwnedRegularFile(
 		WorkspaceJournalFileName,
@@ -449,6 +463,26 @@ func (journal *WorkspaceJournal) appendToSnapshot(snapshot JournalSnapshot, requ
 		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: err}
 	}
 	return record, nil
+}
+
+func validateJournalAppendCapacity(
+	currentBytes, appendBytes, reservedBytes int64,
+) error {
+	if currentBytes < 0 || appendBytes < 0 || reservedBytes < 0 {
+		return fmt.Errorf("journal capacity accounting cannot be negative")
+	}
+	if currentBytes <= MaxJournalBytes &&
+		appendBytes <= MaxJournalBytes-currentBytes &&
+		reservedBytes <= MaxJournalBytes-currentBytes-appendBytes {
+		return nil
+	}
+	if reservedBytes != 0 {
+		return fmt.Errorf(
+			"journal append would consume %d bytes reserved for pending integration completion and exceed %d bytes",
+			reservedBytes, MaxJournalBytes,
+		)
+	}
+	return fmt.Errorf("journal exceeds %d bytes", MaxJournalBytes)
 }
 
 func (journal *WorkspaceJournal) readSnapshotAllowTail() (JournalSnapshot, *IncompleteJournalTailError, error) {

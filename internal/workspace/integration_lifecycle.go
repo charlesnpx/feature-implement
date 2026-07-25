@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -187,14 +188,19 @@ func IntegrateMergeUnit(
 	}
 
 	if integration.Integrated() {
-		if attempt.phase != AttemptCompleted ||
-			target.createdHead != intent.expectedMerge {
+		if attempt.phase != AttemptCompleted {
 			return MergeUnitIntegrationResult{}, fmt.Errorf(
 				"completed integration projection is inconsistent",
 			)
 		}
+		chain, err := completedIntegrationChain(
+			runtime, target, attempt,
+		)
+		if err != nil {
+			return MergeUnitIntegrationResult{}, err
+		}
 		if err := git.VerifyCompletedIntegration(
-			ctx, binding, intent,
+			ctx, binding, chain,
 		); err != nil {
 			return MergeUnitIntegrationResult{}, err
 		}
@@ -255,6 +261,14 @@ func IntegrateMergeUnit(
 			attempt, true,
 		); err != nil {
 			return MergeUnitIntegrationResult{}, err
+		}
+		if err := requireIntegrationCompletionReservation(
+			snapshot, runtime,
+		); err != nil {
+			return MergeUnitIntegrationResult{}, fmt.Errorf(
+				"reserve durable integration completion before feature-ref publication: %w",
+				err,
+			)
 		}
 		if err := injectIntegrationLifecycleFault(
 			request.Fault, IntegrationFaultBeforeRefCAS,
@@ -395,6 +409,84 @@ func IntegrateMergeUnit(
 	return MergeUnitIntegrationResult{
 		attempt: completed, intent: intent, record: record,
 	}, nil
+}
+
+func completedIntegrationChain(
+	runtime WorkspaceRuntimeProjection,
+	target RuntimeLocalTargetProjection,
+	completed RuntimeAttemptProjection,
+) ([]MergeUnitIntegrationIntent, error) {
+	if completed.integration == nil ||
+		!completed.integration.Integrated() ||
+		completed.phase != AttemptCompleted {
+		return nil, fmt.Errorf(
+			"completed integration frontier requires one durable completed attempt",
+		)
+	}
+	type transition struct {
+		record uint64
+		intent MergeUnitIntegrationIntent
+	}
+	transitions := make([]transition, 0)
+	for _, attempt := range runtime.attempts {
+		if attempt.integration == nil ||
+			!attempt.integration.Integrated() ||
+			attempt.integration.integratedRecord <
+				completed.integration.integratedRecord {
+			continue
+		}
+		transitions = append(
+			transitions,
+			transition{
+				record: attempt.integration.integratedRecord,
+				intent: attempt.integration.intent,
+			},
+		)
+	}
+	sort.Slice(transitions, func(i, j int) bool {
+		return transitions[i].record < transitions[j].record
+	})
+	if len(transitions) == 0 ||
+		transitions[0].record !=
+			completed.integration.integratedRecord ||
+		transitions[0].intent.digest !=
+			completed.integration.intent.digest {
+		return nil, fmt.Errorf(
+			"completed integration is absent from the durable feature frontier",
+		)
+	}
+	previousRecord := uint64(0)
+	previousMerge := GitObjectID{}
+	chain := make(
+		[]MergeUnitIntegrationIntent, 0, len(transitions),
+	)
+	for index, transition := range transitions {
+		if transition.record == 0 ||
+			(previousRecord != 0 &&
+				transition.record <= previousRecord) {
+			return nil, fmt.Errorf(
+				"completed integration frontier has duplicate or unordered transitions",
+			)
+		}
+		if index != 0 &&
+			transition.intent.expectedFeatureHead !=
+				previousMerge {
+			return nil, fmt.Errorf(
+				"completed integration frontier is not one exact first-parent chain",
+			)
+		}
+		previousRecord = transition.record
+		previousMerge = transition.intent.expectedMerge
+		chain = append(chain, transition.intent)
+	}
+	frontier := transitions[len(transitions)-1]
+	if frontier.record != target.headRecord ||
+		frontier.intent.expectedMerge != target.createdHead {
+		return nil, fmt.Errorf(
+			"completed integration frontier does not match the current durable feature head",
+		)
+	}
+	return chain, nil
 }
 
 func readIntegrationRuntime(

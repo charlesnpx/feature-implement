@@ -559,6 +559,156 @@ func TestLocalGitIntegrationCompletedRetryRejectsFeatureBranchCheckout(
 	}
 }
 
+func TestLocalGitCompletedIntegrationRetryFollowsLaterDurableFrontier(
+	t *testing.T,
+) {
+	scenario := newRealIntegrationScenario(
+		t, workspace.GitHashSHA1, true, workspace.GitObjectID{},
+	)
+	_, err := workspace.IntegrateMergeUnit(
+		context.Background(),
+		scenario.journal,
+		scenario.definition,
+		scenario.repository,
+		workspace.DefaultLocalIntegrationGitAdapter(),
+		workspace.IntegrateMergeUnitRequest{
+			AttemptID:  scenario.attempt.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-25T16:25:00Z"),
+			Fault: failIntegrationOnce(
+				workspace.IntegrationFaultAfterCompletion,
+			),
+		},
+	)
+	if err == nil ||
+		!strings.Contains(
+			err.Error(),
+			string(workspace.IntegrationFaultAfterCompletion),
+		) {
+		t.Fatalf("first real integration completion fault = %v", err)
+	}
+	firstMerge := integrationMergeFromRuntime(
+		t, scenario.journal, scenario.attempt.AttemptID(),
+	)
+
+	secondCore := scenario.attemptHarness
+	secondCore.unit = mustMergeUnitReference(
+		t, "alpha-plan", "unit-two",
+	)
+	secondCore.goal, err = workspace.NewGoalBinding(
+		workspace.MustID("second-real-integration-goal"),
+		workspace.GoalScopeMergeUnit,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := secondCore.reserve(t, "2026-07-25T16:25:01Z")
+	second, err = workspace.MaterializeAttempt(
+		context.Background(),
+		secondCore.journal,
+		secondCore.definition,
+		workspace.DefaultLocalAttemptGitAdapter(),
+		workspace.MaterializeAttemptRequest{
+			AttemptID:  second.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-25T16:25:02Z"),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Base() != firstMerge {
+		t.Fatalf(
+			"second real integration base = %s, want %s",
+			second.Base(), firstMerge,
+		)
+	}
+	secondAccepted := createIntegrationTestCommit(
+		t,
+		scenario.repositoryRoot,
+		scenario.acceptedTree,
+		[]workspace.GitObjectID{firstMerge},
+		"second accepted attempt",
+	)
+	runTargetGitTest(
+		t, scenario.repositoryRoot, "update-ref",
+		"refs/heads/"+second.Branch(),
+		rawGitObject(secondAccepted),
+	)
+	runTargetGitTest(
+		t, second.Worktree(), "reset", "--hard",
+		rawGitObject(secondAccepted),
+	)
+	secondSnapshot, err := workspace.NewReviewRepositorySnapshot(
+		secondAccepted, scenario.acceptedTree, true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRepository := &reviewRepositoryStub{
+		snapshot: secondSnapshot,
+	}
+	if _, err := workspace.AdoptAttemptHead(
+		context.Background(),
+		secondCore.journal,
+		secondCore.definition,
+		secondRepository,
+		workspace.AdoptAttemptHeadRequest{
+			AttemptID:  second.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-25T16:25:03Z"),
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	secondResult, err := workspace.IntegrateMergeUnit(
+		context.Background(),
+		secondCore.journal,
+		secondCore.definition,
+		secondRepository,
+		workspace.DefaultLocalIntegrationGitAdapter(),
+		workspace.IntegrateMergeUnitRequest{
+			AttemptID:  second.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-25T16:25:04Z"),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	beforeRetry := journalRecordCount(t, scenario.journal)
+	retried, err := workspace.IntegrateMergeUnit(
+		context.Background(),
+		scenario.journal,
+		scenario.definition,
+		scenario.repository,
+		workspace.DefaultLocalIntegrationGitAdapter(),
+		workspace.IntegrateMergeUnitRequest{
+			AttemptID:  scenario.attempt.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-25T16:25:05Z"),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.MergeCommit() != firstMerge ||
+		retried.Record().Sequence() != 0 ||
+		journalRecordCount(t, scenario.journal) != beforeRetry {
+		t.Fatalf(
+			"historical real integration retry mutated state: result=%#v records=%d/%d",
+			retried, beforeRetry,
+			journalRecordCount(t, scenario.journal),
+		)
+	}
+	featureHead := strings.TrimSpace(runTargetGitTest(
+		t, scenario.repositoryRoot, "rev-parse",
+		secondResult.Intent().FeatureRef(),
+	))
+	if featureHead != rawGitObject(secondResult.MergeCommit()) {
+		t.Fatalf(
+			"historical retry moved current feature head to %s, want %s",
+			featureHead, secondResult.MergeCommit(),
+		)
+	}
+}
+
 func TestLocalGitIntegrationRecoversCreatedObjectAndPublishedRef(
 	t *testing.T,
 ) {

@@ -548,7 +548,7 @@ type IntegrationGitPort interface {
 	VerifyCompletedIntegration(
 		context.Context,
 		LocalTargetBinding,
-		MergeUnitIntegrationIntent,
+		[]MergeUnitIntegrationIntent,
 	) error
 }
 

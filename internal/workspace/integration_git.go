@@ -318,17 +318,39 @@ func integrationReflogMessage(intentDigest Digest) string {
 func (adapter LocalIntegrationGitAdapter) VerifyCompletedIntegration(
 	ctx context.Context,
 	binding LocalTargetBinding,
-	intent MergeUnitIntegrationIntent,
+	chain []MergeUnitIntegrationIntent,
 ) (resultErr error) {
 	if ctx == nil {
 		return fmt.Errorf(
 			"completed integration verification requires context",
 		)
 	}
-	if err := validateIntegrationTargetRequest(
-		binding, intent,
-	); err != nil {
-		return err
+	if len(chain) == 0 {
+		return fmt.Errorf(
+			"completed integration verification requires its durable frontier chain",
+		)
+	}
+	for index, intent := range chain {
+		if err := validateIntegrationTargetRequest(
+			binding, intent,
+		); err != nil {
+			return err
+		}
+		if index != 0 &&
+			intent.expectedFeatureHead !=
+				chain[index-1].expectedMerge {
+			return fmt.Errorf(
+				"completed integration verification chain is not first-parent contiguous",
+			)
+		}
+	}
+	completed := chain[0]
+	frontier := chain[len(chain)-1]
+	if completed.workspaceID != frontier.workspaceID ||
+		completed.generation != frontier.generation {
+		return fmt.Errorf(
+			"completed integration and current frontier do not share one workspace generation",
+		)
 	}
 	session, err := adapter.target.openBoundSession(binding)
 	if err != nil {
@@ -347,30 +369,23 @@ func (adapter LocalIntegrationGitAdapter) VerifyCompletedIntegration(
 	}
 	if !exists {
 		return fmt.Errorf(
-			"owned feature ref %s is absent", intent.featureRef,
+			"owned feature ref %s is absent", completed.featureRef,
 		)
 	}
-	if err := verifyIntegrationCommitObject(
-		ctx, session, featureHead, GitObjectID{},
-	); err != nil {
-		return fmt.Errorf(
-			"inspect completed integration feature head: %w", err,
-		)
-	}
-	expectedCommit, err := integrationCommitExists(
-		ctx, session, intent,
+	frontierCommit, err := integrationCommitExists(
+		ctx, session, frontier,
 	)
 	if err != nil {
 		return err
 	}
 	refState, err := classifyIntegrationRefState(
-		ctx, session, featureHead, intent, expectedCommit,
+		ctx, session, featureHead, frontier, frontierCommit,
 	)
 	if err != nil {
 		return err
 	}
 	inspection, err := NewIntegrationGitInspection(
-		featureHead, refState, expectedCommit,
+		featureHead, refState, frontierCommit,
 	)
 	if err != nil {
 		return err
@@ -378,9 +393,26 @@ func (adapter LocalIntegrationGitAdapter) VerifyCompletedIntegration(
 	if refState != IntegrationRefExpectedMerge {
 		return integrationDriftError(inspection)
 	}
-	if featureMarker != integrationReflogMessage(intent.digest) {
+	for index, intent := range chain {
+		expectedCommit := frontierCommit
+		if index != len(chain)-1 {
+			expectedCommit, err = integrationCommitExists(
+				ctx, session, intent,
+			)
+			if err != nil {
+				return err
+			}
+		}
+		if !expectedCommit {
+			return fmt.Errorf(
+				"durable integration frontier commit %s is absent",
+				intent.expectedMerge,
+			)
+		}
+	}
+	if featureMarker != integrationReflogMessage(frontier.digest) {
 		return fmt.Errorf(
-			"completed integration feature ref does not retain its exact merge and marker",
+			"completed integration feature ref does not retain its exact merge and marker for the current durable frontier",
 		)
 	}
 	return session.Verify()

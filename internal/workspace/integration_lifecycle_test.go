@@ -18,6 +18,9 @@ type integrationGitStub struct {
 	inspectCalls   int
 	createCalls    int
 	publishCalls   int
+	verifyCalls    int
+	verifiedStart  workspace.GitObjectID
+	verifiedEnd    workspace.GitObjectID
 	forcedState    workspace.IntegrationRefState
 }
 
@@ -108,9 +111,17 @@ func (git *integrationGitStub) PublishIntegration(
 func (git *integrationGitStub) VerifyCompletedIntegration(
 	_ context.Context,
 	_ workspace.LocalTargetBinding,
-	intent workspace.MergeUnitIntegrationIntent,
+	chain []workspace.MergeUnitIntegrationIntent,
 ) error {
-	if git.featureHead != intent.ExpectedMerge() ||
+	if len(chain) == 0 {
+		return errors.New(
+			"stub completed integration verification has no chain",
+		)
+	}
+	git.verifyCalls++
+	git.verifiedStart = chain[0].ExpectedMerge()
+	git.verifiedEnd = chain[len(chain)-1].ExpectedMerge()
+	if git.featureHead != git.verifiedEnd ||
 		!git.expectedCommit {
 		return errors.New(
 			"stub completed integration verification failed",
@@ -251,15 +262,22 @@ func (git *concurrentIntegrationGitStub) PublishIntegration(
 func (git *concurrentIntegrationGitStub) VerifyCompletedIntegration(
 	_ context.Context,
 	_ workspace.LocalTargetBinding,
-	intent workspace.MergeUnitIntegrationIntent,
+	chain []workspace.MergeUnitIntegrationIntent,
 ) error {
 	git.mu.Lock()
 	defer git.mu.Unlock()
-	if git.featureHead != intent.ExpectedMerge() ||
-		!git.objects[intent.Digest().String()] {
+	if len(chain) == 0 ||
+		git.featureHead != chain[len(chain)-1].ExpectedMerge() {
 		return errors.New(
 			"concurrent completed integration verification failed",
 		)
+	}
+	for _, intent := range chain {
+		if !git.objects[intent.Digest().String()] {
+			return errors.New(
+				"concurrent completed integration chain is missing an object",
+			)
+		}
 	}
 	return nil
 }
@@ -958,6 +976,297 @@ func TestConcurrentIntegrationsPublishExactlyOneIntent(t *testing.T) {
 		t.Fatalf(
 			"reserve replacement for superseded loser = %#v error=%v",
 			replacement, err,
+		)
+	}
+}
+
+func TestIntegrationMakesReviewExhaustedLoserRetryableAtNewFrontier(
+	t *testing.T,
+) {
+	fixture := configuredReviewFixture(t)
+	fixture.sources.Plans[0].Bytes = []byte(strings.Replace(
+		string(fixture.sources.Plans[0].Bytes),
+		"    dependencies:\n      - story-one",
+		"    dependencies: []",
+		1,
+	))
+	loserCore := newAttemptHarnessFromFixture(
+		t, fixture, "unit-one",
+	)
+	loser := loserCore.reserve(t, "2026-07-25T12:50:00Z")
+	loser = loserCore.materialize(
+		t, loser.AttemptID(), "2026-07-25T12:50:01Z",
+	)
+	loserTree := mustGitObject(t, 'b')
+	loserSnapshot, err := workspace.NewReviewRepositorySnapshot(
+		loser.VerifiedHead(), loserTree, true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loserReview := &reviewHarness{
+		attemptHarness: loserCore,
+		attempt:        loser,
+		repository: &reviewRepositoryStub{
+			snapshot: loserSnapshot,
+		},
+		tree: loserTree,
+	}
+	start, err := workspace.StartAttemptReviewRound(
+		context.Background(),
+		loserCore.journal,
+		loserCore.definition,
+		loserReview.repository,
+		workspace.StartAttemptReviewRoundRequest{
+			AttemptID:  loser.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-25T12:50:02Z"),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := start.Request()
+	for invocation := 1; invocation <= 3; invocation++ {
+		submission := reviewSubmission(
+			t,
+			request,
+			workspace.MustID("security-one"),
+			workspace.ReviewResultInfrastructureFailure,
+			nil,
+			workspace.DigestBytes(
+				[]byte(fmt.Sprintf(
+					"loser-review-failure-%d", invocation,
+				)),
+			),
+		)
+		loserReview.record(
+			t,
+			request,
+			submission,
+			fmt.Sprintf(
+				"2026-07-25T12:50:%02dZ", invocation+2,
+			),
+		)
+		state := mustReviewState(
+			t, loserCore.journal, loserCore.definition,
+			loser.AttemptID(),
+		)
+		if invocation == 3 {
+			if _, exhausted := state.Exhaustion(); !exhausted {
+				t.Fatal("losing attempt did not exhaust its review budget")
+			}
+			break
+		}
+		var ok bool
+		request, ok, err = state.NextRequest()
+		if err != nil || !ok {
+			t.Fatalf(
+				"next losing review request = %#v ok=%t err=%v",
+				request, ok, err,
+			)
+		}
+	}
+
+	winnerCore := loserCore
+	winnerCore.unit = mustMergeUnitReference(
+		t, "alpha-plan", "unit-two",
+	)
+	winnerCore.goal, _ = workspace.NewGoalBinding(
+		workspace.MustID("winner-goal"),
+		workspace.GoalScopeMergeUnit,
+	)
+	winner := winnerCore.reserve(t, "2026-07-25T12:50:06Z")
+	winnerCore.git.inspection, _ = workspace.NewAttemptGitInspection(
+		false, workspace.GitObjectID{}, false, false, "",
+		workspace.GitObjectID{}, false,
+	)
+	winner = winnerCore.materialize(
+		t, winner.AttemptID(), "2026-07-25T12:50:07Z",
+	)
+	winnerRepository := adoptedIntegrationRepository(
+		t, winnerCore, winner, mustGitObject(t, 'c'),
+		mustGitObject(t, 'd'), "2026-07-25T12:50:08Z",
+	)
+	git := &integrationGitStub{featureHead: loserCore.base}
+	integrated, err := workspace.IntegrateMergeUnit(
+		context.Background(),
+		winnerCore.journal,
+		winnerCore.definition,
+		winnerRepository,
+		git,
+		workspace.IntegrateMergeUnitRequest{
+			AttemptID:  winner.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-25T12:50:09Z"),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := loserCore.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler, err := workspace.RebuildSchedulerView(
+		snapshot, loserCore.definition,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loserUnit := schedulerUnitByID(
+		t, scheduler, "unit-one",
+	)
+	if loserUnit.Status != workspace.SchedulerUnitReady ||
+		loserUnit.AttemptID != "" {
+		t.Fatalf(
+			"superseded exhausted loser scheduler view = %#v",
+			loserUnit,
+		)
+	}
+	gates, err := workspace.RebuildGateView(
+		snapshot, loserCore.definition,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loserGate := gateUnitByID(t, gates, "unit-one")
+	if loserGate.AttemptID != "" ||
+		gateCheckByName(
+			t, loserGate, "commit",
+		).Reason != "no_attempt" ||
+		gateCheckByName(
+			t, loserGate, "review",
+		).Reason != "no_attempt" {
+		t.Fatalf(
+			"superseded exhausted loser gates = %#v",
+			loserGate,
+		)
+	}
+	replacementGoal, _ := workspace.NewGoalBinding(
+		workspace.MustID("exhausted-loser-replacement"),
+		workspace.GoalScopeMergeUnit,
+	)
+	replacement, err := workspace.ReserveAttempt(
+		context.Background(),
+		loserCore.journal,
+		loserCore.definition,
+		loserCore.git,
+		workspace.ReserveAttemptRequest{
+			MergeUnit:     loser.MergeUnit(),
+			AttemptNumber: 2,
+			Goal:          replacementGoal,
+			OccurredAt: mustTime(
+				t, "2026-07-25T12:50:10Z",
+			),
+		},
+	)
+	if err != nil ||
+		replacement.Base() != integrated.MergeCommit() {
+		t.Fatalf(
+			"review-exhausted loser replacement = %#v error=%v",
+			replacement, err,
+		)
+	}
+}
+
+func TestCompletedIntegrationRetryFollowsLaterDurableFrontier(
+	t *testing.T,
+) {
+	firstCore := newIndependentAttemptHarness(t, "unit-one")
+	first := firstCore.reserve(t, "2026-07-25T12:55:00Z")
+	first = firstCore.materialize(
+		t, first.AttemptID(), "2026-07-25T12:55:01Z",
+	)
+	firstRepository := adoptedIntegrationRepository(
+		t, firstCore, first, mustGitObject(t, 'c'),
+		mustGitObject(t, 'd'), "2026-07-25T12:55:02Z",
+	)
+	git := &integrationGitStub{featureHead: firstCore.base}
+	if _, err := workspace.IntegrateMergeUnit(
+		context.Background(),
+		firstCore.journal,
+		firstCore.definition,
+		firstRepository,
+		git,
+		workspace.IntegrateMergeUnitRequest{
+			AttemptID:  first.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-25T12:55:03Z"),
+			Fault: failIntegrationOnce(
+				workspace.IntegrationFaultAfterCompletion,
+			),
+		},
+	); err == nil {
+		t.Fatal("first integration unexpectedly passed its completion fault")
+	}
+	firstMerge := integrationMergeFromRuntime(
+		t, firstCore.journal, first.AttemptID(),
+	)
+
+	secondCore := firstCore
+	secondCore.unit = mustMergeUnitReference(
+		t, "alpha-plan", "unit-two",
+	)
+	secondCore.goal, _ = workspace.NewGoalBinding(
+		workspace.MustID("second-integration-goal"),
+		workspace.GoalScopeMergeUnit,
+	)
+	second := secondCore.reserve(t, "2026-07-25T12:55:04Z")
+	secondCore.git.inspection, _ = workspace.NewAttemptGitInspection(
+		false, workspace.GitObjectID{}, false, false, "",
+		workspace.GitObjectID{}, false,
+	)
+	second = secondCore.materialize(
+		t, second.AttemptID(), "2026-07-25T12:55:05Z",
+	)
+	secondRepository := adoptedIntegrationRepository(
+		t, secondCore, second, mustGitObject(t, 'e'),
+		mustGitObject(t, 'f'), "2026-07-25T12:55:06Z",
+	)
+	secondResult, err := workspace.IntegrateMergeUnit(
+		context.Background(),
+		secondCore.journal,
+		secondCore.definition,
+		secondRepository,
+		git,
+		workspace.IntegrateMergeUnitRequest{
+			AttemptID:  second.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-25T12:55:07Z"),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	beforeRetry := journalRecordCount(t, firstCore.journal)
+	retry, err := workspace.IntegrateMergeUnit(
+		context.Background(),
+		firstCore.journal,
+		firstCore.definition,
+		firstRepository,
+		git,
+		workspace.IntegrateMergeUnitRequest{
+			AttemptID:  first.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-25T12:55:08Z"),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.MergeCommit() != firstMerge ||
+		retry.Record().Sequence() != 0 ||
+		journalRecordCount(t, firstCore.journal) != beforeRetry {
+		t.Fatalf(
+			"historical completed retry mutated state: result=%#v records=%d/%d",
+			retry, beforeRetry,
+			journalRecordCount(t, firstCore.journal),
+		)
+	}
+	if git.verifyCalls != 1 ||
+		git.verifiedStart != firstMerge ||
+		git.verifiedEnd != secondResult.MergeCommit() {
+		t.Fatalf(
+			"historical completed verification = calls %d, start %s, end %s",
+			git.verifyCalls, git.verifiedStart, git.verifiedEnd,
 		)
 	}
 }

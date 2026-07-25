@@ -36,6 +36,12 @@ func (phase AttemptRuntimePhase) nonterminal() bool {
 		phase == AttemptReviewExhausted
 }
 
+func (phase AttemptRuntimePhase) retryableTerminal() bool {
+	return phase == AttemptSuperseded ||
+		phase == AttemptFailed ||
+		phase == AttemptAbandoned
+}
+
 type AttemptGenerationBinding struct {
 	attemptID  ID
 	mergeUnit  MergeUnitReference

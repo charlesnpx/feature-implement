@@ -2,6 +2,8 @@ package workspace
 
 import (
 	"encoding/json"
+	"fmt"
+	"math"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -500,6 +502,152 @@ func TestIntegrationCompletionReducerRequiresExactLeaseAndSerialSegment(
 		writeSet[loserIntegration.key()] {
 		t.Fatal(
 			"superseded integration resource must be read-only",
+		)
+	}
+}
+
+func TestIntegrationCompletionCapacityRejectsOversizedSupersededSetAndReservesJournalTail(
+	t *testing.T,
+) {
+	intent, err := NewMergeUnitIntegrationIntent(
+		integrationIntentTestOptions(t, GitHashSHA256),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := WorkspaceRuntimeProjection{
+		attempts: []RuntimeAttemptProjection{
+			{
+				attemptID:  intent.attemptID,
+				mergeUnit:  intent.mergeUnit,
+				generation: intent.generation,
+				base:       intent.expectedFeatureHead,
+				phase:      AttemptActive,
+				leaseID:    MustID("winner-lease"),
+				integration: &RuntimeIntegrationProjection{
+					intent: intent, intentRecord: 1,
+				},
+			},
+		},
+	}
+	for index := 0; index < 8; index++ {
+		unit, unitErr := NewMergeUnitReference(
+			MustID("alpha-plan"),
+			MustID(fmt.Sprintf("unit-%04d", index)),
+		)
+		if unitErr != nil {
+			t.Fatal(unitErr)
+		}
+		runtime.attempts = append(
+			runtime.attempts,
+			RuntimeAttemptProjection{
+				attemptID: MustID(
+					fmt.Sprintf("attempt-%04d", index),
+				),
+				mergeUnit:  unit,
+				generation: intent.generation,
+				base:       intent.expectedFeatureHead,
+				phase:      AttemptActive,
+			},
+		)
+	}
+	reserved, err := integrationCompletionReservationBytes(runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reserved <= 0 || reserved > MaxJournalRecordBytes+1 {
+		t.Fatalf(
+			"integration completion reservation = %d", reserved,
+		)
+	}
+	if err := validateJournalAppendCapacity(
+		MaxJournalBytes-reserved-256,
+		256,
+		reserved,
+	); err != nil {
+		t.Fatalf("exact reserved journal tail was rejected: %v", err)
+	}
+	if err := validateJournalAppendCapacity(
+		MaxJournalBytes-reserved-256,
+		257,
+		reserved,
+	); err == nil ||
+		!strings.Contains(err.Error(), "reserved") {
+		t.Fatalf(
+			"competing append consumed integration reservation: %v",
+			err,
+		)
+	}
+	if err := validateJournalAppendCapacity(
+		MaxJournalBytes-reserved,
+		reserved,
+		0,
+	); err != nil {
+		t.Fatalf(
+			"integration completion could not consume its released reservation: %v",
+			err,
+		)
+	}
+	if err := validateJournalAppendCapacity(
+		math.MaxInt64, 1, 0,
+	); err == nil {
+		t.Fatal("overflowing journal capacity accounting was accepted")
+	}
+	maximumWinnerLease := maximumIntegrationReservationID(
+		0, ID{},
+	)
+	if candidate := maximumIntegrationReservationID(
+		0, maximumWinnerLease,
+	); candidate == maximumWinnerLease ||
+		len(candidate.String()) != maxIdentifierBytes {
+		t.Fatalf(
+			"maximum synthetic loser lease %q collides with winner %q",
+			candidate, maximumWinnerLease,
+		)
+	}
+	if err := requireIntegrationCompletionReservation(
+		JournalSnapshot{
+			byteLength: MaxJournalBytes - reserved + 1,
+		},
+		runtime,
+	); err == nil ||
+		!strings.Contains(err.Error(), "reserved") {
+		t.Fatalf(
+			"near-full journal accepted an impossible integration publication: %v",
+			err,
+		)
+	}
+
+	oversized := cloneWorkspaceRuntime(runtime)
+	for index := len(oversized.attempts); index < 2200; index++ {
+		unit, unitErr := NewMergeUnitReference(
+			MustID("alpha-plan"),
+			MustID(fmt.Sprintf("oversized-unit-%04d", index)),
+		)
+		if unitErr != nil {
+			t.Fatal(unitErr)
+		}
+		oversized.attempts = append(
+			oversized.attempts,
+			RuntimeAttemptProjection{
+				attemptID: MustID(
+					fmt.Sprintf("oversized-attempt-%04d", index),
+				),
+				mergeUnit:  unit,
+				generation: intent.generation,
+				base:       intent.expectedFeatureHead,
+				phase:      AttemptReviewExhausted,
+			},
+		)
+	}
+	if _, err := integrationCompletionReservationBytes(
+		oversized,
+	); err == nil ||
+		!strings.Contains(
+			err.Error(), "maximum integration completion record exceeds",
+		) {
+		t.Fatalf(
+			"oversized superseded set capacity error = %v", err,
 		)
 	}
 }
