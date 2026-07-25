@@ -1041,43 +1041,47 @@ func (adapter LocalTargetGitAdapter) inspectBaseTree(
 	root string,
 	base GitObjectID,
 ) error {
-	output, exitCode, err := adapter.git.run(
+	exitCode, err := adapter.git.streamNULTerminatedRecords(
 		ctx, root,
+		func(record []byte) error {
+			entry, parseErr := parseLocalTargetTreeEntry(record, base.Algorithm())
+			if parseErr != nil {
+				return parseErr
+			}
+			if isRepositoryAttributesPath(entry.path) {
+				return fmt.Errorf(
+					"repository-defined .gitattributes are not supported (tree entry %s)",
+					entry.path,
+				)
+			}
+			if entry.mode == "160000" || entry.kind == "commit" ||
+				entry.path == ".gitmodules" {
+				return fmt.Errorf(
+					"submodules are not supported (tree entry %s)", entry.path,
+				)
+			}
+			if entry.mode == "120000" {
+				target, readErr := adapter.readBlob(
+					ctx, root, entry.object,
+				)
+				if readErr != nil {
+					return readErr
+				}
+				if err := validateRepositorySymlink(entry.path, target); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
 		"ls-tree", "-r", "-z", "--full-tree", gitObjectHex(base),
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("inspect pinned base tree: %w", err)
 	}
 	if exitCode != 0 {
 		return fmt.Errorf(
 			"inspect pinned base tree: Git exited with status %d", exitCode,
 		)
-	}
-	for _, record := range bytes.Split(output, []byte{0}) {
-		if len(record) == 0 {
-			continue
-		}
-		entry, parseErr := parseLocalTargetTreeEntry(record, base.Algorithm())
-		if parseErr != nil {
-			return parseErr
-		}
-		if entry.mode == "160000" || entry.kind == "commit" ||
-			entry.path == ".gitmodules" {
-			return fmt.Errorf(
-				"submodules are not supported (tree entry %s)", entry.path,
-			)
-		}
-		if entry.mode == "120000" {
-			target, readErr := adapter.readBlob(
-				ctx, root, entry.object,
-			)
-			if readErr != nil {
-				return readErr
-			}
-			if err := validateRepositorySymlink(entry.path, target); err != nil {
-				return err
-			}
-		}
 	}
 	return nil
 }

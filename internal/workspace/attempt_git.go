@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -18,6 +19,7 @@ import (
 )
 
 const maxAttemptGitOutputBytes = 8 * 1024 * 1024
+const maxAttemptGitRecordBytes = 1024 * 1024
 const maxAttemptWorktreeClaimBytes = 16 * 1024
 const maxAttemptWorktreeBindingBytes = 16 * 1024
 
@@ -168,11 +170,26 @@ type AttemptWorktreeMaterializationFaultInjector func(
 	AttemptWorktreeMaterializationFaultPoint,
 ) error
 
+type AttemptWorktreeCleanupFaultPoint string
+
+const (
+	AttemptCleanupFaultBeforeMaterializationEffect AttemptWorktreeCleanupFaultPoint = "before_materialization_cleanup_effect"
+	AttemptCleanupFaultBeforeRecoveryEffect        AttemptWorktreeCleanupFaultPoint = "before_recovery_cleanup_effect"
+	AttemptCleanupFaultAfterRecoveryContents       AttemptWorktreeCleanupFaultPoint = "after_recovery_contents"
+	AttemptCleanupFaultAfterRecoveryBinding        AttemptWorktreeCleanupFaultPoint = "after_recovery_binding"
+	AttemptCleanupFaultAfterReleaseBinding         AttemptWorktreeCleanupFaultPoint = "after_release_binding"
+)
+
+type AttemptWorktreeCleanupFaultInjector func(
+	AttemptWorktreeCleanupFaultPoint,
+) error
+
 type LocalAttemptGitAdapter struct {
 	executable               string
 	environment              []EnvironmentVariable
 	worktreeClaimFault       AttemptWorktreeClaimFaultInjector
 	worktreeMaterializeFault AttemptWorktreeMaterializationFaultInjector
+	worktreeCleanupFault     AttemptWorktreeCleanupFaultInjector
 }
 
 func NewLocalAttemptGitAdapter(executable string, environment []EnvironmentVariable) (LocalAttemptGitAdapter, error) {
@@ -213,6 +230,13 @@ func (adapter LocalAttemptGitAdapter) WithAttemptWorktreeMaterializationFaultInj
 	injector AttemptWorktreeMaterializationFaultInjector,
 ) LocalAttemptGitAdapter {
 	adapter.worktreeMaterializeFault = injector
+	return adapter
+}
+
+func (adapter LocalAttemptGitAdapter) WithAttemptWorktreeCleanupFaultInjector(
+	injector AttemptWorktreeCleanupFaultInjector,
+) LocalAttemptGitAdapter {
+	adapter.worktreeCleanupFault = injector
 	return adapter
 }
 
@@ -328,10 +352,6 @@ func (adapter LocalAttemptGitAdapter) InspectAttemptWorktree(
 	}
 	var expectedIdentity *PlatformFileIdentity
 	switch {
-	case claimExists && !bindingExists:
-		return AttemptGitInspection{}, fmt.Errorf(
-			"registered claimed attempt worktree is missing its durable identity binding",
-		)
 	case !claimExists && bindingExists:
 		return AttemptGitInspection{}, fmt.Errorf(
 			"attempt worktree identity binding exists without its ownership claim",
@@ -341,13 +361,15 @@ func (adapter LocalAttemptGitAdapter) InspectAttemptWorktree(
 		if err != nil {
 			return AttemptGitInspection{}, err
 		}
-		identity, _, err := readAttemptWorktreeBinding(
-			parent, bindingMarkerName, claimPayload, worktree,
-		)
-		if err != nil {
-			return AttemptGitInspection{}, err
+		if bindingExists {
+			identity, _, err := readAttemptWorktreeBinding(
+				parent, bindingMarkerName, claimPayload, worktree,
+			)
+			if err != nil {
+				return AttemptGitInspection{}, err
+			}
+			expectedIdentity = &identity
 		}
-		expectedIdentity = &identity
 	}
 	worktreeRoot, err := openClaimedAttemptWorktreeDirectory(
 		parent, worktreeName, worktree, expectedIdentity,
@@ -394,25 +416,10 @@ func (adapter LocalAttemptGitAdapter) InspectAttemptWorktree(
 	if err != nil {
 		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree index tree: %w", err)
 	}
-	indexOutput, indexExit, err := adapter.run(ctx, worktree, "ls-files", "-v", "-z", "--")
-	if err != nil || indexExit != 0 {
-		if err == nil {
-			err = fmt.Errorf("Git exited with status %d", indexExit)
-		}
-		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree index flags: %w", err)
-	}
-	if err := rejectHiddenIndexRecords(indexOutput); err != nil {
-		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree index flags: %w", err)
-	}
-	fsmonitorOutput, fsmonitorExit, err := adapter.run(ctx, worktree, "ls-files", "-f", "-z", "--")
-	if err != nil || fsmonitorExit != 0 {
-		if err == nil {
-			err = fmt.Errorf("Git exited with status %d", fsmonitorExit)
-		}
-		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree fsmonitor flags: %w", err)
-	}
-	if err := rejectFSMonitorIndexRecords(fsmonitorOutput); err != nil {
-		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree fsmonitor flags: %w", err)
+	if err := commitAdapter.rejectHiddenIndexEntries(ctx, worktree); err != nil {
+		return AttemptGitInspection{}, fmt.Errorf(
+			"inspect attempt worktree index flags: %w", err,
+		)
 	}
 	tree, err := commitAdapter.resolveObject(ctx, worktree, algorithm, objectHex(head)+"^{tree}")
 	if err != nil {
@@ -857,7 +864,15 @@ func (adapter LocalAttemptGitAdapter) materializeAttemptWorktree(
 	if err != nil {
 		return err
 	}
-	if err := clearAttemptWorktree(root); err != nil {
+	if err := clearAttemptWorktree(
+		root,
+		func() error {
+			return injectAttemptWorktreeCleanupFault(
+				adapter.worktreeCleanupFault,
+				AttemptCleanupFaultBeforeMaterializationEffect,
+			)
+		},
+	); err != nil {
 		return fmt.Errorf("clear partial attempt materialization: %w", err)
 	}
 	if err := root.VerifyPath(); err != nil {
@@ -1075,6 +1090,12 @@ func validateAttemptTreeEntries(entries []rawGitTreeEntry) ([]string, error) {
 				)
 			}
 		}
+		if isRepositoryAttributesPath(entry.path) {
+			return nil, fmt.Errorf(
+				"attempt tree path %s contains repository-defined .gitattributes; exact raw materialization does not support Git attribute transformations",
+				entry.path,
+			)
+		}
 		paths := []string{entry.path}
 		for directory := pathpkg.Dir(entry.path); directory != "."; directory = pathpkg.Dir(directory) {
 			paths = append(paths, directory)
@@ -1106,7 +1127,20 @@ func validateAttemptTreeEntries(entries []rawGitTreeEntry) ([]string, error) {
 	return result, nil
 }
 
-func clearAttemptWorktree(root *VerifiedRoot) error {
+func isRepositoryAttributesPath(relative string) bool {
+	for _, component := range strings.Split(relative, "/") {
+		if materializationCollisionKey(component) ==
+			materializationCollisionKey(".gitattributes") {
+			return true
+		}
+	}
+	return false
+}
+
+func clearAttemptWorktree(
+	root *VerifiedRoot,
+	beforeEffect func() error,
+) error {
 	if root == nil || root.adapter == nil {
 		return fmt.Errorf("attempt worktree root is closed")
 	}
@@ -1122,14 +1156,58 @@ func clearAttemptWorktree(root *VerifiedRoot) error {
 	if !exists || !admin.Mode().IsRegular() {
 		return fmt.Errorf("attempt worktree Git administration is missing or invalid")
 	}
-	return removeRootContentsExceptExact(
-		directory, root.Path(), map[string]struct{}{".git": {}},
+	return clearVerifiedRootContents(
+		root, directory, map[string]struct{}{".git": {}}, beforeEffect,
+	)
+}
+
+func clearClaimedAttemptWorktree(
+	root *VerifiedRoot,
+	beforeEffect func() error,
+) error {
+	if root == nil || root.adapter == nil {
+		return fmt.Errorf("attempt worktree root is closed")
+	}
+	directory, err := root.adapter.openDirectoryExact("")
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return clearVerifiedRootContents(root, directory, nil, beforeEffect)
+}
+
+func clearVerifiedRootContents(
+	root *VerifiedRoot,
+	directory *os.Root,
+	preserved map[string]struct{},
+	beforeEffect func() error,
+) error {
+	revalidate := func() error {
+		if beforeEffect != nil {
+			if err := beforeEffect(); err != nil {
+				return err
+			}
+		}
+		return root.VerifyPath()
+	}
+	return removeRootContentsExceptExactGuarded(
+		directory, root.Path(), preserved, revalidate,
 	)
 }
 
 func injectAttemptWorktreeMaterializationFault(
 	injector AttemptWorktreeMaterializationFaultInjector,
 	point AttemptWorktreeMaterializationFaultPoint,
+) error {
+	if injector == nil {
+		return nil
+	}
+	return injector(point)
+}
+
+func injectAttemptWorktreeCleanupFault(
+	injector AttemptWorktreeCleanupFaultInjector,
+	point AttemptWorktreeCleanupFaultPoint,
 ) error {
 	if injector == nil {
 		return nil
@@ -1284,24 +1362,84 @@ func (adapter LocalAttemptGitAdapter) PrepareAttemptWorktree(
 	if err != nil {
 		return fmt.Errorf("verify recoverable attempt worktree identity: %w", err)
 	}
-	if err := boundRoot.Close(); err != nil {
-		return err
-	}
+	defer boundRoot.Close()
 	if err := guard.Verify(ctx, adapter); err != nil {
 		return fmt.Errorf("verify attempt worktree roots before partial recovery: %w", err)
 	}
-	if effectErr := parent.adapter.removeDirectoryTreeIdentityExact(
-		worktreeName, *boundIdentity,
+	if effectErr := clearClaimedAttemptWorktree(
+		boundRoot,
+		func() error {
+			return injectAttemptWorktreeCleanupFault(
+				adapter.worktreeCleanupFault,
+				AttemptCleanupFaultBeforeRecoveryEffect,
+			)
+		},
 	); effectErr != nil {
 		return errors.Join(
-			fmt.Errorf("remove partial attempt worktree %s: %w", canonicalWorktree, effectErr),
-			guard.verifyAfterEffect(ctx, adapter, "partial recovery"),
+			fmt.Errorf(
+				"clear partial attempt worktree %s: %w",
+				canonicalWorktree, effectErr,
+			),
+			guard.verifyAfterEffect(ctx, adapter, "partial recovery clearing"),
+		)
+	}
+	if effectErr := injectAttemptWorktreeCleanupFault(
+		adapter.worktreeCleanupFault,
+		AttemptCleanupFaultAfterRecoveryContents,
+	); effectErr != nil {
+		return errors.Join(
+			effectErr,
+			guard.verifyAfterEffect(ctx, adapter, "partial recovery clearing"),
+		)
+	}
+	if err := boundRoot.VerifyPath(); err != nil {
+		return fmt.Errorf(
+			"verify cleared attempt worktree before identity release: %w", err,
 		)
 	}
 	if _, err := removeAttemptWorktreeBinding(
 		parent, bindingMarkerName, payload, canonicalWorktree, boundIdentity,
 	); err != nil {
 		return fmt.Errorf("remove recovered attempt worktree identity binding: %w", err)
+	}
+	if effectErr := injectAttemptWorktreeCleanupFault(
+		adapter.worktreeCleanupFault,
+		AttemptCleanupFaultAfterRecoveryBinding,
+	); effectErr != nil {
+		return errors.Join(
+			effectErr,
+			guard.verifyAfterEffect(ctx, adapter, "partial recovery binding release"),
+		)
+	}
+	removed, effectErr := parent.adapter.removeEmptyDirectoryIdentityExact(
+		worktreeName, *boundIdentity,
+		func() error {
+			if err := boundRoot.VerifyPath(); err != nil {
+				return err
+			}
+			return guard.Verify(ctx, adapter)
+		},
+	)
+	if effectErr != nil {
+		return errors.Join(
+			fmt.Errorf(
+				"remove cleared attempt worktree %s: %w",
+				canonicalWorktree, effectErr,
+			),
+			guard.verifyAfterEffect(ctx, adapter, "partial recovery directory removal"),
+		)
+	}
+	if !removed {
+		return errors.Join(
+			fmt.Errorf(
+				"cleared attempt worktree %s became non-empty before exact removal",
+				canonicalWorktree,
+			),
+			guard.verifyAfterEffect(ctx, adapter, "partial recovery directory removal"),
+		)
+	}
+	if err := boundRoot.Close(); err != nil {
+		return err
 	}
 	if err := guard.Verify(ctx, adapter); err != nil {
 		return fmt.Errorf("synchronize recovered attempt worktree roots: %w", err)
@@ -1370,6 +1508,15 @@ func (adapter LocalAttemptGitAdapter) ReleaseAttemptWorktreeClaim(
 		); err != nil {
 			return fmt.Errorf("release attempt worktree identity binding: %w", err)
 		}
+		if effectErr := injectAttemptWorktreeCleanupFault(
+			adapter.worktreeCleanupFault,
+			AttemptCleanupFaultAfterReleaseBinding,
+		); effectErr != nil {
+			return effectErr
+		}
+	}
+	if err := parent.VerifyPath(); err != nil {
+		return fmt.Errorf("verify attempt worktree parent before claim release: %w", err)
 	}
 	removed, err := parent.adapter.removeFileContentExact(
 		markerName, payload, int64(len(payload)), parent.VerifyPath,
@@ -2068,6 +2215,88 @@ func (adapter LocalAttemptGitAdapter) run(
 		return nil, -1, fmt.Errorf("Git output exceeded its bound")
 	}
 	return stdout.bytes(), exitCode, nil
+}
+
+func (adapter LocalAttemptGitAdapter) streamNULTerminatedRecords(
+	ctx context.Context,
+	repositoryRoot string,
+	consume func([]byte) error,
+	arguments ...string,
+) (int, error) {
+	repositoryRoot = filepath.Clean(strings.TrimSpace(repositoryRoot))
+	if !filepath.IsAbs(repositoryRoot) {
+		return -1, fmt.Errorf("Git repository root must be absolute")
+	}
+	if consume == nil {
+		return -1, fmt.Errorf("Git record consumer is required")
+	}
+	command := exec.CommandContext(
+		ctx, adapter.executable,
+		trustedGitArguments(repositoryRoot, arguments...)...,
+	)
+	environment, err := BuildIsolatedProcessEnvironment(
+		os.Environ(), adapter.environment,
+	)
+	if err != nil {
+		return -1, err
+	}
+	command.Env = environment
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		return -1, fmt.Errorf("open Git record stream: %w", err)
+	}
+	var stderr boundedProcessBuffer
+	stderr.maximum = 64 * 1024
+	command.Stderr = &stderr
+	if err := command.Start(); err != nil {
+		return -1, err
+	}
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64*1024), maxAttemptGitRecordBytes)
+	scanner.Split(splitNULTerminatedGitRecord)
+	var consumeErr error
+	for scanner.Scan() {
+		if consumeErr = consume(scanner.Bytes()); consumeErr != nil {
+			break
+		}
+	}
+	if consumeErr == nil {
+		consumeErr = scanner.Err()
+	}
+	if consumeErr != nil {
+		_ = stdout.Close()
+		if command.Process != nil {
+			_ = command.Process.Kill()
+		}
+	}
+	waitErr := command.Wait()
+	if stderr.exceeded {
+		return -1, fmt.Errorf("Git output exceeded its bound")
+	}
+	if consumeErr != nil {
+		return -1, consumeErr
+	}
+	if waitErr != nil {
+		var exitError *exec.ExitError
+		if errors.As(waitErr, &exitError) {
+			return exitError.ExitCode(), nil
+		}
+		return -1, waitErr
+	}
+	return 0, nil
+}
+
+func splitNULTerminatedGitRecord(
+	data []byte,
+	atEOF bool,
+) (advance int, token []byte, err error) {
+	if index := bytes.IndexByte(data, 0); index >= 0 {
+		return index + 1, data[:index], nil
+	}
+	if atEOF && len(data) != 0 {
+		return 0, nil, fmt.Errorf("Git record stream is not NUL terminated")
+	}
+	return 0, nil, nil
 }
 
 func (adapter LocalAttemptGitAdapter) streamGitBlob(

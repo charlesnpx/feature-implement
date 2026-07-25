@@ -627,11 +627,18 @@ func (adapter *RootedFilesystemAdapter) writeFileExclusiveWith(
 	if err != nil {
 		return fmt.Errorf("create rooted file %s: %w", relative, err)
 	}
+	createdInfo, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return fmt.Errorf("inspect created rooted file %s: %w", relative, err)
+	}
 	remove := true
 	defer func() {
 		_ = file.Close()
 		if remove {
-			_ = directory.Remove(base)
+			_, _ = adapter.removeFileIdentityExact(
+				rooted.Relative(), createdInfo, nil,
+			)
 		}
 	}()
 	if err := populate(file); err != nil {
@@ -1171,6 +1178,22 @@ func (adapter *RootedFilesystemAdapter) removeEmptyDirectoryExact(
 	relative string,
 	beforeRemove func() error,
 ) (bool, error) {
+	return adapter.removeEmptyDirectoryBound(relative, nil, beforeRemove)
+}
+
+func (adapter *RootedFilesystemAdapter) removeEmptyDirectoryIdentityExact(
+	relative string,
+	expected PlatformFileIdentity,
+	beforeRemove func() error,
+) (bool, error) {
+	return adapter.removeEmptyDirectoryBound(relative, &expected, beforeRemove)
+}
+
+func (adapter *RootedFilesystemAdapter) removeEmptyDirectoryBound(
+	relative string,
+	expected *PlatformFileIdentity,
+	beforeRemove func() error,
+) (bool, error) {
 	rooted, err := NewRootedPath(adapter.rootPath, relative)
 	if err != nil {
 		return false, err
@@ -1211,6 +1234,21 @@ func (adapter *RootedFilesystemAdapter) removeEmptyDirectoryExact(
 		}
 		return false, fmt.Errorf("verify rooted directory removal target %s: %w", relative, err)
 	}
+	if expected != nil {
+		identity, identityErr := platformFileIdentity(openedInfo)
+		if identityErr != nil {
+			return false, fmt.Errorf(
+				"identify rooted directory removal target %s: %w",
+				relative, identityErr,
+			)
+		}
+		if identity != *expected {
+			return false, fmt.Errorf(
+				"rooted directory removal target %s does not match its durable binding",
+				relative,
+			)
+		}
+	}
 	entries, readErr := opened.ReadDir(1)
 	if readErr != nil && !errors.Is(readErr, io.EOF) {
 		return false, fmt.Errorf("read rooted directory removal target %s: %w", relative, readErr)
@@ -1222,6 +1260,9 @@ func (adapter *RootedFilesystemAdapter) removeEmptyDirectoryExact(
 		if err := beforeRemove(); err != nil {
 			return false, err
 		}
+	}
+	if err := adapter.verifyPath(); err != nil {
+		return false, err
 	}
 	currentInfo, currentExists, err := inspectRootEntryExact(directory, base)
 	if err != nil || !currentExists || !os.SameFile(openedInfo, currentInfo) {
@@ -1307,19 +1348,30 @@ func (adapter *RootedFilesystemAdapter) removeDirectoryTreeBound(
 			)
 		}
 	}
-	if err := removeRootContentsExact(tree, relative); err != nil {
+	verifyTreePath := func() error {
+		if err := adapter.verifyPath(); err != nil {
+			return err
+		}
+		current, currentExists, err := inspectRootEntryExact(parent, base)
+		if err != nil || !currentExists || !os.SameFile(openedInfo, current) {
+			if err == nil {
+				err = fmt.Errorf("directory was replaced or moved")
+			}
+			return fmt.Errorf("revalidate rooted tree %s: %w", relative, err)
+		}
+		return nil
+	}
+	if err := removeRootContentsExactGuarded(
+		tree, relative, verifyTreePath,
+	); err != nil {
 		_ = tree.Close()
 		return err
 	}
 	if err := tree.Close(); err != nil {
 		return fmt.Errorf("close rooted tree %s: %w", relative, err)
 	}
-	current, currentExists, err := inspectRootEntryExact(parent, base)
-	if err != nil || !currentExists || !os.SameFile(openedInfo, current) {
-		if err == nil {
-			err = fmt.Errorf("directory was replaced")
-		}
-		return fmt.Errorf("revalidate rooted tree %s: %w", relative, err)
+	if err := verifyTreePath(); err != nil {
+		return err
 	}
 	if err := parent.Remove(base); err != nil {
 		return fmt.Errorf("remove rooted tree %s: %w", relative, err)
@@ -1327,8 +1379,44 @@ func (adapter *RootedFilesystemAdapter) removeDirectoryTreeBound(
 	return syncRootHandle(parent)
 }
 
+func (adapter *RootedFilesystemAdapter) verifyPath() error {
+	if adapter == nil || adapter.root == nil {
+		return fmt.Errorf("rooted filesystem is closed")
+	}
+	reopened, err := reopenVerifiedRootedFilesystemAdapter(adapter.rootPath)
+	if err != nil {
+		return fmt.Errorf("reopen rooted filesystem %s: %w", adapter.rootPath, err)
+	}
+	defer reopened.Close()
+	expected, err := adapter.root.Stat(".")
+	if err != nil {
+		return fmt.Errorf("inspect retained rooted filesystem %s: %w", adapter.rootPath, err)
+	}
+	observed, err := reopened.root.Stat(".")
+	if err != nil {
+		return fmt.Errorf("reinspect rooted filesystem %s: %w", adapter.rootPath, err)
+	}
+	if !os.SameFile(expected, observed) {
+		return fmt.Errorf(
+			"rooted filesystem at %s was replaced or moved",
+			adapter.rootPath,
+		)
+	}
+	return nil
+}
+
 func removeRootContentsExact(directory *os.Root, display string) error {
-	return removeRootContentsExceptExact(directory, display, nil)
+	return removeRootContentsExactGuarded(directory, display, nil)
+}
+
+func removeRootContentsExactGuarded(
+	directory *os.Root,
+	display string,
+	beforeEffect func() error,
+) error {
+	return removeRootContentsExceptExactGuarded(
+		directory, display, nil, beforeEffect,
+	)
 }
 
 func removeRootContentsExceptExact(
@@ -1336,6 +1424,22 @@ func removeRootContentsExceptExact(
 	display string,
 	preserved map[string]struct{},
 ) error {
+	return removeRootContentsExceptExactGuarded(
+		directory, display, preserved, nil,
+	)
+}
+
+func removeRootContentsExceptExactGuarded(
+	directory *os.Root,
+	display string,
+	preserved map[string]struct{},
+	beforeEffect func() error,
+) error {
+	if beforeEffect != nil {
+		if err := beforeEffect(); err != nil {
+			return err
+		}
+	}
 	entries, err := readRootDirectoryEntries(directory)
 	if err != nil {
 		return fmt.Errorf("read rooted tree %s: %w", display, err)
@@ -1353,6 +1457,11 @@ func removeRootContentsExceptExact(
 		}
 		switch {
 		case current.IsDir():
+			if beforeEffect != nil {
+				if err := beforeEffect(); err != nil {
+					return err
+				}
+			}
 			child, err := directory.OpenRoot(entry.name)
 			if err != nil {
 				return fmt.Errorf("open rooted tree directory %s/%s: %w", display, entry.name, err)
@@ -1365,7 +1474,9 @@ func removeRootContentsExceptExact(
 				}
 				return fmt.Errorf("verify rooted tree directory %s/%s: %w", display, entry.name, err)
 			}
-			if err := removeRootContentsExact(child, display+"/"+entry.name); err != nil {
+			if err := removeRootContentsExactGuarded(
+				child, display+"/"+entry.name, beforeEffect,
+			); err != nil {
 				_ = child.Close()
 				return err
 			}
@@ -1379,6 +1490,11 @@ func removeRootContentsExceptExact(
 				}
 				return fmt.Errorf("revalidate rooted tree directory %s/%s: %w", display, entry.name, err)
 			}
+			if beforeEffect != nil {
+				if err := beforeEffect(); err != nil {
+					return err
+				}
+			}
 			if err := directory.Remove(entry.name); err != nil {
 				return fmt.Errorf("remove rooted tree directory %s/%s: %w", display, entry.name, err)
 			}
@@ -1390,11 +1506,21 @@ func removeRootContentsExceptExact(
 				}
 				return fmt.Errorf("revalidate rooted tree entry %s/%s: %w", display, entry.name, err)
 			}
+			if beforeEffect != nil {
+				if err := beforeEffect(); err != nil {
+					return err
+				}
+			}
 			if err := directory.Remove(entry.name); err != nil {
 				return fmt.Errorf("remove rooted tree entry %s/%s: %w", display, entry.name, err)
 			}
 		default:
 			return fmt.Errorf("rooted tree entry %s/%s has unsupported type %s", display, entry.name, current.Mode())
+		}
+	}
+	if beforeEffect != nil {
+		if err := beforeEffect(); err != nil {
+			return err
 		}
 	}
 	return syncRootHandle(directory)

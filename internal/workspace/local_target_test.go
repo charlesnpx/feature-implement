@@ -1366,7 +1366,7 @@ func TestLocalTargetRejectsSubmodulesInPinnedBaseTree(t *testing.T) {
 	}
 }
 
-func TestLocalTargetAllowsRepositoryAttributesInPinnedBaseTree(t *testing.T) {
+func TestLocalTargetRejectsRepositoryAttributesInPinnedBaseTree(t *testing.T) {
 	root, _ := initializeTargetRepository(
 		t, workspace.GitHashSHA1,
 	)
@@ -1392,10 +1392,12 @@ func TestLocalTargetAllowsRepositoryAttributesInPinnedBaseTree(t *testing.T) {
 	definition := localTargetDefinition(
 		t, root, base, "feature/repository-attributes",
 	)
-	if _, err := workspace.ValidateLocalTarget(
+	_, err := workspace.ValidateLocalTarget(
 		context.Background(), definition.Workspace(),
-	); err != nil {
-		t.Fatalf("validate target with repository attributes: %v", err)
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "repository-defined .gitattributes") {
+		t.Fatalf("repository attributes admission error = %v", err)
 	}
 }
 
