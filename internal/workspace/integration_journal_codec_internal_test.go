@@ -105,8 +105,26 @@ func TestIntegrationJournalCodecRoundTripsAndRejectsTampering(t *testing.T) {
 		t.Fatalf("replayed integration intent = %#v", decoded)
 	}
 
-	completed, err := NewMergeUnitIntegratedJournalEvent(
+	supersededMergeUnit, err := NewMergeUnitReference(
+		MustID("alpha-plan"), MustID("unit-two"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	superseded := []integrationSupersededAttempt{
+		{
+			attemptID:         MustID("attempt-two"),
+			mergeUnit:         supersededMergeUnit,
+			base:              intent.expectedFeatureHead,
+			phase:             AttemptActive,
+			leaseID:           MustID("lease-two"),
+			serialSegment:     MustID("serial-two"),
+			serialSegmentHeld: true,
+		},
+	}
+	completed, err := newMergeUnitIntegratedJournalEvent(
 		intent, MustID("lease-one"), MustID("serial-one"),
+		superseded,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -129,7 +147,10 @@ func TestIntegrationJournalCodecRoundTripsAndRejectsTampering(t *testing.T) {
 	}
 	replayedCompletion, ok := decoded.(MergeUnitIntegratedJournalEvent)
 	if !ok || replayedCompletion.intentDigest != intent.digest ||
-		replayedCompletion.mergeCommit != intent.expectedMerge {
+		replayedCompletion.mergeCommit != intent.expectedMerge ||
+		!equalIntegrationSupersededAttempts(
+			replayedCompletion.supersededAttempts, superseded,
+		) {
 		t.Fatalf("replayed integration completion = %#v", decoded)
 	}
 
@@ -211,6 +232,22 @@ func TestIntegrationJournalCodecRoundTripsAndRejectsTampering(t *testing.T) {
 		JournalEventMergeUnitIntegrated, tampered,
 	); err == nil || !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("completion with unknown field error = %v", err)
+	}
+
+	var completedWire integrationCompletedPayloadWire
+	if err := json.Unmarshal(payload, &completedWire); err != nil {
+		t.Fatal(err)
+	}
+	completedWire.SupersededAttempts[0].Phase = AttemptCompleted
+	tampered, err = json.Marshal(completedWire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := decodeIntegrationJournalEvent(
+		JournalEventMergeUnitIntegrated, tampered,
+	); err == nil ||
+		!strings.Contains(err.Error(), "superseded attempt") {
+		t.Fatalf("completion with terminal superseded attempt error = %v", err)
 	}
 }
 
@@ -359,6 +396,111 @@ func TestIntegrationCompletionReducerRequiresExactLeaseAndSerialSegment(
 		!next.attempts[0].leaseID.IsZero() ||
 		next.attempts[0].serialSegmentHeld {
 		t.Fatalf("exact completion reducer result = %#v", next.attempts[0])
+	}
+
+	loserMergeUnit, err := NewMergeUnitReference(
+		MustID("alpha-plan"), MustID("unit-two"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loserLease := MustID("loser-lease")
+	loserSegment := MustID("loser-segment")
+	withLoser := cloneWorkspaceRuntime(current)
+	withLoser.attempts = append(
+		withLoser.attempts,
+		RuntimeAttemptProjection{
+			attemptID:         MustID("attempt-two"),
+			mergeUnit:         loserMergeUnit,
+			generation:        intent.generation,
+			base:              intent.expectedFeatureHead,
+			phase:             AttemptActive,
+			leaseID:           loserLease,
+			serialSegment:     loserSegment,
+			serialSegmentHeld: true,
+		},
+	)
+	missingSuperseded, err := NewMergeUnitIntegratedJournalEvent(
+		intent, leaseID, serialSegment,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next = cloneWorkspaceRuntime(withLoser)
+	if err := reduceIntegrationRuntime(
+		withLoser, &next, JournalRecord{
+			sequence: 4, generation: intent.generation,
+			event: missingSuperseded,
+		},
+	); err == nil ||
+		!strings.Contains(err.Error(), "exact superseded attempts") {
+		t.Fatalf("completion missing superseded attempt error = %v", err)
+	}
+	supersededAttempts, err := integrationSupersededAttempts(
+		withLoser, intent.attemptID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exactWithLoser, err := newMergeUnitIntegratedJournalEvent(
+		intent, leaseID, serialSegment, supersededAttempts,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next = cloneWorkspaceRuntime(withLoser)
+	if err := reduceIntegrationRuntime(
+		withLoser, &next, JournalRecord{
+			sequence: 4, generation: intent.generation,
+			event: exactWithLoser,
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if next.attempts[1].phase != AttemptSuperseded ||
+		!next.attempts[1].leaseID.IsZero() ||
+		next.attempts[1].serialSegmentHeld {
+		t.Fatalf(
+			"superseded completion reducer result = %#v",
+			next.attempts[1],
+		)
+	}
+	reads, writes, ok := integrationJournalEventResources(
+		exactWithLoser,
+	)
+	if !ok {
+		t.Fatal("completion resources were not recognized")
+	}
+	readSet := make(map[string]bool, len(reads))
+	writeSet := make(map[string]bool, len(writes))
+	for _, resource := range reads {
+		readSet[resource.key()] = true
+	}
+	for _, resource := range writes {
+		writeSet[resource.key()] = true
+	}
+	for _, resource := range []JournalResource{
+		AttemptJournalResource(MustID("attempt-two")),
+		MergeUnitJournalResource(loserMergeUnit),
+		LeaseJournalResource(loserLease),
+		SerialSegmentJournalResource(loserSegment),
+	} {
+		if !readSet[resource.key()] ||
+			!writeSet[resource.key()] {
+			t.Fatalf(
+				"superseded resource %s is not read and written",
+				resource.key(),
+			)
+		}
+	}
+	loserIntegration := IntegrationJournalResource(
+		MustID("attempt-two"),
+	)
+	if !readSet[loserIntegration.key()] ||
+		writeSet[loserIntegration.key()] {
+		t.Fatal(
+			"superseded integration resource must be read-only",
+		)
 	}
 }
 

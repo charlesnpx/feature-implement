@@ -13,6 +13,7 @@ const (
 	IntegrationFaultBeforeCommitCreate IntegrationLifecycleFaultPoint = "before_commit_create"
 	IntegrationFaultAfterCommitCreated IntegrationLifecycleFaultPoint = "after_commit_created"
 	IntegrationFaultBeforeRefCAS       IntegrationLifecycleFaultPoint = "before_ref_cas"
+	IntegrationFaultAfterRefPrepared   IntegrationLifecycleFaultPoint = "after_ref_prepared"
 	IntegrationFaultAfterRefCAS        IntegrationLifecycleFaultPoint = "after_ref_cas"
 	IntegrationFaultAfterVerification  IntegrationLifecycleFaultPoint = "after_verification"
 	IntegrationFaultBeforeCompletion   IntegrationLifecycleFaultPoint = "before_completion"
@@ -274,7 +275,7 @@ func IntegrateMergeUnit(
 			)
 		}
 		if err := git.PublishIntegration(
-			ctx, binding, attempt.branch, intent,
+			ctx, binding, attempt.branch, intent, request.Fault,
 		); err != nil {
 			return MergeUnitIntegrationResult{}, err
 		}
@@ -354,8 +355,15 @@ func IntegrateMergeUnit(
 	if attempt.serialSegmentHeld {
 		serialSegment = attempt.serialSegment
 	}
-	event, err := NewMergeUnitIntegratedJournalEvent(
+	supersededAttempts, err := integrationSupersededAttempts(
+		runtime, attempt.attemptID,
+	)
+	if err != nil {
+		return MergeUnitIntegrationResult{}, err
+	}
+	event, err := newMergeUnitIntegratedJournalEvent(
 		intent, attempt.leaseID, serialSegment,
+		supersededAttempts,
 	)
 	if err != nil {
 		return MergeUnitIntegrationResult{}, err

@@ -1,6 +1,9 @@
 package workspace
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+)
 
 type MergeUnitIntegrationIntendedJournalEvent struct {
 	intent MergeUnitIntegrationIntent
@@ -43,12 +46,34 @@ type MergeUnitIntegratedJournalEvent struct {
 	mergeCommit         GitObjectID
 	leaseID             ID
 	serialSegment       ID
+	supersededAttempts  []integrationSupersededAttempt
+}
+
+type integrationSupersededAttempt struct {
+	attemptID         ID
+	mergeUnit         MergeUnitReference
+	base              GitObjectID
+	phase             AttemptRuntimePhase
+	leaseID           ID
+	serialSegment     ID
+	serialSegmentHeld bool
 }
 
 func NewMergeUnitIntegratedJournalEvent(
 	intent MergeUnitIntegrationIntent,
 	leaseID ID,
 	serialSegment ID,
+) (MergeUnitIntegratedJournalEvent, error) {
+	return newMergeUnitIntegratedJournalEvent(
+		intent, leaseID, serialSegment, nil,
+	)
+}
+
+func newMergeUnitIntegratedJournalEvent(
+	intent MergeUnitIntegrationIntent,
+	leaseID ID,
+	serialSegment ID,
+	supersededAttempts []integrationSupersededAttempt,
 ) (MergeUnitIntegratedJournalEvent, error) {
 	if err := intent.validate(); err != nil {
 		return MergeUnitIntegratedJournalEvent{}, err
@@ -66,6 +91,10 @@ func NewMergeUnitIntegratedJournalEvent(
 		mergeCommit:         intent.expectedMerge,
 		leaseID:             leaseID,
 		serialSegment:       serialSegment,
+		supersededAttempts: append(
+			[]integrationSupersededAttempt(nil),
+			supersededAttempts...,
+		),
 	}
 	if err := event.validate(); err != nil {
 		return MergeUnitIntegratedJournalEvent{}, err
@@ -106,6 +135,30 @@ func (event MergeUnitIntegratedJournalEvent) validate() error {
 				"merge-unit integration completion mixes Git object formats",
 			)
 		}
+	}
+	previousAttemptID := ""
+	for _, attempt := range event.supersededAttempts {
+		if attempt.attemptID.IsZero() ||
+			attempt.attemptID == event.attemptID ||
+			attempt.mergeUnit.planID.IsZero() ||
+			attempt.mergeUnit.mergeUnitID.IsZero() ||
+			attempt.base.IsZero() ||
+			attempt.base.Algorithm() != algorithm ||
+			!attempt.phase.nonterminal() ||
+			(attempt.serialSegmentHeld &&
+				attempt.serialSegment.IsZero()) {
+			return fmt.Errorf(
+				"merge-unit integration completion has an invalid superseded attempt binding",
+			)
+		}
+		attemptID := attempt.attemptID.String()
+		if previousAttemptID != "" &&
+			attemptID <= previousAttemptID {
+			return fmt.Errorf(
+				"merge-unit integration completion superseded attempts must be unique and sorted",
+			)
+		}
+		previousAttemptID = attemptID
 	}
 	return nil
 }
@@ -213,8 +266,49 @@ func integrationJournalEventResources(
 			reads, writes = append(reads, segment),
 				append(writes, segment)
 		}
+		for _, superseded := range completed.supersededAttempts {
+			attemptResource := AttemptJournalResource(
+				superseded.attemptID,
+			)
+			mergeUnitResource := MergeUnitJournalResource(
+				superseded.mergeUnit,
+			)
+			integrationResource := IntegrationJournalResource(
+				superseded.attemptID,
+			)
+			reviewResource := ReviewJournalResource(
+				superseded.attemptID,
+			)
+			reads = append(
+				reads,
+				attemptResource,
+				mergeUnitResource,
+				integrationResource,
+				reviewResource,
+			)
+			writes = append(
+				writes,
+				attemptResource,
+				mergeUnitResource,
+			)
+			if !superseded.leaseID.IsZero() {
+				lease := LeaseJournalResource(
+					superseded.leaseID,
+				)
+				reads, writes = append(reads, lease),
+					append(writes, lease)
+			}
+			if superseded.serialSegmentHeld {
+				segment := SerialSegmentJournalResource(
+					superseded.serialSegment,
+				)
+				reads, writes = append(reads, segment),
+					append(writes, segment)
+			}
+		}
 	}
-	return reads, writes, true
+	return normalizedIntegrationEventResources(reads),
+		normalizedIntegrationEventResources(writes), true
 }
 
 func cloneIntegrationJournalEvent(
@@ -224,8 +318,29 @@ func cloneIntegrationJournalEvent(
 	case MergeUnitIntegrationIntendedJournalEvent:
 		return event
 	case MergeUnitIntegratedJournalEvent:
+		event.supersededAttempts = append(
+			[]integrationSupersededAttempt(nil),
+			event.supersededAttempts...,
+		)
 		return event
 	default:
 		return nil
 	}
+}
+
+func normalizedIntegrationEventResources(
+	resources []JournalResource,
+) []JournalResource {
+	byKey := make(map[string]JournalResource, len(resources))
+	for _, resource := range resources {
+		byKey[resource.key()] = resource
+	}
+	result := make([]JournalResource, 0, len(byKey))
+	for _, resource := range byKey {
+		result = append(result, resource)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].key() < result[j].key()
+	})
+	return result
 }

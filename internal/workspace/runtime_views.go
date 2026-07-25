@@ -661,6 +661,8 @@ func schedulerStatusForAttempt(attempt RuntimeAttemptProjection) SchedulerUnitSt
 		return SchedulerUnitPaused
 	case AttemptReviewExhausted:
 		return SchedulerUnitReviewExhausted
+	case AttemptSuperseded, AttemptFailed, AttemptAbandoned:
+		return SchedulerUnitReady
 	case AttemptCompleted:
 		return SchedulerUnitCompleted
 	default:

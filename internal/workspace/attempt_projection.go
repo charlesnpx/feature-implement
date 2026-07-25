@@ -13,6 +13,7 @@ const (
 	AttemptActive          AttemptRuntimePhase = "active"
 	AttemptPaused          AttemptRuntimePhase = "paused"
 	AttemptReviewExhausted AttemptRuntimePhase = "review_exhausted"
+	AttemptSuperseded      AttemptRuntimePhase = "superseded"
 	AttemptCompleted       AttemptRuntimePhase = "completed"
 	AttemptFailed          AttemptRuntimePhase = "failed"
 	AttemptAbandoned       AttemptRuntimePhase = "abandoned"
@@ -21,7 +22,8 @@ const (
 func (phase AttemptRuntimePhase) valid() bool {
 	switch phase {
 	case AttemptReserved, AttemptMaterializing, AttemptActive, AttemptPaused,
-		AttemptReviewExhausted, AttemptCompleted, AttemptFailed, AttemptAbandoned:
+		AttemptReviewExhausted, AttemptSuperseded, AttemptCompleted,
+		AttemptFailed, AttemptAbandoned:
 		return true
 	default:
 		return false
@@ -298,6 +300,15 @@ func reduceAttemptRuntime(
 	case AttemptReservedJournalEvent:
 		if event.workspaceID != current.workspaceID || event.generation != current.activeGeneration {
 			return fmt.Errorf("attempt reservation does not match the active workspace generation")
+		}
+		for _, attempt := range current.attempts {
+			if attempt.integration != nil &&
+				!attempt.integration.Integrated() {
+				return fmt.Errorf(
+					"attempt reservation conflicts with pending integration attempt %s",
+					attempt.attemptID,
+				)
+			}
 		}
 		if _, exists := findRuntimeAttempt(current.attempts, event.attemptID); exists {
 			return fmt.Errorf("attempt %s is already reserved", event.attemptID)

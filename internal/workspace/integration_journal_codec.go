@@ -14,19 +14,31 @@ type integrationIntendedPayloadWire struct {
 }
 
 type integrationCompletedPayloadWire struct {
-	WorkspaceID         string `json:"workspace_id"`
-	Generation          string `json:"generation"`
-	AttemptID           string `json:"attempt_id"`
-	PlanID              string `json:"plan_id"`
-	MergeUnitID         string `json:"merge_unit_id"`
-	IntentDigest        string `json:"intent_digest"`
-	FeatureRef          string `json:"feature_ref"`
-	ExpectedFeatureHead string `json:"expected_feature_head"`
-	AcceptedHead        string `json:"accepted_head"`
-	AcceptedTree        string `json:"accepted_tree"`
-	MergeCommit         string `json:"merge_commit"`
-	LeaseID             string `json:"lease_id"`
-	SerialSegment       string `json:"serial_segment,omitempty"`
+	WorkspaceID         string                             `json:"workspace_id"`
+	Generation          string                             `json:"generation"`
+	AttemptID           string                             `json:"attempt_id"`
+	PlanID              string                             `json:"plan_id"`
+	MergeUnitID         string                             `json:"merge_unit_id"`
+	IntentDigest        string                             `json:"intent_digest"`
+	FeatureRef          string                             `json:"feature_ref"`
+	ExpectedFeatureHead string                             `json:"expected_feature_head"`
+	AcceptedHead        string                             `json:"accepted_head"`
+	AcceptedTree        string                             `json:"accepted_tree"`
+	MergeCommit         string                             `json:"merge_commit"`
+	LeaseID             string                             `json:"lease_id"`
+	SerialSegment       string                             `json:"serial_segment,omitempty"`
+	SupersededAttempts  []integrationSupersededAttemptWire `json:"superseded_attempts,omitempty"`
+}
+
+type integrationSupersededAttemptWire struct {
+	AttemptID         string              `json:"attempt_id"`
+	PlanID            string              `json:"plan_id"`
+	MergeUnitID       string              `json:"merge_unit_id"`
+	Base              string              `json:"base"`
+	Phase             AttemptRuntimePhase `json:"phase"`
+	LeaseID           string              `json:"lease_id,omitempty"`
+	SerialSegment     string              `json:"serial_segment,omitempty"`
+	SerialSegmentHeld bool                `json:"serial_segment_held"`
 }
 
 func marshalIntegrationJournalEvent(
@@ -40,6 +52,25 @@ func marshalIntegrationJournalEvent(
 			IntentDigest: event.intent.digest.String(),
 		}
 	case MergeUnitIntegratedJournalEvent:
+		supersededAttempts := make(
+			[]integrationSupersededAttemptWire,
+			0, len(event.supersededAttempts),
+		)
+		for _, attempt := range event.supersededAttempts {
+			supersededAttempts = append(
+				supersededAttempts,
+				integrationSupersededAttemptWire{
+					AttemptID:         attempt.attemptID.String(),
+					PlanID:            attempt.mergeUnit.planID.String(),
+					MergeUnitID:       attempt.mergeUnit.mergeUnitID.String(),
+					Base:              attempt.base.String(),
+					Phase:             attempt.phase,
+					LeaseID:           attempt.leaseID.String(),
+					SerialSegment:     attempt.serialSegment.String(),
+					SerialSegmentHeld: attempt.serialSegmentHeld,
+				},
+			)
+		}
 		value = integrationCompletedPayloadWire{
 			WorkspaceID:         event.workspaceID.String(),
 			Generation:          event.generation.String(),
@@ -54,6 +85,7 @@ func marshalIntegrationJournalEvent(
 			MergeCommit:         event.mergeCommit.String(),
 			LeaseID:             event.leaseID.String(),
 			SerialSegment:       event.serialSegment.String(),
+			SupersededAttempts:  supersededAttempts,
 		}
 	default:
 		return nil, false, nil
@@ -152,6 +184,66 @@ func decodeIntegrationJournalEvent(
 		if err != nil {
 			return nil, true, err
 		}
+		supersededAttempts := make(
+			[]integrationSupersededAttempt,
+			0, len(wire.SupersededAttempts),
+		)
+		for _, supersededWire := range wire.SupersededAttempts {
+			supersededAttemptID, err := NewID(
+				supersededWire.AttemptID,
+			)
+			if err != nil {
+				return nil, true, err
+			}
+			supersededPlanID, err := NewID(
+				supersededWire.PlanID,
+			)
+			if err != nil {
+				return nil, true, err
+			}
+			supersededMergeUnitID, err := NewID(
+				supersededWire.MergeUnitID,
+			)
+			if err != nil {
+				return nil, true, err
+			}
+			supersededMergeUnit, err := NewMergeUnitReference(
+				supersededPlanID, supersededMergeUnitID,
+			)
+			if err != nil {
+				return nil, true, err
+			}
+			supersededBase, err := ParseGitObjectID(
+				supersededWire.Base,
+			)
+			if err != nil {
+				return nil, true, err
+			}
+			supersededLease, err := parseOptionalID(
+				supersededWire.LeaseID,
+			)
+			if err != nil {
+				return nil, true, err
+			}
+			supersededSegment, err := parseOptionalID(
+				supersededWire.SerialSegment,
+			)
+			if err != nil {
+				return nil, true, err
+			}
+			supersededAttempts = append(
+				supersededAttempts,
+				integrationSupersededAttempt{
+					attemptID:         supersededAttemptID,
+					mergeUnit:         supersededMergeUnit,
+					base:              supersededBase,
+					phase:             supersededWire.Phase,
+					leaseID:           supersededLease,
+					serialSegment:     supersededSegment,
+					serialSegmentHeld: supersededWire.SerialSegmentHeld,
+				},
+			)
+		}
 		event := MergeUnitIntegratedJournalEvent{
 			workspaceID:         workspaceID,
 			generation:          generation,
@@ -165,6 +257,7 @@ func decodeIntegrationJournalEvent(
 			mergeCommit:         mergeCommit,
 			leaseID:             leaseID,
 			serialSegment:       serialSegment,
+			supersededAttempts:  supersededAttempts,
 		}
 		if err := event.validate(); err != nil {
 			return nil, true, err

@@ -1,10 +1,12 @@
 package workspace
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path"
@@ -442,36 +444,9 @@ func (session *localTargetGitSession) run(
 	if err := session.Verify(); err != nil {
 		return nil, -1, err
 	}
-	argv := trustedGitArguments(session.git.anchor, arguments...)
-	command := exec.CommandContext(ctx, session.adapter.git.executable, argv...)
-	command.Dir = string(os.PathSeparator)
-	environment, err := BuildIsolatedProcessEnvironment(
-		os.Environ(), session.adapter.git.environment,
-	)
+	command, err := session.command(ctx, arguments...)
 	if err != nil {
 		return nil, -1, err
-	}
-	command.Env = append(environment, "GIT_DIR=.")
-	if session.binding.linkedWorktree {
-		commonRelative, err := filepath.Rel(
-			session.binding.gitDirectory,
-			session.binding.commonDirectory,
-		)
-		if err != nil || commonRelative == "." ||
-			filepath.IsAbs(commonRelative) ||
-			(!strings.HasPrefix(commonRelative, ".."+string(filepath.Separator)) &&
-				commonRelative != "..") {
-			if err == nil {
-				err = fmt.Errorf("Git common directory is not an ancestor")
-			}
-			return nil, -1, fmt.Errorf(
-				"bind linked-worktree Git common directory: %w", err,
-			)
-		}
-		command.Env = append(
-			command.Env,
-			"GIT_COMMON_DIR="+commonRelative,
-		)
 	}
 	if input != nil {
 		command.Stdin = bytes.NewReader(input)
@@ -502,6 +477,193 @@ func (session *localTargetGitSession) run(
 		output = stderr.bytes()
 	}
 	return output, exitCode, nil
+}
+
+func (session *localTargetGitSession) command(
+	ctx context.Context,
+	arguments ...string,
+) (*exec.Cmd, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf(
+			"bound local target Git command requires context",
+		)
+	}
+	argv := trustedGitArguments(session.git.anchor, arguments...)
+	command := exec.CommandContext(ctx, session.adapter.git.executable, argv...)
+	command.Dir = string(os.PathSeparator)
+	environment, err := BuildIsolatedProcessEnvironment(
+		os.Environ(), session.adapter.git.environment,
+	)
+	if err != nil {
+		return nil, err
+	}
+	command.Env = append(environment, "GIT_DIR=.")
+	if session.binding.linkedWorktree {
+		commonRelative, err := filepath.Rel(
+			session.binding.gitDirectory,
+			session.binding.commonDirectory,
+		)
+		if err != nil || commonRelative == "." ||
+			filepath.IsAbs(commonRelative) ||
+			(!strings.HasPrefix(commonRelative, ".."+string(filepath.Separator)) &&
+				commonRelative != "..") {
+			if err == nil {
+				err = fmt.Errorf("Git common directory is not an ancestor")
+			}
+			return nil, fmt.Errorf(
+				"bind linked-worktree Git common directory: %w", err,
+			)
+		}
+		command.Env = append(
+			command.Env,
+			"GIT_COMMON_DIR="+commonRelative,
+		)
+	}
+	return command, nil
+}
+
+func (session *localTargetGitSession) runPreparedReferenceTransaction(
+	ctx context.Context,
+	message string,
+	commands []byte,
+	inspectPrepared func() error,
+) (resultErr error) {
+	if ctx == nil || message == "" || len(commands) == 0 ||
+		inspectPrepared == nil {
+		return fmt.Errorf(
+			"prepared reference transaction requires context, message, commands, and inspection",
+		)
+	}
+	if err := session.Verify(); err != nil {
+		return err
+	}
+	command, err := session.command(
+		ctx,
+		"update-ref", "--stdin", "--no-deref",
+		"--create-reflog", "-m", message,
+	)
+	if err != nil {
+		return err
+	}
+	stdin, err := command.StdinPipe()
+	if err != nil {
+		return err
+	}
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		return err
+	}
+	var stderr boundedProcessBuffer
+	stderr.maximum = 64 * 1024
+	command.Stderr = &stderr
+	if err := command.Start(); err != nil {
+		_ = stdin.Close()
+		return err
+	}
+
+	response := bufio.NewReader(
+		io.LimitReader(stdout, 64*1024+1),
+	)
+	waited := false
+	prepared := false
+	commitSent := false
+	wait := func() error {
+		if waited {
+			return nil
+		}
+		waited = true
+		waitErr := command.Wait()
+		verifyErr := session.Verify()
+		if stderr.exceeded {
+			return errors.Join(
+				fmt.Errorf("Git transaction error output exceeded its bound"),
+				verifyErr,
+			)
+		}
+		if waitErr != nil {
+			return errors.Join(
+				fmt.Errorf(
+					"Git reference transaction failed: %w: %s",
+					waitErr,
+					strings.TrimSpace(string(stderr.bytes())),
+				),
+				verifyErr,
+			)
+		}
+		return verifyErr
+	}
+	send := func(action, expected string) error {
+		if _, err := io.WriteString(stdin, action+"\n"); err != nil {
+			return fmt.Errorf(
+				"send Git reference transaction %s: %w",
+				action, err,
+			)
+		}
+		line, err := response.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf(
+				"read Git reference transaction %s response: %w",
+				action, err,
+			)
+		}
+		if line != expected+"\n" {
+			return fmt.Errorf(
+				"Git reference transaction %s response is %q, expected %q",
+				action, strings.TrimSuffix(line, "\n"), expected,
+			)
+		}
+		return nil
+	}
+	finish := func(action, expected string) error {
+		if action == "commit" {
+			commitSent = true
+		}
+		sendErr := send(action, expected)
+		if sendErr == nil {
+			prepared = false
+		}
+		closeErr := stdin.Close()
+		return errors.Join(sendErr, closeErr, wait())
+	}
+	defer func() {
+		if waited {
+			return
+		}
+		var cleanupErr error
+		if prepared && !commitSent {
+			cleanupErr = send("abort", "abort: ok")
+			prepared = false
+		}
+		resultErr = errors.Join(
+			resultErr, cleanupErr, stdin.Close(), wait(),
+		)
+	}()
+
+	if err := send("start", "start: ok"); err != nil {
+		return err
+	}
+	if len(commands) == 0 ||
+		commands[len(commands)-1] != '\n' {
+		commands = append(
+			append([]byte(nil), commands...), '\n',
+		)
+	}
+	if _, err := stdin.Write(commands); err != nil {
+		return fmt.Errorf(
+			"queue Git reference transaction commands: %w", err,
+		)
+	}
+	if err := send("prepare", "prepare: ok"); err != nil {
+		return err
+	}
+	prepared = true
+	if err := inspectPrepared(); err != nil {
+		return errors.Join(
+			err, finish("abort", "abort: ok"),
+		)
+	}
+	return finish("commit", "commit: ok")
 }
 
 func (session *localTargetGitSession) resolveBase(

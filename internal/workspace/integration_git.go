@@ -191,6 +191,7 @@ func (adapter LocalIntegrationGitAdapter) PublishIntegration(
 	binding LocalTargetBinding,
 	attemptBranch string,
 	intent MergeUnitIntegrationIntent,
+	fault IntegrationLifecycleFaultInjector,
 ) (resultErr error) {
 	if ctx == nil {
 		return fmt.Errorf(
@@ -245,17 +246,6 @@ func (adapter LocalIntegrationGitAdapter) PublishIntegration(
 			err,
 		)
 	}
-	exists, preCASHead, preCASMarker, err :=
-		session.inspectFeatureRef(ctx)
-	if err != nil {
-		return err
-	}
-	if !exists || preCASHead != intent.expectedFeatureHead ||
-		preCASMarker != intent.expectedFeatureMarker {
-		return fmt.Errorf(
-			"feature ref changed from its exact owned head and marker immediately before publication",
-		)
-	}
 	if err := session.Verify(); err != nil {
 		return err
 	}
@@ -271,16 +261,31 @@ func (adapter LocalIntegrationGitAdapter) PublishIntegration(
 		gitObjectHex(intent.expectedMerge),
 		gitObjectHex(intent.expectedFeatureHead),
 	))
-	_, exitCode, err := session.run(
+	if err := session.runPreparedReferenceTransaction(
 		ctx,
+		integrationReflogMessage(intent.digest),
 		transaction,
-		"update-ref", "--stdin", "--no-deref", "--create-reflog",
-		"-m", integrationReflogMessage(intent.digest),
-	)
-	if err != nil || exitCode != 0 {
-		return gitExitError(
-			"publish feature ref with compare-and-swap",
-			exitCode, err,
+		func() error {
+			exists, preparedHead, preparedMarker, err :=
+				session.inspectFeatureRef(ctx)
+			if err != nil {
+				return err
+			}
+			if !exists ||
+				preparedHead != intent.expectedFeatureHead ||
+				preparedMarker != intent.expectedFeatureMarker {
+				return fmt.Errorf(
+					"feature ref changed from its exact owned head and marker before prepared publication",
+				)
+			}
+			return injectIntegrationLifecycleFault(
+				fault, IntegrationFaultAfterRefPrepared,
+			)
+		},
+	); err != nil {
+		return fmt.Errorf(
+			"publish feature ref with prepared compare-and-swap: %w",
+			err,
 		)
 	}
 	if _, err := adapter.inspectBoundAttempt(
@@ -332,6 +337,9 @@ func (adapter LocalIntegrationGitAdapter) VerifyCompletedIntegration(
 	defer func() {
 		resultErr = errors.Join(resultErr, session.Close())
 	}()
+	if _, err := session.inspectRegisteredWorktrees(ctx); err != nil {
+		return err
+	}
 	exists, featureHead, featureMarker, err :=
 		session.inspectFeatureRef(ctx)
 	if err != nil {

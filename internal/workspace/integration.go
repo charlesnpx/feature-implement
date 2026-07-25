@@ -543,6 +543,7 @@ type IntegrationGitPort interface {
 		LocalTargetBinding,
 		string,
 		MergeUnitIntegrationIntent,
+		IntegrationLifecycleFaultInjector,
 	) error
 	VerifyCompletedIntegration(
 		context.Context,

@@ -3,6 +3,7 @@ package workspace_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -82,11 +83,23 @@ func (git *integrationGitStub) PublishIntegration(
 	_ workspace.LocalTargetBinding,
 	_ string,
 	intent workspace.MergeUnitIntegrationIntent,
+	fault workspace.IntegrationLifecycleFaultInjector,
 ) error {
 	git.publishCalls++
 	if git.featureHead != intent.ExpectedFeatureHead() ||
 		!git.expectedCommit {
 		return errors.New("stub integration publication precondition failed")
+	}
+	if fault != nil {
+		if err := fault(
+			workspace.IntegrationFaultAfterRefPrepared,
+		); err != nil {
+			return fmt.Errorf(
+				"integration lifecycle fault at %s: %w",
+				workspace.IntegrationFaultAfterRefPrepared,
+				err,
+			)
+		}
 	}
 	git.featureHead = intent.ExpectedMerge()
 	return nil
@@ -212,12 +225,24 @@ func (git *concurrentIntegrationGitStub) PublishIntegration(
 	_ workspace.LocalTargetBinding,
 	_ string,
 	intent workspace.MergeUnitIntegrationIntent,
+	fault workspace.IntegrationLifecycleFaultInjector,
 ) error {
 	git.mu.Lock()
 	defer git.mu.Unlock()
 	if git.featureHead != intent.ExpectedFeatureHead() ||
 		!git.objects[intent.Digest().String()] {
 		return errors.New("concurrent publication precondition failed")
+	}
+	if fault != nil {
+		if err := fault(
+			workspace.IntegrationFaultAfterRefPrepared,
+		); err != nil {
+			return fmt.Errorf(
+				"integration lifecycle fault at %s: %w",
+				workspace.IntegrationFaultAfterRefPrepared,
+				err,
+			)
+		}
 	}
 	git.featureHead = intent.ExpectedMerge()
 	return nil
@@ -516,6 +541,7 @@ func TestIntegrationRecoversEveryDurableEffectBoundaryDeterministically(
 		workspace.IntegrationFaultBeforeCommitCreate,
 		workspace.IntegrationFaultAfterCommitCreated,
 		workspace.IntegrationFaultBeforeRefCAS,
+		workspace.IntegrationFaultAfterRefPrepared,
 		workspace.IntegrationFaultAfterRefCAS,
 		workspace.IntegrationFaultAfterVerification,
 		workspace.IntegrationFaultBeforeCompletion,
@@ -698,6 +724,53 @@ func TestPendingIntegrationIntentSerializesOtherMergeUnits(t *testing.T) {
 	if journalRecordCount(t, firstCore.journal) != before {
 		t.Fatal("rejected concurrent integration appended journal state")
 	}
+	replayedReservation, err := workspace.ReserveAttempt(
+		context.Background(),
+		firstCore.journal,
+		firstCore.definition,
+		secondCore.git,
+		workspace.ReserveAttemptRequest{
+			MergeUnit:     second.MergeUnit(),
+			AttemptNumber: second.AttemptNumber(),
+			Goal:          second.Goal(),
+			OccurredAt: mustTime(
+				t, "2026-07-25T12:30:08Z",
+			),
+		},
+	)
+	if err != nil ||
+		replayedReservation.AttemptID() != second.AttemptID() {
+		t.Fatalf(
+			"retry existing reservation during pending integration = %#v error=%v",
+			replayedReservation, err,
+		)
+	}
+	replacementGoal, err := workspace.NewGoalBinding(
+		workspace.MustID("pending-intent-replacement"),
+		workspace.GoalScopeMergeUnit,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.ReserveAttempt(
+		context.Background(),
+		firstCore.journal,
+		firstCore.definition,
+		secondCore.git,
+		workspace.ReserveAttemptRequest{
+			MergeUnit:     second.MergeUnit(),
+			AttemptNumber: 2,
+			Goal:          replacementGoal,
+			OccurredAt: mustTime(
+				t, "2026-07-25T12:30:09Z",
+			),
+		},
+	); err == nil ||
+		!strings.Contains(
+			err.Error(), "conflicts with pending integration",
+		) {
+		t.Fatalf("reservation during pending integration error = %v", err)
+	}
 	snapshot, err := firstCore.journal.ReadSnapshot()
 	if err != nil {
 		t.Fatal(err)
@@ -817,8 +890,75 @@ func TestConcurrentIntegrationsPublishExactlyOneIntent(t *testing.T) {
 			intended, completed,
 		)
 	}
-	if _, err := workspace.RebuildWorkspaceRuntime(snapshot); err != nil {
+	runtime, err := workspace.RebuildWorkspaceRuntime(snapshot)
+	if err != nil {
 		t.Fatalf("concurrent integration replay: %v", err)
+	}
+	loser := first
+	loserCore := firstCore
+	if winner.Attempt().AttemptID() == first.AttemptID() {
+		loser = second
+		loserCore = secondCore
+	}
+	superseded, exists := runtime.Attempt(loser.AttemptID())
+	if !exists ||
+		superseded.Phase() != workspace.AttemptSuperseded ||
+		!superseded.LeaseID().IsZero() ||
+		superseded.SerialSegmentHeld() {
+		t.Fatalf(
+			"concurrent loser was not terminalized exactly: %#v exists=%t",
+			superseded, exists,
+		)
+	}
+	if revision := snapshot.Revision(
+		workspace.LeaseJournalResource(loser.LeaseID()),
+	); revision == 0 {
+		t.Fatal("concurrent loser lease resource was not released")
+	}
+	scheduler, err := workspace.RebuildSchedulerView(
+		snapshot, firstCore.definition,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loserReady := false
+	for _, unit := range scheduler.Units {
+		if unit.PlanID == loser.MergeUnit().PlanID().String() &&
+			unit.MergeUnitID ==
+				loser.MergeUnit().MergeUnitID().String() {
+			loserReady = unit.Status == workspace.SchedulerUnitReady
+		}
+	}
+	if !loserReady {
+		t.Fatal("superseded concurrent loser is not scheduler-ready")
+	}
+	replacementGoal, err := workspace.NewGoalBinding(
+		workspace.MustID("replacement-goal"),
+		workspace.GoalScopeMergeUnit,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := workspace.ReserveAttempt(
+		context.Background(),
+		firstCore.journal,
+		firstCore.definition,
+		loserCore.git,
+		workspace.ReserveAttemptRequest{
+			MergeUnit:     loser.MergeUnit(),
+			AttemptNumber: 2,
+			Goal:          replacementGoal,
+			OccurredAt: mustTime(
+				t, "2026-07-25T12:45:07Z",
+			),
+		},
+	)
+	if err != nil ||
+		replacement.Base() != winner.MergeCommit() {
+		t.Fatalf(
+			"reserve replacement for superseded loser = %#v error=%v",
+			replacement, err,
+		)
 	}
 }
 

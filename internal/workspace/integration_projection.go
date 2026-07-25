@@ -1,6 +1,9 @@
 package workspace
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+)
 
 func reduceIntegrationRuntime(
 	current WorkspaceRuntimeProjection,
@@ -84,6 +87,19 @@ func reduceIntegrationRuntime(
 			)
 		}
 		intent := attempt.integration.intent
+		expectedSuperseded, err := integrationSupersededAttempts(
+			current, attempt.attemptID,
+		)
+		if err != nil {
+			return err
+		}
+		if !equalIntegrationSupersededAttempts(
+			event.supersededAttempts, expectedSuperseded,
+		) {
+			return fmt.Errorf(
+				"integration completion does not bind the exact superseded attempts",
+			)
+		}
 		expectedSerialSegment := ID{}
 		if attempt.serialSegmentHeld {
 			expectedSerialSegment = attempt.serialSegment
@@ -108,6 +124,21 @@ func reduceIntegrationRuntime(
 		updated.serialSegmentHeld = false
 		updated.leaseID = ID{}
 		updated.integration.integratedRecord = record.sequence
+		for _, superseded := range event.supersededAttempts {
+			supersededIndex, exists := findRuntimeAttempt(
+				next.attempts, superseded.attemptID,
+			)
+			if !exists {
+				return fmt.Errorf(
+					"integration completion superseded attempt %s is absent",
+					superseded.attemptID,
+				)
+			}
+			supersededAttempt := &next.attempts[supersededIndex]
+			supersededAttempt.phase = AttemptSuperseded
+			supersededAttempt.serialSegmentHeld = false
+			supersededAttempt.leaseID = ID{}
+		}
 		next.localTarget.createdHead = intent.expectedMerge
 		next.localTarget.headRecord = record.sequence
 		return nil
@@ -116,4 +147,54 @@ func reduceIntegrationRuntime(
 			"unsupported integration runtime event %T", record.event,
 		)
 	}
+}
+
+func integrationSupersededAttempts(
+	runtime WorkspaceRuntimeProjection,
+	winner ID,
+) ([]integrationSupersededAttempt, error) {
+	result := make([]integrationSupersededAttempt, 0)
+	for _, attempt := range runtime.attempts {
+		if attempt.attemptID == winner ||
+			!attempt.phase.nonterminal() {
+			continue
+		}
+		if attempt.integration != nil {
+			return nil, fmt.Errorf(
+				"integration completion conflicts with pending attempt %s",
+				attempt.attemptID,
+			)
+		}
+		result = append(
+			result,
+			integrationSupersededAttempt{
+				attemptID:         attempt.attemptID,
+				mergeUnit:         attempt.mergeUnit,
+				base:              attempt.base,
+				phase:             attempt.phase,
+				leaseID:           attempt.leaseID,
+				serialSegment:     attempt.serialSegment,
+				serialSegmentHeld: attempt.serialSegmentHeld,
+			},
+		)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].attemptID.String() <
+			result[j].attemptID.String()
+	})
+	return result, nil
+}
+
+func equalIntegrationSupersededAttempts(
+	left, right []integrationSupersededAttempt,
+) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
