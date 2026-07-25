@@ -74,11 +74,6 @@ func (info FileInfo) Regular() bool      { return info.regular }
 func (info FileInfo) Symlink() bool      { return info.symlink }
 func (info FileInfo) Permission() uint32 { return info.permission }
 
-type GitPort interface {
-	ResolveRevision(context.Context, RepositoryIdentity, string) (GitObjectID, error)
-	ReadBlob(context.Context, RepositoryIdentity, GitObjectID, string) ([]byte, GitObjectID, error)
-}
-
 type FilesystemPort interface {
 	ReadFile(context.Context, RootedPath) ([]byte, error)
 	Inspect(context.Context, RootedPath) (FileInfo, error)
@@ -98,60 +93,10 @@ func (result ProcessResult) ExitCode() int        { return result.exitCode }
 func (result ProcessResult) StdoutDigest() Digest { return result.stdoutDigest }
 func (result ProcessResult) StderrDigest() Digest { return result.stderrDigest }
 
-// ProcessPort is a non-provider execution boundary. Implementations must use
-// BuildNonProviderProcessEnvironment, deny write-capable network and provider
-// broker access, and may not reinterpret Command as provider authority.
+// ProcessPort is a local execution boundary. Implementations must use the
+// isolated process environment and deny write-capable network access.
 type ProcessPort interface {
 	Run(context.Context, Command) (ProcessResult, error)
-}
-
-type ProviderQueryKind uint8
-
-const (
-	ProviderQueryRepository ProviderQueryKind = iota + 1
-	ProviderQueryPullRequest
-	ProviderQueryChecks
-)
-
-type ProviderQuery struct {
-	kind       ProviderQueryKind
-	repository RepositoryIdentity
-	identity   string
-}
-
-func NewProviderQuery(kind ProviderQueryKind, repository RepositoryIdentity, identity string) (ProviderQuery, error) {
-	if kind < ProviderQueryRepository || kind > ProviderQueryChecks || repository.String() == "" {
-		return ProviderQuery{}, fmt.Errorf("invalid provider query")
-	}
-	if kind == ProviderQueryRepository && identity != "" {
-		return ProviderQuery{}, fmt.Errorf("repository query cannot carry a secondary identity")
-	}
-	if kind != ProviderQueryRepository {
-		if err := validateBoundedText("provider query identity", identity, 2048); err != nil {
-			return ProviderQuery{}, err
-		}
-	}
-	return ProviderQuery{kind: kind, repository: repository, identity: identity}, nil
-}
-
-func (query ProviderQuery) Kind() ProviderQueryKind        { return query.kind }
-func (query ProviderQuery) Repository() RepositoryIdentity { return query.repository }
-func (query ProviderQuery) Identity() string               { return query.identity }
-
-type ProviderObservation struct {
-	digest Digest
-}
-
-func NewProviderObservation(canonical []byte) ProviderObservation {
-	return ProviderObservation{digest: DigestBytes(canonical)}
-}
-
-func (observation ProviderObservation) Digest() Digest { return observation.digest }
-
-// ProviderPort is deliberately read-only. A credential-bearing broker and its
-// closed dispatch effects are introduced by the provider-lifecycle protocol.
-type ProviderPort interface {
-	Query(context.Context, ProviderQuery) (ProviderObservation, error)
 }
 
 type ClockPort interface {

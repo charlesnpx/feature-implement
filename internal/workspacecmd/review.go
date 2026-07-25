@@ -82,12 +82,11 @@ type reviewFindingInput struct {
 }
 
 type isolationInput struct {
-	RepositoryReadOnly   bool `json:"repository_read_only"`
-	ScratchEphemeral     bool `json:"scratch_ephemeral"`
-	CredentialsAvailable bool `json:"credentials_available"`
-	RepositoryHooks      bool `json:"repository_hooks"`
-	WriteNetwork         bool `json:"write_network"`
-	ExternalWrite        bool `json:"external_write"`
+	RepositoryReadOnly bool `json:"repository_read_only"`
+	ScratchEphemeral   bool `json:"scratch_ephemeral"`
+	RepositoryHooks    bool `json:"repository_hooks"`
+	WriteNetwork       bool `json:"write_network"`
+	ExternalWrite      bool `json:"external_write"`
 }
 
 type recordReviewInput struct {
@@ -228,7 +227,7 @@ func executeReview(ctx context.Context, bundle workspace.WorkspaceBundle, option
 			}
 		}
 		proof := workspace.NewReviewIsolationProof(
-			input.Isolation.RepositoryReadOnly, input.Isolation.ScratchEphemeral, input.Isolation.CredentialsAvailable,
+			input.Isolation.RepositoryReadOnly, input.Isolation.ScratchEphemeral,
 			input.Isolation.RepositoryHooks, input.Isolation.WriteNetwork, input.Isolation.ExternalWrite,
 		)
 		submission, err := workspace.NewReviewResultSubmission(workspace.ReviewResultSubmissionOptions{

@@ -1203,7 +1203,7 @@ func (adapter LocalTargetGitAdapter) validateFeatureNamespace(
 	if err != nil {
 		return err
 	}
-	return CheckAttemptRefConflicts(branch, refs, nil, allowExact)
+	return CheckAttemptRefConflicts(branch, refs, allowExact)
 }
 
 func (adapter LocalTargetGitAdapter) rejectCheckedOutFeatureBranch(

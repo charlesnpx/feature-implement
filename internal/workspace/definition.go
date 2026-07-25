@@ -15,7 +15,6 @@ type DefinitionSources struct {
 	Workspace       SourceArtifact
 	Plans           []SourceArtifact
 	ExecutionConfig SourceArtifact
-	Authorities     []AuthorityMaterial
 }
 
 type ArtifactKind string
@@ -46,14 +45,13 @@ func (artifact NormalizedArtifact) CanonicalBytes() []byte {
 }
 
 // EffectiveWorkspaceDefinition is a content-addressed, immutable composition
-// of all validated v2 authority. It is pure with respect to checkout state.
+// of all validated workspace inputs. It is pure with respect to checkout state.
 type EffectiveWorkspaceDefinition struct {
-	workspace   WorkspaceManifest
-	plans       []Plan
-	execution   ExecutionConfig
-	artifacts   []NormalizedArtifact
-	authorities []AuthoritySnapshot
-	generation  Digest
+	workspace  WorkspaceManifest
+	plans      []Plan
+	execution  ExecutionConfig
+	artifacts  []NormalizedArtifact
+	generation Digest
 }
 
 func ValidateDefinition(sources DefinitionSources) (EffectiveWorkspaceDefinition, error) {
@@ -140,48 +138,19 @@ func ValidateDefinition(sources DefinitionSources) (EffectiveWorkspaceDefinition
 		ArtifactExecutionConfig, workspace.id, executionPath, executionSource, executionCanonical,
 	))
 
-	materialByID := make(map[string]AuthorityMaterial, len(sources.Authorities))
-	for _, material := range sources.Authorities {
-		materialID, err := NewID(material.ID)
-		if err != nil {
-			return EffectiveWorkspaceDefinition{}, fmt.Errorf("authority material: %w", err)
-		}
-		if _, exists := materialByID[materialID.String()]; exists {
-			return EffectiveWorkspaceDefinition{}, fmt.Errorf("duplicate authority material %s", materialID)
-		}
-		copyMaterial := material
-		copyMaterial.Content = append([]byte(nil), material.Content...)
-		materialByID[materialID.String()] = copyMaterial
-	}
-	if len(materialByID) != len(workspace.authoritySources) {
-		return EffectiveWorkspaceDefinition{}, fmt.Errorf("workspace declares %d authority sources but %d materials were supplied", len(workspace.authoritySources), len(materialByID))
-	}
-	authorities := make([]AuthoritySnapshot, 0, len(workspace.authoritySources))
-	for _, reference := range workspace.authoritySources {
-		material, exists := materialByID[reference.id.String()]
-		if !exists {
-			return EffectiveWorkspaceDefinition{}, fmt.Errorf("missing authority material %s", reference.id)
-		}
-		snapshot, err := pinAuthority(reference, material)
-		if err != nil {
-			return EffectiveWorkspaceDefinition{}, err
-		}
-		authorities = append(authorities, snapshot)
-	}
-
 	sort.Slice(artifacts, func(i, j int) bool {
 		left := string(artifacts[i].kind) + "\x00" + artifacts[i].id.String() + "\x00" + artifacts[i].path
 		right := string(artifacts[j].kind) + "\x00" + artifacts[j].id.String() + "\x00" + artifacts[j].path
 		return left < right
 	})
-	generationBytes, err := canonicalGenerationBytes(workspace.id, artifacts, authorities)
+	generationBytes, err := canonicalGenerationBytes(workspace.id, artifacts)
 	if err != nil {
 		return EffectiveWorkspaceDefinition{}, err
 	}
 
 	return EffectiveWorkspaceDefinition{
 		workspace: workspace, plans: append([]Plan(nil), plans...), execution: execution,
-		artifacts: cloneArtifacts(artifacts), authorities: append([]AuthoritySnapshot(nil), authorities...),
+		artifacts:  cloneArtifacts(artifacts),
 		generation: DigestBytes(generationBytes),
 	}, nil
 }
@@ -200,9 +169,6 @@ func (definition EffectiveWorkspaceDefinition) Profiles() []ExecutionProfile {
 }
 func (definition EffectiveWorkspaceDefinition) Artifacts() []NormalizedArtifact {
 	return cloneArtifacts(definition.artifacts)
-}
-func (definition EffectiveWorkspaceDefinition) AuthoritySnapshots() []AuthoritySnapshot {
-	return append([]AuthoritySnapshot(nil), definition.authorities...)
 }
 func (definition EffectiveWorkspaceDefinition) Generation() Digest { return definition.generation }
 
@@ -286,17 +252,16 @@ func validateWorkspaceMergeUnitGraph(workspace WorkspaceManifest, plans []Plan) 
 }
 
 type canonicalWorkspace struct {
-	SchemaVersion    int                            `json:"schema_version"`
-	ID               string                         `json:"id"`
-	Mode             WorkspaceMode                  `json:"mode"`
-	Repository       canonicalRepository            `json:"repository"`
-	BaseRef          string                         `json:"base_ref"`
-	BaseCommit       string                         `json:"base_commit"`
-	FeatureBranch    string                         `json:"feature_branch"`
-	ExecutionConfig  string                         `json:"execution_config"`
-	Plans            []canonicalPlanReference       `json:"plans"`
-	Dependencies     []canonicalWorkspaceDependency `json:"dependencies"`
-	AuthoritySources []canonicalAuthorityReference  `json:"authority_sources"`
+	SchemaVersion   int                            `json:"schema_version"`
+	ID              string                         `json:"id"`
+	Mode            WorkspaceMode                  `json:"mode"`
+	Repository      canonicalRepository            `json:"repository"`
+	BaseRef         string                         `json:"base_ref"`
+	BaseCommit      string                         `json:"base_commit"`
+	FeatureBranch   string                         `json:"feature_branch"`
+	ExecutionConfig string                         `json:"execution_config"`
+	Plans           []canonicalPlanReference       `json:"plans"`
+	Dependencies    []canonicalWorkspaceDependency `json:"dependencies"`
 }
 
 type canonicalRepository struct {
@@ -314,23 +279,17 @@ type canonicalWorkspaceDependency struct {
 	Before canonicalMergeUnitReference `json:"before"`
 	After  canonicalMergeUnitReference `json:"after"`
 }
-type canonicalAuthorityReference struct {
-	ID       string        `json:"id"`
-	Kind     AuthorityKind `json:"kind"`
-	Location string        `json:"location"`
-}
 
 func canonicalWorkspaceBytes(workspace WorkspaceManifest) ([]byte, error) {
 	value := canonicalWorkspace{
 		SchemaVersion: 2, ID: workspace.id.String(),
 		Mode:       workspace.mode,
-		Repository: canonicalRepository{Root: workspace.repositoryRoot},
+		Repository: canonicalRepository{Root: workspace.target.root},
 		BaseRef:    workspace.target.baseRef, BaseCommit: workspace.target.baseCommit.String(),
-		FeatureBranch:    workspace.target.featureBranch,
-		ExecutionConfig:  workspace.executionConfig,
-		Plans:            make([]canonicalPlanReference, 0, len(workspace.plans)),
-		Dependencies:     make([]canonicalWorkspaceDependency, 0, len(workspace.dependencies)),
-		AuthoritySources: make([]canonicalAuthorityReference, 0, len(workspace.authoritySources)),
+		FeatureBranch:   workspace.target.featureBranch,
+		ExecutionConfig: workspace.executionConfig,
+		Plans:           make([]canonicalPlanReference, 0, len(workspace.plans)),
+		Dependencies:    make([]canonicalWorkspaceDependency, 0, len(workspace.dependencies)),
 	}
 	for _, plan := range workspace.plans {
 		value.Plans = append(value.Plans, canonicalPlanReference{ID: plan.id.String(), Source: plan.source})
@@ -340,9 +299,6 @@ func canonicalWorkspaceBytes(workspace WorkspaceManifest) ([]byte, error) {
 			Before: canonicalMergeUnitReference{PlanID: dependency.before.planID.String(), MergeUnitID: dependency.before.mergeUnitID.String()},
 			After:  canonicalMergeUnitReference{PlanID: dependency.after.planID.String(), MergeUnitID: dependency.after.mergeUnitID.String()},
 		})
-	}
-	for _, authority := range workspace.authoritySources {
-		value.AuthoritySources = append(value.AuthoritySources, canonicalAuthorityReference{ID: authority.id.String(), Kind: authority.kind, Location: authority.location})
 	}
 	return json.Marshal(value)
 }
@@ -400,12 +356,11 @@ type canonicalExecution struct {
 	MergeUnits     []canonicalUnitExecution `json:"merge_units"`
 }
 type canonicalPolicy struct {
-	RequirePassingChecks  bool   `json:"require_passing_checks"`
-	RequireSignedReceipts bool   `json:"require_signed_receipts"`
-	AllowWriteNetwork     bool   `json:"allow_write_network"`
-	MaxAttempts           uint16 `json:"max_attempts"`
-	MaxReviewRounds       uint16 `json:"max_review_rounds"`
-	MaxReviewFixes        uint16 `json:"max_review_fixes"`
+	RequirePassingChecks bool   `json:"require_passing_checks"`
+	AllowWriteNetwork    bool   `json:"allow_write_network"`
+	MaxAttempts          uint16 `json:"max_attempts"`
+	MaxReviewRounds      uint16 `json:"max_review_rounds"`
+	MaxReviewFixes       uint16 `json:"max_review_fixes"`
 }
 type canonicalProfile struct {
 	ID     string          `json:"id"`
@@ -560,42 +515,16 @@ func canonicalizeReviewFixProtocol(protocol ReviewFixProtocol) canonicalReviewFi
 
 func canonicalizePolicy(policy ExecutionPolicy) canonicalPolicy {
 	return canonicalPolicy{
-		RequirePassingChecks: policy.requirePassingChecks, RequireSignedReceipts: policy.requireSignedReceipts,
-		AllowWriteNetwork: policy.allowWriteNetwork, MaxAttempts: policy.maxAttempts,
+		RequirePassingChecks: policy.requirePassingChecks,
+		AllowWriteNetwork:    policy.allowWriteNetwork, MaxAttempts: policy.maxAttempts,
 		MaxReviewRounds: policy.maxReviewRounds, MaxReviewFixes: policy.maxReviewFixes,
 	}
 }
 
-type canonicalAuthority struct {
-	ID             string        `json:"id"`
-	Kind           AuthorityKind `json:"kind"`
-	Location       string        `json:"location"`
-	SourceHash     string        `json:"source_hash"`
-	GitRepository  string        `json:"git_repository,omitempty"`
-	GitCommit      string        `json:"git_commit,omitempty"`
-	GitBlob        string        `json:"git_blob,omitempty"`
-	ExternalDigest string        `json:"external_digest,omitempty"`
-}
-
-func canonicalAuthorityBytes(snapshot AuthoritySnapshot) ([]byte, error) {
-	value := canonicalAuthority{
-		ID: snapshot.id.String(), Kind: snapshot.kind, Location: snapshot.location, SourceHash: snapshot.sourceHash.String(),
-	}
-	if snapshot.kind == AuthorityGitBlob {
-		value.GitRepository = snapshot.gitPin.repository.String()
-		value.GitCommit = snapshot.gitPin.commit.String()
-		value.GitBlob = snapshot.gitPin.blob.String()
-	} else {
-		value.ExternalDigest = snapshot.externalPin.String()
-	}
-	return json.Marshal(value)
-}
-
 type canonicalGeneration struct {
-	SchemaVersion int                          `json:"schema_version"`
-	WorkspaceID   string                       `json:"workspace_id"`
-	Artifacts     []canonicalArtifactIdentity  `json:"artifacts"`
-	Authorities   []canonicalAuthorityIdentity `json:"authorities"`
+	SchemaVersion int                         `json:"schema_version"`
+	WorkspaceID   string                      `json:"workspace_id"`
+	Artifacts     []canonicalArtifactIdentity `json:"artifacts"`
 }
 type canonicalArtifactIdentity struct {
 	Kind         ArtifactKind `json:"kind"`
@@ -604,28 +533,16 @@ type canonicalArtifactIdentity struct {
 	SourceHash   string       `json:"source_hash"`
 	SemanticHash string       `json:"semantic_hash"`
 }
-type canonicalAuthorityIdentity struct {
-	ID           string        `json:"id"`
-	Kind         AuthorityKind `json:"kind"`
-	SourceHash   string        `json:"source_hash"`
-	SemanticHash string        `json:"semantic_hash"`
-}
 
-func canonicalGenerationBytes(workspaceID ID, artifacts []NormalizedArtifact, authorities []AuthoritySnapshot) ([]byte, error) {
+func canonicalGenerationBytes(workspaceID ID, artifacts []NormalizedArtifact) ([]byte, error) {
 	value := canonicalGeneration{
 		SchemaVersion: 2, WorkspaceID: workspaceID.String(),
-		Artifacts: []canonicalArtifactIdentity{}, Authorities: []canonicalAuthorityIdentity{},
+		Artifacts: []canonicalArtifactIdentity{},
 	}
 	for _, artifact := range artifacts {
 		value.Artifacts = append(value.Artifacts, canonicalArtifactIdentity{
 			Kind: artifact.kind, ID: artifact.id.String(), Path: artifact.path,
 			SourceHash: artifact.sourceHash.String(), SemanticHash: artifact.semanticHash.String(),
-		})
-	}
-	for _, authority := range authorities {
-		value.Authorities = append(value.Authorities, canonicalAuthorityIdentity{
-			ID: authority.id.String(), Kind: authority.kind,
-			SourceHash: authority.sourceHash.String(), SemanticHash: authority.semanticHash.String(),
 		})
 	}
 	return json.Marshal(value)

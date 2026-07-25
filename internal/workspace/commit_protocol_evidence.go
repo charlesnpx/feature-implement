@@ -467,39 +467,32 @@ func (kind CheckTerminationKind) valid() bool {
 }
 
 type CheckIsolationProof struct {
-	credentialsAvailable bool
-	repositoryHooks      bool
-	writeNetwork         bool
-	providerBroker       bool
-	digest               Digest
+	repositoryHooks bool
+	writeNetwork    bool
+	digest          Digest
 }
 
-func NewCheckIsolationProof(credentialsAvailable, repositoryHooks, writeNetwork, providerBroker bool) CheckIsolationProof {
+func NewCheckIsolationProof(repositoryHooks, writeNetwork bool) CheckIsolationProof {
 	type canonical struct {
-		CredentialsAvailable bool `json:"credentials_available"`
-		RepositoryHooks      bool `json:"repository_hooks"`
-		WriteNetwork         bool `json:"write_network"`
-		ProviderBroker       bool `json:"provider_broker"`
+		RepositoryHooks bool `json:"repository_hooks"`
+		WriteNetwork    bool `json:"write_network"`
 	}
-	content, _ := json.Marshal(canonical{credentialsAvailable, repositoryHooks, writeNetwork, providerBroker})
+	content, _ := json.Marshal(canonical{repositoryHooks, writeNetwork})
 	return CheckIsolationProof{
-		credentialsAvailable: credentialsAvailable, repositoryHooks: repositoryHooks,
-		writeNetwork: writeNetwork, providerBroker: providerBroker, digest: DigestBytes(content),
+		repositoryHooks: repositoryHooks,
+		writeNetwork:    writeNetwork, digest: DigestBytes(content),
 	}
 }
 
 func StrictCheckIsolationProof() CheckIsolationProof {
-	return NewCheckIsolationProof(false, false, false, false)
+	return NewCheckIsolationProof(false, false)
 }
 
-func (proof CheckIsolationProof) CredentialsAvailable() bool { return proof.credentialsAvailable }
-func (proof CheckIsolationProof) RepositoryHooks() bool      { return proof.repositoryHooks }
-func (proof CheckIsolationProof) WriteNetwork() bool         { return proof.writeNetwork }
-func (proof CheckIsolationProof) ProviderBroker() bool       { return proof.providerBroker }
-func (proof CheckIsolationProof) Digest() Digest             { return proof.digest }
+func (proof CheckIsolationProof) RepositoryHooks() bool { return proof.repositoryHooks }
+func (proof CheckIsolationProof) WriteNetwork() bool    { return proof.writeNetwork }
+func (proof CheckIsolationProof) Digest() Digest        { return proof.digest }
 func (proof CheckIsolationProof) Strict() bool {
-	return !proof.digest.IsZero() && !proof.credentialsAvailable && !proof.repositoryHooks &&
-		!proof.writeNetwork && !proof.providerBroker
+	return !proof.digest.IsZero() && !proof.repositoryHooks && !proof.writeNetwork
 }
 
 type CheckProcessResult struct {

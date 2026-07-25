@@ -18,12 +18,9 @@ const (
 	JournalResourceAttempt        JournalResourceKind = "attempt"
 	JournalResourceMergeUnit      JournalResourceKind = "merge_unit"
 	JournalResourceLease          JournalResourceKind = "lease"
-	JournalResourceAuthorization  JournalResourceKind = "authorization"
 	JournalResourceOrchestration  JournalResourceKind = "orchestration"
 	JournalResourceGoal           JournalResourceKind = "goal"
 	JournalResourceSerialSegment  JournalResourceKind = "serial_segment"
-	JournalResourceProviderIntent JournalResourceKind = "provider_intent"
-	JournalResourceQueueEntry     JournalResourceKind = "queue_entry"
 	JournalResourceBudget         JournalResourceKind = "budget"
 	JournalResourceApproval       JournalResourceKind = "approval"
 	JournalResourceEvidence       JournalResourceKind = "evidence"
@@ -33,7 +30,6 @@ const (
 	JournalResourceReviewProfile  JournalResourceKind = "review_profile"
 	JournalResourceCommitStep     JournalResourceKind = "commit_step"
 	JournalResourceCheck          JournalResourceKind = "check"
-	JournalResourceControlReceipt JournalResourceKind = "control_receipt"
 	JournalResourceFeatureRef     JournalResourceKind = "feature_ref"
 )
 
@@ -41,12 +37,11 @@ func (kind JournalResourceKind) valid() bool {
 	switch kind {
 	case JournalResourceWorkspace, JournalResourceGeneration, JournalResourceRecovery,
 		JournalResourceAttempt, JournalResourceMergeUnit, JournalResourceLease,
-		JournalResourceAuthorization, JournalResourceOrchestration, JournalResourceGoal,
-		JournalResourceSerialSegment, JournalResourceProviderIntent, JournalResourceQueueEntry,
+		JournalResourceOrchestration, JournalResourceGoal, JournalResourceSerialSegment,
 		JournalResourceBudget, JournalResourceApproval, JournalResourceEvidence,
 		JournalResourceCommitProtocol, JournalResourceReviewFix, JournalResourceCommitStep,
 		JournalResourceReview, JournalResourceReviewProfile, JournalResourceCheck,
-		JournalResourceControlReceipt, JournalResourceFeatureRef:
+		JournalResourceFeatureRef:
 		return true
 	default:
 		return false
@@ -134,11 +129,6 @@ const (
 	JournalEventReviewFixIntended              JournalEventType = "review_fix.intended.v2"
 	JournalEventReviewFixCommitRecorded        JournalEventType = "review_fix.commit_recorded.v2"
 	JournalEventReviewFixCheckRecorded         JournalEventType = "review_fix.check_recorded.v2"
-	JournalEventAuthorizationGrantRecorded     JournalEventType = "authorization.grant_recorded.v2"
-	JournalEventAuthorizationRevoked           JournalEventType = "authorization.revoked.v2"
-	JournalEventAuthorizationSegmentCompleted  JournalEventType = "authorization.segment_completed.v2"
-	JournalEventAuthorizationSafetyChanged     JournalEventType = "authorization.safety_changed.v2"
-	JournalEventAuthorizationEffectDispatched  JournalEventType = "authorization.effect_dispatched.v2"
 	JournalEventReviewRoundStarted             JournalEventType = "review.round_started.v2"
 	JournalEventReviewHeadAdopted              JournalEventType = "review.head_adopted.v2"
 	JournalEventReviewInvocationReserved       JournalEventType = "review.invocation_reserved.v2"
@@ -146,13 +136,6 @@ const (
 	JournalEventReviewResultRecorded           JournalEventType = "review.result_recorded.v2"
 	JournalEventReviewFindingFixReserved       JournalEventType = "review.finding_fix_reserved.v2"
 	JournalEventReviewFixApplied               JournalEventType = "review.fix_applied.v2"
-	JournalEventProviderIntentReserved         JournalEventType = "provider.intent_reserved.v2"
-	JournalEventProviderIntentAbandoned        JournalEventType = "provider.intent_abandoned.v2"
-	JournalEventProviderMergePreflightRecorded JournalEventType = "provider.merge_preflight_recorded.v2"
-	JournalEventProviderIntentDispatched       JournalEventType = "provider.intent_dispatched.v2"
-	JournalEventProviderResultRecorded         JournalEventType = "provider.result_recorded.v2"
-	JournalEventProviderIntentReconciled       JournalEventType = "provider.intent_reconciled.v2"
-	JournalEventProviderCompletionVerified     JournalEventType = "provider.completion_verified.v2"
 )
 
 type WorkspaceJournalEvent interface {
@@ -330,19 +313,10 @@ func newJournalAppend(
 			ReviewFixIntendedJournalEvent, ReviewFixCommitRecordedJournalEvent,
 			ReviewFixCheckRecordedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("commit protocol events must use the Git-verified commit workflow")
-		case AuthorizationGrantRecordedJournalEvent, AuthorizationRevokedJournalEvent,
-			AuthorizationSegmentCompletedJournalEvent, AuthorizationSafetyChangedJournalEvent,
-			AuthorizationEffectDispatchedJournalEvent:
-			return JournalAppend{}, fmt.Errorf("authorization events must use the protected control-plane workflow")
 		case ReviewHeadAdoptedJournalEvent, ReviewRoundStartedJournalEvent, ReviewInvocationReservedJournalEvent,
 			ReviewInvocationFailedJournalEvent, ReviewResultRecordedJournalEvent,
 			ReviewFindingFixReservedJournalEvent, ReviewFixAppliedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("review events must use the exact-head review workflow")
-		case ProviderIntentReservedJournalEvent, ProviderIntentAbandonedJournalEvent,
-			ProviderMergePreflightRecordedJournalEvent, ProviderIntentDispatchedJournalEvent,
-			ProviderResultRecordedJournalEvent, ProviderIntentReconciledJournalEvent,
-			ProviderCompletionVerifiedJournalEvent:
-			return JournalAppend{}, fmt.Errorf("provider events must use the trusted broker and verifier-backed provider workflow")
 		}
 	}
 	if occurredAt.IsZero() {
@@ -380,8 +354,8 @@ func supportedWorkspaceJournalEvent(event WorkspaceJournalEvent) bool {
 		FeatureRefCreationIntendedJournalEvent, FeatureRefCreatedJournalEvent:
 		return true
 	default:
-		return isAttemptJournalEvent(event) || isCommitJournalEvent(event) || isAuthorizationJournalEvent(event) ||
-			isReviewJournalEvent(event) || isProviderJournalEvent(event)
+		return isAttemptJournalEvent(event) || isCommitJournalEvent(event) ||
+			isReviewJournalEvent(event)
 	}
 }
 
@@ -414,13 +388,7 @@ func validateJournalEventResources(
 			expectedReads, expectedWrites, ok = commitJournalEventResources(event)
 		}
 		if !ok {
-			expectedReads, expectedWrites, ok = authorizationJournalEventResources(event)
-		}
-		if !ok {
 			expectedReads, expectedWrites, ok = reviewJournalEventResources(event)
-		}
-		if !ok {
-			expectedReads, expectedWrites, ok = providerJournalEventResources(event)
 		}
 		if !ok {
 			return fmt.Errorf("unsupported workspace journal event %T", event)
@@ -530,12 +498,9 @@ func cloneWorkspaceJournalEvent(event WorkspaceJournalEvent) WorkspaceJournalEve
 		if cloned := cloneCommitJournalEvent(event); cloned != nil {
 			return cloned
 		}
-		if cloned := cloneAuthorizationJournalEvent(event); cloned != nil {
-			return cloned
-		}
 		if cloned := cloneReviewJournalEvent(event); cloned != nil {
 			return cloned
 		}
-		return cloneProviderJournalEvent(event)
+		return nil
 	}
 }

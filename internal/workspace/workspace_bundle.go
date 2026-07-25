@@ -17,36 +17,22 @@ const (
 )
 
 type workspaceBundleWire struct {
-	SchemaVersion         int                            `json:"schema_version"`
-	Workspace             string                         `json:"workspace"`
-	Plans                 []string                       `json:"plans"`
-	ExecutionConfig       string                         `json:"execution_config"`
-	Authorities           []workspaceBundleAuthorityWire `json:"authorities"`
-	ControlPlaneAuthority string                         `json:"control_plane_authority,omitempty"`
+	SchemaVersion   int      `json:"schema_version"`
+	Workspace       string   `json:"workspace"`
+	Plans           []string `json:"plans"`
+	ExecutionConfig string   `json:"execution_config"`
 }
 
-type workspaceBundleAuthorityWire struct {
-	ID                   string        `json:"id"`
-	Kind                 AuthorityKind `json:"kind"`
-	ContentPath          string        `json:"content_path"`
-	RepositoryIdentity   string        `json:"repository_identity,omitempty"`
-	CommitObject         string        `json:"commit_object,omitempty"`
-	BlobObject           string        `json:"blob_object,omitempty"`
-	ExpectedSourceDigest string        `json:"expected_source_digest,omitempty"`
-}
-
-// WorkspaceBundle is a validated, immutable set of source bytes and authority
-// pins. The descriptor is discovery metadata only; every authority-bearing
-// value it contains is incorporated into the effective generation.
+// WorkspaceBundle is a validated, immutable set of local source bytes. The
+// descriptor is discovery metadata incorporated into the effective generation.
 type WorkspaceBundle struct {
-	root                  string
-	rootIdentity          PlatformFileIdentity
-	descriptorDigest      Digest
-	sourcePaths           []string
-	sourceFiles           map[string][]byte
-	sources               DefinitionSources
-	definition            EffectiveWorkspaceDefinition
-	controlPlaneAuthority ID
+	root             string
+	rootIdentity     PlatformFileIdentity
+	descriptorDigest Digest
+	sourcePaths      []string
+	sourceFiles      map[string][]byte
+	sources          DefinitionSources
+	definition       EffectiveWorkspaceDefinition
 }
 
 func (bundle WorkspaceBundle) Root() string                             { return bundle.root }
@@ -59,8 +45,6 @@ func (bundle WorkspaceBundle) SourcePaths() []string {
 func (bundle WorkspaceBundle) Sources() DefinitionSources {
 	return cloneDefinitionSources(bundle.sources)
 }
-func (bundle WorkspaceBundle) ControlPlaneAuthorityID() ID { return bundle.controlPlaneAuthority }
-
 func (bundle WorkspaceBundle) VerifyRoot() error {
 	if bundle.root == "" {
 		return fmt.Errorf("workspace bundle root is unavailable")
@@ -166,53 +150,10 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 		plans = append(plans, SourceArtifact{Path: path, Bytes: content})
 	}
 
-	authorities := make([]AuthorityMaterial, 0, len(wire.Authorities))
-	authoritySeen := make(map[string]struct{}, len(wire.Authorities))
-	authorityContentPaths := make(map[string]string, len(wire.Authorities))
-	for index, item := range wire.Authorities {
-		id, err := NewID(item.ID)
-		if err != nil {
-			return WorkspaceBundle{}, fmt.Errorf("authorities[%d].id: %w", index, err)
-		}
-		if _, exists := authoritySeen[id.String()]; exists {
-			return WorkspaceBundle{}, fmt.Errorf("workspace bundle contains duplicate authority %s", id)
-		}
-		authoritySeen[id.String()] = struct{}{}
-		contentPath, err := normalizeBundleSourcePath(fmt.Sprintf("authorities[%d].content_path", index), item.ContentPath)
-		if err != nil {
-			return WorkspaceBundle{}, err
-		}
-		if err := claimSourcePath(contentPath, fmt.Sprintf("authorities[%d]", index)); err != nil {
-			return WorkspaceBundle{}, err
-		}
-		authorityContentPaths[id.String()] = contentPath
-		content, err := readWorkspaceBundleFile(filesystem, contentPath, MaxArtifactBytes)
-		if err != nil {
-			return WorkspaceBundle{}, fmt.Errorf("read authority %s content %s: %w", id, contentPath, err)
-		}
-		authorities = append(authorities, AuthorityMaterial{
-			ID: id.String(), Kind: item.Kind, Content: content,
-			RepositoryIdentity: item.RepositoryIdentity, CommitObject: item.CommitObject,
-			BlobObject: item.BlobObject, ExpectedSourceDigest: item.ExpectedSourceDigest,
-		})
-	}
-	sort.Slice(authorities, func(i, j int) bool { return authorities[i].ID < authorities[j].ID })
-	controlPlaneAuthority := ID{}
-	if strings.TrimSpace(wire.ControlPlaneAuthority) != "" {
-		controlPlaneAuthority, err = NewID(wire.ControlPlaneAuthority)
-		if err != nil {
-			return WorkspaceBundle{}, fmt.Errorf("control_plane_authority: %w", err)
-		}
-		if _, exists := authoritySeen[controlPlaneAuthority.String()]; !exists {
-			return WorkspaceBundle{}, fmt.Errorf("control_plane_authority %s is not present in authorities", controlPlaneAuthority)
-		}
-	}
-
 	sources := DefinitionSources{
 		Workspace:       SourceArtifact{Path: workspacePath, Bytes: workspaceBytes},
 		Plans:           plans,
 		ExecutionConfig: SourceArtifact{Path: executionPath, Bytes: executionBytes},
-		Authorities:     authorities,
 	}
 	definition, err := ValidateDefinition(sources)
 	if err != nil {
@@ -220,10 +161,9 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 	}
 	definition, err = bindWorkspaceBundleDefinition(
 		definition, descriptor, workspacePath, planPaths, executionPath,
-		authorityContentPaths, controlPlaneAuthority,
 	)
 	if err != nil {
-		return WorkspaceBundle{}, fmt.Errorf("bind workspace bundle authority: %w", err)
+		return WorkspaceBundle{}, fmt.Errorf("bind workspace bundle descriptor: %w", err)
 	}
 	if err := filesystem.VerifyPath(); err != nil {
 		return WorkspaceBundle{}, fmt.Errorf("revalidate workspace bundle root: %w", err)
@@ -241,37 +181,20 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 	for _, plan := range plans {
 		sourceFiles[plan.Path] = append([]byte(nil), plan.Bytes...)
 	}
-	for _, authority := range authorities {
-		contentPath := authorityContentPaths[authority.ID]
-		sourceFiles[contentPath] = append([]byte(nil), authority.Content...)
-	}
 	return WorkspaceBundle{
 		root: filesystem.Path(), rootIdentity: filesystem.Identity(),
 		descriptorDigest: DigestBytes(descriptor),
 		sourcePaths:      sourcePaths,
 		sourceFiles:      sourceFiles,
 		sources:          cloneDefinitionSources(sources), definition: definition,
-		controlPlaneAuthority: controlPlaneAuthority,
 	}, nil
 }
 
-type canonicalWorkspaceBundleAuthority struct {
-	ID                   string        `json:"id"`
-	Kind                 AuthorityKind `json:"kind"`
-	ContentPath          string        `json:"content_path"`
-	RepositoryIdentity   string        `json:"repository_identity,omitempty"`
-	CommitObject         string        `json:"commit_object,omitempty"`
-	BlobObject           string        `json:"blob_object,omitempty"`
-	ExpectedSourceDigest string        `json:"expected_source_digest,omitempty"`
-}
-
 type canonicalWorkspaceBundle struct {
-	SchemaVersion         int                                 `json:"schema_version"`
-	Workspace             string                              `json:"workspace"`
-	Plans                 []string                            `json:"plans"`
-	ExecutionConfig       string                              `json:"execution_config"`
-	Authorities           []canonicalWorkspaceBundleAuthority `json:"authorities"`
-	ControlPlaneAuthority string                              `json:"control_plane_authority,omitempty"`
+	SchemaVersion   int      `json:"schema_version"`
+	Workspace       string   `json:"workspace"`
+	Plans           []string `json:"plans"`
+	ExecutionConfig string   `json:"execution_config"`
 }
 
 func bindWorkspaceBundleDefinition(
@@ -280,37 +203,12 @@ func bindWorkspaceBundleDefinition(
 	workspacePath string,
 	planPaths []string,
 	executionPath string,
-	authorityContentPaths map[string]string,
-	controlPlaneAuthority ID,
 ) (EffectiveWorkspaceDefinition, error) {
 	canonical := canonicalWorkspaceBundle{
 		SchemaVersion: WorkspaceBundleSchemaVersion,
 		Workspace:     workspacePath, Plans: append([]string(nil), planPaths...),
-		ExecutionConfig: executionPath, Authorities: []canonicalWorkspaceBundleAuthority{},
-		ControlPlaneAuthority: controlPlaneAuthority.String(),
+		ExecutionConfig: executionPath,
 	}
-	for _, snapshot := range definition.authorities {
-		contentPath, exists := authorityContentPaths[snapshot.id.String()]
-		if !exists {
-			return EffectiveWorkspaceDefinition{}, fmt.Errorf("authority %s has no descriptor content path", snapshot.id)
-		}
-		item := canonicalWorkspaceBundleAuthority{
-			ID: snapshot.id.String(), Kind: snapshot.kind, ContentPath: contentPath,
-		}
-		if pin, ok := snapshot.GitPin(); ok {
-			item.RepositoryIdentity = pin.Repository().String()
-			item.CommitObject = pin.Commit().String()
-			item.BlobObject = pin.Blob().String()
-		} else if digest, ok := snapshot.ExternalDigest(); ok {
-			item.ExpectedSourceDigest = digest.String()
-		} else {
-			return EffectiveWorkspaceDefinition{}, fmt.Errorf("authority %s has no canonical pin", snapshot.id)
-		}
-		canonical.Authorities = append(canonical.Authorities, item)
-	}
-	sort.Slice(canonical.Authorities, func(i, j int) bool {
-		return canonical.Authorities[i].ID < canonical.Authorities[j].ID
-	})
 	canonicalBytes, err := json.Marshal(canonical)
 	if err != nil {
 		return EffectiveWorkspaceDefinition{}, err
@@ -323,7 +221,7 @@ func bindWorkspaceBundleDefinition(
 		right := string(definition.artifacts[j].kind) + "\x00" + definition.artifacts[j].id.String() + "\x00" + definition.artifacts[j].path
 		return left < right
 	})
-	generationBytes, err := canonicalGenerationBytes(definition.workspace.id, definition.artifacts, definition.authorities)
+	generationBytes, err := canonicalGenerationBytes(definition.workspace.id, definition.artifacts)
 	if err != nil {
 		return EffectiveWorkspaceDefinition{}, err
 	}
@@ -369,15 +267,9 @@ func cloneDefinitionSources(source DefinitionSources) DefinitionSources {
 		Workspace:       SourceArtifact{Path: source.Workspace.Path, Bytes: append([]byte(nil), source.Workspace.Bytes...)},
 		ExecutionConfig: SourceArtifact{Path: source.ExecutionConfig.Path, Bytes: append([]byte(nil), source.ExecutionConfig.Bytes...)},
 		Plans:           make([]SourceArtifact, 0, len(source.Plans)),
-		Authorities:     make([]AuthorityMaterial, 0, len(source.Authorities)),
 	}
 	for _, plan := range source.Plans {
 		result.Plans = append(result.Plans, SourceArtifact{Path: plan.Path, Bytes: append([]byte(nil), plan.Bytes...)})
-	}
-	for _, authority := range source.Authorities {
-		copyAuthority := authority
-		copyAuthority.Content = append([]byte(nil), authority.Content...)
-		result.Authorities = append(result.Authorities, copyAuthority)
 	}
 	return result
 }
@@ -387,27 +279,12 @@ func WorkspaceBundleSchema() map[string]any {
 		"$schema":              "https://json-schema.org/draft/2020-12/schema",
 		"type":                 "object",
 		"additionalProperties": false,
-		"required":             []string{"schema_version", "workspace", "plans", "execution_config", "authorities"},
+		"required":             []string{"schema_version", "workspace", "plans", "execution_config"},
 		"properties": map[string]any{
 			"schema_version":   map[string]any{"const": WorkspaceBundleSchemaVersion},
 			"workspace":        map[string]any{"type": "string", "minLength": 1},
 			"plans":            map[string]any{"type": "array", "minItems": 1, "uniqueItems": true, "items": map[string]any{"type": "string", "minLength": 1}},
 			"execution_config": map[string]any{"type": "string", "minLength": 1},
-			"authorities": map[string]any{
-				"type": "array", "items": map[string]any{
-					"type": "object", "additionalProperties": false,
-					"required": []string{"id", "kind", "content_path"},
-					"properties": map[string]any{
-						"id":                     map[string]any{"type": "string", "minLength": 1},
-						"kind":                   map[string]any{"enum": []string{string(AuthorityGitBlob), string(AuthorityExternalDigest)}},
-						"content_path":           map[string]any{"type": "string", "minLength": 1},
-						"repository_identity":    map[string]any{"type": "string"},
-						"commit_object":          map[string]any{"type": "string"},
-						"blob_object":            map[string]any{"type": "string"},
-						"expected_source_digest": map[string]any{"type": "string"},
-					},
-				},
-			},
 		},
 	}
 }

@@ -53,7 +53,72 @@ func TestTransitionCodecsRejectReceiptFields(t *testing.T) {
 	}
 }
 
-func TestReviewIsolationCodecContainsNoProviderBrokerField(t *testing.T) {
+func TestAttemptCodecsRejectRemovedRemoteBindings(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		eventType JournalEventType
+		payload   json.RawMessage
+		field     string
+	}{
+		{
+			name:      "reservation repository identity",
+			eventType: JournalEventAttemptReserved,
+			payload:   json.RawMessage(`{"repository":"removed"}`),
+			field:     "repository",
+		},
+		{
+			name:      "start authorization identity",
+			eventType: JournalEventAttemptStarted,
+			payload:   json.RawMessage(`{"authorization_id":"removed"}`),
+			field:     "authorization_id",
+		},
+		{
+			name:      "boundary authorization identity",
+			eventType: JournalEventAttemptBoundary,
+			payload:   json.RawMessage(`{"authorization_id":"removed"}`),
+			field:     "authorization_id",
+		},
+		{
+			name:      "resume authorization identity",
+			eventType: JournalEventAttemptResumed,
+			payload:   json.RawMessage(`{"authorization_id":"removed"}`),
+			field:     "authorization_id",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			event, supported, err := decodeAttemptJournalEvent(
+				test.eventType,
+				test.payload,
+			)
+			if !supported || event != nil || err == nil ||
+				!strings.Contains(
+					err.Error(),
+					`unknown field "`+test.field+`"`,
+				) {
+				t.Fatalf(
+					"removed binding %q decoded as %#v, supported=%t, err=%v",
+					test.field, event, supported, err,
+				)
+			}
+		})
+	}
+}
+
+func TestRemovedProviderJournalEventsAreUnsupported(t *testing.T) {
+	for _, eventType := range []JournalEventType{
+		"authorization.grant_recorded.v2",
+		"provider.intent_reserved.v2",
+		"provider.completion_verified.v2",
+	} {
+		event, err := decodeWorkspaceJournalEvent(eventType, json.RawMessage(`{}`))
+		if err == nil || event != nil ||
+			!strings.Contains(err.Error(), "unsupported journal event type") {
+			t.Fatalf("removed event %q decoded as %#v with %v", eventType, event, err)
+		}
+	}
+}
+
+func TestReviewIsolationCodecRejectsRemovedFields(t *testing.T) {
 	proof := StrictReviewIsolationProof()
 	result, err := NewReviewResultSubmission(ReviewResultSubmissionOptions{
 		RequestDigest:    DigestBytes([]byte("local-review-request")),
@@ -68,21 +133,26 @@ func TestReviewIsolationCodecContainsNoProviderBrokerField(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), "provider_broker") {
-		t.Fatalf("local review wire retains provider field: %s", encoded)
+	for _, field := range []string{"credentials_available", "provider_broker"} {
+		if strings.Contains(string(encoded), field) {
+			t.Fatalf("local review wire retains %q: %s", field, encoded)
+		}
 	}
-	var isolation reviewIsolationPayloadWire
-	err = decodeStrictJSON([]byte(`{
-		"repository_read_only": true,
-		"scratch_ephemeral": true,
-		"credentials_available": false,
-		"repository_hooks": false,
-		"write_network": false,
-		"provider_broker": false,
-		"external_write": false,
-		"digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	}`), &isolation)
-	if err == nil || !strings.Contains(err.Error(), `unknown field "provider_broker"`) {
-		t.Fatalf("provider-bearing review isolation error = %v", err)
+	for _, field := range []string{"credentials_available", "provider_broker"} {
+		var isolation reviewIsolationPayloadWire
+		payload := `{
+			"repository_read_only": true,
+			"scratch_ephemeral": true,
+			"repository_hooks": false,
+			"write_network": false,
+			"` + field + `": false,
+			"external_write": false,
+			"digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		}`
+		err = decodeStrictJSON([]byte(payload), &isolation)
+		if err == nil ||
+			!strings.Contains(err.Error(), `unknown field "`+field+`"`) {
+			t.Fatalf("review isolation accepted removed field %q: %v", field, err)
+		}
 	}
 }

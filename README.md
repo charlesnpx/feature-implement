@@ -1,6 +1,10 @@
 # feature-implement
 
-`feature-implement` provides a self-contained Go CLI and delegated Codex and Claude skills for planning implementation work and executing it through immutable workspace-v2 definitions, a typed journal, isolated Git worktrees, protected review and authorization boundaries, and verified GitHub merge receipts.
+`feature-implement` is a self-contained Go CLI with delegated Codex and Claude
+skills for planning implementation work and executing it in a local Git
+repository. Workspace v2 uses immutable source definitions, a typed append-only
+journal, isolated attempt worktrees, exact-head review, and deterministic local
+integration.
 
 It installs:
 
@@ -10,17 +14,22 @@ It installs:
 
 ## Install contract
 
-This repository follows the `mise-en-place` delegated installer contract. `install-skill.sh` is a thin wrapper around:
+This repository follows the `mise-en-place` delegated installer contract.
+`install-skill.sh` is a thin wrapper around:
 
 ```sh
 feature install-skills [--plan|--install|--uninstall] [--target claude|codex|tools|all] [--json] [--install-root <dir>]
 ```
 
-The installer emits delegated JSON with `schema: 1`, `kind: delegated`, target file records, setup metadata, and SHA256 hashes for installed files. The `tools` target owns the self-contained Go binary.
+The installer emits delegated JSON with `schema: 1`, `kind: delegated`, target
+file records, setup metadata, and SHA256 hashes for installed files. Git is the
+only runtime executable required by the installed workflow. The `tools` target
+owns the self-contained Go binary.
 
 ## Command surfaces
 
-The standalone version-one plan materializer remains available for planning-only consumers:
+The standalone version-one plan materializer remains available for planning
+consumers:
 
 ```sh
 feature plan example
@@ -29,36 +38,34 @@ feature plan materialize --manifest feature.plan.yaml --out-root <dir> --json
 feature validate <plan-dir> [--write-lock] --json
 ```
 
-Execution is workspace-v2 only. Direct `feature status` and `feature implement` lifecycle commands have been removed; plan locks no longer contain mutable runtime state.
-
-```sh
-feature workspace schema bundle --json
-feature workspace schema requests --json
-feature workspace example
-feature workspace validate --bundle <bundle-dir> [--write-locks] --json
-feature workspace init --bundle <bundle-dir> --workspace <runtime-dir> --input <request.json> --json
-feature workspace status --bundle <bundle-dir> --workspace <runtime-dir> --json
-feature workspace recover --bundle <bundle-dir> --workspace <runtime-dir> --input <request.json> --json
-feature workspace scheduler|gates|queue|receipts|report --bundle <bundle-dir> --workspace <runtime-dir> --json
-```
-
-Mutation groups expose closed, typed subactions:
+Workspace execution uses these version-two surfaces:
 
 ```text
-reconcile  stage | plan | activate
-attempt    reserve | materialize | boundary | next-goal | acknowledge | owner-response | resume
-commit     next | rebase
-review     start | reserve | record | reserve-fix | apply-fix | record-fix | ready
-control    grant | revoke | safety | segment-complete | inspect-receipt
-provider   reserve | preflight | dispatch | reconcile | abandon | authorize-pr
-complete   verify
+feature plan checkpoint --root <bundle-root> --kind initial|revision|lock --input <file|-> [--json]
+
+feature workspace schema bundle|requests|reports [--json]
+feature workspace example
+feature workspace validate --bundle <bundle-root> [--write-locks] [--json]
+feature workspace init|recover --bundle <bundle-root> --workspace <runtime-root> --input <file|-> [--json]
+feature workspace status|scheduler|gates|report --bundle <bundle-root> --workspace <runtime-root> [--json]
+
+feature workspace attempt reserve|materialize|adopt-head|boundary|next-goal|acknowledge|owner-response|resume ...
+feature workspace commit next ...
+feature workspace review start|reserve|record|reserve-fix|apply-fix|record-fix|ready ...
+feature workspace integrate merge-unit ...
+feature workspace complete verify ...
 ```
 
-Every mutation accepts exactly one strict schema-version-2 JSON request through `--input <file|->`. Unknown fields, duplicate keys, trailing JSON, unsupported enum values, and oversized inputs fail before a transition is recorded. Use `feature workspace schema requests --json` as the request reference.
+Every mutation accepts exactly one strict schema-version-two JSON request
+through `--input <file|->`. Unknown or duplicate fields, trailing JSON,
+unsupported enum values, omitted required fields, and oversized inputs are
+rejected before a transition is recorded. Use
+`feature workspace schema requests --json` as the request reference.
 
 ## Workspace bundle
 
-A bundle is an immutable set of source files rooted by `feature.workspace.bundle.json`:
+A bundle is an immutable set of source files rooted by
+`feature.workspace.bundle.json`:
 
 ```text
 sample-workspace/
@@ -68,43 +75,48 @@ sample-workspace/
 │   └── sample-plan.yaml
 ├── config/
 │   └── execution.yaml
-├── authority/
-│   └── owner-policy.json       # optional, externally pinned authority material
 └── generated/                  # tool-owned immutable lock projections
 ```
 
-The descriptor contains discovery and authority-selection bindings rather than runtime state. Its exact bytes, every referenced source byte, every authority pin, and the selected control-plane authority contribute to the effective generation. Source paths are relative, non-hidden, outside `generated/`, rooted beneath the bundle, and cannot traverse symlinks or collide across roles.
+The descriptor contains only local source discovery:
 
 ```json
 {
   "schema_version": 2,
   "workspace": "feature.workspace.yaml",
   "plans": ["plans/sample-plan.yaml"],
-  "execution_config": "config/execution.yaml",
-  "authorities": []
+  "execution_config": "config/execution.yaml"
 }
 ```
 
-The workspace manifest owns repository, provider, base, remote, plan membership, cross-plan dependencies, and authority declarations. It never requires the primary checkout to be clean.
+Every descriptor path is relative, non-hidden, outside `generated/`, uniquely
+owned by one source role, and rooted beneath the bundle. Source paths cannot
+traverse symlinks or collide across roles.
+
+The workspace manifest binds one local target repository, a stable fully
+qualified base ref and exact base commit, an AI-selected feature branch, plan
+membership, and cross-plan dependencies:
 
 ```yaml
 schema_version: 2
 id: sample-workspace
+mode: local
 repository:
   root: /absolute/path/to/repository
-  identity: https://github.com/example/project.git
-provider:
-  kind: github
-  repository: example/project
-base_ref: feature/sample-workspace
-remote: origin
+base_ref: refs/heads/main
+base_commit: sha1:1111111111111111111111111111111111111111
+feature_branch: feature/sample-workspace
 execution_config: config/execution.yaml
 plans:
   - id: sample-plan
     source: plans/sample-plan.yaml
 dependencies: []
-authority_sources: []
 ```
+
+The pinned base commit must equal `base_ref` during validation and
+initialization. Later movement of that ref is reported as drift; an active
+workspace is never silently rebased. The primary checkout may be dirty and is
+never cleaned, stashed, switched, or used as an attempt worktree.
 
 Plan sources own stories, story dependencies, and merge-unit composition:
 
@@ -129,13 +141,13 @@ merge_units:
       - story-first-contract
 ```
 
-Execution configuration assigns every merge unit exactly one effective profile, explicit boundary behavior, and policy that can only narrow its parent policy:
+Execution configuration assigns every merge unit exactly one profile, a policy
+that may only narrow its parent, and an explicit boundary:
 
 ```yaml
 schema_version: 2
 policy:
   require_passing_checks: true
-  require_signed_receipts: true
   allow_write_network: false
   max_attempts: 3
   max_review_rounds: 3
@@ -145,7 +157,6 @@ profiles:
     runner: codex
     policy:
       require_passing_checks: true
-      require_signed_receipts: true
       allow_write_network: false
       max_attempts: 3
       max_review_rounds: 3
@@ -159,65 +170,91 @@ merge_units:
       serial_segment: serial-first-contract
     policy:
       require_passing_checks: true
-      require_signed_receipts: true
       allow_write_network: false
       max_attempts: 3
       max_review_rounds: 3
       max_review_fixes: 2
 ```
 
-Optional commit, review-fix, and review-loop protocols are strict schemas within each merge-unit execution entry. An absent commit protocol leaves normal local commits unconstrained; the first configured review atomically adopts the exact clean head. A configured commit protocol owns its commits and isolated checks.
+Commit protocols, review-fix protocols, and review loops are optional strict
+schemas within each merge-unit entry. Without a commit protocol, ordinary
+local commits are allowed. Without a configured review loop,
+`attempt adopt-head` records the exact clean accepted head and tree before
+integration.
 
-Agent-driven broad review loops are capped at three iterations for the plan and for each merge unit. A new iteration starts only when the preceding review found a Critical or High issue. When a review has no Critical or High findings, worthwhile Medium and Low findings are still applied once, but another broad iteration is not started solely to re-review them.
+Agent-driven broad review is capped at three iterations. Start another
+iteration only when the preceding review found a Critical or High issue.
+After a review with no Critical or High findings, apply worthwhile Medium and
+Low fixes once, perform targeted confirmation, and stop the broad-review loop.
 
-`feature workspace validate --write-locks` synchronizes immutable projections under `<bundle>/generated/`. The ownership inventory permits replacement only when an existing generated file still matches its last-generated hash. Modified projections, hidden paths, symlink traversal, missing inventory, and unowned conflicts fail closed.
+## Locks and runtime state
 
-## Journal-backed execution
-
-Keep runtime state separate from the source bundle, for example `<bundle>/runtime/`. Initialization writes the append-only journal, generation store, and disposable projections under `<runtime>/state/`.
-
-1. Validate the bundle and initialize the runtime with a strict request containing `schema_version` and an RFC3339Nano `occurred_at` value.
-2. Run `recover`, then read `status` or `scheduler`. Reserve only a `ready` merge unit against the exact integration-base Git object.
-3. Materialize the reserved attempt. The CLI derives its flat branch and worktree identity and never modifies or cleans the primary checkout.
-4. Work only in the returned attempt worktree. Use `commit next` for configured commit steps; otherwise make ordinary local commits. The first configured review adopts the exact clean descendant head; when no governed review is configured, submit `attempt adopt-head` before provider reservation. Record only receipt-backed governed-review results for their exact head and tree.
-5. Treat every returned boundary directive as authoritative. Scheduler reports re-emit `boundary_pending`, `boundary_reason`, and `pending_directives`; complete goal acknowledgements and owner gates with matching signed control-plane receipts before resuming or creating another goal.
-6. Obtain operator approval and a matching standing-grant receipt before provider writes. Reserve typed `push`, `open_pull_request`, or `merge` intents, then dispatch only through the trusted provider adapter. Ambiguous effects must be reconciled before further dispatch.
-7. Verify completion independently. The completion receipt binds the branch, head, tree, PR checks and reviews, merge-commit parents and tree, integration topology, and final base head.
-8. Record and resolve the final attempt boundary to release its lease and serial segment. A provider completion receipt alone does not complete the scheduler unit or unblock dependents; use the journal-derived report as the completion source of truth.
-
-Provider results contain typed evidence and idempotency markers, never executable provider commands. The only provider intents are push, pull-request creation, and merge; completion always verifies a merge commit. GitHub observations bind only branch-protection-required check runs, commit-status contexts, and review decisions rather than treating optional activity as required. The primary checkout need not be clean.
-
-## Protected receipts
-
-Review evidence, standing grants, revocations, reconciliation activation, orchestration acknowledgements, and owner decisions require canonical signed control-plane receipts when their transition is protected. The bundle must pin the corresponding public authority material and identify it with `control_plane_authority`. Private signing keys are external to this repository and are never generated or stored by the CLI.
-
-## Minimal smoke test
-
-After creating the three source YAML files and descriptor above:
+The bundle root is also the plan repository root. Record an `initial`
+checkpoint before generated locks, use `revision` for an accepted source
+change, and record a `lock` checkpoint after:
 
 ```sh
-bundle_dir=/absolute/path/to/sample-workspace
-runtime_dir="$bundle_dir/runtime"
-request_file="$bundle_dir/init-request.json"
-
-feature workspace validate --bundle "$bundle_dir" --write-locks --json
-feature workspace init --bundle "$bundle_dir" --workspace "$runtime_dir" --input "$request_file" --json
-feature workspace status --bundle "$bundle_dir" --workspace "$runtime_dir" --json
+feature workspace validate --bundle "$bundle_root" --write-locks --json
 ```
 
-`init-request.json` contains one canonical request:
+The generated ownership inventory permits replacement only while each existing
+generated file still matches its last generated hash. Modified projections,
+hidden paths, symlink traversal, missing inventory, and unowned conflicts fail
+closed. Do not edit `generated/` by hand.
+
+Keep runtime state and attempt worktrees outside the source bundle and the
+target repository. Initialization records the verified worktree root and the
+exact plan lock checkpoint:
 
 ```json
-{"schema_version":2,"occurred_at":"2026-07-22T12:00:00Z"}
+{
+  "schema_version": 2,
+  "occurred_at": "2026-07-24T12:00:00Z",
+  "worktree_root": "/absolute/path/to/attempt-worktrees"
+}
 ```
+
+Runtime state is append-only under `<runtime-root>/state/`. A runtime without
+the local v3 format marker is rejected with a regeneration diagnostic; it is
+not interpreted or migrated.
+
+## Local execution
+
+1. Run `recover`, then read `status`, `scheduler`, `gates`, and `report`.
+2. Select a `ready` merge unit. Submit `attempt reserve` with its plan ID,
+   merge-unit ID, next attempt number, and goal. The base, branch, and worktree
+   root are derived from locked runtime state.
+3. Submit `attempt materialize`. Work only in the returned worktree and branch.
+4. Use `commit next` for a configured commit step. Otherwise make ordinary
+   local commits and keep the worktree clean.
+5. For configured review, use `review start`, `reserve`, `record`, bounded fix
+   actions, and `ready`. Reviewer labels are descriptive local metadata, and
+   every result binds the exact request, head, tree, and evidence.
+6. Without configured review, submit `attempt adopt-head` for the exact clean
+   descendant selected for integration.
+7. Submit `integrate merge-unit`. Integration creates a deterministic
+   two-parent local commit and compare-and-swap updates only the workspace-owned
+   feature ref.
+8. Record and resolve the attempt boundary and any returned local directives.
+   Acknowledgements and owner responses bind the exact directive, goal, head,
+   and idempotency inputs.
+9. After every unit is integrated and every boundary is resolved, run
+   `complete verify` to record local workspace completion.
+
+Every mutation returns a fresh journal-derived report. Treat that report as the
+source of truth instead of reconstructing state from remembered commands.
+
+The journal hash chain and stored digests detect accidental corruption; they
+do not authenticate people. Reviewer and owner labels are descriptive. Local
+completion proves the recorded Git topology and workflow state only.
 
 ## Development
 
 ```sh
 gofmt -w cmd/feature/*.go internal/install/*.go internal/plan/*.go internal/workspace/*.go internal/workspacecmd/*.go
-go test ./...
-go test -shuffle=on ./...
-go test -race ./internal/workspace ./internal/workspacecmd
+go test -timeout=20m ./...
+go test -shuffle=on -timeout=20m ./...
+go test -race -timeout=20m ./internal/workspace ./internal/workspacecmd
 go vet ./...
 ./install-skill.sh --plan --target all --json
 stage="$(mktemp -d)"
@@ -225,9 +262,7 @@ stage="$(mktemp -d)"
 "$stage/.local/bin/feature" version
 ```
 
-The exact-head CI baseline is also reusable locally. Set the exact commit expected
-for the checkout, then run every Linux/macOS-compatible gate or an individual
-gate:
+The exact-head CI baseline is reusable locally:
 
 ```sh
 EXPECTED_HEAD_SHA="$(git rev-parse HEAD)" ./scripts/ci-baseline.sh all
@@ -241,7 +276,7 @@ FEATURE_SHUFFLE_SEED=1700000000 ./scripts/ci-baseline.sh shuffle
 ./scripts/ci-baseline.sh clean
 ```
 
-The GitHub workflow checks out the pull request head SHA directly, disables
-persisted checkout credentials and dependency caching, and runs the same gates
-on pinned Ubuntu and macOS runners. A shuffled run prints its seed so it can be
-reproduced with `FEATURE_SHUFFLE_SEED`.
+The hosted pull-request workflow checks out the exact requested head, disables
+persisted checkout state and dependency caching, and runs the same gates on
+pinned Ubuntu and macOS runners. A shuffled run prints its seed for
+reproduction.

@@ -468,8 +468,7 @@ func TestReviewLifecycleVerifiesLocalExactHeadEvidenceAndBoundaryReadiness(t *te
 	manifest := harness.definition.Workspace()
 	if readiness.Purpose() != workspace.ReviewMergeReadinessPurpose ||
 		readiness.WorkspaceID() != manifest.ID() || readiness.Generation() != harness.definition.Generation() ||
-		readiness.MergeUnit() != harness.attempt.MergeUnit() || readiness.Repository() != manifest.Repository() ||
-		readiness.Remote() != manifest.Remote() {
+		readiness.MergeUnit() != harness.attempt.MergeUnit() {
 		t.Fatalf("review readiness scope = %#v", readiness)
 	}
 	type readinessJSON struct {
@@ -479,8 +478,6 @@ func TestReviewLifecycleVerifiesLocalExactHeadEvidenceAndBoundaryReadiness(t *te
 		Generation    string `json:"generation"`
 		PlanID        string `json:"plan_id"`
 		MergeUnitID   string `json:"merge_unit_id"`
-		Repository    string `json:"repository"`
-		Remote        string `json:"remote"`
 		AttemptID     string `json:"attempt_id"`
 		Round         uint16 `json:"round"`
 		Head          string `json:"head"`
@@ -492,8 +489,7 @@ func TestReviewLifecycleVerifiesLocalExactHeadEvidenceAndBoundaryReadiness(t *te
 		WorkspaceID: manifest.ID().String(), Generation: harness.definition.Generation().String(),
 		PlanID:      harness.attempt.MergeUnit().PlanID().String(),
 		MergeUnitID: harness.attempt.MergeUnit().MergeUnitID().String(),
-		Repository:  manifest.Repository().String(), Remote: manifest.Remote(),
-		AttemptID: harness.attempt.AttemptID().String(), Round: 1,
+		AttemptID:   harness.attempt.AttemptID().String(), Round: 1,
 		Head: harness.attempt.VerifiedHead().String(), Tree: harness.tree.String(),
 		Loop: mustReviewState(t, harness.journal, harness.definition, harness.attempt.AttemptID()).Loop().Digest().String(),
 	})
@@ -566,7 +562,7 @@ func TestReviewRunnerRejectsRepositoryMutationAndWeakIsolation(t *testing.T) {
 		t, request, workspace.MustID("security-one"), workspace.ReviewResultCompleted, nil, workspace.Digest{},
 	)
 	runner := reviewRunnerStub{run: func(invocation workspace.ReviewInvocation) (workspace.ReviewRunnerOutput, error) {
-		if invocation.Request().Digest() != request.Digest() || invocation.Repository() != harness.definition.Workspace().Repository() ||
+		if invocation.Request().Digest() != request.Digest() ||
 			invocation.Worktree() != harness.attempt.Worktree() || invocation.Branch() != harness.attempt.Branch() {
 			t.Fatalf("review invocation changed immutable inputs: %#v", invocation)
 		}
@@ -611,7 +607,7 @@ func TestReviewRunnerRejectsRepositoryMutationAndWeakIsolation(t *testing.T) {
 	if err != nil || !ok || weakRequest.Invocation() != 3 {
 		t.Fatalf("weak-isolation retry request = %#v ok=%v err=%v", weakRequest, ok, err)
 	}
-	weakIsolation := workspace.NewReviewIsolationProof(true, true, false, false, true, false)
+	weakIsolation := workspace.NewReviewIsolationProof(true, true, false, true, false)
 	weakSubmission, err := workspace.NewReviewResultSubmission(workspace.ReviewResultSubmissionOptions{
 		RequestDigest: weakRequest.Digest(), ReviewerInstance: workspace.MustID("security-one"),
 		Status: workspace.ReviewResultCompleted, Isolation: weakIsolation,

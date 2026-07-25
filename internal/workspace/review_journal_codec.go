@@ -30,13 +30,12 @@ type reviewFindingPayloadWire struct {
 }
 
 type reviewIsolationPayloadWire struct {
-	RepositoryReadOnly   bool   `json:"repository_read_only"`
-	ScratchEphemeral     bool   `json:"scratch_ephemeral"`
-	CredentialsAvailable bool   `json:"credentials_available"`
-	RepositoryHooks      bool   `json:"repository_hooks"`
-	WriteNetwork         bool   `json:"write_network"`
-	ExternalWrite        bool   `json:"external_write"`
-	Digest               string `json:"digest"`
+	RepositoryReadOnly bool   `json:"repository_read_only"`
+	ScratchEphemeral   bool   `json:"scratch_ephemeral"`
+	RepositoryHooks    bool   `json:"repository_hooks"`
+	WriteNetwork       bool   `json:"write_network"`
+	ExternalWrite      bool   `json:"external_write"`
+	Digest             string `json:"digest"`
 }
 
 type reviewResultPayloadWire struct {
@@ -626,8 +625,8 @@ func reviewResultToWire(result ReviewResultSubmission) reviewResultPayloadWire {
 		Status: result.status, Findings: findings, InfrastructureFailure: result.infrastructureFailure.String(),
 		Isolation: reviewIsolationPayloadWire{
 			RepositoryReadOnly: result.isolation.repositoryReadOnly, ScratchEphemeral: result.isolation.scratchEphemeral,
-			CredentialsAvailable: result.isolation.credentialsAvailable, RepositoryHooks: result.isolation.repositoryHooks,
-			WriteNetwork: result.isolation.writeNetwork, ExternalWrite: result.isolation.externalWrite,
+			RepositoryHooks: result.isolation.repositoryHooks,
+			WriteNetwork:    result.isolation.writeNetwork, ExternalWrite: result.isolation.externalWrite,
 			Digest: result.isolation.digest.String(),
 		},
 		Digest: result.digest.String(),
@@ -675,8 +674,7 @@ func reviewResultFromWire(wire reviewResultPayloadWire) (ReviewResultSubmission,
 	}
 	isolation := NewReviewIsolationProof(
 		wire.Isolation.RepositoryReadOnly, wire.Isolation.ScratchEphemeral,
-		wire.Isolation.CredentialsAvailable, wire.Isolation.RepositoryHooks,
-		wire.Isolation.WriteNetwork, wire.Isolation.ExternalWrite,
+		wire.Isolation.RepositoryHooks, wire.Isolation.WriteNetwork, wire.Isolation.ExternalWrite,
 	)
 	isolationDigest, err := ParseDigest(wire.Isolation.Digest)
 	if err != nil || isolationDigest != isolation.digest {

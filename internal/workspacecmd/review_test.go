@@ -30,11 +30,7 @@ func TestLocalReviewRepositoryAdoptsActualCleanDescendantHead(t *testing.T) {
 	runGitTest(t, repository, "commit", "-m", "Implementation")
 	head := parseWorkspaceCommandGitObject(t, strings.TrimSpace(runGitTest(t, repository, "rev-parse", "HEAD")))
 	tree := parseWorkspaceCommandGitObject(t, strings.TrimSpace(runGitTest(t, repository, "rev-parse", "HEAD^{tree}")))
-	identity, err := workspace.NewRepositoryIdentity("https://github.com/example/project.git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	request, err := workspace.NewReviewRepositoryRequest(identity, repository, "main", base)
+	request, err := workspace.NewReviewRepositoryRequest(repository, "main", base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +41,7 @@ func TestLocalReviewRepositoryAdoptsActualCleanDescendantHead(t *testing.T) {
 	}
 
 	runGitTest(t, repository, "reset", "--hard", gitObjectHex(base))
-	staleRequest, err := workspace.NewReviewRepositoryRequest(identity, repository, "main", head)
+	staleRequest, err := workspace.NewReviewRepositoryRequest(repository, "main", head)
 	if err != nil {
 		t.Fatal(err)
 	}

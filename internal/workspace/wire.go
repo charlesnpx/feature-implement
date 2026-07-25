@@ -1,17 +1,16 @@
 package workspace
 
 type workspaceWire struct {
-	SchemaVersion    int                        `yaml:"schema_version"`
-	ID               string                     `yaml:"id"`
-	Mode             string                     `yaml:"mode"`
-	Repository       repositoryWire             `yaml:"repository"`
-	BaseRef          string                     `yaml:"base_ref"`
-	BaseCommit       string                     `yaml:"base_commit"`
-	FeatureBranch    string                     `yaml:"feature_branch"`
-	ExecutionConfig  string                     `yaml:"execution_config"`
-	Plans            []workspacePlanWire        `yaml:"plans"`
-	Dependencies     *[]workspaceDependencyWire `yaml:"dependencies"`
-	AuthoritySources *[]authoritySourceWire     `yaml:"authority_sources"`
+	SchemaVersion   int                        `yaml:"schema_version"`
+	ID              string                     `yaml:"id"`
+	Mode            string                     `yaml:"mode"`
+	Repository      repositoryWire             `yaml:"repository"`
+	BaseRef         string                     `yaml:"base_ref"`
+	BaseCommit      string                     `yaml:"base_commit"`
+	FeatureBranch   string                     `yaml:"feature_branch"`
+	ExecutionConfig string                     `yaml:"execution_config"`
+	Plans           []workspacePlanWire        `yaml:"plans"`
+	Dependencies    *[]workspaceDependencyWire `yaml:"dependencies"`
 }
 
 type repositoryWire struct {
@@ -31,12 +30,6 @@ type workspaceDependencyWire struct {
 type mergeUnitReferenceWire struct {
 	PlanID      string `yaml:"plan_id"`
 	MergeUnitID string `yaml:"merge_unit_id"`
-}
-
-type authoritySourceWire struct {
-	ID       string `yaml:"id"`
-	Kind     string `yaml:"kind"`
-	Location string `yaml:"location"`
 }
 
 type planWire struct {
@@ -71,12 +64,11 @@ type executionConfigWire struct {
 }
 
 type executionPolicyWire struct {
-	RequirePassingChecks  *bool   `yaml:"require_passing_checks"`
-	RequireSignedReceipts *bool   `yaml:"require_signed_receipts"`
-	AllowWriteNetwork     *bool   `yaml:"allow_write_network"`
-	MaxAttempts           *uint16 `yaml:"max_attempts"`
-	MaxReviewRounds       *uint16 `yaml:"max_review_rounds"`
-	MaxReviewFixes        *uint16 `yaml:"max_review_fixes"`
+	RequirePassingChecks *bool   `yaml:"require_passing_checks"`
+	AllowWriteNetwork    *bool   `yaml:"allow_write_network"`
+	MaxAttempts          *uint16 `yaml:"max_attempts"`
+	MaxReviewRounds      *uint16 `yaml:"max_review_rounds"`
+	MaxReviewFixes       *uint16 `yaml:"max_review_fixes"`
 }
 
 type executionProfileWire struct {

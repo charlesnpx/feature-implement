@@ -32,47 +32,6 @@ func TestWorkspaceBundleRejectsHiddenDuplicateAndAmbiguousSources(t *testing.T) 
 		}
 	})
 
-	t.Run("duplicate authority", func(t *testing.T) {
-		authority := map[string]any{
-			"id": "owner-policy", "kind": "git_blob", "content_path": "authority/owner-policy.yaml",
-			"repository_identity": "https://github.com/example/policy.git",
-			"commit_object":       "sha1:" + strings.Repeat("1", 40), "blob_object": gitSHA1Blob(fixture.gitData),
-		}
-		root := writeDefinitionBundle(t, fixture, map[string]any{
-			"authorities": []any{authority, authority},
-		})
-		if _, err := workspace.LoadWorkspaceBundle(root); err == nil || !strings.Contains(err.Error(), "duplicate authority") {
-			t.Fatalf("duplicate authority error = %v", err)
-		}
-	})
-
-	t.Run("duplicate authority content path", func(t *testing.T) {
-		authority := map[string]any{
-			"id": "owner-policy", "kind": "git_blob", "content_path": "authority/owner-policy.yaml",
-			"repository_identity": "https://github.com/example/policy.git",
-			"commit_object":       "sha1:" + strings.Repeat("1", 40), "blob_object": gitSHA1Blob(fixture.gitData),
-		}
-		other := map[string]any{
-			"id": "organization-policy", "kind": "external_digest", "content_path": "authority/owner-policy.yaml",
-			"expected_source_digest": workspace.DigestBytes(fixture.gitData).String(),
-		}
-		root := writeDefinitionBundle(t, fixture, map[string]any{"authorities": []any{authority, other}})
-		if _, err := workspace.LoadWorkspaceBundle(root); err == nil || !strings.Contains(err.Error(), "claimed by both") {
-			t.Fatalf("duplicate authority source error = %v", err)
-		}
-	})
-
-	t.Run("authority aliases plan source", func(t *testing.T) {
-		authority := map[string]any{
-			"id": "organization-policy", "kind": "external_digest", "content_path": fixture.sources.Plans[0].Path,
-			"expected_source_digest": workspace.DigestBytes(fixture.sources.Plans[0].Bytes).String(),
-		}
-		root := writeDefinitionBundle(t, fixture, map[string]any{"authorities": []any{authority}})
-		if _, err := workspace.LoadWorkspaceBundle(root); err == nil || !strings.Contains(err.Error(), "claimed by both") {
-			t.Fatalf("cross-role source alias error = %v", err)
-		}
-	})
-
 	t.Run("descriptor self reference", func(t *testing.T) {
 		root := writeDefinitionBundle(t, fixture, map[string]any{"workspace": workspace.WorkspaceBundleFileName})
 		if _, err := workspace.LoadWorkspaceBundle(root); err == nil || !strings.Contains(err.Error(), "cannot reference its descriptor") {
@@ -87,41 +46,24 @@ func TestWorkspaceBundleRejectsHiddenDuplicateAndAmbiguousSources(t *testing.T) 
 		}
 	})
 
-	t.Run("null required authorities", func(t *testing.T) {
-		root := writeDefinitionBundle(t, fixture, map[string]any{"authorities": nil})
-		if _, err := workspace.LoadWorkspaceBundle(root); err == nil || !strings.Contains(err.Error(), "required JSON field") {
-			t.Fatalf("null authorities error = %v", err)
+	t.Run("removed authorities", func(t *testing.T) {
+		root := writeDefinitionBundle(t, fixture, map[string]any{"authorities": []any{}})
+		if _, err := workspace.LoadWorkspaceBundle(root); err == nil || !strings.Contains(err.Error(), "unknown field") {
+			t.Fatalf("removed authorities error = %v", err)
 		}
 	})
 
-	t.Run("omitted required authorities", func(t *testing.T) {
-		root := writeDefinitionBundle(t, fixture, nil)
-		descriptor := filepath.Join(root, workspace.WorkspaceBundleFileName)
-		content, err := os.ReadFile(descriptor)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var document map[string]any
-		if err := json.Unmarshal(content, &document); err != nil {
-			t.Fatal(err)
-		}
-		delete(document, "authorities")
-		content, err = json.Marshal(document)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(descriptor, content, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := workspace.LoadWorkspaceBundle(root); err == nil || !strings.Contains(err.Error(), "required JSON field") {
-			t.Fatalf("omitted authorities error = %v", err)
+	t.Run("removed control plane authority", func(t *testing.T) {
+		root := writeDefinitionBundle(t, fixture, map[string]any{"control_plane_authority": "owner-policy"})
+		if _, err := workspace.LoadWorkspaceBundle(root); err == nil || !strings.Contains(err.Error(), "unknown field") {
+			t.Fatalf("removed control-plane authority error = %v", err)
 		}
 	})
 
 	t.Run("duplicate descriptor key", func(t *testing.T) {
 		root := writeDefinitionBundle(t, fixture, nil)
 		descriptor := filepath.Join(root, workspace.WorkspaceBundleFileName)
-		content := `{"schema_version":2,"schema_version":2,"workspace":"feature.workspace.yaml","plans":["plans/alpha.yaml"],"execution_config":"config/execution.yaml","authorities":[]}`
+		content := `{"schema_version":2,"schema_version":2,"workspace":"feature.workspace.yaml","plans":["plans/alpha.yaml"],"execution_config":"config/execution.yaml"}`
 		if err := os.WriteFile(descriptor, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -213,7 +155,7 @@ func TestWorkspaceBundleRetainsAndRevalidatesPlanRootIdentity(t *testing.T) {
 	}
 }
 
-func TestWorkspaceBundleBindsDescriptorAndControlPlaneAuthorityIntoGeneration(t *testing.T) {
+func TestWorkspaceBundleBindsDescriptorAndRejectsProviderEraFields(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	root := writeDefinitionBundle(t, fixture, nil)
 	first, err := workspace.LoadWorkspaceBundle(root)
@@ -242,12 +184,9 @@ func TestWorkspaceBundleBindsDescriptorAndControlPlaneAuthorityIntoGeneration(t 
 	if err := os.WriteFile(descriptorPath, updatedBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	second, err := workspace.LoadWorkspaceBundle(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.Definition().Generation() == second.Definition().Generation() {
-		t.Fatal("control_plane_authority changed without changing the effective generation")
+	if _, err := workspace.LoadWorkspaceBundle(root); err == nil ||
+		!strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("provider-era descriptor field was accepted: %v", err)
 	}
 }
 
@@ -259,17 +198,6 @@ func writeDefinitionBundle(t *testing.T, fixture definitionFixture, overrides ma
 		"workspace":        "feature.workspace.yaml",
 		"plans":            []string{"plans/alpha.yaml"},
 		"execution_config": "config/execution.yaml",
-		"authorities": []any{
-			map[string]any{
-				"id": "owner-policy", "kind": "git_blob", "content_path": "authority/owner-policy.yaml",
-				"repository_identity": "https://github.com/example/policy.git",
-				"commit_object":       "sha1:" + strings.Repeat("1", 40), "blob_object": gitSHA1Blob(fixture.gitData),
-			},
-			map[string]any{
-				"id": "organization-policy", "kind": "external_digest", "content_path": "authority/organization-policy.yaml",
-				"expected_source_digest": workspace.DigestBytes(fixture.extData).String(),
-			},
-		},
 	}
 	for key, value := range overrides {
 		descriptor[key] = value
@@ -283,8 +211,6 @@ func writeDefinitionBundle(t *testing.T, fixture definitionFixture, overrides ma
 		fixture.sources.Workspace.Path:       fixture.sources.Workspace.Bytes,
 		fixture.sources.Plans[0].Path:        fixture.sources.Plans[0].Bytes,
 		fixture.sources.ExecutionConfig.Path: fixture.sources.ExecutionConfig.Bytes,
-		"authority/owner-policy.yaml":        fixture.gitData,
-		"authority/organization-policy.yaml": fixture.extData,
 	}
 	for relative, content := range files {
 		path := filepath.Join(root, filepath.FromSlash(relative))

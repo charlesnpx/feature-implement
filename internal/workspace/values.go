@@ -137,21 +137,6 @@ func (object GitObjectID) Bytes() []byte {
 
 func (object GitObjectID) IsZero() bool { return object.length == 0 }
 
-// RepositoryIdentity is a stable provider-independent repository identity.
-type RepositoryIdentity struct {
-	value string
-}
-
-func NewRepositoryIdentity(value string) (RepositoryIdentity, error) {
-	value = strings.TrimSpace(value)
-	if err := validateBoundedText("repository identity", value, 2048); err != nil {
-		return RepositoryIdentity{}, err
-	}
-	return RepositoryIdentity{value: value}, nil
-}
-
-func (identity RepositoryIdentity) String() string { return identity.value }
-
 // Argv is a typed process invocation. It never stores or renders a shell
 // command string.
 type Argv struct {
@@ -231,8 +216,8 @@ func NewCommand(argv Argv, directory string, environment []EnvironmentVariable, 
 		if variable.name == "" {
 			return Command{}, fmt.Errorf("command contains an invalid environment variable")
 		}
-		if providerCredentialEnvironment(variable.name) {
-			return Command{}, fmt.Errorf("non-provider command environment cannot carry credential variable %s", variable.name)
+		if sensitiveEnvironmentVariable(variable.name) {
+			return Command{}, fmt.Errorf("command environment cannot carry sensitive variable %s", variable.name)
 		}
 		if _, exists := seen[variable.name]; exists {
 			return Command{}, fmt.Errorf("duplicate environment variable %s", variable.name)

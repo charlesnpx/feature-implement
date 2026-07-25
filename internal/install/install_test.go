@@ -2,6 +2,7 @@ package install
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -9,14 +10,21 @@ import (
 
 func TestRunPlanDoesNotWrite(t *testing.T) {
 	stage := t.TempDir()
-	result, err := Run(Options{Operation: "plan", Target: "codex", InstallRoot: stage, Version: "test"})
+	result, err := Run(Options{
+		Operation: "plan", Target: "codex",
+		InstallRoot: stage, Version: "test",
+	})
 	if err != nil {
 		t.Fatalf("Run plan: %v", err)
 	}
-	if result.Schema != 1 || result.Name != "feature-implement" || result.Kind != "delegated" {
+	if result.Schema != 1 ||
+		result.Name != "feature-implement" ||
+		result.Kind != "delegated" {
 		t.Fatalf("bad result metadata: %+v", result)
 	}
-	if _, err := os.Stat(filepath.Join(stage, ".codex", "skills", "feature", "SKILL.md")); !os.IsNotExist(err) {
+	if _, err := os.Stat(
+		filepath.Join(stage, ".codex", "skills", "feature", "SKILL.md"),
+	); !os.IsNotExist(err) {
 		t.Fatalf("plan should not write files, stat err=%v", err)
 	}
 	for _, files := range result.Targets {
@@ -30,7 +38,10 @@ func TestRunPlanDoesNotWrite(t *testing.T) {
 
 func TestRunInstallStagedAllTargets(t *testing.T) {
 	stage := t.TempDir()
-	result, err := Run(Options{Operation: "install", Target: "all", InstallRoot: stage, Version: "test"})
+	result, err := Run(Options{
+		Operation: "install", Target: "all",
+		InstallRoot: stage, Version: "test",
+	})
 	if err != nil {
 		t.Fatalf("Run install: %v", err)
 	}
@@ -48,30 +59,54 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			t.Fatalf("expected installed file %s: %v", path, err)
 		}
 	}
-	codexFeatureMetadata := readInstalledSkill(t, filepath.Join(stage, ".codex", "skills", "feature", "agents", "openai.yaml"))
-	assertContainsAll(t, "codex feature metadata", codexFeatureMetadata, []string{
-		`short_description: "Create workspace-v2 bundles"`,
-		`default_prompt: "Use $feature to create and validate an implementation-ready workspace-v2 bundle."`,
-		"policy:",
-		"allow_implicit_invocation: false",
-	})
-	codexImplementMetadata := readInstalledSkill(t, filepath.Join(stage, ".codex", "skills", "feature:implement", "agents", "openai.yaml"))
-	assertContainsAll(t, "codex implement metadata", codexImplementMetadata, []string{
-		`short_description: "Execute governed workspace bundles"`,
-		`default_prompt: "Use $feature:implement to execute a validated workspace-v2 bundle through governed merge units."`,
-		"policy:",
-		"allow_implicit_invocation: false",
-	})
+	if len(result.Setup) != 1 ||
+		result.Setup[0].Kind != "executable" ||
+		result.Setup[0].Executable != "git" {
+		t.Fatalf("installer setup is not local Git only: %+v", result.Setup)
+	}
 	for target, files := range result.Targets {
 		if len(files.Files) == 0 {
 			t.Fatalf("target %s has no files", target)
 		}
 		for _, file := range files.Files {
 			if len(file.SHA256) != 64 {
-				t.Fatalf("target %s file %s missing sha256: %+v", target, file.Path, file)
+				t.Fatalf(
+					"target %s file %s missing sha256: %+v",
+					target, file.Path, file,
+				)
 			}
 		}
 	}
+
+	codexFeatureMetadata := readInstalledSkill(
+		t,
+		filepath.Join(
+			stage, ".codex", "skills", "feature", "agents", "openai.yaml",
+		),
+	)
+	assertContainsAll(t, "codex feature metadata", codexFeatureMetadata, []string{
+		`short_description: "Create workspace-v2 bundles"`,
+		`default_prompt: "Use $feature to create and validate an implementation-ready workspace-v2 bundle."`,
+		"policy:",
+		"allow_implicit_invocation: false",
+	})
+	codexImplementMetadata := readInstalledSkill(
+		t,
+		filepath.Join(
+			stage, ".codex", "skills", "feature:implement",
+			"agents", "openai.yaml",
+		),
+	)
+	assertContainsAll(
+		t, "codex implement metadata", codexImplementMetadata,
+		[]string{
+			`short_description: "Execute local workspace bundles"`,
+			`default_prompt: "Use $feature:implement to execute a validated workspace-v2 bundle through local merge units."`,
+			"policy:",
+			"allow_implicit_invocation: false",
+		},
+	)
+
 	planningSkills := []string{
 		filepath.Join(stage, ".codex", "skills", "feature", "SKILL.md"),
 		filepath.Join(stage, ".claude", "skills", "feature", "SKILL.md"),
@@ -80,24 +115,27 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 		content := readInstalledSkill(t, path)
 		assertContainsAll(t, path, content, []string{
 			"Invocation guard",
-			"explicitly",
 			"workspace-v2 bundle",
 			"~/tmp/feature-plans/<workspace-id>/",
 			"feature.workspace.bundle.json",
 			"feature.workspace.yaml",
 			"plans/*.yaml",
 			"config/execution.yaml",
-			"Quote every YAML string scalar",
-			"Keep integers and booleans typed",
+			"Quote YAML string",
 			"Default to one merge unit per story",
 			"pause_only",
-			"require_signed_receipts",
-			"operator-supplied, externally pinned public authority material",
 			"at most three plan-review iterations",
-			"evidence-backed Critical and High findings",
-			"do not start another plan-review iteration",
+			"evidence-backed Critical and High fixes",
+			"preceding review reported a Critical or High finding",
+			"feature plan checkpoint --kind initial",
 			"feature workspace validate --bundle <bundle-dir> --write-locks --json",
-			"tool-owned immutable projections",
+			"feature plan checkpoint --kind lock",
+			"mode: \"local\"",
+			"base_ref: \"refs/heads/main\"",
+			"base_commit:",
+			"feature_branch:",
+			"require_passing_checks",
+			"allow_write_network",
 			"feature workspace schema bundle --json",
 			"feature workspace schema requests --json",
 			"feature workspace example",
@@ -109,20 +147,21 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"feature plan schema",
 			"feature status <plan-dir>",
 			"story_progress_label",
-			"existing `feature implement` lifecycle",
-			"local-only",
-			"remote-delete",
+			"authorities",
+			"authority_sources",
+			"repository:\n  identity:",
+			"require_signed_receipts",
 			"Repeat until a fresh review has no Critical or High findings",
 		})
 		assertInOrder(t, path, content, []string{
 			"Invocation guard",
-			"Create a strict schema-version-2 workspace bundle",
+			"Create a strict schema-version-two workspace bundle",
 			"Create `feature.workspace.bundle.json`",
 			"feature workspace validate --bundle <bundle-dir> --json",
-			"to review the source bundle",
-			"evidence-backed Critical and High findings",
+			"subagent to review the source bundle",
+			"Apply evidence-backed Critical and High fixes",
 			"no Critical or High findings",
-			"write-locks",
+			"feature plan checkpoint --kind initial",
 			"Bundle contract",
 		})
 	}
@@ -135,56 +174,43 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 		content := readInstalledSkill(t, path)
 		assertContainsAll(t, path, content, []string{
 			"Invocation guard",
-			"explicitly",
-			"validated workspace-v2 bundle",
+			"workspace-v2 bundle",
 			"feature.workspace.bundle.json",
 			"feature workspace validate --bundle <bundle-dir> --write-locks --json",
-			"dedicated `<runtime-dir>` and `<worktree-root>` outside the primary checkout",
+			"dedicated `<runtime-dir>` and `<worktree-root>` outside the primary",
 			"primary checkout may be dirty",
 			"feature workspace schema requests --json",
-			"explicit operator approval immediately before each external provider write",
 			"feature workspace recover",
-			"feature workspace scheduler",
+			"`scheduler`",
 			"attempt reserve",
 			"attempt materialize",
-			"attempt adopt-head",
 			"journal-derived report",
 			"feature workspace commit next",
-			"typed provider intents",
 			"review start",
 			"review reserve",
 			"review record",
 			"review ready",
-			"at most three iterations for the merge unit",
-			"do not start another broad review iteration",
-			"control grant",
-			"`push`, `open_pull_request`, and `merge`",
-			"provider dispatch",
-			"provider preflight",
-			"merge commit",
+			"at most three",
+			"attempt adopt-head",
+			"integrate merge-unit",
+			"deterministic two-parent commit",
+			"compare-and-swap updates only the",
 			"complete verify",
-			"Provider responses contain typed evidence and idempotency markers only",
 			"attempt boundary",
 			"complete_goal_and_wait",
 			"owner_gate",
 			"create_next_goal",
-			"`status`, `gates`, `queue`, `receipts`, and `report`",
+			"`status`, `scheduler`, `gates`, and `report`",
 		})
 		assertNotContainsAny(t, path, content, []string{
 			"feature status <plan-dir>",
-			"existing `feature implement` lifecycle",
 			"feature implement next",
 			"feature implement start",
 			"--write-state",
 			"story_progress_label",
 			"review-status",
 			"changes-applied",
-			"local-only",
-			"local_only",
-			"remote-delete",
-			"provider_command",
 			"git -C <worktree>",
-			"gh pr",
 			"Continue until `review ready` returns exact-head readiness",
 		})
 		assertInOrder(t, path, content, []string{
@@ -194,43 +220,74 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"attempt reserve",
 			"attempt materialize",
 			"Implement and commit",
-			"Governed review",
+			"Review",
 			"review start",
 			"review ready",
-			"Protected authorization and provider effects",
-			"control grant",
-			"provider dispatch",
-			"provider preflight",
+			"Integrate, resolve boundaries, and complete",
+			"integrate merge-unit",
+			"attempt boundary",
 			"complete verify",
-			"Boundaries and continuation",
 			"Finish",
 		})
 	}
 
-	codexImplementSkill := filepath.Join(stage, ".codex", "skills", "feature:implement", "SKILL.md")
+	forbiddenRuntimeTerms := []string{
+		"provider", "github", "credential", "authorization",
+		"signed receipt", "control plane", "pull request",
+		"standing grant", "replay claim", "remote completion",
+	}
+	for _, path := range append(planningSkills, implementSkills...) {
+		content := strings.ToLower(readInstalledSkill(t, path))
+		assertNotContainsAny(t, path, content, forbiddenRuntimeTerms)
+	}
+
+	binaryPath := filepath.Join(stage, ".local", "bin", "feature")
+	helpCommand := exec.Command(binaryPath, "workspace", "--help")
+	help, err := helpCommand.CombinedOutput()
+	if err != nil {
+		t.Fatalf("installed feature --help: %v\n%s", err, help)
+	}
+	helpText := strings.ToLower(string(help))
+	assertContainsAll(t, binaryPath+" --help", helpText, []string{
+		"feature workspace", "attempt", "review", "integrate", "complete",
+	})
+	assertNotContainsAny(t, binaryPath+" --help", helpText, forbiddenRuntimeTerms)
+
+	codexImplementSkill := filepath.Join(
+		stage, ".codex", "skills", "feature:implement", "SKILL.md",
+	)
 	codexImplementContent := readInstalledSkill(t, codexImplementSkill)
 	assertContainsAll(t, codexImplementSkill, codexImplementContent, []string{
-		"literal `$feature:implement` invocation",
+		"literal",
+		"`$feature:implement` invocation",
 		"fresh Codex subagent",
 	})
-	claudeImplementSkill := filepath.Join(stage, ".claude", "skills", "feature:implement", "SKILL.md")
+	claudeImplementSkill := filepath.Join(
+		stage, ".claude", "skills", "feature:implement", "SKILL.md",
+	)
 	claudeImplementContent := readInstalledSkill(t, claudeImplementSkill)
 	assertContainsAll(t, claudeImplementSkill, claudeImplementContent, []string{
-		"literal `/feature:implement` invocation",
+		"literal",
+		"`/feature:implement` invocation",
 		"fresh Claude subagent",
 	})
 }
 
 func readInstalledSkill(t *testing.T, path string) string {
 	t.Helper()
-	b, err := os.ReadFile(path)
+	content, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read staged skill %s: %v", path, err)
 	}
-	return string(b)
+	return string(content)
 }
 
-func assertContainsAll(t *testing.T, path string, content string, wants []string) {
+func assertContainsAll(
+	t *testing.T,
+	path string,
+	content string,
+	wants []string,
+) {
 	t.Helper()
 	for _, want := range wants {
 		if !strings.Contains(content, want) {
@@ -239,7 +296,12 @@ func assertContainsAll(t *testing.T, path string, content string, wants []string
 	}
 }
 
-func assertNotContainsAny(t *testing.T, path string, content string, forbidden []string) {
+func assertNotContainsAny(
+	t *testing.T,
+	path string,
+	content string,
+	forbidden []string,
+) {
 	t.Helper()
 	for _, value := range forbidden {
 		if strings.Contains(content, value) {
@@ -248,13 +310,21 @@ func assertNotContainsAny(t *testing.T, path string, content string, forbidden [
 	}
 }
 
-func assertInOrder(t *testing.T, path string, content string, wants []string) {
+func assertInOrder(
+	t *testing.T,
+	path string,
+	content string,
+	wants []string,
+) {
 	t.Helper()
 	offset := 0
 	for _, want := range wants {
 		index := strings.Index(content[offset:], want)
 		if index < 0 {
-			t.Fatalf("staged skill %s missing %q after byte offset %d", path, want, offset)
+			t.Fatalf(
+				"staged skill %s missing %q after byte offset %d",
+				path, want, offset,
+			)
 		}
 		offset += index + len(want)
 	}
@@ -262,14 +332,20 @@ func assertInOrder(t *testing.T, path string, content string, wants []string) {
 
 func TestRunTargetFiltering(t *testing.T) {
 	stage := t.TempDir()
-	result, err := Run(Options{Operation: "plan", Target: "tools", InstallRoot: stage, Version: "test"})
+	result, err := Run(Options{
+		Operation: "plan", Target: "tools",
+		InstallRoot: stage, Version: "test",
+	})
 	if err != nil {
 		t.Fatalf("Run tools plan: %v", err)
 	}
 	if len(result.Targets) != 1 || len(result.Targets["tools"].Files) != 1 {
 		t.Fatalf("tools target filtering failed: %+v", result.Targets)
 	}
-	result, err = Run(Options{Operation: "plan", Target: "claude", InstallRoot: stage, Version: "test"})
+	result, err = Run(Options{
+		Operation: "plan", Target: "claude",
+		InstallRoot: stage, Version: "test",
+	})
 	if err != nil {
 		t.Fatalf("Run claude plan: %v", err)
 	}

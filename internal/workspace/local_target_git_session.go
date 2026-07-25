@@ -445,7 +445,7 @@ func (session *localTargetGitSession) run(
 	argv := trustedGitArguments(session.git.anchor, arguments...)
 	command := exec.CommandContext(ctx, session.adapter.git.executable, argv...)
 	command.Dir = string(os.PathSeparator)
-	environment, err := BuildNonProviderProcessEnvironment(
+	environment, err := BuildIsolatedProcessEnvironment(
 		os.Environ(), session.adapter.git.environment,
 	)
 	if err != nil {
@@ -644,7 +644,7 @@ func (session *localTargetGitSession) inspectOwnedState(
 		return LocalTargetInspection{}, err
 	}
 	if err := CheckAttemptRefConflicts(
-		session.binding.featureBranch, localRefs, nil, true,
+		session.binding.featureBranch, localRefs, true,
 	); err != nil {
 		return LocalTargetInspection{}, err
 	}

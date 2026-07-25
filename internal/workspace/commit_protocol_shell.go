@@ -63,9 +63,8 @@ func (invocation CommitCheckInvocation) IdempotencyKey() Digest { return invocat
 // CommitCheckRunnerPort is a capability boundary, not a generic process port.
 // An implementation must materialize the invocation's exact commit and tree
 // in its isolated execution root rather than execute against the ambient
-// worktree head. It must also deny credentials, repository hooks,
-// write-capable network access, and provider-broker access, then return a
-// proof describing the actual isolation used. The shell rejects any weaker
+// worktree head. It must also deny repository hooks and write-capable network
+// access, then return a proof describing the actual isolation used. The shell rejects any weaker
 // proof. Worktree is repository input for that materialization, not authority
 // to substitute its current checkout for the invocation bindings.
 type CommitCheckRunnerPort interface {
@@ -340,7 +339,7 @@ func (shell CommitProtocolShell) drive(
 				return fail(fmt.Errorf("run configured check %s: %w", effect.check.id, err))
 			}
 			if !processResult.isolation.Strict() {
-				return fail(fmt.Errorf("configured check %s did not prove credential, hook, network, and broker isolation", effect.check.id))
+				return fail(fmt.Errorf("configured check %s did not prove hook and network isolation", effect.check.id))
 			}
 			outcome, err := ParseCheckOutcome(effect.check.parser, processResult)
 			if err != nil {

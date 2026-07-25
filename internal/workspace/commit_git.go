@@ -3,9 +3,12 @@ package workspace
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"os"
 	"os/exec"
 	pathpkg "path"
@@ -13,6 +16,26 @@ import (
 	"strings"
 	"unicode/utf8"
 )
+
+func gitBlobObjectID(algorithm GitHashAlgorithm, content []byte) (GitObjectID, error) {
+	var digest hash.Hash
+	switch algorithm {
+	case GitHashSHA1:
+		digest = sha1.New() // Git object-format compatibility, not a security decision.
+	case GitHashSHA256:
+		digest = sha256.New()
+	default:
+		return GitObjectID{}, fmt.Errorf("unsupported Git blob algorithm %q", algorithm)
+	}
+	_, _ = fmt.Fprintf(digest, "blob %d%c", len(content), byte(0))
+	_, _ = digest.Write(content)
+	raw := digest.Sum(nil)
+	var object GitObjectID
+	object.algorithm = algorithm
+	object.length = uint8(len(raw))
+	copy(object.value[:], raw)
+	return object, nil
+}
 
 type GitCommitInspection struct {
 	commit  GitObjectID
@@ -1117,7 +1140,7 @@ func (adapter LocalCommitGitAdapter) runWithInput(
 	}
 	argv := trustedGitArguments(repositoryRoot, arguments...)
 	command := exec.CommandContext(ctx, adapter.git.executable, argv...)
-	environment, err := BuildNonProviderProcessEnvironment(os.Environ(), adapter.git.environment)
+	environment, err := BuildIsolatedProcessEnvironment(os.Environ(), adapter.git.environment)
 	if err != nil {
 		return nil, -1, err
 	}

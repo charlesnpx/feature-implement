@@ -1136,7 +1136,7 @@ func (adapter *RootedFilesystemAdapter) removeEmptyDirectoryExact(
 
 // removeDirectoryTreeExact removes one rooted directory without following
 // links or allowing a replaced entry to be removed under the original
-// authorization. It is reserved for directories whose absence was claimed
+// permission. It is reserved for directories whose absence was claimed
 // before tool-owned materialization began.
 func (adapter *RootedFilesystemAdapter) removeDirectoryTreeExact(relative string) error {
 	rooted, err := NewRootedPath(adapter.rootPath, relative)

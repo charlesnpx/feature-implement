@@ -247,7 +247,8 @@ func TestWorkspaceSchemaExampleAndJournalBackedStatus(t *testing.T) {
 	}
 	if example := runFeatureOutput(t, "workspace", "example"); !strings.Contains(example, `"schema_version": 2`) ||
 		!strings.Contains(example, `"workspace"`) ||
-		!strings.Contains(example, `"authorities": []`) ||
+		!strings.Contains(example, `"execution_config"`) ||
+		strings.Contains(example, "authorities") ||
 		strings.Contains(example, "control_plane") {
 		t.Fatalf("workspace example is incomplete:\n%s", example)
 	}
@@ -444,8 +445,7 @@ func writeWorkspaceBundleFixture(t *testing.T) string {
   "schema_version": 2,
   "workspace": "feature.workspace.yaml",
   "plans": ["plans/alpha.yaml"],
-  "execution_config": "config/execution.yaml",
-  "authorities": []
+  "execution_config": "config/execution.yaml"
 }
 `,
 		"feature.workspace.yaml": fmt.Sprintf(`schema_version: 2
@@ -461,7 +461,6 @@ plans:
   - id: alpha-plan
     source: plans/alpha.yaml
 dependencies: []
-authority_sources: []
 `, repository, baseCommit),
 		"plans/alpha.yaml": `schema_version: 2
 id: alpha-plan
@@ -485,7 +484,6 @@ merge_units:
 		"config/execution.yaml": `schema_version: 2
 policy:
   require_passing_checks: true
-  require_signed_receipts: true
   allow_write_network: false
   max_attempts: 3
   max_review_rounds: 3
@@ -495,7 +493,6 @@ profiles:
     runner: codex
     policy:
       require_passing_checks: true
-      require_signed_receipts: true
       allow_write_network: false
       max_attempts: 3
       max_review_rounds: 3
@@ -509,7 +506,6 @@ merge_units:
       serial_segment: serial-one
     policy:
       require_passing_checks: true
-      require_signed_receipts: true
       allow_write_network: false
       max_attempts: 3
       max_review_rounds: 3

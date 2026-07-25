@@ -4,7 +4,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/charlesnpx/feature-implement/internal/workspace"
 )
@@ -85,38 +84,6 @@ func TestImmutableValueConstructorsAndAccessorsDefendCopies(t *testing.T) {
 		t.Fatalf("evidence item alias escaped: %q", got)
 	}
 
-	repository, err := workspace.NewRepositoryIdentity("https://example.invalid/repository.git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	binding, err := workspace.NewControlPlaneBinding(workspace.ControlPlaneBindingOptions{
-		Kind: workspace.ControlPlaneReceiptReconciliation, WorkspaceID: workspace.MustID("workspace-one"),
-		Generation: workspace.DigestBytes([]byte("generation")), RequestDigest: workspace.DigestBytes([]byte("payload")),
-		Repository: repository, Remote: "origin",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	envelope, err := workspace.NewControlPlaneEnvelopeV2(
-		binding, workspace.MustID("owner-key"), "nonce-1", time.Unix(2_000_000_000, 0), workspace.MustID("coordinator"),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	signature := make([]byte, 64)
-	signature[0], signature[1], signature[2] = 1, 2, 3
-	receipt, err := workspace.NewControlPlaneReceiptV2(envelope, signature)
-	if err != nil {
-		t.Fatal(err)
-	}
-	signature[0] = 9
-	returnedSignature := receipt.Signature()
-	returnedSignature[1] = 9
-	wantSignature := make([]byte, 64)
-	wantSignature[0], wantSignature[1], wantSignature[2] = 1, 2, 3
-	if got := receipt.Signature(); !reflect.DeepEqual(got, wantSignature) {
-		t.Fatalf("receipt signature alias escaped: %#v", got)
-	}
 }
 
 func TestPureReducerIsDeterministicAndReturnsClosedEffects(t *testing.T) {

@@ -143,9 +143,9 @@ func TestStrictWorkspaceDecoderRejectsNonV2AndAmbiguousYAML(t *testing.T) {
 			wantErr: "dependencies must be explicit",
 		},
 		{
-			name:    "implicit authorities",
-			source:  strings.Split(valid, "authority_sources:")[0],
-			wantErr: "authority_sources must be explicit",
+			name:    "removed authority sources",
+			source:  valid + "authority_sources: []\n",
+			wantErr: "field authority_sources not found",
 		},
 	}
 	for _, test := range tests {
@@ -156,7 +156,7 @@ func TestStrictWorkspaceDecoderRejectsNonV2AndAmbiguousYAML(t *testing.T) {
 	}
 }
 
-func TestStrictDecodersBoundInputAndRejectV1PlanAuthority(t *testing.T) {
+func TestStrictDecodersBoundInputAndRejectRemovedPlanFields(t *testing.T) {
 	tooLarge := bytes.Repeat([]byte{'x'}, workspace.MaxArtifactBytes+1)
 	if _, err := workspace.DecodePlan(tooLarge); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("oversized decode error = %v", err)
@@ -172,15 +172,15 @@ merge_units: []
 	if _, err := workspace.DecodePlan([]byte(v1Plan)); err == nil || !strings.Contains(err.Error(), "v2 is required") {
 		t.Fatalf("v1 decode error = %v", err)
 	}
-	v2WithWorkspaceAuthority := `schema_version: 2
-id: misplaced-authority
-title: Misplaced Authority
+	v2WithWorkspaceField := `schema_version: 2
+id: misplaced-field
+title: Misplaced Field
 base_ref: main
 stories: []
 merge_units: []
 `
-	if _, err := workspace.DecodePlan([]byte(v2WithWorkspaceAuthority)); err == nil || !strings.Contains(err.Error(), "field base_ref not found") {
-		t.Fatalf("misplaced plan authority error = %v", err)
+	if _, err := workspace.DecodePlan([]byte(v2WithWorkspaceField)); err == nil || !strings.Contains(err.Error(), "field base_ref not found") {
+		t.Fatalf("misplaced plan field error = %v", err)
 	}
 }
 
@@ -200,7 +200,7 @@ func TestExecutionPolicyRejectsImplicitOrWeakeningPrecedence(t *testing.T) {
 	}{
 		{
 			name:    "implicit field",
-			source:  strings.Replace(valid, "  require_signed_receipts: true\n", "", 1),
+			source:  strings.Replace(valid, "  require_passing_checks: true\n", "", 1),
 			wantErr: "must explicitly define every policy field",
 		},
 		{
@@ -220,8 +220,8 @@ func TestExecutionPolicyRejectsImplicitOrWeakeningPrecedence(t *testing.T) {
 		},
 		{
 			name:    "profile weakens requirement",
-			source:  strings.Replace(valid, "      require_signed_receipts: true\n", "      require_signed_receipts: false\n", 1),
-			wantErr: "profile standard policy weakens require_signed_receipts",
+			source:  strings.Replace(valid, "      require_passing_checks: true\n", "      require_passing_checks: false\n", 1),
+			wantErr: "profile standard policy weakens require_passing_checks",
 		},
 		{
 			name:    "unit weakens permission",
@@ -234,12 +234,12 @@ func TestExecutionPolicyRejectsImplicitOrWeakeningPrecedence(t *testing.T) {
 			wantErr: "references unknown profile missing",
 		},
 		{
-			name:    "duplicate profile authority",
+			name:    "duplicate profile",
 			source:  duplicateProfile,
 			wantErr: "duplicate execution profile standard",
 		},
 		{
-			name:    "duplicate merge-unit authority",
+			name:    "duplicate merge-unit policy",
 			source:  duplicateUnit,
 			wantErr: "duplicate execution policy for merge unit alpha-plan/unit-one",
 		},
@@ -275,7 +275,6 @@ dependencies:
     after:
       plan_id: second-plan
       merge_unit_id: second-unit
-authority_sources: []
 `
 	manifest, err := workspace.DecodeWorkspaceManifest([]byte(valid))
 	if err != nil {
@@ -290,13 +289,18 @@ authority_sources: []
 		dependencies[0].After().PlanID().String() != "second-plan" || dependencies[0].After().MergeUnitID().String() != "second-unit" {
 		t.Fatalf("cross-plan dependencies = %#v", dependencies)
 	}
-	cycle := strings.Replace(valid, "authority_sources: []", "  - before:\n      plan_id: second-plan\n      merge_unit_id: second-unit\n    after:\n      plan_id: first-plan\n      merge_unit_id: first-unit\nauthority_sources: []", 1)
+	cycle := strings.Replace(
+		valid,
+		"      merge_unit_id: second-unit\n",
+		"      merge_unit_id: second-unit\n  - before:\n      plan_id: second-plan\n      merge_unit_id: second-unit\n    after:\n      plan_id: first-plan\n      merge_unit_id: first-unit\n",
+		1,
+	)
 	if _, err := workspace.DecodeWorkspaceManifest([]byte(cycle)); err == nil || err.Error() != "workspace merge-unit dependency cycle includes first-plan\x00first-unit" {
 		t.Fatalf("deterministic cycle error = %v", err)
 	}
 }
 
-func TestDefinitionRejectsIncompleteOrContradictoryAuthority(t *testing.T) {
+func TestDefinitionRejectsIncompleteOrContradictoryInputs(t *testing.T) {
 	fixture := newDefinitionFixture(t)
 	tests := []struct {
 		name    string
@@ -312,44 +316,6 @@ func TestDefinitionRejectsIncompleteOrContradictoryAuthority(t *testing.T) {
 				sources.ExecutionConfig.Bytes = []byte(text[:index])
 			},
 			wantErr: "execution config covers 1 merge units; workspace plans require 2",
-		},
-		{
-			name: "undeclared authority material",
-			mutate: func(sources *workspace.DefinitionSources) {
-				sources.Authorities = append(sources.Authorities, workspace.AuthorityMaterial{
-					ID: "extra-policy", Kind: workspace.AuthorityExternalDigest,
-					Content: []byte("extra\n"), ExpectedSourceDigest: workspace.DigestBytes([]byte("extra\n")).String(),
-				})
-			},
-			wantErr: "declares 2 authority sources but 3 materials were supplied",
-		},
-		{
-			name: "duplicate authority material",
-			mutate: func(sources *workspace.DefinitionSources) {
-				sources.Authorities = append(sources.Authorities, sources.Authorities[0])
-			},
-			wantErr: "duplicate authority material owner-policy",
-		},
-		{
-			name: "external digest mismatch",
-			mutate: func(sources *workspace.DefinitionSources) {
-				sources.Authorities[1].Content = []byte("changed\n")
-			},
-			wantErr: "content digest mismatch",
-		},
-		{
-			name: "Git blob mismatch",
-			mutate: func(sources *workspace.DefinitionSources) {
-				sources.Authorities[0].Content = []byte("changed\n")
-			},
-			wantErr: "content does not match pinned blob",
-		},
-		{
-			name: "mixed Git object formats",
-			mutate: func(sources *workspace.DefinitionSources) {
-				sources.Authorities[0].CommitObject = "sha256:" + strings.Repeat("1", 64)
-			},
-			wantErr: "commit and blob use different object formats",
 		},
 		{
 			name: "wrong plan identity",

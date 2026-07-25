@@ -715,7 +715,7 @@ func TestCommitShellRejectsDirtyStateWeakIsolationAndWrongFailure(t *testing.T) 
 	t.Run("weak check isolation", func(t *testing.T) {
 		repository, branch, base := stagedProtocolRepository(t)
 		state := oneStepProtocolState(t, base, workspace.CheckExpectationPass, nil)
-		weak := workspace.NewCheckIsolationProof(true, false, false, false)
+		weak := workspace.NewCheckIsolationProof(true, false)
 		runner := &protocolCheckRunner{result: passingCheckResult(t, weak)}
 		shell, _ := workspace.NewCommitProtocolShell(workspace.DefaultLocalCommitGitAdapter(), runner)
 		state, err := shell.ExecuteNextCommitStep(context.Background(), state, branch, repository, "")
