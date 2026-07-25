@@ -18,6 +18,18 @@ import (
 )
 
 func gitBlobObjectID(algorithm GitHashAlgorithm, content []byte) (GitObjectID, error) {
+	digest, err := newGitBlobHasher(algorithm, int64(len(content)))
+	if err != nil {
+		return GitObjectID{}, err
+	}
+	_, _ = digest.Write(content)
+	return gitObjectIDFromHash(algorithm, digest)
+}
+
+func newGitBlobHasher(algorithm GitHashAlgorithm, size int64) (hash.Hash, error) {
+	if size < 0 {
+		return nil, fmt.Errorf("Git blob size cannot be negative")
+	}
 	var digest hash.Hash
 	switch algorithm {
 	case GitHashSHA1:
@@ -25,11 +37,33 @@ func gitBlobObjectID(algorithm GitHashAlgorithm, content []byte) (GitObjectID, e
 	case GitHashSHA256:
 		digest = sha256.New()
 	default:
-		return GitObjectID{}, fmt.Errorf("unsupported Git blob algorithm %q", algorithm)
+		return nil, fmt.Errorf("unsupported Git blob algorithm %q", algorithm)
 	}
-	_, _ = fmt.Fprintf(digest, "blob %d%c", len(content), byte(0))
-	_, _ = digest.Write(content)
+	_, _ = fmt.Fprintf(digest, "blob %d%c", size, byte(0))
+	return digest, nil
+}
+
+func gitObjectIDFromHash(
+	algorithm GitHashAlgorithm,
+	digest hash.Hash,
+) (GitObjectID, error) {
+	if digest == nil {
+		return GitObjectID{}, fmt.Errorf("Git object digest is required")
+	}
 	raw := digest.Sum(nil)
+	expected := 0
+	switch algorithm {
+	case GitHashSHA1:
+		expected = sha1.Size
+	case GitHashSHA256:
+		expected = sha256.Size
+	}
+	if expected == 0 || len(raw) != expected {
+		return GitObjectID{}, fmt.Errorf(
+			"Git object digest length %d does not match %s",
+			len(raw), algorithm,
+		)
+	}
 	var object GitObjectID
 	object.algorithm = algorithm
 	object.length = uint8(len(raw))
@@ -621,18 +655,39 @@ func (adapter LocalCommitGitAdapter) confirmTrustedCommitState(
 }
 
 func (adapter LocalCommitGitAdapter) rejectHiddenIndexEntries(ctx context.Context, worktree string) error {
-	output, exitCode, err := adapter.git.run(ctx, worktree, "ls-files", "-v", "-z", "--")
+	exitCode, err := adapter.git.streamNULTerminatedRecords(
+		ctx, worktree,
+		func(record []byte) error {
+			return rejectIndexTagRecord(
+				record,
+				func(tag byte) bool {
+					return tag == 'S' || (tag >= 'a' && tag <= 'z')
+				},
+				"configured execution forbids assume-unchanged and skip-worktree index entries",
+			)
+		},
+		"ls-files", "-v", "-z", "--",
+	)
 	if err != nil || exitCode != 0 {
 		return gitExitError("inspect commit index flags", exitCode, err)
 	}
-	if err := rejectHiddenIndexRecords(output); err != nil {
-		return err
-	}
-	output, exitCode, err = adapter.git.run(ctx, worktree, "ls-files", "-f", "-z", "--")
+	exitCode, err = adapter.git.streamNULTerminatedRecords(
+		ctx, worktree,
+		func(record []byte) error {
+			return rejectIndexTagRecord(
+				record,
+				func(tag byte) bool {
+					return tag >= 'a' && tag <= 'z'
+				},
+				"configured execution forbids fsmonitor-valid index entries",
+			)
+		},
+		"ls-files", "-f", "-z", "--",
+	)
 	if err != nil || exitCode != 0 {
 		return gitExitError("inspect commit fsmonitor flags", exitCode, err)
 	}
-	return rejectFSMonitorIndexRecords(output)
+	return nil
 }
 
 func rejectHiddenIndexRecords(output []byte) error {
@@ -652,13 +707,23 @@ func rejectIndexTagRecords(output []byte, forbidden func(byte) bool, message str
 		if len(record) == 0 {
 			continue
 		}
-		if len(record) < 3 || record[1] != ' ' {
-			return fmt.Errorf("Git index flag record is malformed")
+		if err := rejectIndexTagRecord(record, forbidden, message); err != nil {
+			return err
 		}
-		tag := record[0]
-		if forbidden(tag) {
-			return fmt.Errorf("%s", message)
-		}
+	}
+	return nil
+}
+
+func rejectIndexTagRecord(
+	record []byte,
+	forbidden func(byte) bool,
+	message string,
+) error {
+	if len(record) < 3 || record[1] != ' ' {
+		return fmt.Errorf("Git index flag record is malformed")
+	}
+	if forbidden(record[0]) {
+		return fmt.Errorf("%s", message)
 	}
 	return nil
 }
@@ -681,6 +746,25 @@ type rawGitTreeEntry struct {
 	mode   GitFileMode
 	kind   string
 	object GitObjectID
+}
+
+type rawTreeMaterializationMismatch struct {
+	message string
+}
+
+func (mismatch rawTreeMaterializationMismatch) Error() string {
+	return mismatch.message
+}
+
+func rawTreeMismatchf(format string, arguments ...any) error {
+	return rawTreeMaterializationMismatch{
+		message: fmt.Sprintf(format, arguments...),
+	}
+}
+
+func isRawTreeMaterializationMismatch(err error) bool {
+	var mismatch rawTreeMaterializationMismatch
+	return errors.As(err, &mismatch)
 }
 
 func (adapter LocalCommitGitAdapter) verifyRawTreeMaterialization(
@@ -723,6 +807,19 @@ func (adapter LocalCommitGitAdapter) verifyRawTreeMaterializationAtDepth(
 	if err != nil {
 		return err
 	}
+	for _, entry := range entries {
+		if isRepositoryAttributesPath(entry.path) {
+			return fmt.Errorf(
+				"raw Git tree path %s contains unsupported repository-defined .gitattributes",
+				entry.path,
+			)
+		}
+	}
+	if err := adapter.verifyExactStageZeroIndex(
+		ctx, binding.root, algorithm, entries,
+	); err != nil {
+		return err
+	}
 	expected := make(map[string]rawGitTreeEntry, len(entries))
 	expectedDirectories := map[string]struct{}{"": {}}
 	for _, entry := range entries {
@@ -739,27 +836,33 @@ func (adapter LocalCommitGitAdapter) verifyRawTreeMaterializationAtDepth(
 		absolute := filepath.Join(binding.root, filepath.FromSlash(entry.path))
 		info, err := os.Lstat(absolute)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return rawTreeMismatchf("raw worktree path %s: %v", entry.path, err)
+			}
 			return fmt.Errorf("raw worktree path %s: %w", entry.path, err)
 		}
 		switch entry.mode {
 		case GitModeRegular, GitModeExecutable:
 			if !info.Mode().IsRegular() {
-				return fmt.Errorf("raw worktree path %s is not a regular file", entry.path)
+				return rawTreeMismatchf("raw worktree path %s is not a regular file", entry.path)
+			}
+			if err := verifyRawWorktreeSingleLink(entry.path, info); err != nil {
+				return err
 			}
 			executable := info.Mode().Perm()&0o111 != 0
 			if executable != (entry.mode == GitModeExecutable) {
-				return fmt.Errorf("raw worktree path %s executable mode differs from tree", entry.path)
+				return rawTreeMismatchf("raw worktree path %s executable mode differs from tree", entry.path)
 			}
 			object, err := adapter.hashRawWorktreeFile(ctx, binding.root, entry.path, algorithm, info)
 			if err != nil {
 				return err
 			}
 			if object != entry.object {
-				return fmt.Errorf("raw worktree path %s bytes differ from tree", entry.path)
+				return rawTreeMismatchf("raw worktree path %s bytes differ from tree", entry.path)
 			}
 		case GitModeSymlink:
 			if info.Mode()&os.ModeSymlink == 0 {
-				return fmt.Errorf("raw worktree path %s is not a symbolic link", entry.path)
+				return rawTreeMismatchf("raw worktree path %s is not a symbolic link", entry.path)
 			}
 			target, err := os.Readlink(absolute)
 			if err != nil {
@@ -771,14 +874,14 @@ func (adapter LocalCommitGitAdapter) verifyRawTreeMaterializationAtDepth(
 			}
 			confirmedTarget, err := os.Readlink(absolute)
 			if err != nil || confirmedTarget != target {
-				return fmt.Errorf("raw worktree symlink %s changed during verification", entry.path)
+				return rawTreeMismatchf("raw worktree symlink %s changed during verification", entry.path)
 			}
 			if object != entry.object {
-				return fmt.Errorf("raw worktree symlink %s target differs from tree", entry.path)
+				return rawTreeMismatchf("raw worktree symlink %s target differs from tree", entry.path)
 			}
 		case GitModeSubmodule:
 			if !info.IsDir() {
-				return fmt.Errorf("raw worktree submodule %s is not a directory", entry.path)
+				return rawTreeMismatchf("raw worktree submodule %s is not a directory", entry.path)
 			}
 			submoduleRoot := absolute
 			submoduleAlgorithm, err := adapter.git.objectFormat(ctx, submoduleRoot)
@@ -786,14 +889,14 @@ func (adapter LocalCommitGitAdapter) verifyRawTreeMaterializationAtDepth(
 				return fmt.Errorf("inspect raw submodule %s object format: %w", entry.path, err)
 			}
 			if submoduleAlgorithm != entry.object.Algorithm() {
-				return fmt.Errorf("raw worktree submodule %s object format differs from gitlink", entry.path)
+				return rawTreeMismatchf("raw worktree submodule %s object format differs from gitlink", entry.path)
 			}
 			head, err := adapter.resolveObject(ctx, submoduleRoot, submoduleAlgorithm, "HEAD")
 			if err != nil {
 				return fmt.Errorf("inspect raw submodule %s head: %w", entry.path, err)
 			}
 			if head != entry.object {
-				return fmt.Errorf("raw worktree submodule %s head differs from gitlink", entry.path)
+				return rawTreeMismatchf("raw worktree submodule %s head differs from gitlink", entry.path)
 			}
 			submoduleTree, err := adapter.resolveObject(
 				ctx, submoduleRoot, submoduleAlgorithm, objectHex(head)+"^{tree}",
@@ -839,10 +942,10 @@ func (adapter LocalCommitGitAdapter) verifyRawTreeMaterializationAtDepth(
 			if _, expectedDirectory := expectedDirectories[relative]; expectedDirectory {
 				return nil
 			}
-			return fmt.Errorf("raw worktree contains untracked directory %s", relative)
+			return rawTreeMismatchf("raw worktree contains untracked directory %s", relative)
 		}
 		if !tracked || entry.mode == GitModeSubmodule {
-			return fmt.Errorf("raw worktree contains untracked path %s", relative)
+			return rawTreeMismatchf("raw worktree contains untracked path %s", relative)
 		}
 		materialized[relative] = struct{}{}
 		return nil
@@ -852,7 +955,10 @@ func (adapter LocalCommitGitAdapter) verifyRawTreeMaterializationAtDepth(
 	}
 	for expectedPath := range expected {
 		if _, exists := materialized[expectedPath]; !exists {
-			return fmt.Errorf("raw worktree tree path %s was not materialized as an exact filesystem pathname", expectedPath)
+			return rawTreeMismatchf(
+				"raw worktree tree path %s was not materialized as an exact filesystem pathname",
+				expectedPath,
+			)
 		}
 	}
 	confirmed, err := adapter.captureTrustedWorktreeBinding(ctx, binding.root)
@@ -870,47 +976,139 @@ func (adapter LocalCommitGitAdapter) inspectRawTreeEntries(
 	repositoryRoot string,
 	tree GitObjectID,
 ) ([]rawGitTreeEntry, error) {
-	output, exitCode, err := adapter.git.run(
-		ctx, repositoryRoot, "ls-tree", "-r", "-z", "--full-tree", objectHex(tree),
+	var entries []rawGitTreeEntry
+	exitCode, err := adapter.git.streamNULTerminatedRecords(
+		ctx, repositoryRoot,
+		func(token []byte) error {
+			metadata, rawPath, found := bytes.Cut(token, []byte{'\t'})
+			fields := strings.Fields(string(metadata))
+			if !found || len(fields) != 3 {
+				return fmt.Errorf("raw Git tree entry is malformed")
+			}
+			normalized, err := normalizeCommitPath(string(rawPath))
+			if err != nil {
+				return err
+			}
+			mode := GitFileMode(fields[0])
+			if !mode.valid() || mode == GitModeAbsent {
+				return fmt.Errorf(
+					"raw Git tree path %s has unsupported mode %s",
+					normalized, mode,
+				)
+			}
+			if (mode == GitModeSubmodule) != (fields[1] == "commit") ||
+				(mode != GitModeSubmodule && fields[1] != "blob") {
+				return fmt.Errorf(
+					"raw Git tree path %s has inconsistent type %s",
+					normalized, fields[1],
+				)
+			}
+			object, err := qualifyGitObjectID(tree.Algorithm(), fields[2])
+			if err != nil {
+				return err
+			}
+			entries = append(entries, rawGitTreeEntry{
+				path: normalized, mode: mode, kind: fields[1], object: object,
+			})
+			return nil
+		},
+		"ls-tree", "-r", "-z", "--full-tree", objectHex(tree),
 	)
 	if err != nil || exitCode != 0 {
 		return nil, gitExitError("inspect raw Git tree", exitCode, err)
 	}
-	if len(output) == 0 {
-		return nil, nil
-	}
-	tokens := bytes.Split(output, []byte{0})
-	if len(tokens[len(tokens)-1]) != 0 {
-		return nil, fmt.Errorf("raw Git tree is not NUL terminated")
-	}
-	entries := make([]rawGitTreeEntry, 0, len(tokens)-1)
-	for _, token := range tokens[:len(tokens)-1] {
-		metadata, rawPath, found := bytes.Cut(token, []byte{'\t'})
-		fields := strings.Fields(string(metadata))
-		if !found || len(fields) != 3 {
-			return nil, fmt.Errorf("raw Git tree entry is malformed")
-		}
-		normalized, err := normalizeCommitPath(string(rawPath))
-		if err != nil {
-			return nil, err
-		}
-		mode := GitFileMode(fields[0])
-		if !mode.valid() || mode == GitModeAbsent {
-			return nil, fmt.Errorf("raw Git tree path %s has unsupported mode %s", normalized, mode)
-		}
-		if (mode == GitModeSubmodule) != (fields[1] == "commit") ||
-			(mode != GitModeSubmodule && fields[1] != "blob") {
-			return nil, fmt.Errorf("raw Git tree path %s has inconsistent type %s", normalized, fields[1])
-		}
-		object, err := qualifyGitObjectID(tree.Algorithm(), fields[2])
-		if err != nil {
-			return nil, err
-		}
-		entries = append(entries, rawGitTreeEntry{
-			path: normalized, mode: mode, kind: fields[1], object: object,
-		})
-	}
 	return entries, nil
+}
+
+func (adapter LocalCommitGitAdapter) verifyExactStageZeroIndex(
+	ctx context.Context,
+	repositoryRoot string,
+	algorithm GitHashAlgorithm,
+	expectedEntries []rawGitTreeEntry,
+) error {
+	expected := make(map[string]rawGitTreeEntry, len(expectedEntries))
+	for _, entry := range expectedEntries {
+		if _, duplicate := expected[entry.path]; duplicate {
+			return fmt.Errorf("raw Git tree repeats path %q", entry.path)
+		}
+		expected[entry.path] = entry
+	}
+	observed := make(map[string]struct{}, len(expectedEntries))
+	exitCode, err := adapter.git.streamNULTerminatedRecords(
+		ctx, repositoryRoot,
+		func(record []byte) error {
+			metadata, rawPath, found := bytes.Cut(record, []byte{'\t'})
+			fields := strings.Fields(string(metadata))
+			if !found || len(fields) != 3 {
+				return fmt.Errorf("Git stage-zero index entry is malformed")
+			}
+			mode := GitFileMode(fields[0])
+			if !mode.valid() || mode == GitModeAbsent {
+				return fmt.Errorf(
+					"Git stage-zero index entry has unsupported mode %s",
+					mode,
+				)
+			}
+			if fields[2] != "0" {
+				return rawTreeMismatchf(
+					"Git index contains non-stage-zero entry for %s",
+					string(rawPath),
+				)
+			}
+			normalized, err := normalizeCommitPath(string(rawPath))
+			if err != nil {
+				return err
+			}
+			if strings.Trim(fields[1], "0") == "" {
+				return rawTreeMismatchf(
+					"Git index contains intent-to-add entry %s",
+					normalized,
+				)
+			}
+			object, err := qualifyGitObjectID(algorithm, fields[1])
+			if err != nil {
+				return err
+			}
+			entry, exists := expected[normalized]
+			if !exists {
+				return rawTreeMismatchf(
+					"Git index contains path %s absent from the recorded tree",
+					normalized,
+				)
+			}
+			if _, duplicate := observed[normalized]; duplicate {
+				return rawTreeMismatchf(
+					"Git index repeats stage-zero path %s", normalized,
+				)
+			}
+			if mode != entry.mode || object != entry.object {
+				return rawTreeMismatchf(
+					"Git index path %s mode or object differs from the recorded tree",
+					normalized,
+				)
+			}
+			observed[normalized] = struct{}{}
+			return nil
+		},
+		"ls-files", "--stage", "-z", "--",
+	)
+	if err != nil || exitCode != 0 {
+		return gitExitError("inspect exact stage-zero Git index", exitCode, err)
+	}
+	if len(observed) != len(expected) {
+		for _, entry := range expectedEntries {
+			if _, exists := observed[entry.path]; !exists {
+				return rawTreeMismatchf(
+					"Git index is missing recorded tree path %s",
+					entry.path,
+				)
+			}
+		}
+		return rawTreeMismatchf(
+			"Git index inventory differs from the recorded tree",
+		)
+	}
+	return nil
 }
 
 func (adapter LocalCommitGitAdapter) hashRawWorktreeFile(
@@ -933,7 +1131,24 @@ func (adapter LocalCommitGitAdapter) hashRawWorktreeFile(
 		!before.ModTime().Equal(after.ModTime()) {
 		return GitObjectID{}, fmt.Errorf("raw worktree file %s changed during verification", relative)
 	}
+	if err := verifyRawWorktreeSingleLink(relative, after); err != nil {
+		return GitObjectID{}, err
+	}
 	return qualifyGitObjectID(algorithm, strings.TrimSpace(string(output)))
+}
+
+func verifyRawWorktreeSingleLink(relative string, info os.FileInfo) error {
+	links, err := platformFileLinkCount(info)
+	if err != nil {
+		return fmt.Errorf("inspect raw worktree file %s hard links: %w", relative, err)
+	}
+	if links != 1 {
+		return rawTreeMismatchf(
+			"raw worktree file %s has %d hard links; exactly one is required",
+			relative, links,
+		)
+	}
+	return nil
 }
 
 func (adapter LocalCommitGitAdapter) captureTrustedWorktreeBinding(
@@ -969,6 +1184,9 @@ func (adapter LocalCommitGitAdapter) captureTrustedWorktreeBinding(
 	}
 	commonDir, err = canonicalExistingDirectory(commonDir)
 	if err != nil {
+		return trustedWorktreeBinding{}, err
+	}
+	if err := rejectGitCommonAttributes(commonDir); err != nil {
 		return trustedWorktreeBinding{}, err
 	}
 	adminPath := filepath.Join(root, ".git")
@@ -1007,10 +1225,37 @@ func (adapter LocalCommitGitAdapter) captureTrustedWorktreeBinding(
 	if err != nil || exitCode != 0 {
 		return trustedWorktreeBinding{}, gitExitError("inspect trusted Git configuration", exitCode, err)
 	}
+	if err := rejectGitCommonAttributes(commonDir); err != nil {
+		return trustedWorktreeBinding{}, err
+	}
 	return trustedWorktreeBinding{
 		root: root, gitDir: gitDir, commonDir: commonDir,
 		admin: DigestBytes(adminBytes), config: DigestBytes(config),
 	}, nil
+}
+
+func rejectGitCommonAttributes(commonDir string) error {
+	commonRoot, err := OpenVerifiedRoot(
+		RootRoleGitCommon, commonDir, false,
+	)
+	if err != nil {
+		return fmt.Errorf("open trusted Git common directory: %w", err)
+	}
+	defer commonRoot.Close()
+	_, exists, err := commonRoot.adapter.inspectExact("info/attributes")
+	if err != nil {
+		return fmt.Errorf("inspect trusted Git common attributes: %w", err)
+	}
+	if exists {
+		return fmt.Errorf(
+			"external Git attributes metadata %s is not supported",
+			filepath.Join(commonRoot.Path(), "info", "attributes"),
+		)
+	}
+	if err := commonRoot.VerifyPath(); err != nil {
+		return fmt.Errorf("verify trusted Git common directory: %w", err)
+	}
+	return nil
 }
 
 func (adapter LocalCommitGitAdapter) rejectExternalGitDrivers(ctx context.Context, repositoryRoot string) error {

@@ -1191,6 +1191,19 @@ func TestLocalTargetRejectsUnsupportedRepositoryProfiles(t *testing.T) {
 			want: "external Git attributes",
 		},
 		{
+			name: "external attributes metadata",
+			setup: func(t *testing.T, root string, _ workspace.GitObjectID) {
+				if err := os.WriteFile(
+					filepath.Join(root, ".git", "info", "attributes"),
+					[]byte("*.txt filter=hostile\n"),
+					0o600,
+				); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "external Git attributes",
+		},
+		{
 			name: "fsmonitor",
 			setup: func(t *testing.T, root string, _ workspace.GitObjectID) {
 				runTargetGitTest(
@@ -1319,65 +1332,72 @@ func TestLocalTargetRejectsBareRepository(t *testing.T) {
 	}
 }
 
-func TestLocalTargetRejectsUnsupportedPinnedBaseTreeProfiles(t *testing.T) {
-	tests := []struct {
-		name    string
-		path    string
-		content string
-		want    string
-	}{
-		{
-			name: "gitmodules",
-			path: ".gitmodules",
-			content: `[submodule "hostile"]
+func TestLocalTargetRejectsSubmodulesInPinnedBaseTree(t *testing.T) {
+	root, _ := initializeTargetRepository(
+		t, workspace.GitHashSHA1,
+	)
+	content := `[submodule "hostile"]
 	path = dependencies/hostile
 	url = https://example.invalid/hostile.git
-`,
-			want: "submodules are not supported",
-		},
-		{
-			name:    "nested nonempty gitattributes",
-			path:    "config/.gitattributes",
-			content: "*.txt filter=hostile\n",
-			want:    "repository-defined Git attributes",
-		},
+`
+	if err := os.WriteFile(
+		filepath.Join(root, ".gitmodules"),
+		[]byte(content),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			root, _ := initializeTargetRepository(
-				t, workspace.GitHashSHA1,
-			)
-			if err := os.MkdirAll(
-				filepath.Dir(filepath.Join(root, test.path)),
-				0o700,
-			); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(
-				filepath.Join(root, test.path),
-				[]byte(test.content),
-				0o600,
-			); err != nil {
-				t.Fatal(err)
-			}
-			runTargetGitTest(t, root, "add", "--", test.path)
-			runTargetGitTest(
-				t, root,
-				"-c", "user.name=Feature Implement Test",
-				"-c", "user.email=feature-implement@localhost",
-				"commit", "--quiet", "-m", "add unsupported base metadata",
-			)
-			base := targetHead(t, root, workspace.GitHashSHA1)
-			definition := localTargetDefinition(
-				t, root, base, "feature/base-tree-profile",
-			)
-			_, err := workspace.ValidateLocalTarget(
-				context.Background(), definition.Workspace(),
-			)
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("unsupported pinned-base tree error = %v", err)
-			}
-		})
+	runTargetGitTest(t, root, "add", "--", ".gitmodules")
+	runTargetGitTest(
+		t, root,
+		"-c", "user.name=Feature Implement Test",
+		"-c", "user.email=feature-implement@localhost",
+		"commit", "--quiet", "-m", "add unsupported base metadata",
+	)
+	base := targetHead(t, root, workspace.GitHashSHA1)
+	definition := localTargetDefinition(
+		t, root, base, "feature/base-tree-profile",
+	)
+	_, err := workspace.ValidateLocalTarget(
+		context.Background(), definition.Workspace(),
+	)
+	if err == nil || !strings.Contains(err.Error(), "submodules are not supported") {
+		t.Fatalf("unsupported pinned-base tree error = %v", err)
+	}
+}
+
+func TestLocalTargetRejectsRepositoryAttributesInPinnedBaseTree(t *testing.T) {
+	root, _ := initializeTargetRepository(
+		t, workspace.GitHashSHA1,
+	)
+	attributes := filepath.Join(root, "config", ".gitattributes")
+	if err := os.MkdirAll(filepath.Dir(attributes), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		attributes,
+		[]byte("*.txt filter=hostile text eol=crlf\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	runTargetGitTest(t, root, "add", "--", "config/.gitattributes")
+	runTargetGitTest(
+		t, root,
+		"-c", "user.name=Feature Implement Test",
+		"-c", "user.email=feature-implement@localhost",
+		"commit", "--quiet", "-m", "add repository attributes",
+	)
+	base := targetHead(t, root, workspace.GitHashSHA1)
+	definition := localTargetDefinition(
+		t, root, base, "feature/repository-attributes",
+	)
+	_, err := workspace.ValidateLocalTarget(
+		context.Background(), definition.Workspace(),
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "repository-defined .gitattributes") {
+		t.Fatalf("repository attributes admission error = %v", err)
 	}
 }
 

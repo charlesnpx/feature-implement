@@ -258,6 +258,22 @@ func MaterializeAttempt(
 		if err != nil {
 			return RuntimeAttemptProjection{}, err
 		}
+	} else if inspection.worktreeRegistered && inspection.worktreeExists && !inspection.clean {
+		if inspection.worktreeBranch != attempt.branch {
+			return RuntimeAttemptProjection{}, fmt.Errorf("partial attempt worktree registration does not match the attempt intent")
+		}
+		if err := git.CreateAttemptWorktree(
+			ctx, manifest.target.root, claim, false, true,
+		); err != nil {
+			return RuntimeAttemptProjection{}, err
+		}
+		if err := injectAttemptLifecycleFault(request.Fault, AttemptFaultAfterWorktreeCreation); err != nil {
+			return RuntimeAttemptProjection{}, err
+		}
+		inspection, err = git.InspectAttemptWorktree(ctx, manifest.target.root, attempt.branch, attempt.worktree)
+		if err != nil {
+			return RuntimeAttemptProjection{}, err
+		}
 	} else if !inspection.worktreeRegistered {
 		if err := git.PrepareAttemptWorktree(
 			ctx, manifest.target.root, claim, inspection.worktreeExists,
