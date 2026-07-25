@@ -31,6 +31,7 @@ const (
 	JournalResourceCommitStep     JournalResourceKind = "commit_step"
 	JournalResourceCheck          JournalResourceKind = "check"
 	JournalResourceFeatureRef     JournalResourceKind = "feature_ref"
+	JournalResourceIntegration    JournalResourceKind = "integration"
 )
 
 func (kind JournalResourceKind) valid() bool {
@@ -41,7 +42,7 @@ func (kind JournalResourceKind) valid() bool {
 		JournalResourceBudget, JournalResourceApproval, JournalResourceEvidence,
 		JournalResourceCommitProtocol, JournalResourceReviewFix, JournalResourceCommitStep,
 		JournalResourceReview, JournalResourceReviewProfile, JournalResourceCheck,
-		JournalResourceFeatureRef:
+		JournalResourceFeatureRef, JournalResourceIntegration:
 		return true
 	default:
 		return false
@@ -136,6 +137,8 @@ const (
 	JournalEventReviewResultRecorded           JournalEventType = "review.result_recorded.v2"
 	JournalEventReviewFindingFixReserved       JournalEventType = "review.finding_fix_reserved.v2"
 	JournalEventReviewFixApplied               JournalEventType = "review.fix_applied.v2"
+	JournalEventMergeUnitIntegrationIntended   JournalEventType = "merge_unit_integration_intended"
+	JournalEventMergeUnitIntegrated            JournalEventType = "merge_unit_integrated"
 )
 
 type WorkspaceJournalEvent interface {
@@ -317,6 +320,11 @@ func newJournalAppend(
 			ReviewInvocationFailedJournalEvent, ReviewResultRecordedJournalEvent,
 			ReviewFindingFixReservedJournalEvent, ReviewFixAppliedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("review events must use the exact-head review workflow")
+		case MergeUnitIntegrationIntendedJournalEvent,
+			MergeUnitIntegratedJournalEvent:
+			return JournalAppend{}, fmt.Errorf(
+				"integration events must use the ancestry-checked CAS integration workflow",
+			)
 		}
 	}
 	if occurredAt.IsZero() {
@@ -355,7 +363,7 @@ func supportedWorkspaceJournalEvent(event WorkspaceJournalEvent) bool {
 		return true
 	default:
 		return isAttemptJournalEvent(event) || isCommitJournalEvent(event) ||
-			isReviewJournalEvent(event)
+			isReviewJournalEvent(event) || isIntegrationJournalEvent(event)
 	}
 }
 
@@ -389,6 +397,10 @@ func validateJournalEventResources(
 		}
 		if !ok {
 			expectedReads, expectedWrites, ok = reviewJournalEventResources(event)
+		}
+		if !ok {
+			expectedReads, expectedWrites, ok =
+				integrationJournalEventResources(event)
 		}
 		if !ok {
 			return fmt.Errorf("unsupported workspace journal event %T", event)
@@ -499,6 +511,9 @@ func cloneWorkspaceJournalEvent(event WorkspaceJournalEvent) WorkspaceJournalEve
 			return cloned
 		}
 		if cloned := cloneReviewJournalEvent(event); cloned != nil {
+			return cloned
+		}
+		if cloned := cloneIntegrationJournalEvent(event); cloned != nil {
 			return cloned
 		}
 		return nil

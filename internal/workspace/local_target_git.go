@@ -37,10 +37,12 @@ func (inspection LocalTargetInspection) FeatureHead() GitObjectID {
 }
 
 type localTargetInspectionOptions struct {
-	requireBaseAtPin bool
-	allowFeatureRef  bool
-	expectedBinding  *LocalTargetBinding
-	intentDigest     Digest
+	requireBaseAtPin      bool
+	allowFeatureRef       bool
+	expectedBinding       *LocalTargetBinding
+	intentDigest          Digest
+	expectedFeatureHead   GitObjectID
+	expectedFeatureMarker string
 }
 
 type LocalTargetGitAdapter struct {
@@ -299,16 +301,30 @@ func (adapter LocalTargetGitAdapter) inspect(
 				target.FeatureRef(),
 			)
 		}
-		if featureHead != target.baseCommit {
+		expectedFeatureHead := target.baseCommit
+		if !options.expectedFeatureHead.IsZero() {
+			expectedFeatureHead = options.expectedFeatureHead
+		}
+		if expectedFeatureHead.Algorithm() != objectFormat {
 			return LocalTargetInspection{}, fmt.Errorf(
-				"feature ref %s is %s, expected pinned base %s",
-				target.FeatureRef(), featureHead, target.baseCommit,
+				"expected feature head does not use the repository object format",
 			)
 		}
-		if options.intentDigest.IsZero() ||
-			marker != localTargetReflogMessage(options.intentDigest) {
+		if featureHead != expectedFeatureHead {
 			return LocalTargetInspection{}, fmt.Errorf(
-				"feature ref %s has no exact workspace creation marker; refusing to adopt it",
+				"feature ref %s is %s, expected durable head %s",
+				target.FeatureRef(), featureHead, expectedFeatureHead,
+			)
+		}
+		expectedMarker := options.expectedFeatureMarker
+		if expectedMarker == "" && !options.intentDigest.IsZero() {
+			expectedMarker = localTargetReflogMessage(
+				options.intentDigest,
+			)
+		}
+		if expectedMarker == "" || marker != expectedMarker {
+			return LocalTargetInspection{}, fmt.Errorf(
+				"feature ref %s has no exact durable workspace marker; refusing to adopt it",
 				target.FeatureRef(),
 			)
 		}
@@ -1293,10 +1309,11 @@ func gitObjectHex(object GitObjectID) string {
 	return fmt.Sprintf("%x", object.Bytes())
 }
 
-func (adapter LocalTargetGitAdapter) verifyOwnedFeatureRef(
+func (adapter LocalTargetGitAdapter) verifyOwnedFeatureRefAt(
 	ctx context.Context,
 	binding LocalTargetBinding,
-	intentDigest Digest,
+	expectedHead GitObjectID,
+	expectedMarker string,
 ) (LocalTargetInspection, error) {
 	target := LocalTarget{
 		root: binding.root, baseRef: binding.baseRef,
@@ -1304,7 +1321,9 @@ func (adapter LocalTargetGitAdapter) verifyOwnedFeatureRef(
 	}
 	return adapter.inspect(ctx, target, localTargetInspectionOptions{
 		requireBaseAtPin: false, allowFeatureRef: true,
-		expectedBinding: &binding, intentDigest: intentDigest,
+		expectedBinding:       &binding,
+		expectedFeatureHead:   expectedHead,
+		expectedFeatureMarker: expectedMarker,
 	})
 }
 

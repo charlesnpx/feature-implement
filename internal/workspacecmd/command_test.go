@@ -1,6 +1,7 @@
 package workspacecmd
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -263,6 +264,7 @@ func TestDeferredLocalCommandsStrictlyDecodeTheirFinalEnvelopes(
 	t *testing.T,
 ) {
 	_, err := executeIntegration(
+		context.Background(),
 		workspace.WorkspaceBundle{},
 		Options{
 			Subaction: "merge-unit",
@@ -273,7 +275,8 @@ func TestDeferredLocalCommandsStrictlyDecodeTheirFinalEnvelopes(
 }`),
 		},
 	)
-	if err == nil || !strings.Contains(err.Error(), "not implemented") {
+	if err == nil ||
+		!strings.Contains(err.Error(), "workspace directory is required") {
 		t.Fatalf("valid integration envelope error = %v", err)
 	}
 	_, err = executeCompletion(

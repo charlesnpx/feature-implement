@@ -1,6 +1,7 @@
 package workspacecmd
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/charlesnpx/feature-implement/internal/workspace"
@@ -18,29 +19,56 @@ type completeVerifyInput struct {
 }
 
 func executeIntegration(
-	_ workspace.WorkspaceBundle,
+	ctx context.Context,
+	bundle workspace.WorkspaceBundle,
 	options Options,
-) (any, error) {
+) (MutationResult, error) {
 	if options.Subaction != "merge-unit" {
-		return nil, fmt.Errorf(
+		return MutationResult{}, fmt.Errorf(
 			"unsupported workspace integrate action %q",
 			options.Subaction,
 		)
 	}
 	var input integrateMergeUnitInput
 	if err := decodeRequest(options.Input, &input); err != nil {
-		return nil, err
+		return MutationResult{}, err
 	}
-	if _, err := parseOccurredAt(
+	occurredAt, err := parseOccurredAt(
 		input.SchemaVersion, input.OccurredAt,
+	)
+	if err != nil {
+		return MutationResult{}, err
+	}
+	attemptID, err := parseID(input.AttemptID, "attempt_id")
+	if err != nil {
+		return MutationResult{}, err
+	}
+	journal, _, err := openWritableJournal(options)
+	if err != nil {
+		return MutationResult{}, err
+	}
+	defer journal.Close()
+	repository := localReviewRepository{
+		git: workspace.DefaultLocalCommitGitAdapter(),
+	}
+	if _, err := workspace.IntegrateMergeUnit(
+		ctx,
+		journal,
+		bundle.Definition(),
+		repository,
+		workspace.DefaultLocalIntegrationGitAdapter(),
+		workspace.IntegrateMergeUnitRequest{
+			AttemptID:  attemptID,
+			OccurredAt: occurredAt,
+		},
 	); err != nil {
-		return nil, err
+		return MutationResult{}, err
 	}
-	if _, err := parseID(input.AttemptID, "attempt_id"); err != nil {
-		return nil, err
-	}
-	return nil, fmt.Errorf(
-		"workspace integrate merge-unit is not implemented until local CAS integration",
+	return mutationResult(
+		"integrate.merge-unit",
+		journal,
+		bundle.Definition(),
+		nil,
 	)
 }
 

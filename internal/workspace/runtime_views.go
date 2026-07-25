@@ -205,7 +205,14 @@ func RebuildSchedulerView(snapshot JournalSnapshot, definition EffectiveWorkspac
 		}
 		for _, dependency := range dependencies[key] {
 			unit.Dependencies = append(unit.Dependencies, dependency.String())
-			unit.Blockers = append(unit.Blockers, "dependency:"+dependency.String())
+			dependencyAttempt, completed := attempts[dependency.key()]
+			if !completed ||
+				dependencyAttempt.phase != AttemptCompleted {
+				unit.Blockers = append(
+					unit.Blockers,
+					"dependency:"+dependency.String(),
+				)
+			}
 		}
 		if attempt, ok := attempts[key]; ok {
 			unit.Status = schedulerStatusForAttempt(attempt)
@@ -654,6 +661,8 @@ func schedulerStatusForAttempt(attempt RuntimeAttemptProjection) SchedulerUnitSt
 		return SchedulerUnitPaused
 	case AttemptReviewExhausted:
 		return SchedulerUnitReviewExhausted
+	case AttemptCompleted:
+		return SchedulerUnitCompleted
 	default:
 		return SchedulerUnitActive
 	}
