@@ -1619,6 +1619,82 @@ func TestLocalGitIntegrationRejectsInvalidAcceptedAncestryTreeAndBase(
 	})
 }
 
+func TestCompletedIntegrationReverifiesAcceptedHeadAncestry(t *testing.T) {
+	scenario := newRealIntegrationScenario(
+		t, workspace.GitHashSHA1, true,
+		workspace.GitObjectID{},
+	)
+	result, err := workspace.IntegrateMergeUnit(
+		context.Background(),
+		scenario.journal,
+		scenario.definition,
+		scenario.repository,
+		workspace.DefaultLocalIntegrationGitAdapter(),
+		workspace.IntegrateMergeUnitRequest{
+			AttemptID: scenario.attempt.AttemptID(),
+			OccurredAt: mustTime(
+				t, "2026-07-25T16:55:00Z",
+			),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := scenario.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := workspace.RebuildWorkspaceRuntime(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, exists := runtime.LocalTarget()
+	if !exists {
+		t.Fatal("completed integration has no local target")
+	}
+
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper := filepath.Join(t.TempDir(), "git-wrapper")
+	script := `#!/bin/sh
+merge_base=false
+is_ancestor=false
+for argument in "$@"; do
+  if [ "$argument" = "merge-base" ]; then merge_base=true; fi
+  if [ "$argument" = "--is-ancestor" ]; then is_ancestor=true; fi
+done
+if [ "$merge_base" = "true" ] && [ "$is_ancestor" = "true" ]; then
+  exit 1
+fi
+exec ` + shellSingleQuote(realGit) + ` "$@"
+`
+	if err := os.WriteFile(
+		wrapper, []byte(script), 0o700,
+	); err != nil {
+		t.Fatal(err)
+	}
+	adapter, err := workspace.NewLocalIntegrationGitAdapter(
+		wrapper, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.VerifyCompletedIntegration(
+		context.Background(),
+		target.Binding(),
+		[]workspace.MergeUnitIntegrationIntent{
+			result.Intent(),
+		},
+	); err == nil ||
+		!strings.Contains(err.Error(), "not an ancestor") {
+		t.Fatalf(
+			"completed accepted-head ancestry error = %v", err,
+		)
+	}
+}
+
 func stopRealIntegrationAfterCommit(
 	t *testing.T,
 	scenario *realIntegrationScenario,

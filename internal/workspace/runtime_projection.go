@@ -113,6 +113,30 @@ func (projection RuntimeLocalTargetProjection) IsZero() bool {
 	return projection.binding.IsZero()
 }
 
+type RuntimeWorkspaceCompletionProjection struct {
+	featureRef   string
+	featureHead  GitObjectID
+	reportDigest Digest
+	record       uint64
+	eventDigest  Digest
+}
+
+func (completion RuntimeWorkspaceCompletionProjection) FeatureRef() string {
+	return completion.featureRef
+}
+func (completion RuntimeWorkspaceCompletionProjection) FeatureHead() GitObjectID {
+	return completion.featureHead
+}
+func (completion RuntimeWorkspaceCompletionProjection) ReportDigest() Digest {
+	return completion.reportDigest
+}
+func (completion RuntimeWorkspaceCompletionProjection) Record() uint64 {
+	return completion.record
+}
+func (completion RuntimeWorkspaceCompletionProjection) EventDigest() Digest {
+	return completion.eventDigest
+}
+
 type WorkspaceRuntimeProjection struct {
 	workspaceID      ID
 	activeGeneration Digest
@@ -121,6 +145,7 @@ type WorkspaceRuntimeProjection struct {
 	localTarget      RuntimeLocalTargetProjection
 	recoveries       []RuntimeRecoveryProjection
 	attempts         []RuntimeAttemptProjection
+	completion       *RuntimeWorkspaceCompletionProjection
 }
 
 func (projection WorkspaceRuntimeProjection) WorkspaceID() ID { return projection.workspaceID }
@@ -145,6 +170,15 @@ func (projection WorkspaceRuntimeProjection) LocalTarget() (
 func (projection WorkspaceRuntimeProjection) Recoveries() []RuntimeRecoveryProjection {
 	return append([]RuntimeRecoveryProjection(nil), projection.recoveries...)
 }
+func (projection WorkspaceRuntimeProjection) Completion() (
+	RuntimeWorkspaceCompletionProjection,
+	bool,
+) {
+	if projection.completion == nil {
+		return RuntimeWorkspaceCompletionProjection{}, false
+	}
+	return *projection.completion, true
+}
 
 func RebuildWorkspaceRuntime(snapshot JournalSnapshot) (WorkspaceRuntimeProjection, error) {
 	return RebuildProjection(snapshot, WorkspaceRuntimeProjection{}, reduceWorkspaceRuntime)
@@ -163,6 +197,13 @@ func VerifyWorkspaceRuntimeConformance(snapshot JournalSnapshot, expectedGenerat
 
 func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRecord) (WorkspaceRuntimeProjection, error) {
 	next := cloneWorkspaceRuntime(current)
+	if current.completion != nil {
+		if _, recovery := record.event.(JournalTailRecoveredEvent); !recovery {
+			return WorkspaceRuntimeProjection{}, fmt.Errorf(
+				"workspace completion is final for local workflow mutations",
+			)
+		}
+	}
 	if !current.activeGeneration.IsZero() {
 		target, hasTarget := current.LocalTarget()
 		ready := hasTarget && target.Created()
@@ -287,6 +328,12 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 		); err != nil {
 			return WorkspaceRuntimeProjection{}, err
 		}
+	case WorkspaceCompletedJournalEvent:
+		if err := reduceCompletionRuntime(
+			current, &next, record, event,
+		); err != nil {
+			return WorkspaceRuntimeProjection{}, err
+		}
 	default:
 		if event, ok := record.event.(ReviewHeadAdoptedJournalEvent); ok {
 			if err := reduceReviewHeadAdoption(current, &next, record, event); err != nil {
@@ -384,6 +431,10 @@ func cloneWorkspaceRuntime(source WorkspaceRuntimeProjection) WorkspaceRuntimePr
 	result := source
 	result.recoveries = append([]RuntimeRecoveryProjection(nil), source.recoveries...)
 	result.attempts = cloneRuntimeAttempts(source.attempts)
+	if source.completion != nil {
+		completion := *source.completion
+		result.completion = &completion
+	}
 	return result
 }
 
@@ -406,6 +457,13 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 		CreatedRecord uint64                 `json:"created_record,omitempty"`
 		HeadRecord    uint64                 `json:"head_record,omitempty"`
 	}
+	type completionJSON struct {
+		FeatureRef   string `json:"feature_ref"`
+		FeatureHead  string `json:"feature_head"`
+		ReportDigest string `json:"report_digest"`
+		Record       uint64 `json:"record"`
+		EventDigest  string `json:"event_digest"`
+	}
 	type runtimeJSON struct {
 		SchemaVersion    int                  `json:"schema_version"`
 		WorkspaceID      string               `json:"workspace_id"`
@@ -416,6 +474,7 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 		LocalTarget      *localTargetJSON     `json:"local_target,omitempty"`
 		Recoveries       []recoveryJSON       `json:"recoveries"`
 		Attempts         []json.RawMessage    `json:"attempts"`
+		Completion       *completionJSON      `json:"completion,omitempty"`
 	}
 	value := runtimeJSON{
 		SchemaVersion: JournalSchemaVersion, WorkspaceID: projection.workspaceID.String(),
@@ -438,6 +497,15 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 			CreatedHead:   projection.localTarget.createdHead.String(),
 			CreatedRecord: projection.localTarget.createdRecord,
 			HeadRecord:    projection.localTarget.headRecord,
+		}
+	}
+	if projection.completion != nil {
+		value.Completion = &completionJSON{
+			FeatureRef:   projection.completion.featureRef,
+			FeatureHead:  projection.completion.featureHead.String(),
+			ReportDigest: projection.completion.reportDigest.String(),
+			Record:       projection.completion.record,
+			EventDigest:  projection.completion.eventDigest.String(),
 		}
 	}
 	for _, recovery := range projection.recoveries {

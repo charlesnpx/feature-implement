@@ -596,10 +596,29 @@ func TestLocalTargetInitializationReadinessBarrierAtEveryFault(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := workspace.RebuildWorkspaceReport(
+			report, err := workspace.RebuildWorkspaceReport(
 				snapshot, definition,
-			); err == nil || !strings.Contains(err.Error(), "feature_ref_created") {
-				t.Fatalf("incomplete initialization report error = %v", err)
+			)
+			if err != nil {
+				t.Fatalf(
+					"incomplete initialization report: %v", err,
+				)
+			}
+			if report.Target.Ready ||
+				!containsCompletionBlocker(
+					report.Completion.Blockers,
+					"local_effect:feature_ref_creation_pending",
+				) ||
+				!containsCompletionBlocker(
+					report.Gates.CompletionBlockers,
+					"local_effect:feature_ref_creation_pending",
+				) {
+				t.Fatalf(
+					"incomplete initialization report target=%#v completion=%#v gates=%#v",
+					report.Target,
+					report.Completion,
+					report.Gates,
+				)
 			}
 			goal, err := workspace.NewGoalBinding(
 				workspace.MustID("readiness-goal"),

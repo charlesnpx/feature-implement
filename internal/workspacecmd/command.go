@@ -124,21 +124,25 @@ func Execute(ctx context.Context, options Options) (any, error) {
 	case "init":
 		return initializeWorkspace(ctx, bundle, options)
 	case "status", "report":
-		return readReport(bundle, options.WorkspaceDir)
+		return readReport(ctx, bundle, options.WorkspaceDir)
 	case "scheduler":
-		report, err := readReport(bundle, options.WorkspaceDir)
+		report, err := readReport(
+			ctx, bundle, options.WorkspaceDir,
+		)
 		if err != nil {
 			return nil, err
 		}
 		return report.Scheduler, nil
 	case "gates":
-		report, err := readReport(bundle, options.WorkspaceDir)
+		report, err := readReport(
+			ctx, bundle, options.WorkspaceDir,
+		)
 		if err != nil {
 			return nil, err
 		}
 		return report.Gates, nil
 	case "recover":
-		return recoverWorkspace(bundle, options)
+		return recoverWorkspace(ctx, bundle, options)
 	case "attempt":
 		return executeAttempt(ctx, bundle, options)
 	case "commit":
@@ -148,7 +152,7 @@ func Execute(ctx context.Context, options Options) (any, error) {
 	case "integrate":
 		return executeIntegration(ctx, bundle, options)
 	case "complete":
-		return executeCompletion(bundle, options)
+		return executeCompletion(ctx, bundle, options)
 	default:
 		panic("unreachable")
 	}
@@ -515,7 +519,11 @@ func initializeWorkspace(
 	return result, nil
 }
 
-func readReport(bundle workspace.WorkspaceBundle, workspaceDir string) (workspace.WorkspaceReport, error) {
+func readReport(
+	ctx context.Context,
+	bundle workspace.WorkspaceBundle,
+	workspaceDir string,
+) (workspace.WorkspaceReport, error) {
 	directory, err := absoluteDirectory(workspaceDir, "workspace")
 	if err != nil {
 		return workspace.WorkspaceReport{}, err
@@ -524,7 +532,12 @@ func readReport(bundle workspace.WorkspaceBundle, workspaceDir string) (workspac
 	if err != nil {
 		return workspace.WorkspaceReport{}, err
 	}
-	return workspace.RebuildWorkspaceReport(snapshot, bundle.Definition())
+	return workspace.RebuildWorkspaceReportWithGit(
+		ctx,
+		snapshot,
+		bundle.Definition(),
+		workspace.DefaultLocalIntegrationGitAdapter(),
+	)
 }
 
 type recoverRequest struct {
@@ -532,7 +545,11 @@ type recoverRequest struct {
 	OccurredAt    string `json:"occurred_at"`
 }
 
-func recoverWorkspace(bundle workspace.WorkspaceBundle, options Options) (MutationResult, error) {
+func recoverWorkspace(
+	ctx context.Context,
+	bundle workspace.WorkspaceBundle,
+	options Options,
+) (MutationResult, error) {
 	directory, err := absoluteDirectory(options.WorkspaceDir, "workspace")
 	if err != nil {
 		return MutationResult{}, err
@@ -550,7 +567,21 @@ func recoverWorkspace(bundle workspace.WorkspaceBundle, options Options) (Mutati
 		return MutationResult{}, err
 	}
 	defer journal.Close()
-	if _, err := journal.RecoverIncompleteTail(bundle.Definition().Workspace().ID(), occurredAt); err != nil {
+	repository := localReviewRepository{
+		git: workspace.DefaultLocalCommitGitAdapter(),
+	}
+	if _, err := workspace.RecoverWorkspaceLocalEffects(
+		ctx,
+		journal,
+		bundle.Definition(),
+		workspace.DefaultLocalTargetGitAdapter(),
+		workspace.DefaultLocalAttemptGitAdapter(),
+		repository,
+		workspace.DefaultLocalIntegrationGitAdapter(),
+		workspace.RecoverWorkspaceLocalEffectsRequest{
+			OccurredAt: occurredAt,
+		},
+	); err != nil {
 		return MutationResult{}, err
 	}
 	return mutationResult("recover", journal, bundle.Definition(), nil)
@@ -569,7 +600,12 @@ func mutationResult(
 	if err != nil {
 		return MutationResult{}, err
 	}
-	report, err := workspace.RebuildWorkspaceReport(snapshot, definition)
+	report, err := workspace.RebuildWorkspaceReportWithGit(
+		context.Background(),
+		snapshot,
+		definition,
+		workspace.DefaultLocalIntegrationGitAdapter(),
+	)
 	if err != nil {
 		return MutationResult{}, err
 	}

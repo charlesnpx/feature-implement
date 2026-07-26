@@ -409,6 +409,28 @@ func (adapter LocalIntegrationGitAdapter) VerifyCompletedIntegration(
 				intent.expectedMerge,
 			)
 		}
+		if err := verifyIntegrationCommitObject(
+			ctx, session, intent.acceptedHead, intent.acceptedTree,
+		); err != nil {
+			return fmt.Errorf(
+				"verify durable accepted integration head for %s: %w",
+				intent.mergeUnit, err,
+			)
+		}
+		ancestor, err := integrationIsAncestor(
+			ctx, session, intent.expectedFeatureHead,
+			intent.acceptedHead,
+		)
+		if err != nil {
+			return err
+		}
+		if !ancestor {
+			return fmt.Errorf(
+				"expected feature parent %s is not an ancestor of durable accepted head %s for %s",
+				intent.expectedFeatureHead, intent.acceptedHead,
+				intent.mergeUnit,
+			)
+		}
 	}
 	if featureMarker != integrationReflogMessage(frontier.digest) {
 		return fmt.Errorf(
