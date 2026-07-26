@@ -417,6 +417,14 @@ func (adapter LocalIntegrationGitAdapter) VerifyCompletedIntegration(
 				intent.mergeUnit, err,
 			)
 		}
+		if err := verifyIntegrationTreeClosure(
+			ctx, session, intent.acceptedTree,
+		); err != nil {
+			return fmt.Errorf(
+				"verify durable accepted integration tree for %s: %w",
+				intent.mergeUnit, err,
+			)
+		}
 		ancestor, err := integrationIsAncestor(
 			ctx, session, intent.expectedFeatureHead,
 			intent.acceptedHead,
@@ -687,6 +695,43 @@ func verifyIntegrationCommitObject(
 		return fmt.Errorf(
 			"integration commit %s has tree %s, expected %s",
 			commit, tree, expectedTree,
+		)
+	}
+	return nil
+}
+
+func verifyIntegrationTreeClosure(
+	ctx context.Context,
+	session *localTargetGitSession,
+	tree GitObjectID,
+) error {
+	if tree.IsZero() ||
+		tree.Algorithm() != session.binding.objectFormat {
+		return fmt.Errorf(
+			"integration tree does not use the repository object format",
+		)
+	}
+	output, exitCode, err := session.run(
+		ctx, nil, "cat-file", "-t", gitObjectHex(tree),
+	)
+	if err != nil || exitCode != 0 {
+		return gitExitError(
+			"inspect integration tree type", exitCode, err,
+		)
+	}
+	if strings.TrimSpace(string(output)) != "tree" {
+		return fmt.Errorf(
+			"integration tree %s is not a Git tree object", tree,
+		)
+	}
+	_, exitCode, err = session.run(
+		ctx, nil,
+		"rev-list", "--quiet", "--objects", "--missing=error",
+		gitObjectHex(tree),
+	)
+	if err != nil || exitCode != 0 {
+		return gitExitError(
+			"verify integration tree object closure", exitCode, err,
 		)
 	}
 	return nil

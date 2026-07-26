@@ -1695,6 +1695,89 @@ exec ` + shellSingleQuote(realGit) + ` "$@"
 	}
 }
 
+func TestCompletedIntegrationRejectsMissingAcceptedTreeClosure(
+	t *testing.T,
+) {
+	scenario := newRealIntegrationScenario(
+		t, workspace.GitHashSHA1, true,
+		workspace.GitObjectID{},
+	)
+	result, err := workspace.IntegrateMergeUnit(
+		context.Background(),
+		scenario.journal,
+		scenario.definition,
+		scenario.repository,
+		workspace.DefaultLocalIntegrationGitAdapter(),
+		workspace.IntegrateMergeUnitRequest{
+			AttemptID: scenario.attempt.AttemptID(),
+			OccurredAt: mustTime(
+				t, "2026-07-25T16:56:00Z",
+			),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := scenario.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := workspace.RebuildWorkspaceRuntime(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, exists := runtime.LocalTarget()
+	if !exists {
+		t.Fatal("completed integration has no local target")
+	}
+
+	listing := runTargetGitTest(
+		t, scenario.repositoryRoot,
+		"ls-tree", "-r", rawGitObject(scenario.acceptedTree),
+	)
+	var blob string
+	for _, line := range strings.Split(listing, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[1] == "blob" {
+			blob = fields[2]
+			break
+		}
+	}
+	if blob == "" {
+		t.Fatal("accepted tree has no reachable blob to remove")
+	}
+	commonDirectory := strings.TrimSpace(runTargetGitTest(
+		t, scenario.repositoryRoot,
+		"rev-parse", "--git-common-dir",
+	))
+	if !filepath.IsAbs(commonDirectory) {
+		commonDirectory = filepath.Join(
+			scenario.repositoryRoot, commonDirectory,
+		)
+	}
+	if err := os.Remove(filepath.Join(
+		commonDirectory, "objects", blob[:2], blob[2:],
+	)); err != nil {
+		t.Fatalf("remove accepted-tree blob %s: %v", blob, err)
+	}
+
+	if err := workspace.DefaultLocalIntegrationGitAdapter().
+		VerifyCompletedIntegration(
+			context.Background(),
+			target.Binding(),
+			[]workspace.MergeUnitIntegrationIntent{
+				result.Intent(),
+			},
+		); err == nil ||
+		!strings.Contains(
+			err.Error(), "integration tree object closure",
+		) {
+		t.Fatalf(
+			"missing accepted-tree closure error = %v", err,
+		)
+	}
+}
+
 func stopRealIntegrationAfterCommit(
 	t *testing.T,
 	scenario *realIntegrationScenario,
