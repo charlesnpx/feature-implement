@@ -492,8 +492,7 @@ func verifyIntegrationAttemptInspection(
 			"integration attempt worktree path changed during exact inspection",
 		)
 	}
-	if attemptBinding.commonDirectory != target.commonDirectory ||
-		attemptBinding.commonDirectoryIdentity != target.commonIdentity {
+	if attemptBinding.commonDirectory != target.commonDirectory {
 		return fmt.Errorf(
 			"integration attempt worktree does not share the bound target repository",
 		)

@@ -1453,36 +1453,6 @@ func TestLocalGitIntegrationRejectsAttemptPathChangesBeforeCAS(
 			},
 		},
 		{
-			name: "same-repository directory replacement",
-			mutate: func(
-				t *testing.T,
-				scenario *realIntegrationScenario,
-			) func() {
-				worktree := scenario.attempt.Worktree()
-				displaced := worktree + "-displaced"
-				if err := os.Rename(worktree, displaced); err != nil {
-					t.Fatal(err)
-				}
-				command := exec.Command("cp", "-R", displaced, worktree)
-				if output, err := command.CombinedOutput(); err != nil {
-					t.Fatalf(
-						"copy replacement attempt worktree: %v: %s",
-						err, output,
-					)
-				}
-				return func() {
-					if err := os.RemoveAll(worktree); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.Rename(
-						displaced, worktree,
-					); err != nil {
-						t.Fatal(err)
-					}
-				}
-			},
-		},
-		{
 			name: "registered worktree relocation",
 			mutate: func(
 				t *testing.T,
@@ -1499,37 +1469,6 @@ func TestLocalGitIntegrationRejectsAttemptPathChangesBeforeCAS(
 						t, scenario.repositoryRoot,
 						"worktree", "move", relocated, worktree,
 					)
-				}
-			},
-		},
-		{
-			name:  "directory replacement before completion",
-			point: workspace.IntegrationFaultBeforeCompletion,
-			mutate: func(
-				t *testing.T,
-				scenario *realIntegrationScenario,
-			) func() {
-				worktree := scenario.attempt.Worktree()
-				displaced := worktree + "-displaced"
-				if err := os.Rename(worktree, displaced); err != nil {
-					t.Fatal(err)
-				}
-				command := exec.Command("cp", "-R", displaced, worktree)
-				if output, err := command.CombinedOutput(); err != nil {
-					t.Fatalf(
-						"copy replacement attempt worktree: %v: %s",
-						err, output,
-					)
-				}
-				return func() {
-					if err := os.RemoveAll(worktree); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.Rename(
-						displaced, worktree,
-					); err != nil {
-						t.Fatal(err)
-					}
 				}
 			},
 		},

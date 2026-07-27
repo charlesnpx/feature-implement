@@ -105,9 +105,7 @@ func (guard *WorkspaceInitializationRootGuard) WorktreeRootBinding() (
 	if err := guard.worktree.VerifyPath(); err != nil {
 		return WorkspaceWorktreeRootBinding{}, err
 	}
-	return NewWorkspaceWorktreeRootBinding(
-		guard.worktree.Path(), guard.worktree.Identity(),
-	)
+	return NewWorkspaceWorktreeRootBinding(guard.worktree.Path())
 }
 
 func (guard *WorkspaceInitializationRootGuard) bindLocalTarget(
@@ -128,8 +126,7 @@ func (guard *WorkspaceInitializationRootGuard) bindLocalTarget(
 		return fmt.Errorf("workspace initialization Git roots are already bound")
 	}
 	binding := inspection.binding
-	if guard.target.Path() != binding.root ||
-		guard.target.Identity() != binding.rootIdentity {
+	if guard.target.Path() != binding.root {
 		return fmt.Errorf(
 			"workspace initialization target root does not match the inspected Git binding",
 		)
@@ -156,11 +153,11 @@ func (guard *WorkspaceInitializationRootGuard) bindLocalTarget(
 			resultErr = errors.Join(resultErr, commonDirectory.Close())
 		}
 	}()
-	if gitDirectory.Identity() != binding.gitDirectoryIdentity ||
-		commonDirectory.Identity() != binding.commonIdentity {
-		return fmt.Errorf(
-			"workspace initialization Git-directory identity changed during admission",
-		)
+	if err := gitDirectory.VerifyPath(); err != nil {
+		return fmt.Errorf("verify workspace initialization Git directory: %w", err)
+	}
+	if err := commonDirectory.VerifyPath(); err != nil {
+		return fmt.Errorf("verify workspace initialization Git common directory: %w", err)
 	}
 	registeredPaths := sortedRegisteredWorktreePaths(
 		inspection.registeredWorktrees,

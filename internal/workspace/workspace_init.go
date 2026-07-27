@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const WorkspaceRuntimeProjectionFileName = "runtime-projection.v3.json"
+const WorkspaceRuntimeProjectionFileName = "runtime-projection.v4.json"
 
 type WorkspaceInitializationResult struct {
 	storedGeneration StoredGeneration
@@ -61,34 +61,27 @@ func InitializeWorkspaceV2WithOptions(
 		return WorkspaceInitializationResult{}, err
 	}
 	checkpoint := VerifiedPlanLockCheckpoint{}
-	checkpointID := GitObjectID{}
+	checkpointID := Digest{}
+	checkpointArtifactDigest := Digest{}
+	checkpointArtifactBytes := []byte(nil)
 	hasPlanCheckpoint := options.PlanCheckpoint != nil
 	if hasPlanCheckpoint {
 		checkpoint = *options.PlanCheckpoint
-		if checkpoint.root == "" ||
-			checkpoint.commit.IsZero() ||
-			checkpoint.tree.IsZero() ||
-			checkpoint.sourceDigest.IsZero() ||
-			checkpoint.semanticDigest.IsZero() ||
-			checkpoint.generation.IsZero() ||
-			checkpoint.lockDigest.IsZero() {
+		if checkpoint.validate() != nil {
 			return WorkspaceInitializationResult{}, fmt.Errorf(
 				"workspace initialization requires a nonzero verified plan lock checkpoint",
 			)
 		}
-		if checkpoint.lease == nil || !checkpoint.lease.active.Load() {
-			return WorkspaceInitializationResult{}, fmt.Errorf(
-				"workspace initialization requires an active plan lock verification lease",
-			)
-		}
-		if checkpoint.generation != definition.generation {
+		if checkpoint.Generation() != definition.generation {
 			return WorkspaceInitializationResult{}, fmt.Errorf(
 				"verified plan lock checkpoint generation %s does not match workspace generation %s",
-				checkpoint.generation,
+				checkpoint.Generation(),
 				definition.generation,
 			)
 		}
-		checkpointID = checkpoint.commit
+		checkpointID = checkpoint.CheckpointID()
+		checkpointArtifactDigest = checkpoint.ArtifactDigest()
+		checkpointArtifactBytes = checkpoint.ArtifactBytes()
 	}
 	requiresCheckpoint := false
 	for _, artifact := range definition.artifacts {
@@ -249,9 +242,11 @@ func InitializeWorkspaceV2WithOptions(
 		if err != nil {
 			return WorkspaceInitializationResult{}, err
 		}
-		eventCheckpoint := []GitObjectID(nil)
+		eventCheckpoint := []PlanCheckpointJournalBinding(nil)
 		if hasPlanCheckpoint {
-			eventCheckpoint = append(eventCheckpoint, checkpointID)
+			eventCheckpoint = append(eventCheckpoint, PlanCheckpointJournalBinding{
+				CheckpointID: checkpointID, ArtifactDigest: checkpointArtifactDigest,
+			})
 		}
 		event, err := NewWorkspaceInitializedJournalEvent(
 			definition.workspace.id,
@@ -313,6 +308,9 @@ func InitializeWorkspaceV2WithOptions(
 	if requiresCheckpoint && runtime.planCheckpoint != checkpointID {
 		return WorkspaceInitializationResult{}, fmt.Errorf("initialized runtime does not match the verified plan checkpoint")
 	}
+	if requiresCheckpoint && runtime.planCheckpointArtifactDigest != checkpointArtifactDigest {
+		return WorkspaceInitializationResult{}, fmt.Errorf("initialized runtime does not match the verified plan checkpoint artifact")
+	}
 	worktreeBinding, err := roots.WorktreeRootBinding()
 	if err != nil {
 		return WorkspaceInitializationResult{}, err
@@ -331,6 +329,17 @@ func InitializeWorkspaceV2WithOptions(
 		return WorkspaceInitializationResult{}, fmt.Errorf(
 			"initialized runtime does not match the verified local target",
 		)
+	}
+	if hasPlanCheckpoint {
+		if err := journal.runtime.state.PublishReplaceable(
+			PlanCheckpointArtifactFileName,
+			checkpointArtifactBytes,
+			0o600,
+			MaxArtifactBytes,
+			PublicationOptions{},
+		); err != nil {
+			return WorkspaceInitializationResult{}, err
+		}
 	}
 	projectionDigest, err := writeWorkspaceRuntimeProjectionAt(journal.runtime, snapshot, runtime)
 	if err != nil {

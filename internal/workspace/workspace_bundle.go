@@ -27,7 +27,6 @@ type workspaceBundleWire struct {
 // descriptor is discovery metadata incorporated into the effective generation.
 type WorkspaceBundle struct {
 	root             string
-	rootIdentity     PlatformFileIdentity
 	descriptorDigest Digest
 	sourcePaths      []string
 	sourceFiles      map[string][]byte
@@ -36,7 +35,6 @@ type WorkspaceBundle struct {
 }
 
 func (bundle WorkspaceBundle) Root() string                             { return bundle.root }
-func (bundle WorkspaceBundle) RootIdentity() PlatformFileIdentity       { return bundle.rootIdentity }
 func (bundle WorkspaceBundle) DescriptorDigest() Digest                 { return bundle.descriptorDigest }
 func (bundle WorkspaceBundle) Definition() EffectiveWorkspaceDefinition { return bundle.definition }
 func (bundle WorkspaceBundle) SourcePaths() []string {
@@ -54,10 +52,7 @@ func (bundle WorkspaceBundle) VerifyRoot() error {
 		return fmt.Errorf("reopen workspace bundle root: %w", err)
 	}
 	defer root.Close()
-	if root.Identity() != bundle.rootIdentity {
-		return fmt.Errorf("workspace bundle root at %s was replaced", bundle.root)
-	}
-	return nil
+	return root.VerifyPath()
 }
 
 // LoadWorkspaceBundle resolves a strict v2 bundle through the rooted
@@ -182,7 +177,7 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 		sourceFiles[plan.Path] = append([]byte(nil), plan.Bytes...)
 	}
 	return WorkspaceBundle{
-		root: filesystem.Path(), rootIdentity: filesystem.Identity(),
+		root:             filesystem.Path(),
 		descriptorDigest: DigestBytes(descriptor),
 		sourcePaths:      sourcePaths,
 		sourceFiles:      sourceFiles,

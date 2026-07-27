@@ -331,15 +331,13 @@ func (adapter LocalTargetGitAdapter) inspect(
 	}
 
 	binding, err := NewLocalTargetBinding(LocalTargetBindingOptions{
-		Root: target.root, RootIdentity: targetRoot.Identity(),
-		GitDirectory:         gitDirectory,
-		GitDirectoryIdentity: gitRoot.Identity(),
-		CommonDirectory:      commonDirectory,
-		CommonIdentity:       commonRoot.Identity(),
-		RepositoryFormat:     repositoryFormat,
-		ObjectFormat:         objectFormat,
-		LinkedWorktree:       linkedWorktree,
-		BaseRef:              target.baseRef, BaseCommit: target.baseCommit,
+		Root:             target.root,
+		GitDirectory:     gitDirectory,
+		CommonDirectory:  commonDirectory,
+		RepositoryFormat: repositoryFormat,
+		ObjectFormat:     objectFormat,
+		LinkedWorktree:   linkedWorktree,
+		BaseRef:          target.baseRef, BaseCommit: target.baseCommit,
 		FeatureBranch: target.featureBranch,
 	})
 	if err != nil {

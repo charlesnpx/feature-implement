@@ -57,10 +57,7 @@ func TestLocalTargetValidationAndInitializationBindPrimaryAndLinkedWorktrees(
 			if binding.Root() != targetRoot ||
 				binding.BaseCommit() != base ||
 				binding.ObjectFormat() != test.algorithm ||
-				binding.LinkedWorktree() != test.linked ||
-				binding.RootIdentity().Inode == 0 ||
-				binding.CommonIdentity().Inode == 0 ||
-				binding.GitDirectoryIdentity().Inode == 0 {
+				binding.LinkedWorktree() != test.linked {
 				t.Fatalf("local target binding = %#v", binding)
 			}
 

@@ -38,9 +38,9 @@ func TestPublishedPublicContractIncludesLicenseOperationsAndNotices(t *testing.T
 		"### Threat model",
 		"### Deferred GitHub design",
 		"### License and third-party notices",
-		"local completion is not an external attestation",
-		"runtime without the local v3 marker must",
-		"be regenerated from the locked bundle",
+		"Local completion is not",
+		"runtime without the local v4 marker must",
+		"committed plan and current lock",
 		"The target must be a local non-bare Git repository",
 	} {
 		if !strings.Contains(readme, required) {

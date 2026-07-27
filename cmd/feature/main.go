@@ -11,7 +11,6 @@ import (
 
 	"github.com/charlesnpx/feature-implement/internal/install"
 	"github.com/charlesnpx/feature-implement/internal/plan"
-	"github.com/charlesnpx/feature-implement/internal/workspace"
 	"github.com/charlesnpx/feature-implement/internal/workspacecmd"
 )
 
@@ -53,7 +52,6 @@ func usage(w io.Writer) {
   feature plan example
   feature plan schema [--json]
   feature plan materialize --manifest <file> [--out-root <dir>] [--json]
-  feature plan checkpoint --root <bundle-root> --kind initial|revision|lock --input <json-file|-> [--json]
   feature validate <plan-dir> [--write-lock] [--json]
   feature workspace schema [bundle|requests|reports] [--json]
   feature workspace example
@@ -112,7 +110,7 @@ func installSkills(args []string) error {
 
 func planCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("plan requires subcommand: example, schema, materialize, or checkpoint")
+		return fmt.Errorf("plan requires subcommand: example, schema, or materialize")
 	}
 	if isHelpCommand(args[0]) {
 		usagePlan(os.Stdout)
@@ -125,10 +123,8 @@ func planCommand(args []string) error {
 		return planSchema(args[1:])
 	case "materialize":
 		return planMaterialize(args[1:])
-	case "checkpoint":
-		return planCheckpoint(args[1:])
 	default:
-		return fmt.Errorf("plan requires subcommand: example, schema, materialize, or checkpoint")
+		return fmt.Errorf("plan requires subcommand: example, schema, or materialize")
 	}
 }
 
@@ -182,40 +178,6 @@ func planMaterialize(args []string) error {
 		return writeJSON(result)
 	}
 	fmt.Println(result.PlanDir)
-	return nil
-}
-
-func planCheckpoint(args []string) error {
-	if hasHelpFlag(args) {
-		usagePlanCheckpoint(os.Stdout)
-		return nil
-	}
-	fs := flag.NewFlagSet("plan checkpoint", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	root := fs.String("root", "", "Workspace bundle root and plan repository")
-	kind := fs.String("kind", "", "initial | revision | lock")
-	inputPath := fs.String("input", "", "Strict JSON request file, or - for stdin")
-	asJSON := fs.Bool("json", false, "Emit JSON result")
-	if err := parsePermissive(fs, args, "root", "kind", "input"); err != nil {
-		return err
-	}
-	if fs.NArg() != 0 {
-		return fmt.Errorf("plan checkpoint accepts only flags")
-	}
-	input, err := readWorkspaceInput(*inputPath)
-	if err != nil {
-		return err
-	}
-	result, err := workspace.CheckpointPlanRepository(context.Background(), workspace.PlanCheckpointOptions{
-		Root: *root, Kind: workspace.PlanCheckpointKind(strings.TrimSpace(*kind)), Input: input,
-	})
-	if err != nil {
-		return err
-	}
-	if *asJSON {
-		return writeJSON(result)
-	}
-	fmt.Println(result.Commit)
 	return nil
 }
 
@@ -416,7 +378,6 @@ func usagePlan(w io.Writer) {
   feature plan example
   feature plan schema [--json]
   feature plan materialize --manifest <file> [--out-root <dir>] [--json]
-  feature plan checkpoint --root <bundle-root> --kind initial|revision|lock --input <json-file|-> [--json]
 
 Use "feature plan example" for a valid feature.plan.yaml template.
 Use "feature plan schema --json" for the machine-readable manifest schema.`)
@@ -442,13 +403,6 @@ func usagePlanMaterialize(w io.Writer) {
 
 Materializes a feature.plan.yaml manifest into epic, feature, and story Markdown folders.
 If --out-root is omitted, output defaults to ~/tmp when it exists, otherwise the system temp directory.`)
-}
-
-func usagePlanCheckpoint(w io.Writer) {
-	fmt.Fprintln(w, `Usage:
-  feature plan checkpoint --root <bundle-root> --kind initial|revision|lock --input <json-file|-> [--json]
-
-Records one deterministic checkpoint in the local plan repository. Initial and lock requests require schema_version and occurred_at; revisions also require revision_id and review_digest.`)
 }
 
 func usageValidate(w io.Writer) {

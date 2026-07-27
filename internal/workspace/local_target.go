@@ -8,38 +8,32 @@ import (
 )
 
 // LocalTargetBinding is the durable admission result for the selected target
-// worktree. It binds both semantic Git state and the opened filesystem
-// objects that were used to establish it.
+// worktree. It binds the configured paths and semantic Git state. Filesystem
+// replacement checks are performed with opened roots at operation time.
 type LocalTargetBinding struct {
-	root                 string
-	rootIdentity         PlatformFileIdentity
-	gitDirectory         string
-	gitDirectoryIdentity PlatformFileIdentity
-	commonDirectory      string
-	commonIdentity       PlatformFileIdentity
-	repositoryFormat     uint64
-	objectFormat         GitHashAlgorithm
-	linkedWorktree       bool
-	baseRef              string
-	baseCommit           GitObjectID
-	featureBranch        string
-	featureRef           string
-	digest               Digest
+	root             string
+	gitDirectory     string
+	commonDirectory  string
+	repositoryFormat uint64
+	objectFormat     GitHashAlgorithm
+	linkedWorktree   bool
+	baseRef          string
+	baseCommit       GitObjectID
+	featureBranch    string
+	featureRef       string
+	digest           Digest
 }
 
 type LocalTargetBindingOptions struct {
-	Root                 string
-	RootIdentity         PlatformFileIdentity
-	GitDirectory         string
-	GitDirectoryIdentity PlatformFileIdentity
-	CommonDirectory      string
-	CommonIdentity       PlatformFileIdentity
-	RepositoryFormat     uint64
-	ObjectFormat         GitHashAlgorithm
-	LinkedWorktree       bool
-	BaseRef              string
-	BaseCommit           GitObjectID
-	FeatureBranch        string
+	Root             string
+	GitDirectory     string
+	CommonDirectory  string
+	RepositoryFormat uint64
+	ObjectFormat     GitHashAlgorithm
+	LinkedWorktree   bool
+	BaseRef          string
+	BaseCommit       GitObjectID
+	FeatureBranch    string
 }
 
 func NewLocalTargetBinding(options LocalTargetBindingOptions) (LocalTargetBinding, error) {
@@ -50,13 +44,6 @@ func NewLocalTargetBinding(options LocalTargetBindingOptions) (LocalTargetBindin
 		!filepath.IsAbs(commonDirectory) {
 		return LocalTargetBinding{}, fmt.Errorf(
 			"local target binding requires absolute root, Git directory, and common directory",
-		)
-	}
-	if zeroPlatformFileIdentity(options.RootIdentity) ||
-		zeroPlatformFileIdentity(options.GitDirectoryIdentity) ||
-		zeroPlatformFileIdentity(options.CommonIdentity) {
-		return LocalTargetBinding{}, fmt.Errorf(
-			"local target binding requires target, Git-directory, and common-directory identities",
 		)
 	}
 	if options.RepositoryFormat > 1 {
@@ -99,9 +86,9 @@ func NewLocalTargetBinding(options LocalTargetBindingOptions) (LocalTargetBindin
 		)
 	}
 	binding := LocalTargetBinding{
-		root: root, rootIdentity: options.RootIdentity,
-		gitDirectory: gitDirectory, gitDirectoryIdentity: options.GitDirectoryIdentity,
-		commonDirectory: commonDirectory, commonIdentity: options.CommonIdentity,
+		root:             root,
+		gitDirectory:     gitDirectory,
+		commonDirectory:  commonDirectory,
 		repositoryFormat: options.RepositoryFormat, objectFormat: options.ObjectFormat,
 		linkedWorktree: options.LinkedWorktree,
 		baseRef:        baseRef, baseCommit: options.BaseCommit,
@@ -118,20 +105,11 @@ func NewLocalTargetBinding(options LocalTargetBindingOptions) (LocalTargetBindin
 func (binding LocalTargetBinding) Root() string {
 	return binding.root
 }
-func (binding LocalTargetBinding) RootIdentity() PlatformFileIdentity {
-	return binding.rootIdentity
-}
 func (binding LocalTargetBinding) GitDirectory() string {
 	return binding.gitDirectory
 }
-func (binding LocalTargetBinding) GitDirectoryIdentity() PlatformFileIdentity {
-	return binding.gitDirectoryIdentity
-}
 func (binding LocalTargetBinding) CommonDirectory() string {
 	return binding.commonDirectory
-}
-func (binding LocalTargetBinding) CommonIdentity() PlatformFileIdentity {
-	return binding.commonIdentity
 }
 func (binding LocalTargetBinding) RepositoryFormat() uint64 {
 	return binding.repositoryFormat
@@ -162,30 +140,25 @@ func (binding LocalTargetBinding) IsZero() bool {
 }
 
 type localTargetBindingWire struct {
-	Root                 string               `json:"root"`
-	RootIdentity         PlatformFileIdentity `json:"root_identity"`
-	GitDirectory         string               `json:"git_directory"`
-	GitDirectoryIdentity PlatformFileIdentity `json:"git_directory_identity"`
-	CommonDirectory      string               `json:"common_directory"`
-	CommonIdentity       PlatformFileIdentity `json:"common_directory_identity"`
-	RepositoryFormat     uint64               `json:"repository_format"`
-	ObjectFormat         GitHashAlgorithm     `json:"object_format"`
-	LinkedWorktree       bool                 `json:"linked_worktree"`
-	BaseRef              string               `json:"base_ref"`
-	BaseCommit           string               `json:"base_commit"`
-	FeatureBranch        string               `json:"feature_branch"`
-	FeatureRef           string               `json:"feature_ref"`
+	Root             string           `json:"root"`
+	GitDirectory     string           `json:"git_directory"`
+	CommonDirectory  string           `json:"common_directory"`
+	RepositoryFormat uint64           `json:"repository_format"`
+	ObjectFormat     GitHashAlgorithm `json:"object_format"`
+	LinkedWorktree   bool             `json:"linked_worktree"`
+	BaseRef          string           `json:"base_ref"`
+	BaseCommit       string           `json:"base_commit"`
+	FeatureBranch    string           `json:"feature_branch"`
+	FeatureRef       string           `json:"feature_ref"`
 }
 
 func localTargetBindingToWire(binding LocalTargetBinding) localTargetBindingWire {
 	return localTargetBindingWire{
-		Root: binding.root, RootIdentity: binding.rootIdentity,
-		GitDirectory:         binding.gitDirectory,
-		GitDirectoryIdentity: binding.gitDirectoryIdentity,
-		CommonDirectory:      binding.commonDirectory,
-		CommonIdentity:       binding.commonIdentity,
-		RepositoryFormat:     binding.repositoryFormat,
-		ObjectFormat:         binding.objectFormat, LinkedWorktree: binding.linkedWorktree,
+		Root:             binding.root,
+		GitDirectory:     binding.gitDirectory,
+		CommonDirectory:  binding.commonDirectory,
+		RepositoryFormat: binding.repositoryFormat,
+		ObjectFormat:     binding.objectFormat, LinkedWorktree: binding.linkedWorktree,
 		BaseRef: binding.baseRef, BaseCommit: binding.baseCommit.String(),
 		FeatureBranch: binding.featureBranch, FeatureRef: binding.featureRef,
 	}
@@ -197,13 +170,11 @@ func localTargetBindingFromWire(wire localTargetBindingWire) (LocalTargetBinding
 		return LocalTargetBinding{}, fmt.Errorf("local target base commit: %w", err)
 	}
 	binding, err := NewLocalTargetBinding(LocalTargetBindingOptions{
-		Root: wire.Root, RootIdentity: wire.RootIdentity,
-		GitDirectory:         wire.GitDirectory,
-		GitDirectoryIdentity: wire.GitDirectoryIdentity,
-		CommonDirectory:      wire.CommonDirectory,
-		CommonIdentity:       wire.CommonIdentity,
-		RepositoryFormat:     wire.RepositoryFormat,
-		ObjectFormat:         wire.ObjectFormat, LinkedWorktree: wire.LinkedWorktree,
+		Root:             wire.Root,
+		GitDirectory:     wire.GitDirectory,
+		CommonDirectory:  wire.CommonDirectory,
+		RepositoryFormat: wire.RepositoryFormat,
+		ObjectFormat:     wire.ObjectFormat, LinkedWorktree: wire.LinkedWorktree,
 		BaseRef: wire.BaseRef, BaseCommit: baseCommit,
 		FeatureBranch: wire.FeatureBranch,
 	})
@@ -224,8 +195,4 @@ func digestLocalTargetBinding(binding LocalTargetBinding) (Digest, error) {
 		return Digest{}, err
 	}
 	return DigestBytes(content), nil
-}
-
-func zeroPlatformFileIdentity(identity PlatformFileIdentity) bool {
-	return identity.Device == 0 && identity.Inode == 0 && identity.Owner == 0
 }

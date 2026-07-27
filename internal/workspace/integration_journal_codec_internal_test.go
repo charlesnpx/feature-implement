@@ -196,9 +196,9 @@ func TestIntegrationJournalCodecRoundTripsAndRejectsTampering(t *testing.T) {
 			},
 		},
 		{
-			name: "attempt directory identity",
+			name: "attempt Git directory",
 			mutate: func(wire *integrationIntentDigestWire) {
-				wire.AttemptWorktreeBinding.WorktreeIdentity.Inode++
+				wire.AttemptWorktreeBinding.GitDirectory += "-replacement"
 			},
 		},
 	} {
@@ -291,18 +291,9 @@ func TestIntegrationCompletionReducerRequiresExactLeaseAndSerialSegment(
 	commonDirectory := filepath.Join(targetRoot, "git")
 	targetBinding, err := NewLocalTargetBinding(
 		LocalTargetBindingOptions{
-			Root: targetRoot,
-			RootIdentity: PlatformFileIdentity{
-				Device: 2, Inode: 10, Owner: 3,
-			},
-			GitDirectory: commonDirectory,
-			GitDirectoryIdentity: PlatformFileIdentity{
-				Device: 2, Inode: 11, Owner: 3,
-			},
-			CommonDirectory: commonDirectory,
-			CommonIdentity: PlatformFileIdentity{
-				Device: 2, Inode: 11, Owner: 3,
-			},
+			Root:             targetRoot,
+			GitDirectory:     commonDirectory,
+			CommonDirectory:  commonDirectory,
 			RepositoryFormat: 0,
 			ObjectFormat:     GitHashSHA1,
 			LinkedWorktree:   false,
@@ -693,18 +684,9 @@ func integrationIntentTestOptions(
 	bindingRoot := t.TempDir()
 	attemptBinding, err := NewAttemptWorktreeGitBinding(
 		AttemptWorktreeGitBindingOptions{
-			Worktree: filepath.Join(bindingRoot, "attempt"),
-			WorktreeIdentity: PlatformFileIdentity{
-				Device: 1, Inode: 2, Owner: 3,
-			},
-			GitDirectory: filepath.Join(bindingRoot, "git", "worktrees", "attempt"),
-			GitDirectoryIdentity: PlatformFileIdentity{
-				Device: 1, Inode: 4, Owner: 3,
-			},
+			Worktree:        filepath.Join(bindingRoot, "attempt"),
+			GitDirectory:    filepath.Join(bindingRoot, "git", "worktrees", "attempt"),
 			CommonDirectory: filepath.Join(bindingRoot, "git"),
-			CommonDirectoryIdentity: PlatformFileIdentity{
-				Device: 1, Inode: 5, Owner: 3,
-			},
 			AdministrationDigest: DigestBytes(
 				[]byte("attempt-administration"),
 			),

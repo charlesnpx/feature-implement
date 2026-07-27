@@ -16,11 +16,12 @@ Execute one validated workspace-v2 bundle through its local journal.
 ## Preconditions
 
 1. Use the obvious bundle only when context identifies exactly one; otherwise
-   require `<bundle-dir>`. Require its strict
-   `feature.workspace.bundle.json` and every referenced source.
+	   require `<bundle-dir>`. Require its strict
+	   `feature.workspace.bundle.json` and every referenced source.
 2. Run `feature workspace validate --bundle <bundle-dir> --write-locks --json`.
-   Treat the source files and `generated/` projections as immutable for the
-   active generation. Require the bundle repository's exact lock checkpoint.
+	   Treat the source files and `generated/` projections as immutable for the
+	   active generation. Require the bundle repository to be clean at a committed
+	   `HEAD` containing the exact source and lock bytes.
 3. Use a dedicated `<runtime-dir>` and `<worktree-root>` outside the primary
    checkout and target repository. Existing runtime state is authoritative. If
    it exists, run `recover`; otherwise initialize it with a strict request that
@@ -32,7 +33,7 @@ Execute one validated workspace-v2 bundle through its local journal.
 5. Read `feature workspace schema requests --json` before constructing
    mutations. Each mutation is one strict schema-version-two JSON value.
 
-If the journal, active generation, target binding, plan lock checkpoint, or Git
+If the journal, active generation, target binding, committed plan `HEAD`, or Git
 topology is missing, contradictory, or ambiguous, stop for operator direction.
 Never edit `generated/`, `<runtime-dir>/state/`, or journal records by hand.
 
@@ -119,7 +120,7 @@ readiness.
 ## Finish
 
 Run `status`, `scheduler`, `gates`, and `report` again. Report the workspace ID,
-generation, plan lock checkpoint, feature branch and head, completed merge
-units, local completion digest, validation results, and any intentionally
-retained attempt worktrees. Do not claim completion while a gate, directive,
-drift condition, or recovery action remains unresolved.
+generation, plan checkpoint, feature branch and head, completed merge units,
+local completion digest, validation results, and any intentionally retained
+attempt worktrees. Do not claim completion while a gate, directive, drift
+condition, or recovery action remains unresolved.

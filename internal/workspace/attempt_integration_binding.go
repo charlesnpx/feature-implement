@@ -7,31 +7,25 @@ import (
 	"strings"
 )
 
-// AttemptWorktreeGitBinding captures the exact filesystem and Git
-// administration objects used to inspect an attempt worktree. Integration
-// persists this value before publication so a path replacement, worktree
-// relocation, or repository substitution cannot be accepted on retry.
+// AttemptWorktreeGitBinding captures the attempt worktree paths and Git
+// administration digests used to inspect an attempt before integration.
+// Filesystem replacement checks are performed with opened roots at operation
+// time; the durable binding deliberately avoids persisted device/inode data.
 type AttemptWorktreeGitBinding struct {
-	worktree                string
-	worktreeIdentity        PlatformFileIdentity
-	gitDirectory            string
-	gitDirectoryIdentity    PlatformFileIdentity
-	commonDirectory         string
-	commonDirectoryIdentity PlatformFileIdentity
-	administrationDigest    Digest
-	configurationDigest     Digest
-	digest                  Digest
+	worktree             string
+	gitDirectory         string
+	commonDirectory      string
+	administrationDigest Digest
+	configurationDigest  Digest
+	digest               Digest
 }
 
 type AttemptWorktreeGitBindingOptions struct {
-	Worktree                string
-	WorktreeIdentity        PlatformFileIdentity
-	GitDirectory            string
-	GitDirectoryIdentity    PlatformFileIdentity
-	CommonDirectory         string
-	CommonDirectoryIdentity PlatformFileIdentity
-	AdministrationDigest    Digest
-	ConfigurationDigest     Digest
+	Worktree             string
+	GitDirectory         string
+	CommonDirectory      string
+	AdministrationDigest Digest
+	ConfigurationDigest  Digest
 }
 
 func NewAttemptWorktreeGitBinding(
@@ -46,23 +40,18 @@ func NewAttemptWorktreeGitBinding(
 			"attempt worktree Git binding requires absolute worktree and Git directories",
 		)
 	}
-	if zeroPlatformFileIdentity(options.WorktreeIdentity) ||
-		zeroPlatformFileIdentity(options.GitDirectoryIdentity) ||
-		zeroPlatformFileIdentity(options.CommonDirectoryIdentity) ||
-		options.AdministrationDigest.IsZero() ||
+	if options.AdministrationDigest.IsZero() ||
 		options.ConfigurationDigest.IsZero() {
 		return AttemptWorktreeGitBinding{}, fmt.Errorf(
-			"attempt worktree Git binding requires exact directory identities and Git state digests",
+			"attempt worktree Git binding requires exact paths and Git state digests",
 		)
 	}
 	binding := AttemptWorktreeGitBinding{
-		worktree: worktree, worktreeIdentity: options.WorktreeIdentity,
-		gitDirectory:            gitDirectory,
-		gitDirectoryIdentity:    options.GitDirectoryIdentity,
-		commonDirectory:         commonDirectory,
-		commonDirectoryIdentity: options.CommonDirectoryIdentity,
-		administrationDigest:    options.AdministrationDigest,
-		configurationDigest:     options.ConfigurationDigest,
+		worktree:             worktree,
+		gitDirectory:         gitDirectory,
+		commonDirectory:      commonDirectory,
+		administrationDigest: options.AdministrationDigest,
+		configurationDigest:  options.ConfigurationDigest,
 	}
 	digest, err := digestAttemptWorktreeGitBinding(binding)
 	if err != nil {
@@ -78,20 +67,11 @@ func NewAttemptWorktreeGitBinding(
 func (binding AttemptWorktreeGitBinding) Worktree() string {
 	return binding.worktree
 }
-func (binding AttemptWorktreeGitBinding) WorktreeIdentity() PlatformFileIdentity {
-	return binding.worktreeIdentity
-}
 func (binding AttemptWorktreeGitBinding) GitDirectory() string {
 	return binding.gitDirectory
 }
-func (binding AttemptWorktreeGitBinding) GitDirectoryIdentity() PlatformFileIdentity {
-	return binding.gitDirectoryIdentity
-}
 func (binding AttemptWorktreeGitBinding) CommonDirectory() string {
 	return binding.commonDirectory
-}
-func (binding AttemptWorktreeGitBinding) CommonDirectoryIdentity() PlatformFileIdentity {
-	return binding.commonDirectoryIdentity
 }
 func (binding AttemptWorktreeGitBinding) AdministrationDigest() Digest {
 	return binding.administrationDigest
@@ -116,14 +96,11 @@ func (binding AttemptWorktreeGitBinding) validate() error {
 		!filepath.IsAbs(binding.commonDirectory) ||
 		filepath.Clean(strings.TrimSpace(binding.commonDirectory)) !=
 			binding.commonDirectory ||
-		zeroPlatformFileIdentity(binding.worktreeIdentity) ||
-		zeroPlatformFileIdentity(binding.gitDirectoryIdentity) ||
-		zeroPlatformFileIdentity(binding.commonDirectoryIdentity) ||
 		binding.administrationDigest.IsZero() ||
 		binding.configurationDigest.IsZero() ||
 		binding.digest.IsZero() {
 		return fmt.Errorf(
-			"attempt worktree Git binding has incomplete immutable bindings",
+			"attempt worktree Git binding has incomplete path or Git state bindings",
 		)
 	}
 	digest, err := digestAttemptWorktreeGitBinding(binding)
@@ -137,30 +114,24 @@ func (binding AttemptWorktreeGitBinding) validate() error {
 }
 
 type attemptWorktreeGitBindingWire struct {
-	SchemaVersion           int                  `json:"schema_version"`
-	Worktree                string               `json:"worktree"`
-	WorktreeIdentity        PlatformFileIdentity `json:"worktree_identity"`
-	GitDirectory            string               `json:"git_directory"`
-	GitDirectoryIdentity    PlatformFileIdentity `json:"git_directory_identity"`
-	CommonDirectory         string               `json:"common_directory"`
-	CommonDirectoryIdentity PlatformFileIdentity `json:"common_directory_identity"`
-	AdministrationDigest    string               `json:"administration_digest"`
-	ConfigurationDigest     string               `json:"configuration_digest"`
+	SchemaVersion        int    `json:"schema_version"`
+	Worktree             string `json:"worktree"`
+	GitDirectory         string `json:"git_directory"`
+	CommonDirectory      string `json:"common_directory"`
+	AdministrationDigest string `json:"administration_digest"`
+	ConfigurationDigest  string `json:"configuration_digest"`
 }
 
 func attemptWorktreeGitBindingToWire(
 	binding AttemptWorktreeGitBinding,
 ) attemptWorktreeGitBindingWire {
 	return attemptWorktreeGitBindingWire{
-		SchemaVersion:           JournalSchemaVersion,
-		Worktree:                binding.worktree,
-		WorktreeIdentity:        binding.worktreeIdentity,
-		GitDirectory:            binding.gitDirectory,
-		GitDirectoryIdentity:    binding.gitDirectoryIdentity,
-		CommonDirectory:         binding.commonDirectory,
-		CommonDirectoryIdentity: binding.commonDirectoryIdentity,
-		AdministrationDigest:    binding.administrationDigest.String(),
-		ConfigurationDigest:     binding.configurationDigest.String(),
+		SchemaVersion:        JournalSchemaVersion,
+		Worktree:             binding.worktree,
+		GitDirectory:         binding.gitDirectory,
+		CommonDirectory:      binding.commonDirectory,
+		AdministrationDigest: binding.administrationDigest.String(),
+		ConfigurationDigest:  binding.configurationDigest.String(),
 	}
 }
 
@@ -187,14 +158,11 @@ func attemptWorktreeGitBindingFromWire(
 	}
 	return NewAttemptWorktreeGitBinding(
 		AttemptWorktreeGitBindingOptions{
-			Worktree:                wire.Worktree,
-			WorktreeIdentity:        wire.WorktreeIdentity,
-			GitDirectory:            wire.GitDirectory,
-			GitDirectoryIdentity:    wire.GitDirectoryIdentity,
-			CommonDirectory:         wire.CommonDirectory,
-			CommonDirectoryIdentity: wire.CommonDirectoryIdentity,
-			AdministrationDigest:    administrationDigest,
-			ConfigurationDigest:     configurationDigest,
+			Worktree:             wire.Worktree,
+			GitDirectory:         wire.GitDirectory,
+			CommonDirectory:      wire.CommonDirectory,
+			AdministrationDigest: administrationDigest,
+			ConfigurationDigest:  configurationDigest,
 		},
 	)
 }

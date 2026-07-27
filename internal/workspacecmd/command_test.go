@@ -411,30 +411,19 @@ merge_units:
       max_review_rounds: 2
       max_review_fixes: 1
 `)
-	checkpointInput := func(occurredAt string) []byte {
-		return []byte(fmt.Sprintf(`{
-  "schema_version": 2,
-  "occurred_at": %q
-}`, occurredAt))
-	}
-	if _, err := workspace.CheckpointPlanRepository(
-		context.Background(),
-		workspace.PlanCheckpointOptions{
-			Root: bundleRoot, Kind: workspace.PlanCheckpointInitial,
-			Input: checkpointInput("2026-07-25T17:59:58Z"),
-		},
-	); err != nil {
+	if _, err := Execute(context.Background(), Options{
+		Action:           "validate",
+		BundleDir:        bundleRoot,
+		WriteLocks:       true,
+		GeneratorVersion: "test",
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := workspace.CheckpointPlanRepository(
-		context.Background(),
-		workspace.PlanCheckpointOptions{
-			Root: bundleRoot, Kind: workspace.PlanCheckpointLock,
-			Input: checkpointInput("2026-07-25T17:59:59Z"),
-		},
-	); err != nil {
-		t.Fatal(err)
-	}
+	runGitTest(t, bundleRoot, "init", "-b", "main")
+	runGitTest(t, bundleRoot, "config", "user.name", "Feature Test")
+	runGitTest(t, bundleRoot, "config", "user.email", "feature@example.test")
+	runGitTest(t, bundleRoot, "add", ".")
+	runGitTest(t, bundleRoot, "commit", "-m", "Committed plan locks")
 	bundle, err := workspace.LoadWorkspaceBundle(bundleRoot)
 	if err != nil {
 		t.Fatal(err)

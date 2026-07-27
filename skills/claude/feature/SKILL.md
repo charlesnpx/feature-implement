@@ -48,16 +48,15 @@ can execute locally.
    fixes once, then validate again. Start another broad review only when the
    preceding review reported a Critical or High finding. Stop after a review
    with no Critical or High findings or after the third iteration.
-10. Initialize the bundle's local plan repository with
-    `feature plan checkpoint --kind initial`, write immutable projections with
-    `feature workspace validate --bundle <bundle-dir> --write-locks --json`,
-    then record `feature plan checkpoint --kind lock`.
+10. Run `feature workspace validate --bundle <bundle-dir> --write-locks --json`,
+    commit the plan sources and generated locks in the bundle repository, and
+    verify the plan repository is clean at the committed `HEAD`.
 
 If the target root, base ref, exact base commit, feature branch, execution
 policy, or story scope is materially ambiguous, stop for operator direction.
 
-Return the bundle directory, workspace ID, effective generation, exact plan
-lock checkpoint, ordered merge units, and validation result.
+Return the bundle directory, workspace ID, effective generation, committed plan
+`HEAD`, generated lock digest, ordered merge units, and validation result.
 
 ## Bundle contract
 

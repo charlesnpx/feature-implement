@@ -1131,9 +1131,7 @@ func testWorktreeRootBinding(
 		t.Fatal(err)
 	}
 	defer root.Close()
-	binding, err := workspace.NewWorkspaceWorktreeRootBinding(
-		root.Path(), root.Identity(),
-	)
+	binding, err := workspace.NewWorkspaceWorktreeRootBinding(root.Path())
 	if err != nil {
 		t.Fatal(err)
 	}

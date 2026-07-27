@@ -46,12 +46,12 @@ type journalRecordBodyWire struct {
 }
 
 type workspaceInitializedPayloadWire struct {
-	WorkspaceID          string               `json:"workspace_id"`
-	Generation           string               `json:"generation"`
-	DefinitionDigest     string               `json:"definition_digest"`
-	PlanCheckpoint       string               `json:"plan_checkpoint,omitempty"`
-	WorktreeRoot         string               `json:"worktree_root"`
-	WorktreeRootIdentity PlatformFileIdentity `json:"worktree_root_identity"`
+	WorkspaceID                  string `json:"workspace_id"`
+	Generation                   string `json:"generation"`
+	DefinitionDigest             string `json:"definition_digest"`
+	PlanCheckpoint               string `json:"plan_checkpoint,omitempty"`
+	PlanCheckpointArtifactDigest string `json:"plan_checkpoint_artifact_digest,omitempty"`
+	WorktreeRoot                 string `json:"worktree_root"`
 }
 
 type journalTailRecoveredPayloadWire struct {
@@ -158,8 +158,8 @@ func marshalWorkspaceJournalEvent(event WorkspaceJournalEvent) (json.RawMessage,
 		value = workspaceInitializedPayloadWire{
 			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
 			DefinitionDigest: event.definitionDigest.String(), PlanCheckpoint: event.planCheckpoint.String(),
-			WorktreeRoot:         event.worktreeRoot.Path(),
-			WorktreeRootIdentity: event.worktreeRoot.Identity(),
+			PlanCheckpointArtifactDigest: event.planCheckpointArtifactDigest.String(),
+			WorktreeRoot:                 event.worktreeRoot.Path(),
 		}
 	case JournalTailRecoveredEvent:
 		value = journalTailRecoveredPayloadWire{
@@ -320,21 +320,27 @@ func decodeWorkspaceJournalEvent(eventType JournalEventType, payload json.RawMes
 		if err != nil {
 			return nil, err
 		}
-		worktreeRoot, err := NewWorkspaceWorktreeRootBinding(
-			wire.WorktreeRoot, wire.WorktreeRootIdentity,
-		)
+		worktreeRoot, err := NewWorkspaceWorktreeRootBinding(wire.WorktreeRoot)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"workspace initialization worktree root: %w", err,
 			)
 		}
-		var checkpoint []GitObjectID
+		var checkpoint []PlanCheckpointJournalBinding
 		if strings.TrimSpace(wire.PlanCheckpoint) != "" {
-			parsed, err := ParseGitObjectID(wire.PlanCheckpoint)
+			parsed, err := ParseDigest(wire.PlanCheckpoint)
 			if err != nil {
 				return nil, fmt.Errorf("plan checkpoint: %w", err)
 			}
-			checkpoint = append(checkpoint, parsed)
+			artifactDigest, err := ParseDigest(wire.PlanCheckpointArtifactDigest)
+			if err != nil {
+				return nil, fmt.Errorf("plan checkpoint artifact digest: %w", err)
+			}
+			checkpoint = append(checkpoint, PlanCheckpointJournalBinding{
+				CheckpointID: parsed, ArtifactDigest: artifactDigest,
+			})
+		} else if strings.TrimSpace(wire.PlanCheckpointArtifactDigest) != "" {
+			return nil, fmt.Errorf("plan checkpoint artifact digest requires plan checkpoint")
 		}
 		return NewWorkspaceInitializedJournalEvent(
 			workspaceID, generation, definitionDigest,

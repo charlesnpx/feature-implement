@@ -116,11 +116,11 @@ func (adapter LocalTargetGitAdapter) openBoundSession(
 			)
 		}
 	}()
-	if targetRoot.Identity() != binding.rootIdentity ||
-		gitRoot.Identity() != binding.gitDirectoryIdentity ||
-		commonRoot.Identity() != binding.commonIdentity {
+	if targetRoot.Path() != binding.root ||
+		gitRoot.Path() != binding.gitDirectory ||
+		commonRoot.Path() != binding.commonDirectory {
 		return nil, fmt.Errorf(
-			"local target filesystem identity changed after durable feature-ref intent",
+			"local target paths changed after durable feature-ref intent",
 		)
 	}
 	target, err := retainLocalTargetRoot(targetRoot)
@@ -162,10 +162,10 @@ func (session *localTargetGitSession) Verify() error {
 			return err
 		}
 	}
-	if session.target.root.Identity() != session.binding.rootIdentity ||
-		session.git.root.Identity() != session.binding.gitDirectoryIdentity ||
-		session.common.root.Identity() != session.binding.commonIdentity {
-		return fmt.Errorf("bound local target Git session identity changed")
+	if session.target.root.Path() != session.binding.root ||
+		session.git.root.Path() != session.binding.gitDirectory ||
+		session.common.root.Path() != session.binding.commonDirectory {
+		return fmt.Errorf("bound local target Git session path changed")
 	}
 	if err := validateLocalTargetWorktreeAdministration(
 		session.target.root,

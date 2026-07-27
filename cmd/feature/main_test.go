@@ -254,27 +254,6 @@ func TestWorkspaceSchemaExampleAndJournalBackedStatus(t *testing.T) {
 	}
 
 	bundleDir := writeWorkspaceBundleFixture(t)
-	initialCheckpointInput := writeJSONInput(t, map[string]any{
-		"schema_version": 2,
-		"occurred_at":    "2026-07-22T11:58:00Z",
-	})
-	initialCheckpoint := runFeatureOutput(
-		t,
-		"plan", "checkpoint",
-		"--root", bundleDir,
-		"--kind", "initial",
-		"--input", initialCheckpointInput,
-		"--json",
-	)
-	var initialCheckpointResult struct {
-		Status string `json:"status"`
-		Commit string `json:"commit"`
-	}
-	if err := json.Unmarshal([]byte(initialCheckpoint), &initialCheckpointResult); err != nil ||
-		initialCheckpointResult.Status != "checkpointed" ||
-		initialCheckpointResult.Commit == "" {
-		t.Fatalf("initial plan checkpoint failed: err=%v output=%s", err, initialCheckpoint)
-	}
 	stdout = runFeatureOutput(t, "workspace", "validate", "--bundle", bundleDir, "--write-locks", "--json")
 	var validation struct {
 		Status   string `json:"status"`
@@ -295,27 +274,7 @@ func TestWorkspaceSchemaExampleAndJournalBackedStatus(t *testing.T) {
 			t.Fatalf("expected generated projection %s: %v", path, err)
 		}
 	}
-	lockCheckpointInput := writeJSONInput(t, map[string]any{
-		"schema_version": 2,
-		"occurred_at":    "2026-07-22T11:59:00Z",
-	})
-	lockCheckpoint := runFeatureOutput(
-		t,
-		"plan", "checkpoint",
-		"--root", bundleDir,
-		"--kind", "lock",
-		"--input", lockCheckpointInput,
-		"--json",
-	)
-	var lockCheckpointResult struct {
-		Commit     string `json:"commit"`
-		LockDigest string `json:"lock_digest"`
-	}
-	if err := json.Unmarshal([]byte(lockCheckpoint), &lockCheckpointResult); err != nil ||
-		lockCheckpointResult.Commit == "" ||
-		lockCheckpointResult.LockDigest == "" {
-		t.Fatalf("lock plan checkpoint failed: err=%v output=%s", err, lockCheckpoint)
-	}
+	commitWorkspaceBundleFixture(t, bundleDir)
 
 	workspaceDir := filepath.Join(canonicalFeatureTestTempDir(t), "workspace-state")
 	worktreeRoot := canonicalFeatureTestTempDir(t)
@@ -339,8 +298,11 @@ func TestWorkspaceSchemaExampleAndJournalBackedStatus(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &initialized); err != nil || initialized.Status != "initialized" {
 		t.Fatalf("workspace init failed: err=%v output=%s", err, stdout)
 	}
-	if initialized.PlanCheckpoint != lockCheckpointResult.Commit {
-		t.Fatalf("workspace plan checkpoint = %q, want %q", initialized.PlanCheckpoint, lockCheckpointResult.Commit)
+	if !strings.HasPrefix(initialized.PlanCheckpoint, "sha256:") {
+		t.Fatalf("workspace plan checkpoint is not a digest: %q", initialized.PlanCheckpoint)
+	}
+	if _, err := os.Stat(filepath.Join(workspaceDir, "state", "plan-checkpoint.v4.json")); err != nil {
+		t.Fatalf("expected runtime checkpoint artifact: %v", err)
 	}
 	if len(initialized.Report.Scheduler.Units) != 1 || initialized.Report.Scheduler.Units[0].Status != "ready" {
 		t.Fatalf("unexpected initialized scheduler: %+v", initialized.Report.Scheduler.Units)
@@ -558,6 +520,34 @@ func initializeWorkspaceTargetFixture(t *testing.T, root string) string {
 		"commit", "--quiet", "-m", "seed local target",
 	)
 	return "sha1:" + strings.TrimSpace(run("rev-parse", "HEAD"))
+}
+
+func commitWorkspaceBundleFixture(t *testing.T, root string) {
+	t.Helper()
+	run := func(arguments ...string) string {
+		t.Helper()
+		command := exec.Command(
+			"git", append([]string{"-C", root}, arguments...)...,
+		)
+		command.Env = append(os.Environ(),
+			"GIT_CONFIG_NOSYSTEM=1",
+			"GIT_CONFIG_GLOBAL="+os.DevNull,
+			"GIT_TERMINAL_PROMPT=0",
+		)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf(
+				"git %s: %v\n%s",
+				strings.Join(arguments, " "), err, output,
+			)
+		}
+		return string(output)
+	}
+	run("init", "--quiet", "--initial-branch=main", "--object-format=sha1", ".")
+	run("config", "user.name", "Feature Implement Test")
+	run("config", "user.email", "feature-implement@localhost")
+	run("add", "--", ".")
+	run("commit", "--quiet", "-m", "commit workspace bundle locks")
 }
 
 func writeJSONInput(t *testing.T, value any) string {

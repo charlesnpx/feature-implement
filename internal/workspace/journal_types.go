@@ -159,18 +159,24 @@ type WorkspaceJournalEvent interface {
 }
 
 type WorkspaceInitializedJournalEvent struct {
-	workspaceID      ID
-	generation       Digest
-	definitionDigest Digest
-	planCheckpoint   GitObjectID
-	worktreeRoot     WorkspaceWorktreeRootBinding
+	workspaceID                  ID
+	generation                   Digest
+	definitionDigest             Digest
+	planCheckpoint               Digest
+	planCheckpointArtifactDigest Digest
+	worktreeRoot                 WorkspaceWorktreeRootBinding
+}
+
+type PlanCheckpointJournalBinding struct {
+	CheckpointID   Digest
+	ArtifactDigest Digest
 }
 
 func NewWorkspaceInitializedJournalEvent(
 	workspaceID ID,
 	generation, definitionDigest Digest,
 	worktreeRoot WorkspaceWorktreeRootBinding,
-	planCheckpoint ...GitObjectID,
+	planCheckpoint ...PlanCheckpointJournalBinding,
 ) (WorkspaceInitializedJournalEvent, error) {
 	if len(planCheckpoint) > 1 {
 		return WorkspaceInitializedJournalEvent{}, fmt.Errorf("workspace initialization accepts one plan checkpoint")
@@ -180,7 +186,8 @@ func NewWorkspaceInitializedJournalEvent(
 		definitionDigest: definitionDigest, worktreeRoot: worktreeRoot,
 	}
 	if len(planCheckpoint) == 1 {
-		event.planCheckpoint = planCheckpoint[0]
+		event.planCheckpoint = planCheckpoint[0].CheckpointID
+		event.planCheckpointArtifactDigest = planCheckpoint[0].ArtifactDigest
 	}
 	if err := event.validate(); err != nil {
 		return WorkspaceInitializedJournalEvent{}, err
@@ -202,6 +209,9 @@ func (event WorkspaceInitializedJournalEvent) validate() error {
 			"workspace initialization requires a verified worktree root",
 		)
 	}
+	if event.planCheckpoint.IsZero() != event.planCheckpointArtifactDigest.IsZero() {
+		return fmt.Errorf("workspace initialization plan checkpoint requires checkpoint and artifact digests")
+	}
 	return nil
 }
 func (event WorkspaceInitializedJournalEvent) WorkspaceID() ID    { return event.workspaceID }
@@ -209,8 +219,11 @@ func (event WorkspaceInitializedJournalEvent) Generation() Digest { return event
 func (event WorkspaceInitializedJournalEvent) DefinitionDigest() Digest {
 	return event.definitionDigest
 }
-func (event WorkspaceInitializedJournalEvent) PlanCheckpoint() GitObjectID {
+func (event WorkspaceInitializedJournalEvent) PlanCheckpoint() Digest {
 	return event.planCheckpoint
+}
+func (event WorkspaceInitializedJournalEvent) PlanCheckpointArtifactDigest() Digest {
+	return event.planCheckpointArtifactDigest
 }
 func (event WorkspaceInitializedJournalEvent) WorktreeRoot() WorkspaceWorktreeRootBinding {
 	return event.worktreeRoot

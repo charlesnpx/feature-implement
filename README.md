@@ -41,8 +41,6 @@ feature validate <plan-dir> [--write-lock] --json
 Workspace execution uses these version-two surfaces:
 
 ```text
-feature plan checkpoint --root <bundle-root> --kind initial|revision|lock --input <file|-> [--json]
-
 feature workspace schema bundle|requests|reports [--json]
 feature workspace example
 feature workspace validate --bundle <bundle-root> [--write-locks] [--json]
@@ -189,13 +187,17 @@ Low fixes once, perform targeted confirmation, and stop the broad-review loop.
 
 ## Locks and runtime state
 
-The bundle root is also the plan repository root. Record an `initial`
-checkpoint before generated locks, use `revision` for an accepted source
-change, and record a `lock` checkpoint after:
+The bundle root is also the plan repository root. Keep plan sources in ordinary
+Git history. After an accepted source change, regenerate locks with:
 
 ```sh
 feature workspace validate --bundle "$bundle_root" --write-locks --json
 ```
+
+Commit both the plan sources and generated locks, and keep the plan repository
+clean before initializing a runtime. `workspace init` verifies that the clean
+plan `HEAD` contains the exact source and lock bytes, then derives the runtime
+plan checkpoint artifact from that committed state.
 
 The generated ownership inventory permits replacement only while each existing
 generated file still matches its last generated hash. Modified projections,
@@ -204,7 +206,7 @@ closed. Do not edit `generated/` by hand.
 
 Keep runtime state and attempt worktrees outside the source bundle and the
 target repository. Initialization records the verified worktree root and the
-exact plan lock checkpoint:
+derived plan checkpoint:
 
 ```json
 {
@@ -215,7 +217,7 @@ exact plan lock checkpoint:
 ```
 
 Runtime state is append-only under `<runtime-root>/state/`. A runtime without
-the local v3 format marker is rejected with a regeneration diagnostic; it is
+the local v4 format marker is rejected with a regeneration diagnostic; it is
 not interpreted or migrated.
 
 ## Local execution
@@ -252,11 +254,12 @@ completion proves the recorded Git topology and workflow state only.
 
 ### Operations and migration
 
-Workspace v2 is a local-only execution model. Operators create an exact plan
-lock checkpoint, initialize a fresh local v3 runtime, recover before each work
-cycle, and use journal-derived reports as the source of truth. Draft-v2 runtime
-state is intentionally not migrated; a runtime without the local v3 marker must
-be regenerated from the locked bundle.
+Workspace v2 is a local-only execution model. Operators commit exact plan
+sources and generated lock bytes in a clean plan repository, initialize a fresh
+local v4 runtime, recover before each work cycle, and use journal-derived
+reports as the source of truth. Earlier draft runtime state is intentionally not
+migrated; a runtime without the local v4 marker must be regenerated from the
+committed plan and current lock.
 
 ### Supported repository profile
 
@@ -279,10 +282,12 @@ base, or mutates the primary checkout to make the base match.
 
 The implementation defends local state against malformed source bundles,
 generated-file drift, journal tail corruption, stale compare-and-swap inputs,
-directory replacement, symlink traversal, hard-link surprises, unsafe Git
-configuration, repository hooks, ambient helper programs, and write-capable
-network use by configured checks. It does not authenticate operators,
-reviewers, or owners, and local completion is not an external attestation.
+symlink traversal, unsafe Git configuration, repository hooks, ambient helper
+programs, and write-capable network use by configured checks. It does not
+authenticate operators, reviewers, or owners; detect same-user replacement of
+owned runtime files, locks, directories, Git admin data, or executables; or
+provide cross-invocation hard-link insertion guarantees. Local completion is not
+an external attestation.
 
 ### Deferred GitHub design
 

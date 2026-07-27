@@ -138,22 +138,26 @@ func (completion RuntimeWorkspaceCompletionProjection) EventDigest() Digest {
 }
 
 type WorkspaceRuntimeProjection struct {
-	workspaceID      ID
-	activeGeneration Digest
-	planCheckpoint   GitObjectID
-	worktreeRoot     WorkspaceWorktreeRootBinding
-	localTarget      RuntimeLocalTargetProjection
-	recoveries       []RuntimeRecoveryProjection
-	attempts         []RuntimeAttemptProjection
-	completion       *RuntimeWorkspaceCompletionProjection
+	workspaceID                  ID
+	activeGeneration             Digest
+	planCheckpoint               Digest
+	planCheckpointArtifactDigest Digest
+	worktreeRoot                 WorkspaceWorktreeRootBinding
+	localTarget                  RuntimeLocalTargetProjection
+	recoveries                   []RuntimeRecoveryProjection
+	attempts                     []RuntimeAttemptProjection
+	completion                   *RuntimeWorkspaceCompletionProjection
 }
 
 func (projection WorkspaceRuntimeProjection) WorkspaceID() ID { return projection.workspaceID }
 func (projection WorkspaceRuntimeProjection) ActiveGeneration() Digest {
 	return projection.activeGeneration
 }
-func (projection WorkspaceRuntimeProjection) PlanCheckpoint() GitObjectID {
+func (projection WorkspaceRuntimeProjection) PlanCheckpoint() Digest {
 	return projection.planCheckpoint
+}
+func (projection WorkspaceRuntimeProjection) PlanCheckpointArtifactDigest() Digest {
+	return projection.planCheckpointArtifactDigest
 }
 func (projection WorkspaceRuntimeProjection) WorktreeRoot() WorkspaceWorktreeRootBinding {
 	return projection.worktreeRoot
@@ -258,6 +262,7 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 		next.workspaceID = event.workspaceID
 		next.activeGeneration = event.generation
 		next.planCheckpoint = event.planCheckpoint
+		next.planCheckpointArtifactDigest = event.planCheckpointArtifactDigest
 		next.worktreeRoot = event.worktreeRoot
 	case FeatureRefCreationIntendedJournalEvent:
 		if current.workspaceID != event.workspaceID ||
@@ -465,25 +470,25 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 		EventDigest  string `json:"event_digest"`
 	}
 	type runtimeJSON struct {
-		SchemaVersion    int                  `json:"schema_version"`
-		WorkspaceID      string               `json:"workspace_id"`
-		ActiveGeneration string               `json:"active_generation"`
-		PlanCheckpoint   string               `json:"plan_checkpoint,omitempty"`
-		WorktreeRoot     string               `json:"worktree_root"`
-		WorktreeIdentity PlatformFileIdentity `json:"worktree_root_identity"`
-		LocalTarget      *localTargetJSON     `json:"local_target,omitempty"`
-		Recoveries       []recoveryJSON       `json:"recoveries"`
-		Attempts         []json.RawMessage    `json:"attempts"`
-		Completion       *completionJSON      `json:"completion,omitempty"`
+		SchemaVersion                int               `json:"schema_version"`
+		WorkspaceID                  string            `json:"workspace_id"`
+		ActiveGeneration             string            `json:"active_generation"`
+		PlanCheckpoint               string            `json:"plan_checkpoint,omitempty"`
+		PlanCheckpointArtifactDigest string            `json:"plan_checkpoint_artifact_digest,omitempty"`
+		WorktreeRoot                 string            `json:"worktree_root"`
+		LocalTarget                  *localTargetJSON  `json:"local_target,omitempty"`
+		Recoveries                   []recoveryJSON    `json:"recoveries"`
+		Attempts                     []json.RawMessage `json:"attempts"`
+		Completion                   *completionJSON   `json:"completion,omitempty"`
 	}
 	value := runtimeJSON{
 		SchemaVersion: JournalSchemaVersion, WorkspaceID: projection.workspaceID.String(),
-		ActiveGeneration: projection.activeGeneration.String(),
-		PlanCheckpoint:   projection.planCheckpoint.String(),
-		WorktreeRoot:     projection.worktreeRoot.Path(),
-		WorktreeIdentity: projection.worktreeRoot.Identity(),
-		Recoveries:       make([]recoveryJSON, 0, len(projection.recoveries)),
-		Attempts:         make([]json.RawMessage, 0, len(projection.attempts)),
+		ActiveGeneration:             projection.activeGeneration.String(),
+		PlanCheckpoint:               projection.planCheckpoint.String(),
+		PlanCheckpointArtifactDigest: projection.planCheckpointArtifactDigest.String(),
+		WorktreeRoot:                 projection.worktreeRoot.Path(),
+		Recoveries:                   make([]recoveryJSON, 0, len(projection.recoveries)),
+		Attempts:                     make([]json.RawMessage, 0, len(projection.attempts)),
 	}
 	if !projection.localTarget.IsZero() {
 		value.LocalTarget = &localTargetJSON{

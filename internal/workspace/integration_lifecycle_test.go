@@ -184,21 +184,13 @@ func stubIntegrationAttemptInspection(
 	worktree, branch string,
 	expectedHead, expectedTree workspace.GitObjectID,
 ) (workspace.AttemptGitInspection, error) {
-	identitySeed := uint64(len(worktree) + len(branch) + 1)
 	binding, err := workspace.NewAttemptWorktreeGitBinding(
 		workspace.AttemptWorktreeGitBindingOptions{
 			Worktree: worktree,
-			WorktreeIdentity: workspace.PlatformFileIdentity{
-				Device: 1, Inode: identitySeed, Owner: 1,
-			},
 			GitDirectory: filepath.Join(
 				target.CommonDirectory(), "worktrees", branch,
 			),
-			GitDirectoryIdentity: workspace.PlatformFileIdentity{
-				Device: 1, Inode: identitySeed + 1, Owner: 1,
-			},
-			CommonDirectory:         target.CommonDirectory(),
-			CommonDirectoryIdentity: target.CommonIdentity(),
+			CommonDirectory: target.CommonDirectory(),
 			AdministrationDigest: workspace.DigestBytes(
 				[]byte("stub administration " + worktree),
 			),

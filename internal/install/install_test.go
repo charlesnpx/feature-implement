@@ -127,9 +127,9 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"at most three plan-review iterations",
 			"evidence-backed Critical and High fixes",
 			"preceding review reported a Critical or High finding",
-			"feature plan checkpoint --kind initial",
 			"feature workspace validate --bundle <bundle-dir> --write-locks --json",
-			"feature plan checkpoint --kind lock",
+			"commit the plan sources and generated locks",
+			"verify the plan repository is clean",
 			"mode: \"local\"",
 			"base_ref: \"refs/heads/main\"",
 			"base_commit:",
@@ -161,7 +161,8 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"subagent to review the source bundle",
 			"Apply evidence-backed Critical and High fixes",
 			"no Critical or High findings",
-			"feature plan checkpoint --kind initial",
+			"feature workspace validate --bundle <bundle-dir> --write-locks --json",
+			"commit the plan sources and generated locks",
 			"Bundle contract",
 		})
 	}
