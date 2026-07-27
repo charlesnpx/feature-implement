@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/charlesnpx/feature-implement/internal/install"
 	"github.com/charlesnpx/feature-implement/internal/plan"
+	"github.com/charlesnpx/feature-implement/internal/workspacecmd"
 )
 
 var Version = "dev"
@@ -27,10 +29,10 @@ func main() {
 		err = planCommand(os.Args[2:])
 	case "validate":
 		err = validateCommand(os.Args[2:])
-	case "status":
-		err = statusCommand(os.Args[2:])
-	case "implement":
-		err = implementCommand(os.Args[2:])
+	case "workspace":
+		err = workspaceCommand(os.Args[2:])
+	case "status", "implement":
+		err = fmt.Errorf("feature %s was removed; use feature workspace with a schema-version-2 bundle", os.Args[1])
 	case "version":
 		fmt.Println(Version)
 	case "-h", "--help", "help":
@@ -51,8 +53,10 @@ func usage(w io.Writer) {
   feature plan schema [--json]
   feature plan materialize --manifest <file> [--out-root <dir>] [--json]
   feature validate <plan-dir> [--write-lock] [--json]
-  feature status <plan-dir> [--json]
-  feature implement next|start|commit|push|open-pr|review|merge|cleanup <plan-dir> [--merge-unit <id>] [--write-state] [metadata flags] [--json]
+  feature workspace schema [bundle|requests|reports] [--json]
+  feature workspace example
+  feature workspace validate --bundle <dir> [--write-locks] [--json]
+  feature workspace <action> [<subaction>] --bundle <dir> --workspace <dir> [--input <json-file|->] [--json]
   feature version`)
 }
 
@@ -203,96 +207,112 @@ func validateCommand(args []string) error {
 	return nil
 }
 
-func statusCommand(args []string) error {
-	if hasHelpFlag(args) {
-		usageStatus(os.Stdout)
+func workspaceCommand(args []string) error {
+	if len(args) == 0 || isHelpCommand(args[0]) {
+		usageWorkspace(os.Stdout)
 		return nil
 	}
-	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	action := args[0]
+	remaining := args[1:]
+	subaction := ""
+	switch action {
+	case "queue", "receipts", "reconcile", "control", "provider":
+		return fmt.Errorf(
+			"workspace %s was removed from the local-only workflow",
+			action,
+		)
+	}
+	if hasHelpFlag(remaining) {
+		usageWorkspace(os.Stdout)
+		return nil
+	}
+	if workspaceActionRequiresSubaction(action) {
+		if len(remaining) == 0 || strings.HasPrefix(remaining[0], "-") {
+			return fmt.Errorf("workspace %s requires a subaction", action)
+		}
+		subaction, remaining = remaining[0], remaining[1:]
+	}
+	if action == "schema" && len(remaining) > 0 && !strings.HasPrefix(remaining[0], "-") {
+		subaction, remaining = remaining[0], remaining[1:]
+	}
+	if action == "commit" && subaction == "rebase" {
+		return fmt.Errorf(
+			"workspace commit rebase was removed; attempt bases are immutable",
+		)
+	}
+	fs := flag.NewFlagSet("workspace "+action, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	asJSON := fs.Bool("json", false, "Emit JSON result")
-	if err := parsePermissive(fs, args); err != nil {
+	bundle := fs.String("bundle", "", "Directory containing feature.workspace.bundle.json")
+	workspaceDir := fs.String("workspace", "", "Journal-backed workspace state directory")
+	inputPath := fs.String("input", "", "Strict JSON request file, or - for stdin")
+	writeLocks := fs.Bool("write-locks", false, "Synchronize immutable generated lock projections")
+	fs.Bool("json", false, "Emit JSON (workspace commands always emit JSON)")
+	if err := parsePermissive(fs, remaining, "bundle", "workspace", "input"); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
-		return fmt.Errorf("status requires <plan-dir>")
+	if fs.NArg() != 0 {
+		return fmt.Errorf("workspace %s accepts only flags", action)
 	}
-	result, err := plan.Status(fs.Arg(0))
+	if action == "example" {
+		if subaction != "" {
+			return fmt.Errorf("workspace example does not accept a subaction")
+		}
+		fmt.Print(workspacecmd.BundleExample())
+		return nil
+	}
+	input, err := readWorkspaceInput(*inputPath)
 	if err != nil {
 		return err
 	}
-	if *asJSON {
-		return writeJSON(result)
-	}
-	fmt.Println(result.Status)
-	return nil
-}
-
-func implementCommand(args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("implement requires subcommand: next, start, commit, push, open-pr, review, merge, or cleanup")
-	}
-	action := args[0]
-	if isHelpCommand(action) {
-		usageImplement(os.Stdout)
-		return nil
-	}
-	if !supportedImplementAction(action) {
-		return fmt.Errorf("unsupported implement action: %s", action)
-	}
-	if hasHelpFlag(args[1:]) {
-		usageImplementAction(os.Stdout, action)
-		return nil
-	}
-	fs := flag.NewFlagSet("implement "+action, flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	mergeUnit := fs.String("merge-unit", "", "Merge unit id")
-	allowPush := fs.Bool("allow-push", false, "Allow git push")
-	allowOpenPR := fs.Bool("allow-open-pr", false, "Allow GitHub PR creation")
-	allowMerge := fs.Bool("allow-merge", false, "Allow PR merge")
-	allowDeleteBranch := fs.Bool("allow-delete-branch", false, "Allow branch deletion")
-	writeState := fs.Bool("write-state", false, "Write lifecycle state to feature.plan.lock.json")
-	branch := fs.String("branch", "", "Branch name for start state")
-	worktree := fs.String("worktree", "", "Worktree path for start state")
-	baseSHA := fs.String("base-sha", "", "Base commit SHA for start state")
-	commitSHA := fs.String("commit-sha", "", "Commit SHA for commit state")
-	prNumber := fs.Int("pr", 0, "Pull request number for open-pr state")
-	prURL := fs.String("pr-url", "", "Pull request URL for open-pr state")
-	reviewStatus := fs.String("review-status", "", "Review status: passed | changes-applied")
-	mergeCommit := fs.String("merge-commit", "", "Merge commit SHA for merge state")
-	asJSON := fs.Bool("json", false, "Emit JSON result")
-	if err := parsePermissive(fs, args[1:], "merge-unit", "branch", "worktree", "base-sha", "commit-sha", "pr", "pr-url", "review-status", "merge-commit"); err != nil {
-		return err
-	}
-	if fs.NArg() != 1 {
-		return fmt.Errorf("implement %s requires <plan-dir>", action)
-	}
-	result, err := plan.Implement(plan.ImplementOptions{
-		PlanDir:           fs.Arg(0),
-		Action:            action,
-		MergeUnit:         *mergeUnit,
-		AllowPush:         *allowPush,
-		AllowOpenPR:       *allowOpenPR,
-		AllowMerge:        *allowMerge,
-		AllowDeleteBranch: *allowDeleteBranch,
-		WriteState:        *writeState,
-		Branch:            *branch,
-		Worktree:          *worktree,
-		BaseSHA:           *baseSHA,
-		CommitSHA:         *commitSHA,
-		PRNumber:          *prNumber,
-		PRURL:             *prURL,
-		ReviewStatus:      *reviewStatus,
-		MergeCommit:       *mergeCommit,
+	result, err := workspacecmd.Execute(context.Background(), workspacecmd.Options{
+		Action: action, Subaction: subaction, BundleDir: *bundle,
+		WorkspaceDir: *workspaceDir, Input: input, WriteLocks: *writeLocks, GeneratorVersion: Version,
 	})
 	if err != nil {
 		return err
 	}
-	if *asJSON {
-		return writeJSON(result)
+	return writeJSON(result)
+}
+
+func workspaceActionRequiresSubaction(action string) bool {
+	switch action {
+	case "attempt", "commit", "review", "integrate", "complete":
+		return true
+	default:
+		return false
 	}
-	fmt.Println(result.Status)
-	return nil
+}
+
+func readWorkspaceInput(path string) ([]byte, error) {
+	switch strings.TrimSpace(path) {
+	case "":
+		return nil, nil
+	case "-":
+		return readBoundedWorkspaceInput(os.Stdin)
+	default:
+		file, err := os.Open(path)
+		if err != nil {
+			return nil, fmt.Errorf("read workspace input: %w", err)
+		}
+		defer file.Close()
+		if info, statErr := file.Stat(); statErr != nil {
+			return nil, fmt.Errorf("read workspace input: %w", statErr)
+		} else if info.Size() > workspacecmd.MaxCommandInputBytes {
+			return nil, fmt.Errorf("workspace command input exceeds %d bytes", workspacecmd.MaxCommandInputBytes)
+		}
+		return readBoundedWorkspaceInput(file)
+	}
+}
+
+func readBoundedWorkspaceInput(reader io.Reader) ([]byte, error) {
+	content, err := io.ReadAll(io.LimitReader(reader, int64(workspacecmd.MaxCommandInputBytes)+1))
+	if err != nil {
+		return nil, fmt.Errorf("read workspace input: %w", err)
+	}
+	if len(content) > workspacecmd.MaxCommandInputBytes {
+		return nil, fmt.Errorf("workspace command input exceeds %d bytes", workspacecmd.MaxCommandInputBytes)
+	}
+	return content, nil
 }
 
 func writeJSON(value any) error {
@@ -312,15 +332,6 @@ func hasHelpFlag(args []string) bool {
 
 func isHelpCommand(arg string) bool {
 	return arg == "-h" || arg == "--help" || arg == "help"
-}
-
-func supportedImplementAction(action string) bool {
-	switch action {
-	case "next", "start", "commit", "push", "open-pr", "review", "merge", "cleanup":
-		return true
-	default:
-		return false
-	}
 }
 
 func parsePermissive(fs *flag.FlagSet, args []string, valueFlags ...string) error {
@@ -398,27 +409,21 @@ func usageValidate(w io.Writer) {
 	fmt.Fprintln(w, `Usage:
   feature validate <plan-dir> [--write-lock] [--json]
 
-Validates a materialized plan directory. Use --write-lock before feature:implement.`)
+Validates a standalone materialized plan directory. Workspace execution uses feature workspace validate with a schema-version-2 bundle.`)
 }
 
-func usageStatus(w io.Writer) {
+func usageWorkspace(w io.Writer) {
 	fmt.Fprintln(w, `Usage:
-  feature status <plan-dir> [--json]
+  feature workspace schema [bundle|requests|reports] [--json]
+  feature workspace example
+  feature workspace validate --bundle <dir> [--write-locks] [--json]
+  feature workspace init|recover --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
+  feature workspace status|scheduler|gates|report --bundle <dir> --workspace <dir> [--json]
+  feature workspace attempt reserve|materialize|adopt-head|boundary|next-goal|acknowledge|owner-response|resume --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
+  feature workspace commit next --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
+  feature workspace review start|reserve|record|reserve-fix|apply-fix|record-fix|ready --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
+  feature workspace integrate merge-unit --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
+  feature workspace complete verify --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
 
-Reports whether a plan is materialized or validated.`)
-}
-
-func usageImplement(w io.Writer) {
-	fmt.Fprintln(w, `Usage:
-  feature implement next|start|commit|push|open-pr|review|merge|cleanup <plan-dir> [--merge-unit <id>] [--write-state] [metadata flags] [--json]
-
-Plans guarded implementation actions for the next or selected merge unit.`)
-}
-
-func usageImplementAction(w io.Writer, action string) {
-	fmt.Fprintf(w, `Usage:
-  feature implement %s <plan-dir> [--merge-unit <id>] [--write-state] [--branch <name>] [--worktree <path>] [--base-sha <sha>] [--commit-sha <sha>] [--pr <number>] [--pr-url <url>] [--review-status passed|changes-applied] [--merge-commit <sha>] [--allow-push] [--allow-open-pr] [--allow-merge] [--allow-delete-branch] [--json]
-
-Reads feature.plan.lock.json and returns the guarded next action for the selected merge unit.
-`, action)
+All mutations accept one strict schema-version-2 JSON request and record typed local journal events.`)
 }

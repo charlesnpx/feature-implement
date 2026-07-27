@@ -1,7 +1,7 @@
 interface:
   display_name: "Feature"
-  short_description: "Create validated feature plans"
-  default_prompt: "Use $feature to break implementation scope into epics, features, stories, and merge units, then validate the plan."
+  short_description: "Create workspace-v2 bundles"
+  default_prompt: "Use $feature to create and validate an implementation-ready workspace-v2 bundle."
 
 policy:
   allow_implicit_invocation: false
