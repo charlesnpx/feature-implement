@@ -25,6 +25,8 @@ type journalCommitGit struct {
 }
 
 func TestJournaledCommitProtocolStartsFromRealStagedWorktree(t *testing.T) {
+	t.Parallel()
+
 	harness := newConfiguredAttemptHarness(t)
 	attempt := harness.reserve(t, "2026-07-21T10:55:00Z")
 	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T10:56:00Z")
@@ -164,6 +166,8 @@ func (git *journalCommitGit) VerifyCleanWorktree(
 }
 
 func TestJournaledCommitProtocolRecoversCommitAndCheckCrashWindows(t *testing.T) {
+	t.Parallel()
+
 	harness := newConfiguredAttemptHarness(t)
 	attempt := harness.reserve(t, "2026-07-21T11:00:00Z")
 	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T11:01:00Z")
@@ -295,6 +299,9 @@ func TestJournaledCommitProtocolRecoversCommitAndCheckCrashWindows(t *testing.T)
 }
 
 func TestJournaledCommitProtocolRecoversBaseOnlyRebaseAfterStartCrash(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "base-only rebase crash permutation")
+
 	scenario := newJournalCommitScenario(t)
 	request := scenario.request
 	request.Fault = commitFailOnce(workspace.CommitFaultAfterProtocolStart)
@@ -401,6 +408,9 @@ func TestJournaledCommitProtocolRecoversBaseOnlyRebaseAfterStartCrash(t *testing
 }
 
 func TestJournaledCommitProtocolRecoversEveryDurableCrashWindow(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "exhaustive commit-protocol crash matrix")
+
 	tests := []struct {
 		name           string
 		point          workspace.CommitProtocolFaultPoint
@@ -465,6 +475,9 @@ func TestJournaledCommitProtocolRecoversEveryDurableCrashWindow(t *testing.T) {
 }
 
 func TestJournaledReviewFixRecoversEveryDurableCrashWindow(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "exhaustive review-fix crash matrix")
+
 	tests := []struct {
 		name           string
 		point          workspace.ReviewFixFaultPoint
@@ -530,6 +543,8 @@ func TestJournaledReviewFixRecoversEveryDurableCrashWindow(t *testing.T) {
 }
 
 func TestJournaledReviewFixReplayBudgetExactHeadAndBoundary(t *testing.T) {
+	t.Parallel()
+
 	scenario := newJournalReviewFixScenario(t)
 	result, err := workspace.ExecuteAttemptReviewFix(
 		context.Background(), scenario.harness.journal, scenario.harness.definition,
@@ -668,6 +683,8 @@ func TestJournaledReviewFixReplayBudgetExactHeadAndBoundary(t *testing.T) {
 }
 
 func TestAttemptBoundaryRejectsInFlightReviewFix(t *testing.T) {
+	t.Parallel()
+
 	scenario := newJournalReviewFixScenario(t)
 	scenario.request.Fault = reviewFixFailOnce(workspace.ReviewFixFaultAfterReservation)
 	if _, err := workspace.ExecuteAttemptReviewFix(
@@ -689,6 +706,8 @@ func TestAttemptBoundaryRejectsInFlightReviewFix(t *testing.T) {
 }
 
 func TestReviewFixCanFollowUnconstrainedImplementationHistory(t *testing.T) {
+	t.Parallel()
+
 	harness := newReviewOnlyAttemptHarness(t)
 	attempt := harness.reserve(t, "2026-07-21T12:20:00Z")
 	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T12:21:00Z")
@@ -775,6 +794,8 @@ func TestReviewFixCanFollowUnconstrainedImplementationHistory(t *testing.T) {
 }
 
 func TestJournaledCommitRebaseRetryIsIdempotentAndRerunsChecks(t *testing.T) {
+	t.Parallel()
+
 	scenario := newJournalCommitScenario(t)
 	result, err := workspace.ExecuteAttemptCommitStep(
 		context.Background(), scenario.harness.journal, scenario.harness.definition,
@@ -878,6 +899,8 @@ func TestJournaledCommitRebaseRetryIsIdempotentAndRerunsChecks(t *testing.T) {
 }
 
 func TestJournaledRebaseAtomicallyRemapsImplementationAndReviewFixChecks(t *testing.T) {
+	t.Parallel()
+
 	scenario := newJournalReviewFixScenario(t)
 	reviewResult, err := workspace.ExecuteAttemptReviewFix(
 		context.Background(), scenario.harness.journal, scenario.harness.definition,
@@ -1050,6 +1073,8 @@ func TestJournaledRebaseAtomicallyRemapsImplementationAndReviewFixChecks(t *test
 }
 
 func TestCommitJournalCodecRejectsTamperedProtocolPayload(t *testing.T) {
+	t.Parallel()
+
 	scenario := newJournalCommitScenario(t)
 	scenario.request.Fault = commitFailOnce(workspace.CommitFaultAfterProtocolStart)
 	result, err := workspace.ExecuteAttemptCommitStep(
@@ -1084,6 +1109,8 @@ func TestCommitJournalCodecRejectsTamperedProtocolPayload(t *testing.T) {
 }
 
 func TestReviewFixJournalCodecRejectsUnknownPayloadFields(t *testing.T) {
+	t.Parallel()
+
 	scenario := newJournalReviewFixScenario(t)
 	scenario.request.Fault = reviewFixFailOnce(workspace.ReviewFixFaultAfterReservation)
 	if _, err := workspace.ExecuteAttemptReviewFix(
@@ -1116,6 +1143,8 @@ func TestReviewFixJournalCodecRejectsUnknownPayloadFields(t *testing.T) {
 }
 
 func TestCommitEventsRejectDirectNonPrivilegedAppend(t *testing.T) {
+	t.Parallel()
+
 	scenario := newJournalCommitScenario(t)
 	protocol := configuredProtocolStep(t, scenario.harness.definition)
 	configured, err := workspace.NewCommitProtocol([]workspace.CommitStep{protocol})
@@ -1150,6 +1179,8 @@ func TestCommitEventsRejectDirectNonPrivilegedAppend(t *testing.T) {
 }
 
 func TestCommitProtocolResultsDefensivelyCopyNestedState(t *testing.T) {
+	t.Parallel()
+
 	scenario := newJournalCommitScenario(t)
 	result, err := workspace.ExecuteAttemptCommitStep(
 		context.Background(), scenario.harness.journal, scenario.harness.definition,

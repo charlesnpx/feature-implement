@@ -73,25 +73,46 @@ func executeIntegration(
 }
 
 func executeCompletion(
-	_ workspace.WorkspaceBundle,
+	ctx context.Context,
+	bundle workspace.WorkspaceBundle,
 	options Options,
-) (any, error) {
+) (MutationResult, error) {
 	if options.Subaction != "verify" {
-		return nil, fmt.Errorf(
+		return MutationResult{}, fmt.Errorf(
 			"unsupported workspace complete action %q",
 			options.Subaction,
 		)
 	}
 	var input completeVerifyInput
 	if err := decodeRequest(options.Input, &input); err != nil {
-		return nil, err
+		return MutationResult{}, err
 	}
-	if _, err := parseOccurredAt(
+	occurredAt, err := parseOccurredAt(
 		input.SchemaVersion, input.OccurredAt,
-	); err != nil {
-		return nil, err
+	)
+	if err != nil {
+		return MutationResult{}, err
 	}
-	return nil, fmt.Errorf(
-		"workspace complete verify is not implemented until local completion verification",
+	journal, _, err := openWritableJournal(options)
+	if err != nil {
+		return MutationResult{}, err
+	}
+	defer journal.Close()
+	if _, err := workspace.CompleteWorkspace(
+		ctx,
+		journal,
+		bundle.Definition(),
+		workspace.DefaultLocalIntegrationGitAdapter(),
+		workspace.CompleteWorkspaceRequest{
+			OccurredAt: occurredAt,
+		},
+	); err != nil {
+		return MutationResult{}, err
+	}
+	return mutationResult(
+		"complete.verify",
+		journal,
+		bundle.Definition(),
+		nil,
 	)
 }

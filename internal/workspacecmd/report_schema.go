@@ -99,7 +99,7 @@ func ReportSchemas() map[string]any {
 	gateCheck := object(
 		[]string{"name", "status", "generation", "reason"},
 		map[string]any{
-			"name":       enum("dependencies", "commit", "review", "integration"),
+			"name":       enum("dependencies", "commit", "review", "integration", "completion"),
 			"status":     enum("pending", "passed", "failed"),
 			"generation": nonEmptyText(),
 			"reason":     nonEmptyText(),
@@ -118,7 +118,8 @@ func ReportSchemas() map[string]any {
 	gates := object(
 		[]string{
 			"schema_version", "workspace_id", "generation",
-			"journal_head", "units",
+			"journal_head", "units", "completion",
+			"completion_blockers",
 		},
 		map[string]any{
 			"schema_version": map[string]any{"const": workspace.JournalSchemaVersion},
@@ -126,6 +127,10 @@ func ReportSchemas() map[string]any {
 			"generation":     nonEmptyText(),
 			"journal_head":   nonEmptyText(),
 			"units":          array(gateUnit),
+			"completion":     gateCheck,
+			"completion_blockers": array(
+				nonEmptyText(),
+			),
 		},
 	)
 
@@ -154,17 +159,17 @@ func ReportSchemas() map[string]any {
 		},
 		map[string]any{
 			"root":              nonEmptyText(),
-			"git_directory":     nonEmptyText(),
-			"common_directory":  nonEmptyText(),
+			"git_directory":     text(),
+			"common_directory":  text(),
 			"repository_format": integer(0),
-			"object_format":     enum("sha1", "sha256"),
+			"object_format":     enum("", "sha1", "sha256"),
 			"linked_worktree":   boolean(),
 			"base_ref":          nonEmptyText(),
 			"base_commit":       nonEmptyText(),
 			"feature_branch":    nonEmptyText(),
 			"feature_ref":       nonEmptyText(),
-			"feature_head":      nonEmptyText(),
-			"binding_digest":    nonEmptyText(),
+			"feature_head":      text(),
+			"binding_digest":    text(),
 			"ready":             boolean(),
 		},
 	)
@@ -240,8 +245,9 @@ func ReportSchemas() map[string]any {
 	completion := object(
 		[]string{"complete", "blockers"},
 		map[string]any{
-			"complete": boolean(),
-			"blockers": array(nonEmptyText()),
+			"complete":      boolean(),
+			"blockers":      array(nonEmptyText()),
+			"report_digest": nonEmptyText(),
 		},
 	)
 	report := object(

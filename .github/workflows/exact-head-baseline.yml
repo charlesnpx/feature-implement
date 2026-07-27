@@ -1,40 +1,45 @@
-name: Exact-head baseline
+name: Fast exact-head baseline
 
 on:
   pull_request:
-  workflow_dispatch:
-    inputs:
-      head_sha:
-        description: Exact commit SHA to validate
-        required: true
-        type: string
 
 permissions:
   contents: read
 
 jobs:
-  baseline:
-    name: Baseline (${{ matrix.os }})
+  tests:
+    name: Tests (${{ matrix.name }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-24.04
-          - macos-15
+        include:
+          - name: normal
+            os: ubuntu-24.04
+            suite: short-normal
+          - name: normal
+            os: macos-15
+            suite: short-normal
+          - name: shuffle
+            os: ubuntu-24.04
+            suite: short-shuffle
+          - name: race
+            os: ubuntu-24.04
+            suite: short-race
     env:
-      EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.head_sha }}
+      EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       GH_TOKEN: ""
       GITHUB_TOKEN: ""
     steps:
       - name: Check out the exact requested head
+        id: checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 1
           lfs: false
           persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha || inputs.head_sha }}
+          ref: ${{ github.event.pull_request.head.sha }}
           submodules: false
 
       - name: Install Go 1.26.0 without dependency caching
@@ -47,14 +52,47 @@ jobs:
       - name: Assert exact head and credential isolation
         run: ./scripts/ci-baseline.sh assert-head
 
-      - name: Run uncached tests
-        run: ./scripts/ci-baseline.sh normal
+      - name: Run uncached ${{ matrix.suite }} tests
+        run: ./scripts/ci-baseline.sh "${{ matrix.suite }}"
 
-      - name: Run seeded shuffled tests
-        run: ./scripts/ci-baseline.sh shuffle
+      - name: Verify the checkout stayed clean
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        run: ./scripts/ci-baseline.sh clean
 
-      - name: Run race tests
-        run: ./scripts/ci-baseline.sh race
+  static:
+    name: Static (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - macos-15
+    env:
+      EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      GH_TOKEN: ""
+      GITHUB_TOKEN: ""
+    steps:
+      - name: Check out the exact requested head
+        id: checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 1
+          lfs: false
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+          submodules: false
+
+      - name: Install Go 1.26.0 without dependency caching
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          cache: false
+          check-latest: false
+          go-version: "1.26.0"
+
+      - name: Assert exact head and credential isolation
+        run: ./scripts/ci-baseline.sh assert-head
 
       - name: Run vet
         run: ./scripts/ci-baseline.sh vet
@@ -69,4 +107,5 @@ jobs:
         run: ./scripts/ci-baseline.sh diff
 
       - name: Verify the checkout stayed clean
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
         run: ./scripts/ci-baseline.sh clean

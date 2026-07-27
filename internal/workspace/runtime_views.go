@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -82,11 +83,13 @@ type UnitGateView struct {
 }
 
 type GateView struct {
-	SchemaVersion int            `json:"schema_version"`
-	WorkspaceID   string         `json:"workspace_id"`
-	Generation    string         `json:"generation"`
-	JournalHead   string         `json:"journal_head"`
-	Units         []UnitGateView `json:"units"`
+	SchemaVersion      int            `json:"schema_version"`
+	WorkspaceID        string         `json:"workspace_id"`
+	Generation         string         `json:"generation"`
+	JournalHead        string         `json:"journal_head"`
+	Units              []UnitGateView `json:"units"`
+	Completion         GateCheckView  `json:"completion"`
+	CompletionBlockers []string       `json:"completion_blockers"`
 }
 
 type WorkspaceWorkflowView struct {
@@ -165,8 +168,9 @@ type DriftView struct {
 }
 
 type CompletionView struct {
-	Complete bool     `json:"complete"`
-	Blockers []string `json:"blockers"`
+	Complete     bool     `json:"complete"`
+	Blockers     []string `json:"blockers"`
+	ReportDigest string   `json:"report_digest,omitempty"`
 }
 
 type WorkspaceReport struct {
@@ -328,34 +332,56 @@ func RebuildGateView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefi
 			reviewGate.Status == GatePassed && integrationGate.Status != GatePassed
 		view.Units = append(view.Units, unit)
 	}
+	blockers, complete, _, err := workspaceCompletionViewState(
+		snapshot, definition, reviews, core,
+	)
+	if err != nil {
+		return GateView{}, err
+	}
+	view.Completion = GateCheckView{
+		Name:       "completion",
+		Generation: definition.generation.String(),
+	}
+	view.CompletionBlockers = append(
+		[]string{}, blockers...,
+	)
+	switch {
+	case complete:
+		view.Completion.Status = GatePassed
+		view.Completion.Reason = "workspace_completed"
+	case len(blockers) == 0:
+		view.Completion.Status = GatePending
+		view.Completion.Reason = "workspace_completion_not_recorded"
+	default:
+		if _, recorded := core.Completion(); recorded {
+			view.Completion.Status = GateFailed
+		} else {
+			view.Completion.Status = GatePending
+		}
+		view.Completion.Reason = blockers[0]
+	}
 	return view, nil
 }
 
 func RebuildCompletionView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefinition) (CompletionView, error) {
-	scheduler, err := RebuildSchedulerView(snapshot, definition)
+	core, reviews, err := rebuildViewProjections(
+		snapshot, definition,
+	)
 	if err != nil {
 		return CompletionView{}, err
 	}
-	view := CompletionView{Blockers: []string{}}
-	for _, unit := range scheduler.Units {
-		if unit.Status == SchedulerUnitCompleted {
-			continue
-		}
-		view.Blockers = append(
-			view.Blockers,
-			fmt.Sprintf(
-				"merge_unit:%s/%s:%s",
-				unit.PlanID, unit.MergeUnitID, unit.Status,
-			),
+	blockers, complete, reportDigest, err :=
+		workspaceCompletionViewState(
+			snapshot, definition, reviews, core,
 		)
+	if err != nil {
+		return CompletionView{}, err
 	}
-	if len(view.Blockers) == 0 {
-		view.Blockers = append(
-			view.Blockers,
-			"workspace_completion_not_recorded",
-		)
-	}
-	return view, nil
+	return CompletionView{
+		Complete:     complete,
+		Blockers:     blockers,
+		ReportDigest: reportDigest.String(),
+	}, nil
 }
 
 func RebuildWorkspaceReport(snapshot JournalSnapshot, definition EffectiveWorkspaceDefinition) (WorkspaceReport, error) {
@@ -379,7 +405,7 @@ func RebuildWorkspaceReport(snapshot JournalSnapshot, definition EffectiveWorksp
 	if err != nil {
 		return WorkspaceReport{}, err
 	}
-	target, err := workspaceTargetView(core)
+	target, err := workspaceTargetView(core, definition)
 	if err != nil {
 		return WorkspaceReport{}, err
 	}
@@ -410,24 +436,115 @@ func RebuildWorkspaceReport(snapshot JournalSnapshot, definition EffectiveWorksp
 		Drift:       DriftView{Reasons: []string{}},
 		Completion:  completion,
 	}
-	canonical, err := json.Marshal(report)
+	if err := setWorkspaceReportDigest(&report); err != nil {
+		return WorkspaceReport{}, err
+	}
+	return report, nil
+}
+
+func RebuildWorkspaceReportWithGit(
+	ctx context.Context,
+	snapshot JournalSnapshot,
+	definition EffectiveWorkspaceDefinition,
+	git IntegrationGitPort,
+) (WorkspaceReport, error) {
+	if ctx == nil || git == nil {
+		return WorkspaceReport{}, fmt.Errorf(
+			"Git-aware workspace report requires context and integration Git adapter",
+		)
+	}
+	report, err := RebuildWorkspaceReport(snapshot, definition)
 	if err != nil {
 		return WorkspaceReport{}, err
 	}
-	report.ReportDigest = DigestBytes(canonical).String()
+	core, reviews, err := rebuildViewProjections(
+		snapshot, definition,
+	)
+	if err != nil {
+		return WorkspaceReport{}, err
+	}
+	assessment := assessWorkspaceCompletion(
+		snapshot, definition, reviews, core,
+	)
+	if len(assessment.chain) == 0 {
+		return report, nil
+	}
+	target, exists := core.LocalTarget()
+	if !exists || !target.Created() {
+		return report, nil
+	}
+	if err := git.VerifyCompletedIntegration(
+		ctx, target.binding, assessment.chain,
+	); err == nil {
+		return report, nil
+	} else {
+		report.Drift.Detected = true
+		report.Drift.Reasons = []string{err.Error()}
+		report.Completion.Complete = false
+		report.Completion.Blockers =
+			sortedUniqueCompletionBlockers(
+				append(
+					report.Completion.Blockers,
+					"git:completed_integration_drift",
+				),
+			)
+		report.Gates.CompletionBlockers = append(
+			[]string{},
+			report.Completion.Blockers...,
+		)
+		if _, recorded := core.Completion(); recorded {
+			report.Gates.Completion.Status = GateFailed
+		} else {
+			report.Gates.Completion.Status = GatePending
+		}
+		report.Gates.Completion.Reason =
+			"git:completed_integration_drift"
+	}
+	if err := setWorkspaceReportDigest(&report); err != nil {
+		return WorkspaceReport{}, err
+	}
 	return report, nil
+}
+
+func setWorkspaceReportDigest(report *WorkspaceReport) error {
+	if report == nil {
+		return fmt.Errorf("workspace report is required")
+	}
+	report.ReportDigest = ""
+	canonical, err := json.Marshal(report)
+	if err != nil {
+		return err
+	}
+	report.ReportDigest = DigestBytes(canonical).String()
+	return nil
 }
 
 func workspaceTargetView(
 	core WorkspaceRuntimeProjection,
+	definition EffectiveWorkspaceDefinition,
 ) (WorkspaceTargetView, error) {
 	target, exists := core.LocalTarget()
-	if !exists || !target.Created() {
-		return WorkspaceTargetView{}, fmt.Errorf(
-			"workspace report requires the ready local target",
-		)
+	if !exists {
+		configured := definition.workspace.target
+		if configured.IsZero() {
+			return WorkspaceTargetView{}, fmt.Errorf(
+				"workspace report requires a configured local target",
+			)
+		}
+		return WorkspaceTargetView{
+			Root:          configured.Root(),
+			BaseRef:       configured.BaseRef(),
+			BaseCommit:    configured.BaseCommit().String(),
+			FeatureBranch: configured.FeatureBranch(),
+			FeatureRef:    configured.FeatureRef(),
+			Ready:         false,
+		}, nil
 	}
 	binding := target.Binding()
+	featureHead := ""
+	if target.Created() {
+		featureHead = target.CreatedHead().String()
+	}
 	return WorkspaceTargetView{
 		Root:             binding.Root(),
 		GitDirectory:     binding.GitDirectory(),
@@ -439,9 +556,9 @@ func workspaceTargetView(
 		BaseCommit:       binding.BaseCommit().String(),
 		FeatureBranch:    binding.FeatureBranch(),
 		FeatureRef:       binding.FeatureRef(),
-		FeatureHead:      target.CreatedHead().String(),
+		FeatureHead:      featureHead,
 		BindingDigest:    binding.Digest().String(),
-		Ready:            true,
+		Ready:            target.Created(),
 	}, nil
 }
 
@@ -595,9 +712,6 @@ func rebuildViewProjections(
 	if core.workspaceID != definition.workspace.id || core.activeGeneration != definition.generation {
 		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{},
 			fmt.Errorf("workspace report definition does not match active journal generation")
-	}
-	if err := requireReadyLocalTarget(core); err != nil {
-		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, err
 	}
 	reviews, err := RebuildReviewRuntime(snapshot, definition)
 	if err != nil {

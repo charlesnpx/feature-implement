@@ -16,6 +16,8 @@ import (
 )
 
 func TestInitializeWorkspaceV2CreatesDurableJournalGenerationAndProjection(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := filepath.Join(t.TempDir(), "workspace")
@@ -103,6 +105,8 @@ func TestInitializeWorkspaceV2CreatesDurableJournalGenerationAndProjection(t *te
 func TestInitializeWorkspaceV2RequiresExplicitWorktreeRoot(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	definition := mustDefinition(t, newDefinitionFixture(t).sources)
 	workspaceDir := t.TempDir()
 	if _, err := workspace.InitializeWorkspaceV2WithOptions(
@@ -129,6 +133,8 @@ func TestInitializeWorkspaceV2RequiresExplicitWorktreeRoot(
 }
 
 func TestInitializeWorkspaceV2RejectsRuntimeTargetOverlapBeforeMutation(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	target := definition.Workspace().RepositoryRoot()
@@ -152,6 +158,8 @@ func TestInitializeWorkspaceV2RejectsRuntimeTargetOverlapBeforeMutation(t *testi
 }
 
 func TestInitializationResumesAfterBootstrapTailRecovery(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
@@ -248,6 +256,8 @@ func TestInitializationResumesAfterBootstrapTailRecovery(t *testing.T) {
 }
 
 func TestWorkspaceJournalUsesProcessLifetimeAdvisoryLocks(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
@@ -300,6 +310,8 @@ func TestWorkspaceJournalUsesProcessLifetimeAdvisoryLocks(t *testing.T) {
 }
 
 func TestWorkspaceJournalReadOnlyLockDoesNotRequireWritePermission(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
@@ -332,6 +344,7 @@ func TestWorkspaceJournalReadOnlyLockDoesNotRequireWritePermission(t *testing.T)
 func TestWorkspaceJournalLockSubprocess(t *testing.T) {
 	workspaceDir := os.Getenv("WORKSPACE_JOURNAL_LOCK_HELPER")
 	if workspaceDir == "" {
+		t.Parallel()
 		t.Skip("subprocess helper")
 	}
 	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
@@ -347,6 +360,8 @@ func TestWorkspaceJournalLockSubprocess(t *testing.T) {
 }
 
 func TestWorkspaceJournalMultiProcessCASAllowsOneWinner(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
@@ -413,6 +428,7 @@ func TestWorkspaceJournalMultiProcessCASAllowsOneWinner(t *testing.T) {
 func TestWorkspaceJournalCASSubprocess(t *testing.T) {
 	workspaceDir := os.Getenv("WORKSPACE_JOURNAL_CAS_HELPER")
 	if workspaceDir == "" {
+		t.Parallel()
 		t.Skip("subprocess helper")
 	}
 	active, err := workspace.ParseDigest(os.Getenv("WORKSPACE_JOURNAL_CAS_ACTIVE"))
@@ -487,6 +503,8 @@ func TestWorkspaceJournalCASSubprocess(t *testing.T) {
 }
 
 func TestJournalCASRejectsStaleResourceWithoutAppending(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
@@ -543,6 +561,8 @@ func TestJournalCASRejectsStaleResourceWithoutAppending(t *testing.T) {
 }
 
 func TestJournalRejectsInvalidEventResourceSetsAndRuntimeTransitions(t *testing.T) {
+	t.Parallel()
+
 	var nilEvent *workspace.WorkspaceInitializedJournalEvent
 	if _, err := workspace.NewJournalAppend(
 		nilEvent,
@@ -632,6 +652,8 @@ func TestJournalRejectsInvalidEventResourceSetsAndRuntimeTransitions(t *testing.
 }
 
 func TestIncompleteTailRequiresExplicitRecoveryAndRecordsDiscardedBytes(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
@@ -705,6 +727,8 @@ func TestIncompleteTailRequiresExplicitRecoveryAndRecordsDiscardedBytes(t *testi
 }
 
 func TestRecoveryRejectsCorruptCompleteRecord(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
@@ -738,6 +762,8 @@ func TestRecoveryRejectsCorruptCompleteRecord(t *testing.T) {
 }
 
 func TestJournalFailpointsDistinguishIncompleteAndCompleteAppends(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
@@ -844,6 +870,8 @@ func TestJournalFailpointsDistinguishIncompleteAndCompleteAppends(t *testing.T) 
 }
 
 func TestJournalRecoveryResumesAcrossCrashBoundaries(t *testing.T) {
+	t.Parallel()
+
 	for _, faultPoint := range []workspace.JournalFaultPoint{
 		workspace.JournalFaultBeforeAppend,
 		workspace.JournalFaultAfterAppendPrefix,
@@ -853,6 +881,13 @@ func TestJournalRecoveryResumesAcrossCrashBoundaries(t *testing.T) {
 		workspace.JournalFaultAfterDirectorySync,
 	} {
 		t.Run(string(faultPoint), func(t *testing.T) {
+			requireFullSuiteCase(
+				t,
+				faultPoint == workspace.JournalFaultBeforeAppend ||
+					faultPoint == workspace.JournalFaultAfterAppendPrefix,
+				"intermediate journal recovery boundary",
+			)
+
 			fixture := newDefinitionFixture(t)
 			definition := mustDefinition(t, fixture.sources)
 			workspaceDir := t.TempDir()
@@ -919,6 +954,9 @@ func TestJournalRecoveryResumesAcrossCrashBoundaries(t *testing.T) {
 }
 
 func TestJournalSubprocessCrashesAroundAppendAndFsync(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "exhaustive process-crash journal matrix")
+
 	for _, faultPoint := range []workspace.JournalFaultPoint{
 		workspace.JournalFaultAfterAppendPrefix,
 		workspace.JournalFaultBeforeFileSync,
@@ -983,6 +1021,9 @@ func TestJournalSubprocessCrashesAroundAppendAndFsync(t *testing.T) {
 }
 
 func TestJournalSubprocessCrashesAroundInitialAppendDirectorySync(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "initial journal directory-sync crash matrix")
+
 	for _, faultPoint := range []workspace.JournalFaultPoint{
 		workspace.JournalFaultBeforeDirectorySync,
 		workspace.JournalFaultAfterDirectorySync,
@@ -1027,6 +1068,7 @@ func TestJournalSubprocessCrashesAroundInitialAppendDirectorySync(t *testing.T) 
 func TestWorkspaceJournalInitialAppendCrashSubprocess(t *testing.T) {
 	workspaceDir := os.Getenv("WORKSPACE_JOURNAL_INITIAL_CRASH_HELPER")
 	if workspaceDir == "" {
+		t.Parallel()
 		t.Skip("subprocess helper")
 	}
 	generation, err := workspace.ParseDigest(os.Getenv("WORKSPACE_JOURNAL_CRASH_ACTIVE"))
@@ -1101,6 +1143,7 @@ func testWorktreeRootBinding(
 func TestWorkspaceJournalCrashSubprocess(t *testing.T) {
 	workspaceDir := os.Getenv("WORKSPACE_JOURNAL_CRASH_HELPER")
 	if workspaceDir == "" {
+		t.Parallel()
 		t.Skip("subprocess helper")
 	}
 	active, err := workspace.ParseDigest(os.Getenv("WORKSPACE_JOURNAL_CRASH_ACTIVE"))
@@ -1146,6 +1189,8 @@ func TestWorkspaceJournalCrashSubprocess(t *testing.T) {
 }
 
 func TestJournalRejectsOversizedAndNonCanonicalCompleteRecords(t *testing.T) {
+	t.Parallel()
+
 	workspaceDir := t.TempDir()
 	journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadWrite)
 	if err != nil {

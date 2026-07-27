@@ -13,6 +13,8 @@ import (
 func TestWorkspaceRuntimeViewsExposeOnlyLocalStateAndReplayDeterministically(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	harness := newReviewHarness(t)
 	if _, err := workspace.StartAttemptReviewRound(
 		context.Background(),

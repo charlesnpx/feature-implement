@@ -15,6 +15,8 @@ import (
 func TestLocalTargetValidationAndInitializationBindPrimaryAndLinkedWorktrees(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tests := []struct {
 		name      string
 		algorithm workspace.GitHashAlgorithm
@@ -23,9 +25,16 @@ func TestLocalTargetValidationAndInitializationBindPrimaryAndLinkedWorktrees(
 		{name: "primary-sha1", algorithm: workspace.GitHashSHA1},
 		{name: "primary-sha256", algorithm: workspace.GitHashSHA256},
 		{name: "linked-sha1", algorithm: workspace.GitHashSHA1, linked: true},
+		{name: "linked-sha256", algorithm: workspace.GitHashSHA256, linked: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			requireFullSuiteCase(
+				t,
+				test.name == "primary-sha1" || test.name == "linked-sha256",
+				"Git object-format and worktree-shape cross-product",
+			)
+
 			root, base := initializeTargetRepository(t, test.algorithm)
 			targetRoot := root
 			if test.linked {
@@ -81,12 +90,21 @@ func TestLocalTargetValidationAndInitializationBindPrimaryAndLinkedWorktrees(
 }
 
 func TestLocalTargetInitializationRecoversExactFeatureRefBoundaries(t *testing.T) {
+	t.Parallel()
+
 	for _, faultPoint := range []workspace.LocalTargetInitializationFaultPoint{
 		workspace.LocalTargetFaultAfterIntentSynced,
 		workspace.LocalTargetFaultAfterRefUpdate,
 		workspace.LocalTargetFaultBeforeCompletion,
 	} {
 		t.Run(string(faultPoint), func(t *testing.T) {
+			requireFullSuiteCase(
+				t,
+				faultPoint == workspace.LocalTargetFaultAfterIntentSynced ||
+					faultPoint == workspace.LocalTargetFaultAfterRefUpdate,
+				"intermediate feature-ref creation boundary",
+			)
+
 			fixture := newDefinitionFixture(t)
 			definition := mustDefinition(t, fixture.sources)
 			runtimeRoot := canonicalTestDirectory(t)
@@ -132,6 +150,8 @@ func TestLocalTargetInitializationRecoversExactFeatureRefBoundaries(t *testing.T
 }
 
 func TestLocalTargetInitializationRefRaceIsNotAdopted(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	root := definition.Workspace().RepositoryRoot()
@@ -175,6 +195,9 @@ func TestLocalTargetInitializationRefRaceIsNotAdopted(t *testing.T) {
 }
 
 func TestLocalTargetRefCreationDoesNotMutateReplacementGitDirectory(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "Git directory replacement permutation")
+
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	root := definition.Workspace().RepositoryRoot()
@@ -226,6 +249,9 @@ func TestLocalTargetRefCreationDoesNotMutateReplacementGitDirectory(t *testing.T
 }
 
 func TestLocalTargetRefCreationDoesNotFollowReplacedCommonDirectory(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "Git common-directory replacement permutation")
+
 	root, base := initializeTargetRepository(t, workspace.GitHashSHA1)
 	linked := filepath.Join(canonicalTestDirectory(t), "linked")
 	runTargetGitTest(
@@ -283,6 +309,9 @@ func TestLocalTargetRefCreationDoesNotFollowReplacedCommonDirectory(t *testing.T
 }
 
 func TestLocalTargetRefCreationRejectsExternalRefAndReflogStorage(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "external Git ref-storage matrix")
+
 	tests := []struct {
 		name  string
 		setup func(*testing.T, string, string, string) (string, []byte)
@@ -422,6 +451,9 @@ func TestLocalTargetRefCreationRejectsExternalRefAndReflogStorage(t *testing.T) 
 func TestLocalTargetRefCreationRejectsUnsafeStorageAncestorPermissions(
 	t *testing.T,
 ) {
+	t.Parallel()
+	requireFullSuite(t, "Git storage-permission matrix")
+
 	tests := []struct {
 		name     string
 		ancestor func(string) string
@@ -518,6 +550,8 @@ func TestLocalTargetRefCreationRejectsUnsafeStorageAncestorPermissions(
 }
 
 func TestLocalTargetCreatesSecureFeatureStorageAncestors(t *testing.T) {
+	t.Parallel()
+
 	root, base := initializeTargetRepository(t, workspace.GitHashSHA1)
 	definition := localTargetDefinition(
 		t, root, base, "feature/secure-storage-ancestors",
@@ -553,6 +587,9 @@ func TestLocalTargetCreatesSecureFeatureStorageAncestors(t *testing.T) {
 }
 
 func TestLocalTargetInitializationReadinessBarrierAtEveryFault(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "exhaustive feature-ref readiness-boundary matrix")
+
 	for _, faultPoint := range []workspace.LocalTargetInitializationFaultPoint{
 		workspace.LocalTargetFaultAfterIntentSynced,
 		workspace.LocalTargetFaultBeforeRefUpdate,
@@ -596,10 +633,29 @@ func TestLocalTargetInitializationReadinessBarrierAtEveryFault(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := workspace.RebuildWorkspaceReport(
+			report, err := workspace.RebuildWorkspaceReport(
 				snapshot, definition,
-			); err == nil || !strings.Contains(err.Error(), "feature_ref_created") {
-				t.Fatalf("incomplete initialization report error = %v", err)
+			)
+			if err != nil {
+				t.Fatalf(
+					"incomplete initialization report: %v", err,
+				)
+			}
+			if report.Target.Ready ||
+				!containsCompletionBlocker(
+					report.Completion.Blockers,
+					"local_effect:feature_ref_creation_pending",
+				) ||
+				!containsCompletionBlocker(
+					report.Gates.CompletionBlockers,
+					"local_effect:feature_ref_creation_pending",
+				) {
+				t.Fatalf(
+					"incomplete initialization report target=%#v completion=%#v gates=%#v",
+					report.Target,
+					report.Completion,
+					report.Gates,
+				)
 			}
 			goal, err := workspace.NewGoalBinding(
 				workspace.MustID("readiness-goal"),
@@ -635,6 +691,9 @@ func TestLocalTargetInitializationReadinessBarrierAtEveryFault(t *testing.T) {
 }
 
 func TestLocalTargetBaseMustRemainPinnedAtEveryPreCompletionFault(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "exhaustive feature-ref base-drift matrix")
+
 	for _, faultPoint := range []workspace.LocalTargetInitializationFaultPoint{
 		workspace.LocalTargetFaultAfterIntentSynced,
 		workspace.LocalTargetFaultBeforeRefUpdate,
@@ -708,6 +767,8 @@ func TestLocalTargetBaseMustRemainPinnedAtEveryPreCompletionFault(t *testing.T) 
 }
 
 func TestLocalTargetBaseMovementIsInformationalAfterInitialization(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	runtimeRoot := canonicalTestDirectory(t)
@@ -752,6 +813,9 @@ func TestLocalTargetBaseMovementIsInformationalAfterInitialization(t *testing.T)
 }
 
 func TestLocalTargetInitializationRejectsDiscoveredRootOverlap(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "repository root-overlap permutation")
+
 	tests := []struct {
 		name  string
 		setup func(*testing.T) (workspace.EffectiveWorkspaceDefinition, string)
@@ -822,6 +886,8 @@ func TestLocalTargetInitializationRejectsDiscoveredRootOverlap(t *testing.T) {
 func TestLocalTargetInitializationRejectsPrunableRegisteredRuntimePath(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	root, base := initializeTargetRepository(t, workspace.GitHashSHA1)
 	parent := canonicalTestDirectory(t)
 	runtimeRoot := filepath.Join(parent, "prunable-worktree")
@@ -856,6 +922,8 @@ func TestLocalTargetInitializationRejectsPrunableRegisteredRuntimePath(
 func TestLocalTargetInitializationRejectsConcurrentRegisteredWorktree(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	root, base := initializeTargetRepository(t, workspace.GitHashSHA1)
 	definition := localTargetDefinition(
 		t, root, base, "feature/concurrent-worktree-registration",
@@ -905,6 +973,8 @@ func TestLocalTargetInitializationRejectsConcurrentRegisteredWorktree(
 }
 
 func TestLocalTargetRejectsFeatureNamespaceAndCheckedOutOwnership(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name  string
 		setup func(*testing.T, string, workspace.GitObjectID, string)
@@ -964,6 +1034,12 @@ func TestLocalTargetRejectsFeatureNamespaceAndCheckedOutOwnership(t *testing.T) 
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			requireFullSuiteCase(
+				t,
+				test.name == "unrelated exact ref",
+				"feature-ref namespace and checkout permutation",
+			)
+
 			root, base := initializeTargetRepository(
 				t, workspace.GitHashSHA1,
 			)
@@ -981,6 +1057,9 @@ func TestLocalTargetRejectsFeatureNamespaceAndCheckedOutOwnership(t *testing.T) 
 }
 
 func TestLocalTargetRejectsExternalObjectLinks(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "external Git object-storage matrix")
+
 	t.Run("packed objects", func(t *testing.T) {
 		root, base := initializeTargetRepository(t, workspace.GitHashSHA1)
 		runTargetGitTest(t, root, "gc", "--quiet", "--prune=now")
@@ -1071,6 +1150,8 @@ func TestLocalTargetRejectsExternalObjectLinks(t *testing.T) {
 }
 
 func TestLocalTargetRejectsUnsupportedRepositoryProfiles(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name  string
 		setup func(*testing.T, string, workspace.GitObjectID)
@@ -1296,6 +1377,12 @@ func TestLocalTargetRejectsUnsupportedRepositoryProfiles(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			requireFullSuiteCase(
+				t,
+				test.name == "promisor",
+				"unsupported Git repository-profile matrix",
+			)
+
 			root, base := initializeTargetRepository(
 				t, workspace.GitHashSHA1,
 			)
@@ -1314,6 +1401,9 @@ func TestLocalTargetRejectsUnsupportedRepositoryProfiles(t *testing.T) {
 }
 
 func TestLocalTargetRejectsBareRepository(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "bare Git repository profile")
+
 	source, base := initializeTargetRepository(t, workspace.GitHashSHA1)
 	parent := canonicalTestDirectory(t)
 	bare := filepath.Join(parent, "target.git")
@@ -1333,6 +1423,9 @@ func TestLocalTargetRejectsBareRepository(t *testing.T) {
 }
 
 func TestLocalTargetRejectsSubmodulesInPinnedBaseTree(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "submodule Git repository profile")
+
 	root, _ := initializeTargetRepository(
 		t, workspace.GitHashSHA1,
 	)
@@ -1367,6 +1460,9 @@ func TestLocalTargetRejectsSubmodulesInPinnedBaseTree(t *testing.T) {
 }
 
 func TestLocalTargetRejectsRepositoryAttributesInPinnedBaseTree(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "repository attributes profile")
+
 	root, _ := initializeTargetRepository(
 		t, workspace.GitHashSHA1,
 	)
@@ -1404,6 +1500,9 @@ func TestLocalTargetRejectsRepositoryAttributesInPinnedBaseTree(t *testing.T) {
 func TestLocalTargetReadsGitCompatibleWorktreeConfigurationBooleans(
 	t *testing.T,
 ) {
+	t.Parallel()
+	requireFullSuite(t, "worktree Git configuration encoding matrix")
+
 	tests := []struct {
 		name       string
 		boolean    string
@@ -1495,6 +1594,8 @@ func TestLocalTargetReadsGitCompatibleWorktreeConfigurationBooleans(
 }
 
 func TestLocalTargetRejectsEscapingSymlinkAndRepositoryReplacement(t *testing.T) {
+	t.Parallel()
+
 	t.Run("escaping symlink", func(t *testing.T) {
 		root, _ := initializeTargetRepository(t, workspace.GitHashSHA1)
 		if err := os.Symlink("../../outside", filepath.Join(root, "escape")); err != nil {
@@ -1520,6 +1621,8 @@ func TestLocalTargetRejectsEscapingSymlinkAndRepositoryReplacement(t *testing.T)
 	})
 
 	t.Run("linked worktree administration symlink", func(t *testing.T) {
+		requireFullSuite(t, "repository symlink-placement permutation")
+
 		root, base := initializeTargetRepository(t, workspace.GitHashSHA1)
 		linked := filepath.Join(canonicalTestDirectory(t), "linked")
 		runTargetGitTest(
@@ -1551,6 +1654,8 @@ func TestLocalTargetRejectsEscapingSymlinkAndRepositoryReplacement(t *testing.T)
 	})
 
 	t.Run("repository replacement", func(t *testing.T) {
+		requireFullSuite(t, "repository replacement permutation")
+
 		fixture := newDefinitionFixture(t)
 		definition := mustDefinition(t, fixture.sources)
 		runtimeRoot := canonicalTestDirectory(t)
@@ -1600,6 +1705,9 @@ func TestLocalTargetRejectsEscapingSymlinkAndRepositoryReplacement(t *testing.T)
 func TestLocalTargetRejectsConfiguredSignatureVerifierWithoutInvocation(
 	t *testing.T,
 ) {
+	t.Parallel()
+	requireFullSuite(t, "Git signature-verifier profile")
+
 	sshKeygen, err := exec.LookPath("ssh-keygen")
 	if err != nil {
 		t.Skip("ssh-keygen is required for signed-commit coverage")
@@ -1663,6 +1771,8 @@ func TestLocalTargetRejectsConfiguredSignatureVerifierWithoutInvocation(
 }
 
 func TestLocalTargetOperationsDoNotInvokeHooksCredentialsOrProtocols(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	root := definition.Workspace().RepositoryRoot()

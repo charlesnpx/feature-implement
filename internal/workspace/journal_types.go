@@ -32,6 +32,7 @@ const (
 	JournalResourceCheck          JournalResourceKind = "check"
 	JournalResourceFeatureRef     JournalResourceKind = "feature_ref"
 	JournalResourceIntegration    JournalResourceKind = "integration"
+	JournalResourceCompletion     JournalResourceKind = "completion"
 )
 
 func (kind JournalResourceKind) valid() bool {
@@ -42,7 +43,8 @@ func (kind JournalResourceKind) valid() bool {
 		JournalResourceBudget, JournalResourceApproval, JournalResourceEvidence,
 		JournalResourceCommitProtocol, JournalResourceReviewFix, JournalResourceCommitStep,
 		JournalResourceReview, JournalResourceReviewProfile, JournalResourceCheck,
-		JournalResourceFeatureRef, JournalResourceIntegration:
+		JournalResourceFeatureRef, JournalResourceIntegration,
+		JournalResourceCompletion:
 		return true
 	default:
 		return false
@@ -79,6 +81,13 @@ func GenerationJournalResource(generation Digest) JournalResource {
 
 func RecoveryJournalResource(workspaceID ID) JournalResource {
 	resource, _ := NewJournalResource(JournalResourceRecovery, workspaceID.String())
+	return resource
+}
+
+func CompletionJournalResource(workspaceID ID) JournalResource {
+	resource, _ := NewJournalResource(
+		JournalResourceCompletion, workspaceID.String(),
+	)
 	return resource
 }
 
@@ -139,6 +148,7 @@ const (
 	JournalEventReviewFixApplied               JournalEventType = "review.fix_applied.v2"
 	JournalEventMergeUnitIntegrationIntended   JournalEventType = "merge_unit_integration_intended"
 	JournalEventMergeUnitIntegrated            JournalEventType = "merge_unit_integrated"
+	JournalEventWorkspaceCompleted             JournalEventType = "workspace_completed"
 )
 
 type WorkspaceJournalEvent interface {
@@ -325,6 +335,10 @@ func newJournalAppend(
 			return JournalAppend{}, fmt.Errorf(
 				"integration events must use the ancestry-checked CAS integration workflow",
 			)
+		case WorkspaceCompletedJournalEvent:
+			return JournalAppend{}, fmt.Errorf(
+				"workspace completion events must use the complete local verification workflow",
+			)
 		}
 	}
 	if occurredAt.IsZero() {
@@ -363,7 +377,8 @@ func supportedWorkspaceJournalEvent(event WorkspaceJournalEvent) bool {
 		return true
 	default:
 		return isAttemptJournalEvent(event) || isCommitJournalEvent(event) ||
-			isReviewJournalEvent(event) || isIntegrationJournalEvent(event)
+			isReviewJournalEvent(event) || isIntegrationJournalEvent(event) ||
+			isCompletionJournalEvent(event)
 	}
 }
 
@@ -401,6 +416,10 @@ func validateJournalEventResources(
 		if !ok {
 			expectedReads, expectedWrites, ok =
 				integrationJournalEventResources(event)
+		}
+		if !ok {
+			expectedReads, expectedWrites, ok =
+				completionJournalEventResources(event)
 		}
 		if !ok {
 			return fmt.Errorf("unsupported workspace journal event %T", event)
@@ -514,6 +533,9 @@ func cloneWorkspaceJournalEvent(event WorkspaceJournalEvent) WorkspaceJournalEve
 			return cloned
 		}
 		if cloned := cloneIntegrationJournalEvent(event); cloned != nil {
+			return cloned
+		}
+		if cloned := cloneCompletionJournalEvent(event); cloned != nil {
 			return cloned
 		}
 		return nil

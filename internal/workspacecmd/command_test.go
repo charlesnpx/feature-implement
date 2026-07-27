@@ -284,6 +284,7 @@ func TestDeferredLocalCommandsStrictlyDecodeTheirFinalEnvelopes(
 		t.Fatalf("valid integration envelope error = %v", err)
 	}
 	_, err = executeCompletion(
+		context.Background(),
 		workspace.WorkspaceBundle{},
 		Options{
 			Subaction: "verify",
@@ -293,7 +294,8 @@ func TestDeferredLocalCommandsStrictlyDecodeTheirFinalEnvelopes(
 }`),
 		},
 	)
-	if err == nil || !strings.Contains(err.Error(), "not implemented") {
+	if err == nil ||
+		!strings.Contains(err.Error(), "workspace directory is required") {
 		t.Fatalf("valid completion envelope error = %v", err)
 	}
 }
@@ -599,7 +601,6 @@ merge_units:
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer journal.Close()
 	retriedSnapshot, err := journal.ReadSnapshot()
 	if err != nil {
 		t.Fatal(err)
@@ -608,6 +609,171 @@ merge_units:
 		t.Fatalf(
 			"idempotent integration retry appended records: first=%d retry=%d",
 			firstRecords, len(retriedSnapshot.Records()),
+		)
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	completionOptions := Options{
+		Subaction:    "verify",
+		WorkspaceDir: workspaceDir,
+		Input: []byte(`{
+  "schema_version": 2,
+  "occurred_at": "2026-07-25T18:00:06Z"
+}`),
+	}
+	completed, err := executeCompletion(
+		context.Background(), bundle, completionOptions,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Action != "complete.verify" ||
+		!completed.Report.Completion.Complete ||
+		len(completed.Report.Completion.Blockers) != 0 ||
+		completed.Report.Completion.ReportDigest == "" ||
+		completed.Report.Gates.Completion.Status !=
+			workspace.GatePassed {
+		t.Fatalf(
+			"successful completion result = %#v",
+			completed,
+		)
+	}
+	journal, err = workspace.OpenWorkspaceJournal(
+		workspaceDir, workspace.JournalReadOnly,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completedSnapshot, err := journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	completedRecords := len(completedSnapshot.Records())
+	if completedRecords != firstRecords+1 {
+		t.Fatalf(
+			"completion records = %d, want %d",
+			completedRecords, firstRecords+1,
+		)
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	completionOptions.Input = []byte(`{
+  "schema_version": 2,
+  "occurred_at": "2026-07-25T18:00:07Z"
+}`)
+	completionRetry, err := executeCompletion(
+		context.Background(), bundle, completionOptions,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !completionRetry.Report.Completion.Complete ||
+		completionRetry.Report.Completion.ReportDigest !=
+			completed.Report.Completion.ReportDigest {
+		t.Fatalf(
+			"idempotent completion result = %#v",
+			completionRetry,
+		)
+	}
+	journal, err = workspace.OpenWorkspaceJournal(
+		workspaceDir, workspace.JournalReadOnly,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completionRetrySnapshot, err := journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completionRetrySnapshot.Records()) != completedRecords {
+		t.Fatalf(
+			"completion retry appended records: first=%d retry=%d",
+			completedRecords,
+			len(completionRetrySnapshot.Records()),
+		)
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	recovered, err := recoverWorkspace(
+		context.Background(),
+		bundle,
+		Options{
+			WorkspaceDir: workspaceDir,
+			Input: []byte(`{
+  "schema_version": 2,
+  "occurred_at": "2026-07-25T18:00:07.5Z"
+}`),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Action != "recover" ||
+		!recovered.Report.Completion.Complete ||
+		recovered.Report.Completion.ReportDigest !=
+			completed.Report.Completion.ReportDigest {
+		t.Fatalf(
+			"idempotent CLI recovery = %#v", recovered,
+		)
+	}
+	journal, err = workspace.OpenWorkspaceJournal(
+		workspaceDir, workspace.JournalReadOnly,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoverySnapshot, err := journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recoverySnapshot.Records()) != completedRecords {
+		t.Fatalf(
+			"idempotent recovery appended records: completion=%d recovery=%d",
+			completedRecords, len(recoverySnapshot.Records()),
+		)
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	runGitTest(
+		t, repositoryRoot,
+		"update-ref",
+		bundle.Definition().Workspace().FeatureRef(),
+		strings.TrimPrefix(base.String(), "sha1:"),
+	)
+	completionOptions.Input = []byte(`{
+  "schema_version": 2,
+  "occurred_at": "2026-07-25T18:00:08Z"
+}`)
+	if _, err := executeCompletion(
+		context.Background(), bundle, completionOptions,
+	); err == nil {
+		t.Fatal(
+			"post-completion feature-ref drift was not rejected",
+		)
+	}
+	drifted, err := readReport(
+		context.Background(), bundle, workspaceDir,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !drifted.Drift.Detected ||
+		len(drifted.Drift.Reasons) == 0 ||
+		drifted.Completion.Complete ||
+		drifted.Gates.Completion.Status != workspace.GateFailed {
+		t.Fatalf(
+			"post-completion drift report = drift %#v completion %#v gate %#v",
+			drifted.Drift,
+			drifted.Completion,
+			drifted.Gates.Completion,
 		)
 	}
 }

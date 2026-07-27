@@ -33,6 +33,8 @@ func (runner *protocolCheckRunner) RunConfiguredCheck(
 }
 
 func TestLocalCommitShellCreatesExactCommitAndRevalidatesAfterRebase(t *testing.T) {
+	t.Parallel()
+
 	repository, branch, base := newProtocolRepository(t)
 	tracked := filepath.Join(repository, "src", "protocol.go")
 	if err := os.WriteFile(tracked, []byte("package protocol\n\nconst Enabled = true\n"), 0o644); err != nil {
@@ -112,6 +114,9 @@ func TestLocalCommitShellCreatesExactCommitAndRevalidatesAfterRebase(t *testing.
 }
 
 func TestLocalCommitShellRerunsEachRebasedStepCheckFromFinalHead(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "multi-step Git rebase permutation")
+
 	repository, branch, base := newProtocolRepository(t)
 	firstStep, _ := protocolTestStep(t, "first", "Implement first step")
 	secondStep, _ := protocolTestStep(t, "second", "Implement second step")
@@ -168,6 +173,9 @@ func TestLocalCommitShellRerunsEachRebasedStepCheckFromFinalHead(t *testing.T) {
 }
 
 func TestLocalCommitShellRemapsBaseOnlyRebaseBeforeFirstStep(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "base-only Git rebase permutation")
+
 	repository, branch, base := newProtocolRepository(t)
 	step, _ := protocolTestStep(t, "implementation", "Implement protocol")
 	protocol, _ := workspace.NewCommitProtocol([]workspace.CommitStep{step})
@@ -210,6 +218,9 @@ func TestLocalCommitShellRemapsBaseOnlyRebaseBeforeFirstStep(t *testing.T) {
 }
 
 func TestLocalCommitShellSupportsSHA256Repositories(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "Git object-format permutation")
+
 	repository := t.TempDir()
 	branch := "protocol"
 	runGitSetup(t, "", "init", "--object-format=sha256", "-b", branch, repository)
@@ -248,6 +259,9 @@ func TestLocalCommitShellSupportsSHA256Repositories(t *testing.T) {
 }
 
 func TestLocalCommitAdapterParsesRenameModesSymlinksAndDeletion(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "Git diff-shape permutation")
+
 	repository, branch, _ := newProtocolRepository(t)
 	newPath := filepath.Join(repository, "src", "renamed.go")
 	runGitSetup(t, repository, "mv", "src/protocol.go", "src/renamed.go")
@@ -288,6 +302,8 @@ func TestLocalCommitAdapterParsesRenameModesSymlinksAndDeletion(t *testing.T) {
 }
 
 func TestLocalCommitAdapterRejectsDirtySubmoduleBeforeCommit(t *testing.T) {
+	t.Parallel()
+
 	submodule := t.TempDir()
 	runGitSetup(t, "", "init", "-b", "main", submodule)
 	runGitSetup(t, submodule, "config", "user.name", "Protocol Test")
@@ -316,6 +332,9 @@ func TestLocalCommitAdapterRejectsDirtySubmoduleBeforeCommit(t *testing.T) {
 }
 
 func TestLocalCommitAdapterDoesNotHideStagedGitlinkFromPathPolicy(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "Git submodule-index permutation")
+
 	submodule := t.TempDir()
 	runGitSetup(t, "", "init", "-b", "main", submodule)
 	runGitSetup(t, submodule, "config", "user.name", "Protocol Test")
@@ -366,6 +385,8 @@ func TestLocalCommitAdapterDoesNotHideStagedGitlinkFromPathPolicy(t *testing.T) 
 }
 
 func TestLocalCommitAdapterRejectsHiddenIndexFlags(t *testing.T) {
+	t.Parallel()
+
 	for _, test := range []struct {
 		name string
 		flag string
@@ -396,6 +417,9 @@ func TestLocalCommitAdapterRejectsHiddenIndexFlags(t *testing.T) {
 }
 
 func TestLocalCommitAdapterIgnoresReplacementRefsAndLegacyGrafts(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "Git history-replacement profile matrix")
+
 	t.Run("replacement ref", func(t *testing.T) {
 		repository, _, base := newProtocolRepository(t)
 		tracked := filepath.Join(repository, "src", "protocol.go")
@@ -466,6 +490,9 @@ func TestLocalCommitAdapterIgnoresReplacementRefsAndLegacyGrafts(t *testing.T) {
 }
 
 func TestLocalCommitAdapterDoesNotTrustFsmonitorOrIgnoredInputs(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "Git fsmonitor and ignore profile matrix")
+
 	t.Run("lying fsmonitor", func(t *testing.T) {
 		repository, branch, head := newProtocolRepository(t)
 		hook := filepath.Join(t.TempDir(), "lying-fsmonitor")
@@ -519,6 +546,9 @@ func TestLocalCommitAdapterDoesNotTrustFsmonitorOrIgnoredInputs(t *testing.T) {
 }
 
 func TestLocalCommitAdapterVerifiesRawBytesTypesAndModes(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "Git byte-type-mode matrix")
+
 	t.Run("external clean filter", func(t *testing.T) {
 		repository, branch, _ := newProtocolRepository(t)
 		if err := os.WriteFile(
@@ -657,6 +687,8 @@ func TestLocalCommitAdapterVerifiesRawBytesTypesAndModes(t *testing.T) {
 }
 
 func TestLocalCommitAdapterDisablesReferenceTransactionHooks(t *testing.T) {
+	t.Parallel()
+
 	repository, branch, base := stagedProtocolRepository(t)
 	gitDir := strings.TrimSpace(string(runGitSetup(t, repository, "rev-parse", "--absolute-git-dir")))
 	hook := filepath.Join(gitDir, "hooks", "reference-transaction")
@@ -693,6 +725,8 @@ func TestLocalCommitAdapterDisablesReferenceTransactionHooks(t *testing.T) {
 }
 
 func TestCommitShellRejectsDirtyStateWeakIsolationAndWrongFailure(t *testing.T) {
+	t.Parallel()
+
 	t.Run("dirty before commit", func(t *testing.T) {
 		repository, branch, base := newProtocolRepository(t)
 		tracked := filepath.Join(repository, "src", "protocol.go")
@@ -766,6 +800,8 @@ func TestCommitShellRejectsDirtyStateWeakIsolationAndWrongFailure(t *testing.T) 
 }
 
 func TestCommitShellAcceptsOnlyTheConfiguredExpectedFailure(t *testing.T) {
+	t.Parallel()
+
 	repository, branch, base := stagedProtocolRepository(t)
 	state := oneStepProtocolState(
 		t, base, workspace.CheckExpectationExpectedTestFailure,

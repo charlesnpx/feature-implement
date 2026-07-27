@@ -19,6 +19,8 @@ const testGeneratorVersion = "materialization-test/v2"
 var _ workspace.FilesystemPort = (*workspace.RootedFilesystemAdapter)(nil)
 
 func TestRootedFilesystemAdapterRejectsCrossRootAndSymlinkTraversal(t *testing.T) {
+	t.Parallel()
+
 	root := canonicalMaterializationTestTempDir(t)
 	if err := os.WriteFile(filepath.Join(root, "safe.txt"), []byte("safe\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -59,6 +61,8 @@ func TestRootedFilesystemAdapterRejectsCrossRootAndSymlinkTraversal(t *testing.T
 }
 
 func TestMaterializationRejectsSymlinkedDestinationRootsAndAncestors(t *testing.T) {
+	t.Parallel()
+
 	artifacts := materializationArtifacts(t, artifactFixture{
 		id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n",
 	})
@@ -105,6 +109,8 @@ func TestMaterializationRejectsSymlinkedDestinationRootsAndAncestors(t *testing.
 }
 
 func TestMaterializationRejectsHiddenDestinationAncestors(t *testing.T) {
+	t.Parallel()
+
 	base := canonicalMaterializationTestTempDir(t)
 	root := filepath.Join(base, ".hidden", "plan")
 	artifacts := materializationArtifacts(t, artifactFixture{
@@ -121,6 +127,8 @@ func TestMaterializationRejectsHiddenDestinationAncestors(t *testing.T) {
 }
 
 func TestMaterializationBootstrapsAbsentOrEmptyDestinationWithV2Inventory(t *testing.T) {
+	t.Parallel()
+
 	for _, existing := range []bool{false, true} {
 		t.Run(fmt.Sprintf("existing=%t", existing), func(t *testing.T) {
 			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
@@ -183,6 +191,8 @@ func TestMaterializationBootstrapsAbsentOrEmptyDestinationWithV2Inventory(t *tes
 }
 
 func TestMaterializationRejectsNonemptyUnownedDestinationWithoutWritingState(t *testing.T) {
+	t.Parallel()
+
 	root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatal(err)
@@ -207,6 +217,8 @@ func TestMaterializationRejectsNonemptyUnownedDestinationWithoutWritingState(t *
 }
 
 func TestMaterializationNeverClaimsAByteMatchingUnownedCandidate(t *testing.T) {
+	t.Parallel()
+
 	root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 	initial := materializationArtifacts(t, artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"})
 	if _, err := workspace.SynchronizeMaterialization(root, testGeneratorVersion, initial, workspace.MaterializationOptions{}); err != nil {
@@ -232,6 +244,8 @@ func TestMaterializationNeverClaimsAByteMatchingUnownedCandidate(t *testing.T) {
 }
 
 func TestMaterializationUpdatesAndDeletesOnlyHashMatchedOwnedFiles(t *testing.T) {
+	t.Parallel()
+
 	root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 	initial := materializationArtifacts(t,
 		artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "v1\n"},
@@ -259,6 +273,8 @@ func TestMaterializationUpdatesAndDeletesOnlyHashMatchedOwnedFiles(t *testing.T)
 }
 
 func TestMaterializationPreservesModifiedOrMissingOwnedArtifacts(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name        string
 		mutate      func(t *testing.T, root string)
@@ -344,6 +360,8 @@ func TestMaterializationPreservesModifiedOrMissingOwnedArtifacts(t *testing.T) {
 }
 
 func TestMaterializationTreatsLaterMissingOrCorruptInventoryAsCorruption(t *testing.T) {
+	t.Parallel()
+
 	for _, mutate := range []struct {
 		name  string
 		apply func(t *testing.T, root string)
@@ -386,6 +404,8 @@ func TestMaterializationTreatsLaterMissingOrCorruptInventoryAsCorruption(t *test
 }
 
 func TestMaterializationRejectsSymlinkTraversalAndPathAliases(t *testing.T) {
+	t.Parallel()
+
 	t.Run("symlink traversal", func(t *testing.T) {
 		root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 		base := materializationArtifacts(t, artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"})
@@ -411,6 +431,8 @@ func TestMaterializationRejectsSymlinkTraversalAndPathAliases(t *testing.T) {
 	})
 
 	t.Run("existing case alias", func(t *testing.T) {
+		requireFullSuite(t, "materialization path-alias permutation")
+
 		root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 		base := materializationArtifacts(t, artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"})
 		if _, err := workspace.SynchronizeMaterialization(root, testGeneratorVersion, base, workspace.MaterializationOptions{}); err != nil {
@@ -431,6 +453,8 @@ func TestMaterializationRejectsSymlinkTraversalAndPathAliases(t *testing.T) {
 	})
 
 	t.Run("desired aliases and prefixes", func(t *testing.T) {
+		requireFullSuite(t, "materialization path-alias permutation")
+
 		caseAliases := materializationArtifacts(t,
 			artifactFixture{id: "story/a", path: "Docs/a.md", content: "a"},
 			artifactFixture{id: "story/b", path: "docs/b.md", content: "b"},
@@ -454,6 +478,8 @@ func TestMaterializationRejectsSymlinkTraversalAndPathAliases(t *testing.T) {
 	})
 
 	t.Run("hidden and non-normalized Unicode", func(t *testing.T) {
+		requireFullSuite(t, "materialization path-alias permutation")
+
 		if _, err := workspace.NewMaterializationArtifact("story/hidden", ".git/config", []byte("a")); err == nil {
 			t.Fatal("hidden materialization path was accepted")
 		}
@@ -476,6 +502,8 @@ func TestMaterializationRejectsSymlinkTraversalAndPathAliases(t *testing.T) {
 }
 
 func TestMaterializationRecoversAcrossStagedUpdateFaults(t *testing.T) {
+	t.Parallel()
+
 	points := []workspace.MaterializationFaultPoint{
 		workspace.MaterializationFaultAfterBootstrapState,
 		workspace.MaterializationFaultAfterStaging,
@@ -488,6 +516,13 @@ func TestMaterializationRecoversAcrossStagedUpdateFaults(t *testing.T) {
 	}
 	for _, point := range points {
 		t.Run(string(point), func(t *testing.T) {
+			requireFullSuiteCase(
+				t,
+				point == workspace.MaterializationFaultAfterPending ||
+					point == workspace.MaterializationFaultAfterInventoryActivation,
+				"intermediate materialization publication boundary",
+			)
+
 			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 			artifacts := materializationArtifacts(t,
 				artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"},
@@ -519,6 +554,8 @@ func TestMaterializationRecoversAcrossStagedUpdateFaults(t *testing.T) {
 }
 
 func TestMaterializationRecoveryNeverClaimsTargetsThatAppearAfterPending(t *testing.T) {
+	t.Parallel()
+
 	t.Run("matching file", func(t *testing.T) {
 		root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 		initial := materializationArtifacts(t, artifactFixture{
@@ -559,6 +596,8 @@ func TestMaterializationRecoveryNeverClaimsTargetsThatAppearAfterPending(t *test
 	})
 
 	t.Run("directory", func(t *testing.T) {
+		requireFullSuite(t, "appearing materialization target permutation")
+
 		root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 		initial := materializationArtifacts(t, artifactFixture{
 			id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n",
@@ -602,6 +641,9 @@ func TestMaterializationRecoveryNeverClaimsTargetsThatAppearAfterPending(t *test
 }
 
 func TestMaterializationRecoveryPreservesTransactionPathsWithoutExactIdentity(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "exhaustive materialization identity-replacement matrix")
+
 	for _, test := range []struct {
 		name              string
 		targetMayActivate bool
@@ -758,6 +800,9 @@ func TestMaterializationRecoveryPreservesTransactionPathsWithoutExactIdentity(t 
 }
 
 func TestMaterializationControlActivationNeverOverwritesAppearingTargets(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "materialization control-target replacement matrix")
+
 	for _, test := range []struct {
 		name         string
 		faultOrdinal int
@@ -805,6 +850,8 @@ func TestMaterializationControlActivationNeverOverwritesAppearingTargets(t *test
 }
 
 func TestMaterializationRecoversMissingControlTargetsAfterQuarantine(t *testing.T) {
+	t.Parallel()
+
 	for _, test := range []struct {
 		name         string
 		faultOrdinal int
@@ -814,6 +861,12 @@ func TestMaterializationRecoversMissingControlTargetsAfterQuarantine(t *testing.
 		{name: "state", faultOrdinal: 2, target: workspace.MaterializationStateFileName},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			requireFullSuiteCase(
+				t,
+				test.name == "inventory",
+				"materialization control-file permutation",
+			)
+
 			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 			artifacts := materializationArtifacts(t, artifactFixture{
 				id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n",
@@ -862,6 +915,9 @@ func TestMaterializationRecoversMissingControlTargetsAfterQuarantine(t *testing.
 }
 
 func TestMaterializationRecoveryPreservesAppearingDirectoryPreparation(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "materialization directory-preparation replacement")
+
 	root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 	initial := materializationArtifacts(t, artifactFixture{
 		id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n",
@@ -905,6 +961,9 @@ func TestMaterializationRecoveryPreservesAppearingDirectoryPreparation(t *testin
 }
 
 func TestMaterializationNeverDeletesRecreatedOwnedDirectoryInstance(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "materialization directory-identity replacement")
+
 	root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 	initial := materializationArtifacts(t,
 		artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"},
@@ -946,6 +1005,9 @@ func TestMaterializationNeverDeletesRecreatedOwnedDirectoryInstance(t *testing.T
 }
 
 func TestMaterializationQuarantinesBeforeHashingOwnedTargets(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "materialization quarantine mutation matrix")
+
 	for _, test := range []struct {
 		name       string
 		initial    []artifactFixture
@@ -1023,6 +1085,9 @@ func TestMaterializationQuarantinesBeforeHashingOwnedTargets(t *testing.T) {
 }
 
 func TestMaterializationRecoveryPreservesAReplacedQuarantineSource(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "materialization quarantine replacement")
+
 	root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 	initial := materializationArtifacts(t,
 		artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"},
@@ -1068,6 +1133,9 @@ func TestMaterializationRecoveryPreservesAReplacedQuarantineSource(t *testing.T)
 }
 
 func TestMaterializationPreservesUnownedReservedStagingPaths(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "materialization reserved-path replacement")
+
 	root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 	artifacts := materializationArtifacts(t, artifactFixture{
 		id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n",
@@ -1097,12 +1165,20 @@ func TestMaterializationPreservesUnownedReservedStagingPaths(t *testing.T) {
 }
 
 func TestMaterializationRecoversStaleDeletionAndDirectoryCleanup(t *testing.T) {
+	t.Parallel()
+
 	for _, point := range []workspace.MaterializationFaultPoint{
 		workspace.MaterializationFaultAfterQuarantine,
 		workspace.MaterializationFaultAfterStaleDelete,
 		workspace.MaterializationFaultAfterDirectoryCleanup,
 	} {
 		t.Run(string(point), func(t *testing.T) {
+			requireFullSuiteCase(
+				t,
+				point != workspace.MaterializationFaultAfterDirectoryCleanup,
+				"intermediate stale-deletion cleanup boundary",
+			)
+
 			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 			initial := materializationArtifacts(t,
 				artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"},
@@ -1137,6 +1213,9 @@ func TestMaterializationRecoversStaleDeletionAndDirectoryCleanup(t *testing.T) {
 }
 
 func TestMaterializationRecoversOwnedUpdatesAcrossTransactionFaults(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "exhaustive owned-update recovery matrix")
+
 	for _, point := range []workspace.MaterializationFaultPoint{
 		workspace.MaterializationFaultAfterStaging,
 		workspace.MaterializationFaultAfterPending,
@@ -1184,6 +1263,9 @@ func TestMaterializationRecoversOwnedUpdatesAcrossTransactionFaults(t *testing.T
 }
 
 func TestMaterializationCleanupRecoversEveryPersistedPrefix(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "exhaustive materialization cleanup-prefix matrix")
+
 	run := func(t *testing.T, failOrdinal int) (string, int, error) {
 		t.Helper()
 		root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
@@ -1251,6 +1333,9 @@ func TestMaterializationCleanupRecoversEveryPersistedPrefix(t *testing.T) {
 }
 
 func TestMaterializationCleanupPreservesReplacementAtVerifiedUnlink(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "materialization cleanup replacement boundary")
+
 	root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 	initial := materializationArtifacts(t,
 		artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"},
@@ -1296,6 +1381,8 @@ func TestMaterializationCleanupPreservesReplacementAtVerifiedUnlink(t *testing.T
 }
 
 func TestMaterializationRejectsCorruptStagedBytesDuringRecovery(t *testing.T) {
+	t.Parallel()
+
 	root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 	artifacts := materializationArtifacts(t, artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"})
 	fault := func(point workspace.MaterializationFaultPoint) error {
@@ -1339,6 +1426,9 @@ func TestMaterializationRejectsCorruptStagedBytesDuringRecovery(t *testing.T) {
 }
 
 func TestMaterializationRecoveryRechecksOwnedBytesBeforeOverwriteOrDelete(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "materialization owned-byte mutation matrix")
+
 	for _, test := range []struct {
 		name       string
 		desired    []artifactFixture
@@ -1400,6 +1490,8 @@ func TestMaterializationRecoveryRechecksOwnedBytesBeforeOverwriteOrDelete(t *tes
 }
 
 func TestMaterializationRemovesOnlyEmptyProvenOwnedDirectories(t *testing.T) {
+	t.Parallel()
+
 	root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 	initial := materializationArtifacts(t,
 		artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"},
