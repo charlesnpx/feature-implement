@@ -1,7 +1,7 @@
 interface:
   display_name: "Feature Implement"
-  short_description: "Execute local workspace bundles"
-  default_prompt: "Use $feature:implement to execute a validated workspace-v2 bundle through local merge units."
+  short_description: "Run guarded feature plans"
+  default_prompt: "Use $feature:implement to execute a validated feature plan one merge unit at a time."
 
 policy:
   allow_implicit_invocation: false
