@@ -9,6 +9,8 @@ import (
 )
 
 func TestImmutableValueConstructorsAndAccessorsDefendCopies(t *testing.T) {
+	t.Parallel()
+
 	identifier, err := workspace.NewID("  stable-id  ")
 	if err != nil || identifier.String() != "stable-id" {
 		t.Fatalf("normalized id = %q, %v", identifier, err)
@@ -87,6 +89,8 @@ func TestImmutableValueConstructorsAndAccessorsDefendCopies(t *testing.T) {
 }
 
 func TestPureReducerIsDeterministicAndReturnsClosedEffects(t *testing.T) {
+	t.Parallel()
+
 	generation := workspace.DigestBytes([]byte("generation"))
 	evidence, err := workspace.NewEvidence(workspace.MustID("test"), workspace.DigestBytes([]byte("evidence")), nil)
 	if err != nil {
@@ -163,6 +167,8 @@ func TestPureReducerIsDeterministicAndReturnsClosedEffects(t *testing.T) {
 }
 
 func TestReducerRejectsInvalidTransitionsAndStaleGeneration(t *testing.T) {
+	t.Parallel()
+
 	generation := workspace.DigestBytes([]byte("generation"))
 	otherGeneration := workspace.DigestBytes([]byte("other"))
 	pause, _ := workspace.NewPauseDefinition(workspace.MustID("gate"), nil)
@@ -195,6 +201,8 @@ func TestReducerRejectsInvalidTransitionsAndStaleGeneration(t *testing.T) {
 }
 
 func TestReducerEventsRejectMalformedEvidence(t *testing.T) {
+	t.Parallel()
+
 	malformed := []workspace.Evidence{{}}
 	if _, err := workspace.NewPauseDefinition(workspace.MustID("gate"), malformed); err == nil || !strings.Contains(err.Error(), "kind and digest") {
 		t.Fatalf("malformed pause evidence error = %v", err)
@@ -205,6 +213,8 @@ func TestReducerEventsRejectMalformedEvidence(t *testing.T) {
 }
 
 func TestTypedPortsRejectUnrootedPathsAndShellLikeInvalidValues(t *testing.T) {
+	t.Parallel()
+
 	if _, err := workspace.NewRootedPath("relative", "file.txt"); err == nil {
 		t.Fatal("relative root accepted")
 	}

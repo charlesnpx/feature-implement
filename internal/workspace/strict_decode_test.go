@@ -9,6 +9,8 @@ import (
 )
 
 func TestStrictJSONRequiresPresentNonNullFields(t *testing.T) {
+	t.Parallel()
+
 	type item struct {
 		Enabled bool `json:"enabled"`
 	}
@@ -35,6 +37,8 @@ func TestStrictJSONRequiresPresentNonNullFields(t *testing.T) {
 }
 
 func TestStrictWorkspaceDecoderRejectsNonV2AndAmbiguousYAML(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	valid := string(fixture.sources.Workspace.Bytes)
 	tests := []struct {
@@ -157,6 +161,8 @@ func TestStrictWorkspaceDecoderRejectsNonV2AndAmbiguousYAML(t *testing.T) {
 }
 
 func TestStrictDecodersBoundInputAndRejectRemovedPlanFields(t *testing.T) {
+	t.Parallel()
+
 	tooLarge := bytes.Repeat([]byte{'x'}, workspace.MaxArtifactBytes+1)
 	if _, err := workspace.DecodePlan(tooLarge); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("oversized decode error = %v", err)
@@ -185,6 +191,8 @@ merge_units: []
 }
 
 func TestExecutionPolicyRejectsImplicitOrWeakeningPrecedence(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	valid := string(fixture.sources.ExecutionConfig.Bytes)
 	profileStart := strings.Index(valid, "  - id: standard\n")
@@ -253,6 +261,8 @@ func TestExecutionPolicyRejectsImplicitOrWeakeningPrecedence(t *testing.T) {
 }
 
 func TestWorkspaceOwnsAndValidatesCrossPlanDependencies(t *testing.T) {
+	t.Parallel()
+
 	root, _ := initializeTargetRepository(t, workspace.GitHashSHA1)
 	valid := `schema_version: 2
 id: multi-plan
@@ -301,6 +311,8 @@ dependencies:
 }
 
 func TestDefinitionRejectsIncompleteOrContradictoryInputs(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	tests := []struct {
 		name    string

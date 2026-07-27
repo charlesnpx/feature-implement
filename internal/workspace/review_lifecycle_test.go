@@ -53,6 +53,8 @@ type reviewHarness struct {
 }
 
 func TestReviewConfigurationPreservesLoopOrderAndRejectsUnsafeSchemas(t *testing.T) {
+	t.Parallel()
+
 	fixture := configuredReviewFixture(t)
 	config, err := workspace.DecodeExecutionConfig(fixture.sources.ExecutionConfig.Bytes)
 	if err != nil {
@@ -143,6 +145,8 @@ func TestReviewConfigurationPreservesLoopOrderAndRejectsUnsafeSchemas(t *testing
 }
 
 func TestReviewResultRejectsAggregatePayloadThatCannotFitJournal(t *testing.T) {
+	t.Parallel()
+
 	findings := make([]workspace.ReviewFinding, 0, 128)
 	for index := 0; index < 128; index++ {
 		finding, err := workspace.NewReviewFinding(workspace.ReviewFindingOptions{
@@ -165,6 +169,8 @@ func TestReviewResultRejectsAggregatePayloadThatCannotFitJournal(t *testing.T) {
 }
 
 func TestReviewReducerEnforcesOrderedProfilesExactHeadAndReviewerIdentity(t *testing.T) {
+	t.Parallel()
+
 	definition := mustDefinition(t, configuredReviewFixture(t).sources)
 	state := startDomainReview(t, reviewLoopForDefinition(t, definition), definition.Generation())
 
@@ -257,6 +263,8 @@ func TestReviewReducerEnforcesOrderedProfilesExactHeadAndReviewerIdentity(t *tes
 }
 
 func TestReviewReducerSeparatesInfrastructureRoundAndFixBudgets(t *testing.T) {
+	t.Parallel()
+
 	definition := mustDefinition(t, configuredReviewFixture(t).sources)
 	loop := reviewLoopForDefinition(t, definition)
 
@@ -349,6 +357,8 @@ func TestReviewReducerSeparatesInfrastructureRoundAndFixBudgets(t *testing.T) {
 }
 
 func TestReviewLifecycleVerifiesLocalExactHeadEvidenceAndBoundaryReadiness(t *testing.T) {
+	t.Parallel()
+
 	harness := newReviewHarness(t)
 	start, err := workspace.StartAttemptReviewRound(
 		context.Background(), harness.journal, harness.definition, harness.repository,
@@ -547,6 +557,8 @@ func TestReviewLifecycleVerifiesLocalExactHeadEvidenceAndBoundaryReadiness(t *te
 }
 
 func TestReviewRunnerRejectsRepositoryMutationAndWeakIsolation(t *testing.T) {
+	t.Parallel()
+
 	harness := newReviewHarness(t)
 	start, err := workspace.StartAttemptReviewRound(
 		context.Background(), harness.journal, harness.definition, harness.repository,
@@ -632,6 +644,8 @@ func TestReviewRunnerRejectsRepositoryMutationAndWeakIsolation(t *testing.T) {
 }
 
 func TestReviewInvocationReservationSerializesRunnerAndCountsRawFailureIdentity(t *testing.T) {
+	t.Parallel()
+
 	t.Run("only the durable reservation may invoke the runner", func(t *testing.T) {
 		harness := newReviewHarness(t)
 		start, err := workspace.StartAttemptReviewRound(
@@ -795,6 +809,8 @@ func TestReviewInvocationReservationSerializesRunnerAndCountsRawFailureIdentity(
 }
 
 func TestReviewRunnerReturnsFailureJournalError(t *testing.T) {
+	t.Parallel()
+
 	harness := newReviewHarness(t)
 	start, err := workspace.StartAttemptReviewRound(
 		context.Background(), harness.journal, harness.definition, harness.repository,
@@ -826,6 +842,8 @@ func TestReviewRunnerReturnsFailureJournalError(t *testing.T) {
 }
 
 func TestReviewFixExecutionRequiresACompletedReviewRoundBeforeGitMutation(t *testing.T) {
+	t.Parallel()
+
 	harness := newReviewHarness(t)
 	if _, err := workspace.StartAttemptReviewRound(
 		context.Background(), harness.journal, harness.definition, harness.repository,
@@ -860,6 +878,8 @@ func TestReviewFixExecutionRequiresACompletedReviewRoundBeforeGitMutation(t *tes
 }
 
 func TestReviewFixOnFinalRoundRequiresReconfirmationCapacity(t *testing.T) {
+	t.Parallel()
+
 	fixture := configuredReviewFixture(t)
 	configuration := strings.ReplaceAll(string(fixture.sources.ExecutionConfig.Bytes), "max_review_fixes: 2", "max_review_fixes: 4")
 	configuration = strings.ReplaceAll(configuration, "max_review_fixes: 3", "max_review_fixes: 4")
@@ -938,6 +958,8 @@ func TestReviewFixOnFinalRoundRequiresReconfirmationCapacity(t *testing.T) {
 }
 
 func TestReviewAdoptsCleanImplementationHeadWithoutCommitProtocol(t *testing.T) {
+	t.Parallel()
+
 	harness := newReviewHarness(t)
 	implementationHead, implementationTree := mustGitObject(t, 'c'), mustGitObject(t, 'd')
 	harness.repository.snapshot, _ = workspace.NewReviewRepositorySnapshot(implementationHead, implementationTree, true)
@@ -979,6 +1001,8 @@ func TestReviewAdoptsCleanImplementationHeadWithoutCommitProtocol(t *testing.T) 
 }
 
 func TestProtocolFreeAttemptAdoptsOrdinaryHeadWithoutReviewLoop(t *testing.T) {
+	t.Parallel()
+
 	harness := newAttemptHarness(t, "unit-one")
 	attempt := harness.reserve(t, "2026-07-21T11:18:00Z")
 	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T11:18:01Z")
@@ -1026,6 +1050,8 @@ func TestProtocolFreeAttemptAdoptsOrdinaryHeadWithoutReviewLoop(t *testing.T) {
 }
 
 func TestReviewFixCommitInvalidatesReadinessUntilAllProfilesReconfirm(t *testing.T) {
+	t.Parallel()
+
 	harness := newReviewHarness(t)
 	start, err := workspace.StartAttemptReviewRound(
 		context.Background(), harness.journal, harness.definition, harness.repository,
@@ -1279,6 +1305,8 @@ func TestReviewFixCommitInvalidatesReadinessUntilAllProfilesReconfirm(t *testing
 }
 
 func TestReviewRebaseRejectsConcurrentFindingFixReservation(t *testing.T) {
+	t.Parallel()
+
 	harness := newReviewHarness(t)
 	start, err := workspace.StartAttemptReviewRound(
 		context.Background(), harness.journal, harness.definition, harness.repository,

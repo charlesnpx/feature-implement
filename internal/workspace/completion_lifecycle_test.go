@@ -20,6 +20,8 @@ type completedWorkspaceHarness struct {
 func TestWorkspaceCompletionAppendsOnceAndBindsCanonicalLocalReport(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	harness := newCompletedWorkspaceHarness(t)
 	snapshot, err := harness.core.journal.ReadSnapshot()
 	if err != nil {
@@ -128,6 +130,8 @@ func TestWorkspaceCompletionAppendsOnceAndBindsCanonicalLocalReport(
 func TestWorkspaceCompletionExposesEveryCurrentLocalBlocker(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	harness := newNoReviewIntegrationHarness(t, false)
 	_, err := workspace.CompleteWorkspace(
 		context.Background(),
@@ -187,6 +191,8 @@ func TestWorkspaceCompletionExposesEveryCurrentLocalBlocker(
 func TestWorkspaceCompletionSupportsConfiguredReviewAndAdoptHead(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	harness := newReviewHarness(t)
 	start, err := workspace.StartAttemptReviewRound(
 		context.Background(),
@@ -343,6 +349,8 @@ func TestWorkspaceCompletionSupportsConfiguredReviewAndAdoptHead(
 func TestWorkspaceCompletionRetryRecoversBeforeAndAfterAppendFaults(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	for _, point := range []workspace.CompletionLifecycleFaultPoint{
 		workspace.CompletionFaultBeforeAppend,
 		workspace.CompletionFaultAfterAppend,
@@ -426,6 +434,8 @@ func TestWorkspaceCompletionRetryRecoversBeforeAndAfterAppendFaults(
 func TestLocalRecoveryResumesPendingMaterializationAndIntegration(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	t.Run("materialization", func(t *testing.T) {
 		core := newAttemptHarness(t, "unit-one")
 		attempt := core.reserve(
@@ -552,6 +562,8 @@ func TestLocalRecoveryResumesPendingMaterializationAndIntegration(
 func TestLocalRecoveryRepairsIncompleteCompletionTailWithoutDuplication(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	harness := newCompletedWorkspaceHarness(t)
 	before := journalRecordCount(t, harness.core.journal)
 	if err := harness.core.journal.Close(); err != nil {
@@ -658,6 +670,8 @@ func TestLocalRecoveryRepairsIncompleteCompletionTailWithoutDuplication(
 func TestIncompleteFeatureRefCreationIsReportedAndRecovered(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()

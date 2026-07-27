@@ -10,6 +10,8 @@ import (
 )
 
 func TestVerifiedRootRejectsSymlinksAndDetectsReplacement(t *testing.T) {
+	t.Parallel()
+
 	parent := canonicalVerifiedRootTempDir(t)
 	realRoot := filepath.Join(parent, "real")
 	if err := os.Mkdir(realRoot, 0o700); err != nil {
@@ -85,6 +87,8 @@ func TestVerifiedRootRejectsSymlinksAndDetectsReplacement(t *testing.T) {
 }
 
 func TestVerifiedRootDurabilityProbeCleansItsArtifacts(t *testing.T) {
+	t.Parallel()
+
 	rootPath := filepath.Join(canonicalVerifiedRootTempDir(t), "runtime")
 	root, err := workspace.OpenVerifiedRoot(workspace.RootRoleRuntime, rootPath, true)
 	if err != nil {
@@ -104,6 +108,8 @@ func TestVerifiedRootDurabilityProbeCleansItsArtifacts(t *testing.T) {
 }
 
 func TestWorkspaceInitializationAdmissionRejectsPlanRuntimeOverlap(t *testing.T) {
+	t.Parallel()
+
 	parent := canonicalVerifiedRootTempDir(t)
 	planPath := filepath.Join(parent, "plan")
 	targetPath := filepath.Join(parent, "target")
@@ -125,6 +131,8 @@ func TestWorkspaceInitializationAdmissionRejectsPlanRuntimeOverlap(t *testing.T)
 }
 
 func TestWorkspaceRootLayoutAllowsOnlyGitStructuralOverlap(t *testing.T) {
+	t.Parallel()
+
 	parent := canonicalVerifiedRootTempDir(t)
 	paths := map[workspace.RootRole]string{
 		workspace.RootRolePlan:               filepath.Join(parent, "plan"),
@@ -188,6 +196,8 @@ func TestWorkspaceRootLayoutAllowsOnlyGitStructuralOverlap(t *testing.T) {
 }
 
 func TestWorkspaceRootLayoutSupportsLinkedWorktreeCommonDirectory(t *testing.T) {
+	t.Parallel()
+
 	parent := canonicalVerifiedRootTempDir(t)
 	planPath := filepath.Join(parent, "plan")
 	runtimePath := filepath.Join(parent, "runtime")

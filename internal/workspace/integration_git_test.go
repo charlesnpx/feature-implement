@@ -44,11 +44,19 @@ func (repository localIntegrationReviewRepository) InspectReviewSnapshot(
 func TestLocalGitIntegrationCreatesExactTwoParentCommitForSHA1AndSHA256(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	for _, algorithm := range []workspace.GitHashAlgorithm{
 		workspace.GitHashSHA1,
 		workspace.GitHashSHA256,
 	} {
 		t.Run(string(algorithm), func(t *testing.T) {
+			requireFullSuiteCase(
+				t,
+				algorithm == workspace.GitHashSHA1,
+				"Git object-format permutation",
+			)
+
 			scenario := newRealIntegrationScenario(
 				t, algorithm, true, workspace.GitObjectID{},
 			)
@@ -141,6 +149,8 @@ func TestLocalGitIntegrationCreatesExactTwoParentCommitForSHA1AndSHA256(
 }
 
 func TestLocalGitIntegrationUsesExactRegisteredAttemptWorktree(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	runtimeRoot := t.TempDir()
@@ -325,6 +335,8 @@ func TestLocalGitIntegrationUsesExactRegisteredAttemptWorktree(t *testing.T) {
 func TestLocalGitIntegrationRejectsAncestorDescendantAndUnrelatedDrift(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	scenario := newRealIntegrationScenario(
 		t, workspace.GitHashSHA1, true, workspace.GitObjectID{},
 	)
@@ -374,6 +386,12 @@ func TestLocalGitIntegrationRejectsAncestorDescendantAndUnrelatedDrift(
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			requireFullSuiteCase(
+				t,
+				test.name == "unrelated",
+				"completed integration drift permutation",
+			)
+
 			runTargetGitTest(
 				t, scenario.repositoryRoot,
 				"update-ref", result.Intent().FeatureRef(),
@@ -418,6 +436,9 @@ func TestLocalGitIntegrationRejectsAncestorDescendantAndUnrelatedDrift(
 func TestLocalGitIntegrationRejectsCompletedSameOIDFeatureRefRecreation(
 	t *testing.T,
 ) {
+	t.Parallel()
+	requireFullSuite(t, "same-object ref recreation permutation")
+
 	scenario := newRealIntegrationScenario(
 		t, workspace.GitHashSHA1, true, workspace.GitObjectID{},
 	)
@@ -481,6 +502,9 @@ func TestLocalGitIntegrationRejectsCompletedSameOIDFeatureRefRecreation(
 func TestLocalGitIntegrationCompletedRetryRejectsFeatureBranchCheckout(
 	t *testing.T,
 ) {
+	t.Parallel()
+	requireFullSuite(t, "completed integration checkout permutation")
+
 	scenario := newRealIntegrationScenario(
 		t, workspace.GitHashSHA1, true, workspace.GitObjectID{},
 	)
@@ -562,6 +586,9 @@ func TestLocalGitIntegrationCompletedRetryRejectsFeatureBranchCheckout(
 func TestLocalGitCompletedIntegrationRetryFollowsLaterDurableFrontier(
 	t *testing.T,
 ) {
+	t.Parallel()
+	requireFullSuite(t, "multi-integration durable-frontier permutation")
+
 	scenario := newRealIntegrationScenario(
 		t, workspace.GitHashSHA1, true, workspace.GitObjectID{},
 	)
@@ -712,6 +739,8 @@ func TestLocalGitCompletedIntegrationRetryFollowsLaterDurableFrontier(
 func TestLocalGitIntegrationRecoversCreatedObjectAndPublishedRef(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tests := []struct {
 		name  string
 		point workspace.IntegrationLifecycleFaultPoint
@@ -731,6 +760,12 @@ func TestLocalGitIntegrationRecoversCreatedObjectAndPublishedRef(
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			requireFullSuiteCase(
+				t,
+				test.name != "prepared publication aborted at old head",
+				"intermediate integration publication boundary",
+			)
+
 			scenario := newRealIntegrationScenario(
 				t, workspace.GitHashSHA1, true,
 				workspace.GitObjectID{},
@@ -852,6 +887,9 @@ func TestLocalGitIntegrationRecoversCreatedObjectAndPublishedRef(
 func TestLocalGitIntegrationRejectsExternalMoveToExpectedMergeWithoutMarker(
 	t *testing.T,
 ) {
+	t.Parallel()
+	requireFullSuite(t, "external ref-publication permutation")
+
 	scenario := newRealIntegrationScenario(
 		t, workspace.GitHashSHA1, true, workspace.GitObjectID{},
 	)
@@ -900,6 +938,9 @@ func TestLocalGitIntegrationRejectsExternalMoveToExpectedMergeWithoutMarker(
 func TestLocalGitIntegrationRejectsSameOIDFeatureRefRecreationBeforeIntent(
 	t *testing.T,
 ) {
+	t.Parallel()
+	requireFullSuite(t, "same-object ref recreation permutation")
+
 	scenario := newRealIntegrationScenario(
 		t, workspace.GitHashSHA1, true, workspace.GitObjectID{},
 	)
@@ -922,6 +963,9 @@ func TestLocalGitIntegrationRejectsSameOIDFeatureRefRecreationBeforeIntent(
 func TestLocalGitIntegrationRejectsSameOIDFeatureRefRecreationAfterIntent(
 	t *testing.T,
 ) {
+	t.Parallel()
+	requireFullSuite(t, "same-object ref recreation permutation")
+
 	scenario := newRealIntegrationScenario(
 		t, workspace.GitHashSHA1, true, workspace.GitObjectID{},
 	)
@@ -989,6 +1033,9 @@ func TestLocalGitIntegrationRejectsSameOIDFeatureRefRecreationAfterIntent(
 func TestLocalGitIntegrationLocksFeatureOwnershipMarkerThroughPublication(
 	t *testing.T,
 ) {
+	t.Parallel()
+	requireFullSuite(t, "feature ownership publication-lock permutation")
+
 	scenario := newRealIntegrationScenario(
 		t, workspace.GitHashSHA1, true, workspace.GitObjectID{},
 	)
@@ -1068,6 +1115,9 @@ func TestLocalGitIntegrationLocksFeatureOwnershipMarkerThroughPublication(
 func TestLocalGitIntegrationRevalidatesMergeMarkerBeforeCompletion(
 	t *testing.T,
 ) {
+	t.Parallel()
+	requireFullSuite(t, "integration marker replacement permutation")
+
 	scenario := newRealIntegrationScenario(
 		t, workspace.GitHashSHA1, true, workspace.GitObjectID{},
 	)
@@ -1155,6 +1205,9 @@ func TestLocalGitIntegrationRevalidatesMergeMarkerBeforeCompletion(
 func TestWorkspaceReadmissionRejectsRecreatedIntegratedFeatureRef(
 	t *testing.T,
 ) {
+	t.Parallel()
+	requireFullSuite(t, "completed workspace readmission permutation")
+
 	scenario := newRealIntegrationScenario(
 		t, workspace.GitHashSHA1, true,
 		workspace.GitObjectID{},
@@ -1204,7 +1257,11 @@ func TestWorkspaceReadmissionRejectsRecreatedIntegratedFeatureRef(
 }
 
 func TestLocalGitIntegrationRejectsRefChangesAfterIntent(t *testing.T) {
+	t.Parallel()
+
 	t.Run("attempt ref", func(t *testing.T) {
+		requireFullSuite(t, "post-intent ref drift permutation")
+
 		scenario := newRealIntegrationScenario(
 			t, workspace.GitHashSHA1, true,
 			workspace.GitObjectID{},
@@ -1362,6 +1419,8 @@ func TestLocalGitIntegrationRejectsRefChangesAfterIntent(t *testing.T) {
 func TestLocalGitIntegrationRejectsAttemptPathChangesBeforeCAS(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tests := []struct {
 		name   string
 		point  workspace.IntegrationLifecycleFaultPoint
@@ -1477,6 +1536,12 @@ func TestLocalGitIntegrationRejectsAttemptPathChangesBeforeCAS(
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			requireFullSuiteCase(
+				t,
+				test.name == "symlink substitution",
+				"attempt worktree replacement permutation",
+			)
+
 			scenario := newRealIntegrationScenario(
 				t, workspace.GitHashSHA1, true,
 				workspace.GitObjectID{},
@@ -1570,6 +1635,8 @@ func TestLocalGitIntegrationRejectsAttemptPathChangesBeforeCAS(
 func TestLocalGitIntegrationRejectsInvalidAcceptedAncestryTreeAndBase(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	t.Run("non-descendant accepted head", func(t *testing.T) {
 		scenario := newRealIntegrationScenario(
 			t, workspace.GitHashSHA1, false,
@@ -1581,6 +1648,8 @@ func TestLocalGitIntegrationRejectsInvalidAcceptedAncestryTreeAndBase(
 	})
 
 	t.Run("accepted tree mismatch", func(t *testing.T) {
+		requireFullSuite(t, "accepted integration identity permutation")
+
 		reportedTree := mustGitObject(t, 'd')
 		scenario := newRealIntegrationScenario(
 			t, workspace.GitHashSHA1, true, reportedTree,
@@ -1592,6 +1661,8 @@ func TestLocalGitIntegrationRejectsInvalidAcceptedAncestryTreeAndBase(
 	})
 
 	t.Run("feature head moved from attempt base", func(t *testing.T) {
+		requireFullSuite(t, "accepted integration identity permutation")
+
 		scenario := newRealIntegrationScenario(
 			t, workspace.GitHashSHA1, true,
 			workspace.GitObjectID{},
@@ -1620,6 +1691,9 @@ func TestLocalGitIntegrationRejectsInvalidAcceptedAncestryTreeAndBase(
 }
 
 func TestCompletedIntegrationReverifiesAcceptedHeadAncestry(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "completed integration ancestry permutation")
+
 	scenario := newRealIntegrationScenario(
 		t, workspace.GitHashSHA1, true,
 		workspace.GitObjectID{},
@@ -1698,6 +1772,8 @@ exec ` + shellSingleQuote(realGit) + ` "$@"
 func TestCompletedIntegrationRejectsMissingAcceptedTreeClosure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	scenario := newRealIntegrationScenario(
 		t, workspace.GitHashSHA1, true,
 		workspace.GitObjectID{},

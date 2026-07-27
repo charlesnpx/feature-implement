@@ -13,6 +13,8 @@ import (
 )
 
 func TestOptionalCommitProtocolSchemaIsStrictAndAbsentMeansUnconstrained(t *testing.T) {
+	t.Parallel()
+
 	configured := protocolExecutionYAML(true)
 	config, err := workspace.DecodeExecutionConfig([]byte(configured))
 	if err != nil {
@@ -106,6 +108,8 @@ func TestOptionalCommitProtocolSchemaIsStrictAndAbsentMeansUnconstrained(t *test
 }
 
 func TestCommitPathPolicyCoversRenamesDeletesModesSymlinksAndSubmodules(t *testing.T) {
+	t.Parallel()
+
 	policy, err := workspace.NewCommitPathPolicy(
 		[]string{"src/**", "modules/**", ".github/**", ".gitignore"},
 		[]string{"src/frozen.go", "modules/vendor/**"},
@@ -156,6 +160,8 @@ func TestCommitPathPolicyCoversRenamesDeletesModesSymlinksAndSubmodules(t *testi
 }
 
 func TestCommitDiffRejectsMixedOrRepositoryMismatchedObjectFormats(t *testing.T) {
+	t.Parallel()
+
 	sha1 := mustGitObject(t, '1')
 	sha256, err := workspace.ParseGitObjectID("sha256:" + strings.Repeat("2", 64))
 	if err != nil {
@@ -185,6 +191,8 @@ func TestCommitDiffRejectsMixedOrRepositoryMismatchedObjectFormats(t *testing.T)
 }
 
 func TestStructuredCheckParsersRejectGenericAndWrongFailures(t *testing.T) {
+	t.Parallel()
+
 	isolation := workspace.StrictCheckIsolationProof()
 	goPass := []byte("{\"Action\":\"pass\",\"Package\":\"example/pkg\"}\n")
 	passResult := mustCheckResult(t, workspace.CheckExited, 0, "", goPass, nil, isolation)
@@ -260,6 +268,8 @@ func TestStructuredCheckParsersRejectGenericAndWrongFailures(t *testing.T) {
 }
 
 func TestGoTestParserRejectsUncorrelatedBuildsAndAbnormalTermination(t *testing.T) {
+	t.Parallel()
+
 	namedFailure := []string{
 		`{"Action":"fail","Package":"example/pkg","Test":"TestExpected"}`,
 		`{"Action":"fail","Package":"example/pkg"}`,
@@ -376,6 +386,8 @@ func TestGoTestParserRejectsUncorrelatedBuildsAndAbnormalTermination(t *testing.
 }
 
 func TestGoTestParserRecognizesRealGo126CompilationFailure(t *testing.T) {
+	t.Parallel()
+
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/broken\n\ngo 1.26\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -408,6 +420,8 @@ func TestGoTestParserRecognizesRealGo126CompilationFailure(t *testing.T) {
 }
 
 func TestGoTestParserRecognizesRealTimeoutAndIgnoresLoggedMarkersOnPass(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		source   string
@@ -519,6 +533,8 @@ func TestPanic(t *testing.T) {
 }
 
 func TestGoTestParserAllowsRepeatedTestRunsWithDistinctTerminals(t *testing.T) {
+	t.Parallel()
+
 	output := []byte(strings.Join([]string{
 		`{"Action":"run","Package":"example/pkg","Test":"TestRepeated"}`,
 		`{"Action":"pass","Package":"example/pkg","Test":"TestRepeated"}`,
@@ -537,6 +553,8 @@ func TestGoTestParserAllowsRepeatedTestRunsWithDistinctTerminals(t *testing.T) {
 }
 
 func TestGoTestParserDoesNotHideSetupFailureBehindExpectedTestFailure(t *testing.T) {
+	t.Parallel()
+
 	output := []byte(strings.Join([]string{
 		`{"Action":"fail","Package":"example/a","Test":"TestExpected"}`,
 		`{"Action":"fail","Package":"example/a"}`,
@@ -562,6 +580,8 @@ func TestGoTestParserDoesNotHideSetupFailureBehindExpectedTestFailure(t *testing
 }
 
 func TestGoTestParserRejectsPartialMultiPackageStreams(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		exitCode int
@@ -649,6 +669,8 @@ func TestGoTestParserRejectsPartialMultiPackageStreams(t *testing.T) {
 }
 
 func TestAssertionAndDiagnosticParsersRequireExactStructuredIdentities(t *testing.T) {
+	t.Parallel()
+
 	for _, test := range []struct {
 		name       string
 		parser     workspace.CheckParserKind
@@ -704,6 +726,8 @@ func TestAssertionAndDiagnosticParsersRequireExactStructuredIdentities(t *testin
 }
 
 func TestCommitProtocolReducerOrdersCommitAndChecksAndInvalidatesChecksOnRebase(t *testing.T) {
+	t.Parallel()
+
 	generation := workspace.DigestBytes([]byte("generation"))
 	base, tree, commit := mustGitObject(t, '1'), mustGitObject(t, '2'), mustGitObject(t, '3')
 	step, check := protocolTestStep(t, "protocol-step", "Implement protocol")
@@ -787,6 +811,8 @@ func TestCommitProtocolReducerOrdersCommitAndChecksAndInvalidatesChecksOnRebase(
 }
 
 func TestCommitCheckEvidenceRejectsOutcomeUnrelatedToProcessResult(t *testing.T) {
+	t.Parallel()
+
 	generation := workspace.DigestBytes([]byte("generation"))
 	base, tree, commit := mustGitObject(t, '1'), mustGitObject(t, '2'), mustGitObject(t, '3')
 	step, check := protocolTestStep(t, "protocol-step", "Implement protocol")
@@ -818,6 +844,8 @@ func TestCommitCheckEvidenceRejectsOutcomeUnrelatedToProcessResult(t *testing.T)
 }
 
 func TestCommitProtocolRebaseAcceptsACompletedPrefix(t *testing.T) {
+	t.Parallel()
+
 	generation := workspace.DigestBytes([]byte("generation"))
 	base := mustGitObject(t, '1')
 	first, firstCheck := protocolTestStep(t, "first-step", "First step")
@@ -884,6 +912,8 @@ func TestCommitProtocolRebaseAcceptsACompletedPrefix(t *testing.T) {
 }
 
 func TestCommitEvidenceRejectsMergeCommitsAndReviewFixBudgetIsDurableState(t *testing.T) {
+	t.Parallel()
+
 	step, _ := protocolTestStep(t, "one-step", "One step")
 	diff := addedDiff(t, "src/value.go", mustGitObject(t, '4'))
 	inspection, err := workspace.NewGitCommitInspection(
@@ -933,6 +963,8 @@ func TestCommitEvidenceRejectsMergeCommitsAndReviewFixBudgetIsDurableState(t *te
 }
 
 func TestReviewFixRebaseRerunsChecksForEveryRewrittenFix(t *testing.T) {
+	t.Parallel()
+
 	generation := workspace.DigestBytes([]byte("generation"))
 	_, check := protocolTestStep(t, "unused", "Unused")
 	paths, _ := workspace.NewCommitPathPolicy([]string{"src/**"}, nil)

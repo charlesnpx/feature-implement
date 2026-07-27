@@ -129,6 +129,8 @@ merge_units:
 }
 
 func TestValidateDefinitionBuildsContentAddressedEffectiveInputs(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	definition, err := workspace.ValidateDefinition(fixture.sources)
 	if err != nil {
@@ -266,6 +268,8 @@ func assertLocalTargetInitializationJournal(
 }
 
 func TestSourceAndSemanticHashesHaveDistinctContracts(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	first, err := workspace.ValidateDefinition(fixture.sources)
 	if err != nil {
@@ -291,6 +295,8 @@ func TestSourceAndSemanticHashesHaveDistinctContracts(t *testing.T) {
 }
 
 func TestNoReviewExecutionCanonicalFormOmitsUnusedAndRemovedFields(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	definition, err := workspace.ValidateDefinition(fixture.sources)
 	if err != nil {
@@ -306,6 +312,8 @@ func TestNoReviewExecutionCanonicalFormOmitsUnusedAndRemovedFields(t *testing.T)
 }
 
 func TestEffectiveDefinitionBindsTypedCrossPlanMergeUnitDependencies(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	sources := cloneDefinitionSources(fixture.sources)
 	workspaceText := string(sources.Workspace.Bytes)
@@ -361,6 +369,8 @@ merge_units:
 }
 
 func TestEffectiveDefinitionRejectsCombinedCrossPlanCycle(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	sources := cloneDefinitionSources(fixture.sources)
 	sources.Workspace.Bytes = []byte(strings.Replace(string(sources.Workspace.Bytes),
@@ -398,6 +408,8 @@ func TestEffectiveDefinitionRejectsCombinedCrossPlanCycle(t *testing.T) {
 }
 
 func TestEffectiveDefinitionRejectsCycleIntroducedByMergeUnitGrouping(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	sources := cloneDefinitionSources(fixture.sources)
 	sources.Plans[0].Bytes = []byte(`schema_version: 2
@@ -442,6 +454,8 @@ merge_units:
 }
 
 func TestEffectiveDefinitionRejectsCrossRoleArtifactPathCollisions(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	tests := []struct {
 		name   string
@@ -475,6 +489,8 @@ func TestEffectiveDefinitionRejectsCrossRoleArtifactPathCollisions(t *testing.T)
 }
 
 func TestValidationIsIndependentOfDirtyCheckout(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	first, err := workspace.ValidateDefinition(fixture.sources)
 	if err != nil {
@@ -494,6 +510,8 @@ func TestValidationIsIndependentOfDirtyCheckout(t *testing.T) {
 }
 
 func TestDefinitionDefensivelyCopiesNestedInputsAndOutputs(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	sources := cloneDefinitionSources(fixture.sources)
 	definition, err := workspace.ValidateDefinition(sources)
@@ -523,6 +541,8 @@ func TestDefinitionDefensivelyCopiesNestedInputsAndOutputs(t *testing.T) {
 }
 
 func TestV2PlanAndLockProjectionsCannotOwnRuntimeOrWorkspaceState(t *testing.T) {
+	t.Parallel()
+
 	assertTypeOmitsFields(t, reflect.TypeOf(workspace.Plan{}), "base", "remote", "policy", "runtime", "state", "status")
 	assertTypeOmitsFields(t, reflect.TypeOf(workspace.PlanLockProjection{}), "base", "remote", "policy", "runtime", "state", "status")
 	assertTypeOmitsFields(t, reflect.TypeOf(workspace.WorkspaceLockProjection{}), "runtime", "state", "status", "approval", "attempt")

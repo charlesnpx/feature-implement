@@ -12,6 +12,8 @@ import (
 )
 
 func TestWorkspaceBundleRejectsHiddenDuplicateAndAmbiguousSources(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 
 	t.Run("hidden source", func(t *testing.T) {
@@ -74,6 +76,8 @@ func TestWorkspaceBundleRejectsHiddenDuplicateAndAmbiguousSources(t *testing.T) 
 }
 
 func TestWorkspaceBundleGeneratedLocksAreImmutableOwnedProjections(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	root := writeDefinitionBundle(t, fixture, nil)
 	bundle, err := workspace.LoadWorkspaceBundle(root)
@@ -131,6 +135,8 @@ func TestWorkspaceBundleGeneratedLocksAreImmutableOwnedProjections(t *testing.T)
 }
 
 func TestWorkspaceBundleRetainsAndRevalidatesPlanRootIdentity(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	root := writeDefinitionBundle(t, fixture, nil)
 	bundle, err := workspace.LoadWorkspaceBundle(root)
@@ -156,6 +162,8 @@ func TestWorkspaceBundleRetainsAndRevalidatesPlanRootIdentity(t *testing.T) {
 }
 
 func TestWorkspaceBundleBindsDescriptorAndRejectsProviderEraFields(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	root := writeDefinitionBundle(t, fixture, nil)
 	first, err := workspace.LoadWorkspaceBundle(root)

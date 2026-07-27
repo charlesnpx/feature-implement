@@ -15,6 +15,8 @@ import (
 )
 
 func TestPlanCheckpointInitialRevisionLockAndExactRetries(t *testing.T) {
+	t.Parallel()
+
 	root := writeDefinitionBundle(t, newDefinitionFixture(t), nil)
 	initialInput := checkpointInput(t, "2026-07-23T10:00:00Z", "", "")
 	initial, err := workspace.CheckpointPlanRepository(context.Background(), workspace.PlanCheckpointOptions{
@@ -97,6 +99,8 @@ func TestPlanCheckpointInitialRevisionLockAndExactRetries(t *testing.T) {
 func TestWithVerifiedPlanLockCheckpointExcludesGitMutationsThroughWorkspaceBinding(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	root, lock := lockedPlanRepository(t)
 	bundle := mustLoadBundle(t, root)
 	runtimeRoot := filepath.Join(
@@ -231,6 +235,8 @@ func TestWithVerifiedPlanLockCheckpointExcludesGitMutationsThroughWorkspaceBindi
 }
 
 func TestPlanCheckpointRequestDecodingIsStrict(t *testing.T) {
+	t.Parallel()
+
 	root := writeDefinitionBundle(t, newDefinitionFixture(t), nil)
 	for _, test := range []struct {
 		name  string
@@ -281,6 +287,8 @@ func TestPlanCheckpointRequestDecodingIsStrict(t *testing.T) {
 }
 
 func TestPlanCheckpointOwnsRepositoryInsideAncestorRepository(t *testing.T) {
+	t.Parallel()
+
 	root := writeDefinitionBundle(t, newDefinitionFixture(t), nil)
 	ancestor := filepath.Dir(root)
 	runGitSetup(t, ancestor, "init", "--initial-branch=ancestor")
@@ -313,6 +321,8 @@ func TestPlanCheckpointOwnsRepositoryInsideAncestorRepository(t *testing.T) {
 }
 
 func TestPlanCheckpointRejectsGitSymlinkBeforeInitialization(t *testing.T) {
+	t.Parallel()
+
 	root := writeDefinitionBundle(t, newDefinitionFixture(t), nil)
 	external := filepath.Join(canonicalMaterializationTestTempDir(t), "external-git")
 	if err := os.Mkdir(external, 0o700); err != nil {
@@ -351,6 +361,8 @@ func TestPlanCheckpointRejectsGitSymlinkBeforeInitialization(t *testing.T) {
 }
 
 func TestPlanCheckpointGitEffectsRemainBoundToRetainedDirectory(t *testing.T) {
+	t.Parallel()
+
 	root := writeDefinitionBundle(t, newDefinitionFixture(t), nil)
 	external := filepath.Join(canonicalMaterializationTestTempDir(t), "external-git-race")
 	if err := os.Mkdir(external, 0o700); err != nil {
@@ -420,6 +432,8 @@ exec %s "$@"
 }
 
 func TestPlanCheckpointRejectsNoOpUnownedStagedAndDuplicateRevisions(t *testing.T) {
+	t.Parallel()
+
 	t.Run("semantic no-op", func(t *testing.T) {
 		root := initializedPlanRepository(t)
 		planPath := filepath.Join(root, "plans", "alpha.yaml")
@@ -440,6 +454,8 @@ func TestPlanCheckpointRejectsNoOpUnownedStagedAndDuplicateRevisions(t *testing.
 	})
 
 	t.Run("unowned path", func(t *testing.T) {
+		requireFullSuite(t, "plan checkpoint rejection permutation")
+
 		root := initializedPlanRepository(t)
 		if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("not owned\n"), 0o600); err != nil {
 			t.Fatal(err)
@@ -454,6 +470,8 @@ func TestPlanCheckpointRejectsNoOpUnownedStagedAndDuplicateRevisions(t *testing.
 	})
 
 	t.Run("staged path", func(t *testing.T) {
+		requireFullSuite(t, "plan checkpoint rejection permutation")
+
 		root := initializedPlanRepository(t)
 		planPath := filepath.Join(root, "plans", "alpha.yaml")
 		replaceFileText(t, planPath, "Establish the first contract.", "Define the first contract.")
@@ -468,6 +486,8 @@ func TestPlanCheckpointRejectsNoOpUnownedStagedAndDuplicateRevisions(t *testing.
 	})
 
 	t.Run("duplicate revision id", func(t *testing.T) {
+		requireFullSuite(t, "plan checkpoint rejection permutation")
+
 		root := initializedPlanRepository(t)
 		planPath := filepath.Join(root, "plans", "alpha.yaml")
 		replaceFileText(t, planPath, "Establish the first contract.", "Define the first contract.")
@@ -488,6 +508,8 @@ func TestPlanCheckpointRejectsNoOpUnownedStagedAndDuplicateRevisions(t *testing.
 	})
 
 	t.Run("worktree-specific Git configuration", func(t *testing.T) {
+		requireFullSuite(t, "Git repository profile permutation")
+
 		root := initializedPlanRepository(t)
 		runGitSetup(t, root, "config", "extensions.worktreeConfig", "true")
 		_, err := workspace.CheckpointPlanRepository(context.Background(), workspace.PlanCheckpointOptions{
@@ -501,7 +523,11 @@ func TestPlanCheckpointRejectsNoOpUnownedStagedAndDuplicateRevisions(t *testing.
 }
 
 func TestPlanCheckpointIndexRecoveryPreservesUnexpectedStaging(t *testing.T) {
+	t.Parallel()
+
 	t.Run("exact retry", func(t *testing.T) {
+		requireFullSuite(t, "plan checkpoint index recovery permutation")
+
 		root := initializedPlanRepository(t)
 		relative := "plans/alpha.yaml"
 		planPath := filepath.Join(root, filepath.FromSlash(relative))
@@ -597,6 +623,8 @@ func TestPlanCheckpointIndexRecoveryPreservesUnexpectedStaging(t *testing.T) {
 }
 
 func TestPlanCheckpointIndexPublicationLocksAndRecovers(t *testing.T) {
+	t.Parallel()
+
 	t.Run("concurrent Git add is blocked", func(t *testing.T) {
 		root := initializedPlanRepository(t)
 		relative := "plans/alpha.yaml"
@@ -672,6 +700,8 @@ func TestPlanCheckpointIndexPublicationLocksAndRecovers(t *testing.T) {
 	})
 
 	t.Run("quarantined prior index is crash recoverable", func(t *testing.T) {
+		requireFullSuite(t, "plan checkpoint index recovery permutation")
+
 		root := initializedPlanRepository(t)
 		planPath := filepath.Join(root, "plans", "alpha.yaml")
 		replaceFileText(
@@ -744,6 +774,9 @@ func TestPlanCheckpointIndexPublicationLocksAndRecovers(t *testing.T) {
 func TestPlanCheckpointIndexRecoveryPreservesActiveStateAfterHeadMoves(
 	t *testing.T,
 ) {
+	t.Parallel()
+	requireFullSuite(t, "exhaustive plan checkpoint index recovery matrix")
+
 	t.Run("index matching current HEAD", func(t *testing.T) {
 		root := initializedPlanRepository(t)
 		planPath := filepath.Join(root, "plans", "alpha.yaml")
@@ -948,6 +981,8 @@ func TestPlanCheckpointIndexRecoveryPreservesActiveStateAfterHeadMoves(
 }
 
 func TestPlanCheckpointRecoversInterruptedInitializationAndPublication(t *testing.T) {
+	t.Parallel()
+
 	for _, test := range []struct {
 		name      string
 		point     workspace.PlanCheckpointFaultPoint
@@ -958,6 +993,12 @@ func TestPlanCheckpointRecoversInterruptedInitializationAndPublication(t *testin
 		{name: "ref publication", point: workspace.PlanCheckpointFaultAfterRefCAS, recovered: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			requireFullSuiteCase(
+				t,
+				test.name != "commit object",
+				"intermediate plan checkpoint publication boundary",
+			)
+
 			root := writeDefinitionBundle(t, newDefinitionFixture(t), nil)
 			input := checkpointInput(t, "2026-07-23T12:00:00Z", "", "")
 			injected := errors.New("injected")
@@ -988,7 +1029,11 @@ func TestPlanCheckpointRecoversInterruptedInitializationAndPublication(t *testin
 }
 
 func TestPlanCheckpointDetectsSourceChangeDuringLockAndCASRace(t *testing.T) {
+	t.Parallel()
+
 	t.Run("source changes during lock", func(t *testing.T) {
+		requireFullSuite(t, "plan checkpoint source-race permutation")
+
 		root := initializedPlanRepository(t)
 		planPath := filepath.Join(root, "plans", "alpha.yaml")
 		input := checkpointInput(t, "2026-07-23T13:00:00Z", "", "")
@@ -1038,6 +1083,8 @@ func TestPlanCheckpointDetectsSourceChangeDuringLockAndCASRace(t *testing.T) {
 	})
 
 	t.Run("source race retires generated locks for revision", func(t *testing.T) {
+		requireFullSuite(t, "plan checkpoint source-race permutation")
+
 		root := initializedPlanRepository(t)
 		planPath := filepath.Join(root, "plans", "alpha.yaml")
 		_, err := workspace.CheckpointPlanRepository(context.Background(), workspace.PlanCheckpointOptions{
@@ -1098,6 +1145,8 @@ func TestPlanCheckpointDetectsSourceChangeDuringLockAndCASRace(t *testing.T) {
 	})
 
 	t.Run("retired lock sentinel changes before CAS", func(t *testing.T) {
+		requireFullSuite(t, "plan checkpoint source-race permutation")
+
 		root := initializedPlanRepository(t)
 		planPath := filepath.Join(root, "plans", "alpha.yaml")
 		replaceFileText(
@@ -1137,6 +1186,8 @@ func TestPlanCheckpointDetectsSourceChangeDuringLockAndCASRace(t *testing.T) {
 	})
 
 	t.Run("source changes after tree creation", func(t *testing.T) {
+		requireFullSuite(t, "plan checkpoint source-race permutation")
+
 		root := initializedPlanRepository(t)
 		planPath := filepath.Join(root, "plans", "alpha.yaml")
 		replaceFileText(t, planPath, "Establish the first contract.", "Define the first contract.")
@@ -1165,6 +1216,8 @@ func TestPlanCheckpointDetectsSourceChangeDuringLockAndCASRace(t *testing.T) {
 }
 
 func TestPlanCheckpointRecoversInterruptedLockGeneration(t *testing.T) {
+	t.Parallel()
+
 	root := initializedPlanRepository(t)
 	input := checkpointInput(t, "2026-07-23T13:03:00Z", "", "")
 	injected := errors.New("injected lock interruption")
@@ -1202,6 +1255,9 @@ func TestPlanCheckpointRecoversInterruptedLockGeneration(t *testing.T) {
 }
 
 func TestPlanCheckpointRecoversLockAfterInventoryPublication(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "exhaustive prepared-lock publication matrix")
+
 	for _, point := range []workspace.PlanCheckpointFaultPoint{
 		workspace.PlanCheckpointFaultAfterTreeCreation,
 		workspace.PlanCheckpointFaultAfterCommitCreation,
@@ -1255,6 +1311,9 @@ func TestPlanCheckpointRecoversLockAfterInventoryPublication(t *testing.T) {
 }
 
 func TestPlanCheckpointReconcilesPreparedLockBeforeChangedRequest(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "exhaustive prepared-lock reconciliation matrix")
+
 	for _, point := range []workspace.PlanCheckpointFaultPoint{
 		workspace.PlanCheckpointFaultAfterTreeCreation,
 		workspace.PlanCheckpointFaultAfterCommitCreation,
@@ -1362,6 +1421,8 @@ func TestPlanCheckpointReconcilesPreparedLockBeforeChangedRequest(t *testing.T) 
 func TestPlanCheckpointTransactionExcludesConcurrentPreparedLockRecovery(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	root := initializedPlanRepository(t)
 	interruptPreparedPlanLock(
 		t,
@@ -1468,6 +1529,7 @@ func TestPlanCheckpointTransactionExcludesConcurrentPreparedLockRecovery(
 
 func TestPlanCheckpointTransactionSubprocess(t *testing.T) {
 	if os.Getenv("FEATURE_IMPLEMENT_PLAN_TRANSACTION_HELPER") != "1" {
+		t.Parallel()
 		t.Skip("subprocess helper")
 	}
 	root := os.Getenv("FEATURE_IMPLEMENT_PLAN_TRANSACTION_ROOT")
@@ -1488,6 +1550,8 @@ func TestPlanCheckpointTransactionSubprocess(t *testing.T) {
 }
 
 func TestPlanCheckpointRecoversOnlyAbandonedMainRefExclusions(t *testing.T) {
+	t.Parallel()
+
 	for _, test := range []struct {
 		name    string
 		content string
@@ -1504,6 +1568,12 @@ func TestPlanCheckpointRecoversOnlyAbandonedMainRefExclusions(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			requireFullSuiteCase(
+				t,
+				test.name == "abandoned tool exclusion",
+				"plan checkpoint lock-owner permutation",
+			)
+
 			root := initializedPlanRepository(t)
 			replaceFileText(
 				t,

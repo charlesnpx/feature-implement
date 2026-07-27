@@ -15,6 +15,8 @@ import (
 )
 
 func TestWorkspaceInitializationRequiresExactLockCheckpoint(t *testing.T) {
+	t.Parallel()
+
 	t.Run("initial checkpoint", func(t *testing.T) {
 		root := initializedPlanRepository(t)
 		err := initializeCheckpointBundle(t, root)
@@ -24,6 +26,8 @@ func TestWorkspaceInitializationRequiresExactLockCheckpoint(t *testing.T) {
 	})
 
 	t.Run("revision checkpoint", func(t *testing.T) {
+		requireFullSuite(t, "plan checkpoint admission permutation")
+
 		root := initializedPlanRepository(t)
 		replaceFileText(
 			t,
@@ -91,6 +95,8 @@ func TestWorkspaceInitializationRequiresExactLockCheckpoint(t *testing.T) {
 	})
 
 	t.Run("dirty index", func(t *testing.T) {
+		requireFullSuite(t, "plan checkpoint admission permutation")
+
 		root, _ := lockedPlanRepository(t)
 		relative := "plans/alpha.yaml"
 		planPath := filepath.Join(root, filepath.FromSlash(relative))
@@ -110,6 +116,8 @@ func TestWorkspaceInitializationRequiresExactLockCheckpoint(t *testing.T) {
 	})
 
 	t.Run("unowned path", func(t *testing.T) {
+		requireFullSuite(t, "plan checkpoint admission permutation")
+
 		root, _ := lockedPlanRepository(t)
 		if err := os.WriteFile(filepath.Join(root, "unowned.txt"), []byte("unowned\n"), 0o600); err != nil {
 			t.Fatal(err)
@@ -121,6 +129,8 @@ func TestWorkspaceInitializationRequiresExactLockCheckpoint(t *testing.T) {
 	})
 
 	t.Run("wrong generated lock", func(t *testing.T) {
+		requireFullSuite(t, "plan checkpoint identity permutation")
+
 		root, _ := lockedPlanRepository(t)
 		lockPath := filepath.Join(root, "generated", workspace.WorkspaceLockFileName)
 		content, err := os.ReadFile(lockPath)
@@ -137,6 +147,8 @@ func TestWorkspaceInitializationRequiresExactLockCheckpoint(t *testing.T) {
 	})
 
 	t.Run("wrong checkpoint tree", func(t *testing.T) {
+		requireFullSuite(t, "plan checkpoint identity permutation")
+
 		root, _ := lockedPlanRepository(t)
 		forgeCheckpointTreeFromParent(t, root)
 		err := initializeCheckpointBundle(t, root)
@@ -146,6 +158,8 @@ func TestWorkspaceInitializationRequiresExactLockCheckpoint(t *testing.T) {
 	})
 
 	t.Run("invalid checkpoint parent", func(t *testing.T) {
+		requireFullSuite(t, "plan checkpoint identity permutation")
+
 		root, _ := lockedPlanRepository(t)
 		forgeCheckpointParent(t, root)
 		err := initializeCheckpointBundle(t, root)
@@ -156,6 +170,9 @@ func TestWorkspaceInitializationRequiresExactLockCheckpoint(t *testing.T) {
 }
 
 func TestWorkspaceInitializationRejectsWrongCheckpointIdentities(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "exhaustive plan checkpoint identity matrix")
+
 	for _, test := range []struct {
 		name    string
 		trailer string
@@ -177,6 +194,8 @@ func TestWorkspaceInitializationRejectsWrongCheckpointIdentities(t *testing.T) {
 }
 
 func TestWorkspaceValidationPreservesFinalLockCheckpoint(t *testing.T) {
+	t.Parallel()
+
 	root, lock := lockedPlanRepository(t)
 	result, err := workspacecmd.Execute(context.Background(), workspacecmd.Options{
 		Action:           "validate",

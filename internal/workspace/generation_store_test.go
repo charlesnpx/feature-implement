@@ -10,6 +10,8 @@ import (
 )
 
 func TestGenerationStoreDetectsCanonicalTampering(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
@@ -54,6 +56,8 @@ func TestGenerationStoreDetectsCanonicalTampering(t *testing.T) {
 }
 
 func TestGenerationStoreRequiresFreshRuntimeForAnotherGeneration(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
 	other := mustProspectiveCandidate(t, fixture)

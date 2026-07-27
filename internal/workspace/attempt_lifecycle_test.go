@@ -226,6 +226,8 @@ func (h attemptHarness) materialize(t *testing.T, attemptID workspace.ID, at str
 }
 
 func TestAttemptIdentityIsFlatBoundedDigestBackedAndRejectsRefConflicts(t *testing.T) {
+	t.Parallel()
+
 	workspaceID := workspace.MustID("workspace-one")
 	generation := workspace.DigestBytes([]byte("generation-one"))
 	plan := workspace.MustID("p" + strings.Repeat("1", 90))
@@ -290,6 +292,8 @@ func TestAttemptIdentityIsFlatBoundedDigestBackedAndRejectsRefConflicts(t *testi
 }
 
 func TestAttemptReservationEnforcesSchedulerOrderAndEffectiveAttemptBudget(t *testing.T) {
+	t.Parallel()
+
 	harness := newAttemptHarness(t, "unit-one")
 	blockedUnit := mustMergeUnitReference(t, "alpha-plan", "unit-two")
 	if _, err := workspace.ReserveAttempt(
@@ -325,6 +329,8 @@ func TestAttemptReservationEnforcesSchedulerOrderAndEffectiveAttemptBudget(t *te
 }
 
 func TestExecutionConfigRequiresExplicitSupportedBoundaryPolicy(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	withoutBoundary := cloneDefinitionSources(fixture.sources)
 	withoutBoundary.ExecutionConfig.Bytes = []byte(strings.Replace(
@@ -346,6 +352,8 @@ func TestExecutionConfigRequiresExplicitSupportedBoundaryPolicy(t *testing.T) {
 }
 
 func TestReserveAttemptRejectsLocalRefCollisions(t *testing.T) {
+	t.Parallel()
+
 	for _, test := range []struct {
 		name  string
 		local func(string) []string
@@ -380,6 +388,8 @@ func TestReserveAttemptRejectsLocalRefCollisions(t *testing.T) {
 }
 
 func TestAttemptMaterializationRecoversAcrossEveryCrashPoint(t *testing.T) {
+	t.Parallel()
+
 	harness := newAttemptHarness(t, "unit-one")
 	crash := errors.New("simulated crash")
 	identity, err := workspace.DeriveAttemptIdentity(
@@ -476,6 +486,8 @@ func TestAttemptMaterializationRecoversAcrossEveryCrashPoint(t *testing.T) {
 }
 
 func TestAttemptMaterializationRecoversClaimedUnregisteredPartialWorktree(t *testing.T) {
+	t.Parallel()
+
 	harness := newAttemptHarness(t, "unit-one")
 	attempt := harness.reserve(t, "2026-07-21T10:10:00Z")
 	harness.git.createErr = errors.New("Git terminated after creating a partial checkout")
@@ -502,6 +514,9 @@ func TestAttemptMaterializationRecoversClaimedUnregisteredPartialWorktree(t *tes
 }
 
 func TestAttemptWorktreeClaimPublicationIsAtomicAcrossCrashPoints(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "exhaustive attempt-claim publication matrix")
+
 	repositoryRoot := filepath.Join(t.TempDir(), "repository")
 	runGitSetup(t, "", "init", "--initial-branch=main", repositoryRoot)
 	base, err := workspace.ParseGitObjectID("sha1:" + strings.Repeat("a", 40))
@@ -589,6 +604,8 @@ func TestAttemptWorktreeClaimRecoversCrashStrandedPendingFile(t *testing.T) {
 		}
 		os.Exit(0)
 	}
+	t.Parallel()
+	requireFullSuite(t, "process-crash attempt-claim recovery matrix")
 
 	repositoryRoot := filepath.Join(t.TempDir(), "repository")
 	runGitSetup(t, "", "init", "--initial-branch=main", repositoryRoot)
@@ -649,6 +666,9 @@ func TestAttemptWorktreeClaimRecoversCrashStrandedPendingFile(t *testing.T) {
 }
 
 func TestAttemptWorktreeClaimDoesNotReclaimActivePendingFile(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "active attempt-claim lock permutation")
+
 	repositoryRoot := filepath.Join(t.TempDir(), "repository")
 	runGitSetup(t, "", "init", "--initial-branch=main", repositoryRoot)
 	base, err := workspace.ParseGitObjectID("sha1:" + strings.Repeat("a", 40))
@@ -722,6 +742,9 @@ func TestAttemptWorktreeClaimDoesNotReclaimActivePendingFile(t *testing.T) {
 }
 
 func TestAttemptWorktreeCreationRejectsReplacedClaimParent(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "attempt-claim parent replacement")
+
 	parent := t.TempDir()
 	repositoryRoot := filepath.Join(parent, "repository")
 	runGitSetup(t, "", "init", "--initial-branch=main", repositoryRoot)
@@ -792,6 +815,9 @@ func TestAttemptWorktreeCreationRejectsReplacedClaimParent(t *testing.T) {
 }
 
 func TestAttemptWorktreeAdmissionRejectsGitOwnedRootsBeforeMutation(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "attempt worktree root-overlap matrix")
+
 	repositoryRoot, linkedRoot, base := newRealAttemptRepository(t)
 	fixture := newDefinitionFixture(t)
 	workspaceSource := strings.Split(string(fixture.sources.Workspace.Bytes), "\n")
@@ -892,6 +918,8 @@ func TestAttemptWorktreeAdmissionRejectsGitOwnedRootsBeforeMutation(t *testing.T
 }
 
 func TestAttemptWorktreeAdmissionAllowsSafeExternalRoot(t *testing.T) {
+	t.Parallel()
+
 	repositoryRoot, _, base := newRealAttemptRepository(t)
 	fixture := newDefinitionFixture(t)
 	workspaceSource := strings.Split(string(fixture.sources.Workspace.Bytes), "\n")
@@ -957,6 +985,8 @@ func TestAttemptWorktreeAdmissionAllowsSafeExternalRoot(t *testing.T) {
 }
 
 func TestLocalGitAttemptMaterializationPreservesDirtyPrimaryCheckout(t *testing.T) {
+	t.Parallel()
+
 	repositoryRoot := filepath.Join(t.TempDir(), "repository")
 	remoteRoot := filepath.Join(t.TempDir(), "remote.git")
 	runGitSetup(t, "", "init", "--initial-branch=main", repositoryRoot)
@@ -1135,6 +1165,9 @@ func TestLocalGitAttemptMaterializationPreservesDirtyPrimaryCheckout(t *testing.
 }
 
 func TestAttemptWorktreeRejectsLateConfiguredSmudgeFilterWithoutInvocation(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "late Git filter profile")
+
 	repositoryRoot := canonicalTestDirectory(t)
 	runGitSetup(t, repositoryRoot, "init", "--initial-branch=main", ".")
 	payload := filepath.Join(repositoryRoot, "payload.txt")
@@ -1221,6 +1254,9 @@ func TestAttemptWorktreeRejectsLateConfiguredSmudgeFilterWithoutInvocation(t *te
 }
 
 func TestAttemptWorktreeRevalidatesLateGitCommonAttributes(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "late Git attributes profile")
+
 	repositoryRoot, base := newRawAttemptTreeRepository(t)
 	attributes := filepath.Join(repositoryRoot, ".git", "info", "attributes")
 	realGit, err := exec.LookPath("git")
@@ -1297,6 +1333,9 @@ func TestAttemptWorktreeRevalidatesLateGitCommonAttributes(t *testing.T) {
 func TestAttemptWorktreeRejectsTransformingRepositoryAttributesBeforePublication(
 	t *testing.T,
 ) {
+	t.Parallel()
+	requireFullSuite(t, "transforming Git attributes profile")
+
 	repositoryRoot := canonicalTestDirectory(t)
 	runGitSetup(t, repositoryRoot, "init", "--initial-branch=main", ".")
 	if err := os.WriteFile(
@@ -1381,6 +1420,8 @@ func TestAttemptWorktreeRejectsTransformingRepositoryAttributesBeforePublication
 }
 
 func TestAttemptWorktreeMaterializesExactRawTreeWithoutCheckoutPrograms(t *testing.T) {
+	t.Parallel()
+
 	repositoryRoot, base := newRawAttemptTreeRepository(t)
 	probeDirectory := canonicalTestDirectory(t)
 	hookMarker := filepath.Join(probeDirectory, "post-checkout-invoked")
@@ -1539,6 +1580,9 @@ func TestAttemptWorktreeMaterializesExactRawTreeWithoutCheckoutPrograms(t *testi
 }
 
 func TestAttemptWorktreeStreamsBlobLargerThanBufferedGitOutputLimit(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "large Git object profile")
+
 	repositoryRoot, _ := newRawAttemptTreeRepository(t)
 	content := bytes.Repeat([]byte{0xa5}, 8*1024*1024+1)
 	largePath := filepath.Join(repositoryRoot, "large.bin")
@@ -1600,6 +1644,8 @@ func TestAttemptWorktreeStreamsBlobLargerThanBufferedGitOutputLimit(t *testing.T
 }
 
 func TestAttemptWorktreeRecoversInterruptedRawPublication(t *testing.T) {
+	t.Parallel()
+
 	crash := errors.New("simulated raw materialization interruption")
 	for _, point := range []workspace.AttemptWorktreeMaterializationFaultPoint{
 		workspace.AttemptMaterializationFaultAfterDirectoryBinding,
@@ -1608,6 +1654,13 @@ func TestAttemptWorktreeRecoversInterruptedRawPublication(t *testing.T) {
 		workspace.AttemptMaterializationFaultAfterPath,
 	} {
 		t.Run(string(point), func(t *testing.T) {
+			requireFullSuiteCase(
+				t,
+				point == workspace.AttemptMaterializationFaultAfterDirectoryBinding ||
+					point == workspace.AttemptMaterializationFaultAfterPath,
+				"intermediate attempt worktree publication boundary",
+			)
+
 			repositoryRoot, base := newRawAttemptTreeRepository(t)
 			worktree := filepath.Join(canonicalTestDirectory(t), "attempt")
 			pointID := strings.ReplaceAll(string(point), "_", "-")
@@ -1675,6 +1728,9 @@ func TestAttemptWorktreeRecoversInterruptedRawPublication(t *testing.T) {
 func TestAttemptWorktreePartialRecoveryIsRetryableAcrossOrderedCleanupCrashes(
 	t *testing.T,
 ) {
+	t.Parallel()
+	requireFullSuite(t, "ordered attempt cleanup crash matrix")
+
 	crash := errors.New("simulated ordered cleanup crash")
 	for _, point := range []workspace.AttemptWorktreeCleanupFaultPoint{
 		workspace.AttemptCleanupFaultAfterRecoveryContents,
@@ -1787,6 +1843,9 @@ func TestAttemptWorktreePartialRecoveryIsRetryableAcrossOrderedCleanupCrashes(
 func TestAttemptWorktreeRecoveryPreservesBoundDirectoryMovedOutsideParent(
 	t *testing.T,
 ) {
+	t.Parallel()
+	requireFullSuite(t, "attempt cleanup directory-move permutation")
+
 	repositoryRoot, base := newRawAttemptTreeRepository(t)
 	worktree := filepath.Join(canonicalTestDirectory(t), "attempt")
 	displaced := filepath.Join(canonicalTestDirectory(t), "displaced-attempt")
@@ -1863,6 +1922,9 @@ func TestAttemptWorktreeRecoveryPreservesBoundDirectoryMovedOutsideParent(
 func TestAttemptWorktreeClaimReleaseRecoversAfterBindingRemovalCrash(
 	t *testing.T,
 ) {
+	t.Parallel()
+	requireFullSuite(t, "attempt claim-release crash boundary")
+
 	repositoryRoot, base := newRawAttemptTreeRepository(t)
 	worktree := filepath.Join(canonicalTestDirectory(t), "attempt")
 	claim, err := workspace.NewAttemptWorktreeClaim(
@@ -1940,6 +2002,9 @@ func TestAttemptWorktreeClaimReleaseRecoversAfterBindingRemovalCrash(
 }
 
 func TestAttemptWorktreeRejectsMissingBlobWithoutLazyMaterialization(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "missing Git object profile")
+
 	repositoryRoot, base := newRawAttemptTreeRepository(t)
 	blob := strings.TrimSpace(string(
 		runGitSetup(t, repositoryRoot, "rev-parse", "HEAD:payload.txt"),
@@ -1981,6 +2046,9 @@ func TestAttemptWorktreeRejectsMissingBlobWithoutLazyMaterialization(t *testing.
 }
 
 func TestAttemptWorktreeRejectsUnsafeRawSymlink(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "raw-tree symlink-target matrix")
+
 	for _, test := range []struct {
 		name   string
 		target string
@@ -2038,6 +2106,8 @@ func TestAttemptWorktreeRejectsUnsafeRawSymlink(t *testing.T) {
 }
 
 func TestAttemptWorktreeRejectsConcurrentRegistrationChange(t *testing.T) {
+	t.Parallel()
+
 	repositoryRoot, base := newRawAttemptTreeRepository(t)
 	probeDirectory := canonicalTestDirectory(t)
 	racedWorktree := filepath.Join(probeDirectory, "raced-worktree")
@@ -2084,6 +2154,9 @@ func TestAttemptWorktreeRejectsConcurrentRegistrationChange(t *testing.T) {
 }
 
 func TestAttemptWorktreeRejectsExternalHardLinkDuringRawPublication(t *testing.T) {
+	t.Parallel()
+	requireFullSuite(t, "attempt publication hard-link permutation")
+
 	repositoryRoot, base := newRawAttemptTreeRepository(t)
 	probeDirectory := canonicalTestDirectory(t)
 	outside := filepath.Join(probeDirectory, "outside-link")
@@ -2137,6 +2210,8 @@ func TestAttemptWorktreeRejectsExternalHardLinkDuringRawPublication(t *testing.T
 func TestAttemptWorktreeRejectsPostRegistrationSymlinkWithoutTouchingOutsideDirectory(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	repositoryRoot, base := newRawAttemptTreeRepository(t)
 	worktreeParent := canonicalTestDirectory(t)
 	worktree := filepath.Join(worktreeParent, "attempt")
@@ -2205,6 +2280,9 @@ func TestAttemptWorktreeRejectsPostRegistrationSymlinkWithoutTouchingOutsideDire
 func TestAttemptWorktreeDoesNotRecreateMissingBoundDirectoryOutsideVerifiedParent(
 	t *testing.T,
 ) {
+	t.Parallel()
+	requireFullSuite(t, "attempt cleanup missing-directory permutation")
+
 	repositoryRoot, base := newRawAttemptTreeRepository(t)
 	worktreeParent := canonicalTestDirectory(t)
 	worktree := filepath.Join(worktreeParent, "attempt")
@@ -2370,6 +2448,8 @@ func journalRecordCount(t *testing.T, journal *workspace.WorkspaceJournal) int {
 }
 
 func TestPauseOnlyBoundaryAtomicallyPausesAndResumesSameGoal(t *testing.T) {
+	t.Parallel()
+
 	harness := newAttemptHarness(t, "unit-one")
 	attempt := harness.reserve(t, "2026-07-21T11:01:00Z")
 	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T11:02:00Z")
@@ -2458,6 +2538,8 @@ func TestPauseOnlyBoundaryAtomicallyPausesAndResumesSameGoal(t *testing.T) {
 }
 
 func TestLocalAttemptInspectionRejectsHiddenIndexFlags(t *testing.T) {
+	t.Parallel()
+
 	for _, test := range []struct {
 		name string
 		flag string
@@ -2488,6 +2570,8 @@ func TestLocalAttemptInspectionRejectsHiddenIndexFlags(t *testing.T) {
 }
 
 func TestLocalAttemptInspectionRejectsIntentToAddIndexEntry(t *testing.T) {
+	t.Parallel()
+
 	repository, _, _ := newProtocolRepository(t)
 	worktree := filepath.Join(t.TempDir(), "attempt")
 	branch := "attempt-intent-to-add"
@@ -2520,6 +2604,8 @@ func TestLocalAttemptInspectionRejectsIntentToAddIndexEntry(t *testing.T) {
 }
 
 func TestLocalAttemptInspectionRejectsRawModeDrift(t *testing.T) {
+	t.Parallel()
+
 	repository, _, _ := newProtocolRepository(t)
 	worktree := filepath.Join(t.TempDir(), "attempt")
 	branch := "attempt-raw-mode"
@@ -2541,6 +2627,8 @@ func TestLocalAttemptInspectionRejectsRawModeDrift(t *testing.T) {
 }
 
 func TestCompleteGoalBoundaryRecoversIdempotentlyThroughHandoffAndRejectsStaleHead(t *testing.T) {
+	t.Parallel()
+
 	harness := newIndependentAttemptHarness(t, "unit-two")
 	attempt := harness.reserve(t, "2026-07-21T12:01:00Z")
 	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T12:02:00Z")
@@ -2867,6 +2955,8 @@ func TestCompleteGoalBoundaryRecoversIdempotentlyThroughHandoffAndRejectsStaleHe
 }
 
 func TestSerialSegmentsFenceOnlyMatchingSegments(t *testing.T) {
+	t.Parallel()
+
 	harness := newIndependentAttemptHarness(t, "unit-one")
 	first := harness.reserve(t, "2026-07-21T13:01:00Z")
 	otherUnit := mustMergeUnitReference(t, "alpha-plan", "unit-two")

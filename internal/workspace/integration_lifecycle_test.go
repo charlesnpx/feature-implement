@@ -291,6 +291,8 @@ type noReviewIntegrationHarness struct {
 }
 
 func TestNoReviewIntegrationRequiresDurableSameHeadAdoption(t *testing.T) {
+	t.Parallel()
+
 	harness := newAttemptHarness(t, "unit-one")
 	attempt := harness.reserve(t, "2026-07-25T10:00:00Z")
 	attempt = harness.materialize(
@@ -362,6 +364,8 @@ func TestNoReviewIntegrationRequiresDurableSameHeadAdoption(t *testing.T) {
 func TestIntegrationCompletionAccountsForAndReleasesLeaseAndSerialSegment(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	fixture.sources.Plans[0].Bytes = []byte(strings.Replace(
 		string(fixture.sources.Plans[0].Bytes),
@@ -480,6 +484,8 @@ func TestIntegrationCompletionAccountsForAndReleasesLeaseAndSerialSegment(
 func TestConfiguredCommitProtocolRequiresDurableSameHeadAdoption(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	scenario := newJournalCommitScenario(t)
 	committed, err := workspace.ExecuteAttemptCommitStep(
 		context.Background(),
@@ -554,6 +560,8 @@ func TestConfiguredCommitProtocolRequiresDurableSameHeadAdoption(
 func TestIntegrationRecoversEveryDurableEffectBoundaryDeterministically(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	points := []workspace.IntegrationLifecycleFaultPoint{
 		workspace.IntegrationFaultAfterIntentSynced,
 		workspace.IntegrationFaultBeforeCommitCreate,
@@ -567,6 +575,13 @@ func TestIntegrationRecoversEveryDurableEffectBoundaryDeterministically(
 	}
 	for _, point := range points {
 		t.Run(string(point), func(t *testing.T) {
+			requireFullSuiteCase(
+				t,
+				point == workspace.IntegrationFaultBeforeCommitCreate ||
+					point == workspace.IntegrationFaultAfterRefCAS,
+				"intermediate integration durability boundary",
+			)
+
 			harness := newNoReviewIntegrationHarness(t, false)
 			_, err := workspace.IntegrateMergeUnit(
 				context.Background(),
@@ -640,6 +655,8 @@ func TestIntegrationRecoversEveryDurableEffectBoundaryDeterministically(
 }
 
 func TestPendingIntegrationIntentFreezesAttemptAcceptance(t *testing.T) {
+	t.Parallel()
+
 	harness := newNoReviewIntegrationHarness(t, false)
 	_, err := workspace.IntegrateMergeUnit(
 		context.Background(), harness.journal, harness.definition,
@@ -686,6 +703,8 @@ func TestPendingIntegrationIntentFreezesAttemptAcceptance(t *testing.T) {
 }
 
 func TestPendingIntegrationIntentSerializesOtherMergeUnits(t *testing.T) {
+	t.Parallel()
+
 	firstCore := newIndependentAttemptHarness(t, "unit-one")
 	first := firstCore.reserve(t, "2026-07-25T12:30:00Z")
 	first = firstCore.materialize(
@@ -808,6 +827,8 @@ func TestPendingIntegrationIntentSerializesOtherMergeUnits(t *testing.T) {
 }
 
 func TestConcurrentIntegrationsPublishExactlyOneIntent(t *testing.T) {
+	t.Parallel()
+
 	firstCore := newIndependentAttemptHarness(t, "unit-one")
 	first := firstCore.reserve(t, "2026-07-25T12:45:00Z")
 	first = firstCore.materialize(
@@ -983,6 +1004,9 @@ func TestConcurrentIntegrationsPublishExactlyOneIntent(t *testing.T) {
 func TestIntegrationMakesReviewExhaustedLoserRetryableAtNewFrontier(
 	t *testing.T,
 ) {
+	t.Parallel()
+	requireFullSuite(t, "multi-integration frontier permutation")
+
 	fixture := configuredReviewFixture(t)
 	fixture.sources.Plans[0].Bytes = []byte(strings.Replace(
 		string(fixture.sources.Plans[0].Bytes),
@@ -1172,6 +1196,9 @@ func TestIntegrationMakesReviewExhaustedLoserRetryableAtNewFrontier(
 func TestCompletedIntegrationRetryFollowsLaterDurableFrontier(
 	t *testing.T,
 ) {
+	t.Parallel()
+	requireFullSuite(t, "multi-integration frontier permutation")
+
 	firstCore := newIndependentAttemptHarness(t, "unit-one")
 	first := firstCore.reserve(t, "2026-07-25T12:55:00Z")
 	first = firstCore.materialize(
@@ -1272,6 +1299,8 @@ func TestCompletedIntegrationRetryFollowsLaterDurableFrontier(
 }
 
 func TestReviewReadyIntegrationBindsExactHeadTreeAndReadiness(t *testing.T) {
+	t.Parallel()
+
 	harness := newReviewHarness(t)
 	git := &integrationGitStub{featureHead: harness.base}
 	_, err := workspace.IntegrateMergeUnit(
@@ -1370,6 +1399,8 @@ func TestReviewReadyIntegrationBindsExactHeadTreeAndReadiness(t *testing.T) {
 }
 
 func TestExecutionConfigRejectsPostIntegrationChecks(t *testing.T) {
+	t.Parallel()
+
 	fixture := newDefinitionFixture(t)
 	configuration := string(fixture.sources.ExecutionConfig.Bytes)
 	configuration = strings.Replace(
@@ -1397,6 +1428,8 @@ func TestExecutionConfigRejectsPostIntegrationChecks(t *testing.T) {
 }
 
 func TestCompletedIntegrationUnblocksDependentSchedulerUnit(t *testing.T) {
+	t.Parallel()
+
 	harness := newNoReviewIntegrationHarness(t, false)
 	result, err := workspace.IntegrateMergeUnit(
 		context.Background(), harness.journal, harness.definition,
