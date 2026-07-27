@@ -252,9 +252,9 @@ completion proves the recorded Git topology and workflow state only.
 
 ```sh
 gofmt -w cmd/feature/*.go internal/install/*.go internal/plan/*.go internal/workspace/*.go internal/workspacecmd/*.go
-go test -timeout=20m ./...
-go test -shuffle=on -timeout=20m ./...
-go test -race -timeout=30m ./internal/workspace ./internal/workspacecmd
+go test -short -count=1 -p=1 -parallel=4 -timeout=10m ./...
+go test -short -count=1 -p=1 -shuffle=on -parallel=4 -timeout=10m ./...
+go test -short -count=1 -race -p=1 -parallel=4 -timeout=20m ./internal/workspace
 go vet ./...
 ./install-skill.sh --plan --target all --json
 stage="$(mktemp -d)"
@@ -265,10 +265,19 @@ stage="$(mktemp -d)"
 The exact-head CI baseline is reusable locally:
 
 ```sh
-EXPECTED_HEAD_SHA="$(git rev-parse HEAD)" ./scripts/ci-baseline.sh all
+./scripts/ci-baseline.sh short-normal
+FEATURE_SHUFFLE_SEED=1700000000 ./scripts/ci-baseline.sh short-shuffle
+./scripts/ci-baseline.sh short-race
+FEATURE_TEST_PARALLEL=2 ./scripts/ci-baseline.sh short-race # macOS
+
 ./scripts/ci-baseline.sh normal
 FEATURE_SHUFFLE_SEED=1700000000 ./scripts/ci-baseline.sh shuffle
 ./scripts/ci-baseline.sh race
+./scripts/ci-baseline.sh single-slot
+FEATURE_SHUFFLE_SEED=1700000000 ./scripts/ci-baseline.sh shuffle-race
+./scripts/ci-baseline.sh stress-concurrency
+
+EXPECTED_HEAD_SHA="$(git rev-parse HEAD)" ./scripts/ci-baseline.sh all
 ./scripts/ci-baseline.sh vet
 ./scripts/ci-baseline.sh build
 ./scripts/ci-baseline.sh installer
@@ -276,7 +285,29 @@ FEATURE_SHUFFLE_SEED=1700000000 ./scripts/ci-baseline.sh shuffle
 ./scripts/ci-baseline.sh clean
 ```
 
-The hosted pull-request workflow checks out the exact requested head, disables
-persisted checkout state and dependency caching, and runs the same gates on
-pinned Ubuntu and macOS runners. A shuffled run prints its seed for
-reproduction.
+All test profiles run one package binary at a time with `-p=1`. They permit four
+parallel tests inside that binary by default; `FEATURE_TEST_PARALLEL` accepts a
+validated value from one through four. Full macOS race validation uses two test
+slots to leave headroom for race-instrumented Git subprocesses.
+
+Testing has three tiers:
+
+- Every pull-request workflow runs representative short coverage: normal tests on Linux
+  and macOS, one Linux shuffle, a Linux workspace race run, and static checks on
+  both platforms. The short suite retains the main local lifecycle, the two
+  essential recovery states for each durable effect, core compare-and-swap
+  races, representative rooted-filesystem and real-Git integration, and command
+  and installer contracts.
+- The full suite preserves every test and subtest. It runs automatically for
+  changes under the workspace or workspace-command packages, the CI contracts
+  and workflows, the baseline script, or the Go module files. It can also be
+  dispatched for an exact commit SHA with the `full` profile.
+- Stress validation is operator-invoked for an exact SHA with the `stress`
+  profile. It runs three fixed shuffle seeds, shuffled race, single-slot
+  compatibility, and repeated concurrency-sensitive scenarios. There is no
+  scheduled stress workflow.
+
+Every hosted job checks out the exact requested head, disables persisted
+credentials and dependency caching, leaves token variables empty, and runs its
+clean-tree check even after a preceding step fails. Shuffled runs print their
+seed for reproduction.
