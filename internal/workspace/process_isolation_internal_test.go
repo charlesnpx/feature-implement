@@ -1,7 +1,10 @@
 package workspace
 
 import (
+	"context"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -105,5 +108,42 @@ func TestTrustedGitArgumentsDisableHooksHelpersPromptsAndAmbientHeaders(t *testi
 		if !strings.Contains(joined, required) {
 			t.Fatalf("trusted Git arguments do not enforce %q: %#v", required, arguments)
 		}
+	}
+}
+
+func TestPlanGitCommandsDisableRepositoryFSMonitor(t *testing.T) {
+	repository := t.TempDir()
+	monitor := filepath.Join(t.TempDir(), "fsmonitor")
+	marker := monitor + ".invoked"
+	if err := os.WriteFile(
+		monitor,
+		[]byte("#!/bin/sh\nprintf invoked > \"$0.invoked\"\nexit 1\n"),
+		0o700,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, arguments := range [][]string{
+		{"init", "--quiet", "--initial-branch=main", repository},
+		{"-C", repository, "config", "core.fsmonitor", monitor},
+	} {
+		command := exec.Command("git", arguments...)
+		command.Env = append(
+			os.Environ(),
+			"GIT_CONFIG_NOSYSTEM=1",
+			"GIT_CONFIG_GLOBAL="+os.DevNull,
+		)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(arguments, " "), err, output)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repository, "untracked"), []byte("content\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := runPlanGit(context.Background(), repository, "status", "--porcelain=v1"); err != nil {
+		t.Fatalf("isolated plan Git status: %v", err)
+	}
+	if _, err := os.Lstat(marker); !os.IsNotExist(err) {
+		t.Fatalf("repository fsmonitor executed during plan Git status: %v", err)
 	}
 }

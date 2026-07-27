@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -14,6 +15,7 @@ import (
 const (
 	PlanCheckpointGeneratorVersion = "feature-plan-checkpoint/v2"
 	PlanCheckpointArtifactFileName = "plan-checkpoint.v4.json"
+	maxPlanGitOutputBytes          = 8 * 1024 * 1024
 )
 
 type VerifiedPlanLockCheckpoint struct {
@@ -333,21 +335,31 @@ func runPlanGit(ctx context.Context, root string, arguments ...string) ([]byte, 
 	if ctx == nil {
 		return nil, fmt.Errorf("plan Git command requires context")
 	}
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", root}, arguments...)...)
-	cmd.Env = []string{
-		"GIT_CONFIG_NOSYSTEM=1",
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_OPTIONAL_LOCKS=0",
-	}
-	output, err := cmd.Output()
+	cmd := exec.CommandContext(
+		ctx,
+		"git",
+		trustedGitArguments(root, arguments...)...,
+	)
+	environment, err := BuildIsolatedProcessEnvironment(os.Environ(), nil)
 	if err != nil {
-		if exit, ok := err.(*exec.ExitError); ok {
-			stderr := strings.TrimSpace(string(exit.Stderr))
-			if stderr != "" {
-				return nil, fmt.Errorf("%v: %s", err, stderr)
-			}
-		}
 		return nil, err
 	}
-	return output, nil
+	cmd.Env = environment
+	var stdout, stderr boundedProcessBuffer
+	stdout.maximum = maxPlanGitOutputBytes
+	stderr.maximum = 128 * 1024
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	if stdout.exceeded || stderr.exceeded {
+		return nil, fmt.Errorf("plan Git output exceeded its bound")
+	}
+	if runErr != nil {
+		detail := strings.TrimSpace(string(stderr.bytes()))
+		if detail != "" {
+			return nil, fmt.Errorf("%v: %s", runErr, detail)
+		}
+		return nil, runErr
+	}
+	return stdout.bytes(), nil
 }
