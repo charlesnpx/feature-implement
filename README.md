@@ -248,6 +248,54 @@ The journal hash chain and stored digests detect accidental corruption; they
 do not authenticate people. Reviewer and owner labels are descriptive. Local
 completion proves the recorded Git topology and workflow state only.
 
+## Public contract
+
+### Operations and migration
+
+Workspace v2 is a local-only execution model. Operators create an exact plan
+lock checkpoint, initialize a fresh local v3 runtime, recover before each work
+cycle, and use journal-derived reports as the source of truth. Draft-v2 runtime
+state is intentionally not migrated; a runtime without the local v3 marker must
+be regenerated from the locked bundle.
+
+### Supported repository profile
+
+The target must be a local non-bare Git repository with a complete object
+database, SHA-1 or SHA-256 objects, ordinary ref and reflog storage, and no
+active partial-clone, promisor, shallow, submodule, external object-storage,
+repository-attribute, configured-filter, configured-signature-verifier, or
+replacement-history profile. Linked worktrees are supported when their
+administration and common directories remain exactly bound to the verified
+target repository.
+
+### Stable-base policy
+
+The fully qualified `base_ref` must point to the exact `base_commit` during
+validation and initialization. After initialization, movement of the base ref is
+reported as drift only. The runtime never rebases active work, adopts a moved
+base, or mutates the primary checkout to make the base match.
+
+### Threat model
+
+The implementation defends local state against malformed source bundles,
+generated-file drift, journal tail corruption, stale compare-and-swap inputs,
+directory replacement, symlink traversal, hard-link surprises, unsafe Git
+configuration, repository hooks, ambient helper programs, and write-capable
+network use by configured checks. It does not authenticate operators,
+reviewers, or owners, and local completion is not an external attestation.
+
+### Deferred GitHub design
+
+Any hosted-forge lifecycle is outside the v0.2 executable surface. It must be
+introduced as a separate design with its own state, checks, and admission rules;
+it cannot reinterpret local completion as hosted approval or release evidence.
+
+### License and third-party notices
+
+The project is distributed under the MIT license; see `LICENSE`. Runtime module
+notices are listed in `THIRD_PARTY_NOTICES.md`. The repository does not vendor
+third-party source or assets.
+
 ## Development
 
 ```sh

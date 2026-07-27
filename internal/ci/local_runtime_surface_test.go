@@ -96,6 +96,10 @@ func TestRemovedSurfaceScannerAllowsDevelopmentAndModuleMetadata(t *testing.T) {
 			path: "README.md",
 			line: "The hosted pull-request workflow runs development checks.",
 		},
+		{
+			path: "README.md",
+			line: "### Deferred GitHub design",
+		},
 	}
 	for _, fixture := range allowed {
 		if removedRuntimeSurface.MatchString(fixture.line) &&
@@ -209,6 +213,10 @@ func allowedRemovedSurfaceReference(relative, line string) bool {
 			strings.ToLower(line), "pull-request workflow", "development workflow",
 		)
 		return !removedRuntimeSurface.MatchString(remainder)
+	}
+	if normalized == "README.md" &&
+		strings.TrimSpace(line) == "### Deferred GitHub design" {
+		return true
 	}
 	if normalized == "cmd/feature/main.go" &&
 		strings.HasPrefix(trimmed, `case "queue", "receipts", "reconcile", "control", "provider":`) {
