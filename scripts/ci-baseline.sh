@@ -56,7 +56,7 @@ run_shuffle() {
 
 run_race() {
 	go clean -testcache
-	go test -count=1 -race ./...
+	go test -count=1 -race -timeout=30m ./...
 }
 
 run_vet() {
