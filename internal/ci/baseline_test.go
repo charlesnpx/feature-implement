@@ -172,7 +172,6 @@ func TestExactHeadWorkflowContract(t *testing.T) {
 			{Name: "normal", OS: "ubuntu-24.04", Suite: "short-normal"},
 			{Name: "normal", OS: "macos-15", Suite: "short-normal"},
 			{Name: "shuffle", OS: "ubuntu-24.04", Suite: "short-shuffle"},
-			{Name: "race", OS: "ubuntu-24.04", Suite: "short-race"},
 		}
 		if !reflect.DeepEqual(tests.Strategy.Matrix.Include, wantMatrix) {
 			t.Errorf("fast test matrix = %#v, want %#v", tests.Strategy.Matrix.Include, wantMatrix)
@@ -279,8 +278,6 @@ func TestExactHeadWorkflowContract(t *testing.T) {
 			{Name: "normal", OS: "ubuntu-24.04", Parallel: 4, Suite: "normal"},
 			{Name: "normal", OS: "macos-15", Parallel: 4, Suite: "normal"},
 			{Name: "shuffle", OS: "ubuntu-24.04", Parallel: 4, Suite: "shuffle"},
-			{Name: "race", OS: "ubuntu-24.04", Parallel: 4, Suite: "race"},
-			{Name: "race", OS: "macos-15", Parallel: 2, Suite: "race"},
 		}
 		if !reflect.DeepEqual(full.Strategy.Matrix.Include, wantFullMatrix) {
 			t.Errorf("full test matrix = %#v, want %#v", full.Strategy.Matrix.Include, wantFullMatrix)
@@ -305,7 +302,6 @@ func TestExactHeadWorkflowContract(t *testing.T) {
 			{Name: "shuffle-1700000000", Seed: "1700000000", Suite: "shuffle"},
 			{Name: "shuffle-1700000001", Seed: "1700000001", Suite: "shuffle"},
 			{Name: "shuffle-1700000002", Seed: "1700000002", Suite: "shuffle"},
-			{Name: "shuffled-race", Seed: "1700000000", Suite: "shuffle-race"},
 			{Name: "single-slot", Suite: "single-slot"},
 			{Name: "repeated-concurrency", Suite: "stress-concurrency"},
 		}

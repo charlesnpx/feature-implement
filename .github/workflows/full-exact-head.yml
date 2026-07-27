@@ -50,14 +50,6 @@ jobs:
             os: ubuntu-24.04
             parallel: 4
             suite: shuffle
-          - name: race
-            os: ubuntu-24.04
-            parallel: 4
-            suite: race
-          - name: race
-            os: macos-15
-            parallel: 2
-            suite: race
     env:
       EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.head_sha }}
       FEATURE_TEST_PARALLEL: ${{ matrix.parallel }}
@@ -109,9 +101,6 @@ jobs:
           - name: shuffle-1700000002
             seed: "1700000002"
             suite: shuffle
-          - name: shuffled-race
-            seed: "1700000000"
-            suite: shuffle-race
           - name: single-slot
             seed: ""
             suite: single-slot

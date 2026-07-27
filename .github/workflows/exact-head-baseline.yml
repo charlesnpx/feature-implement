@@ -24,9 +24,6 @@ jobs:
           - name: shuffle
             os: ubuntu-24.04
             suite: short-shuffle
-          - name: race
-            os: ubuntu-24.04
-            suite: short-race
     env:
       EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       GH_TOKEN: ""

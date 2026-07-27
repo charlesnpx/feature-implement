@@ -335,14 +335,14 @@ EXPECTED_HEAD_SHA="$(git rev-parse HEAD)" ./scripts/ci-baseline.sh all
 
 All test profiles run one package binary at a time with `-p=1`. They permit four
 parallel tests inside that binary by default; `FEATURE_TEST_PARALLEL` accepts a
-validated value from one through four. Full macOS race validation uses two test
-slots to leave headroom for race-instrumented Git subprocesses.
+validated value from one through four. Race profiles remain available for
+operator-invoked local validation.
 
 Testing has three tiers:
 
 - Every pull-request workflow runs representative short coverage: normal tests on Linux
-  and macOS, one Linux shuffle, a Linux workspace race run, and static checks on
-  both platforms. The short suite retains the main local lifecycle, the two
+  and macOS, one Linux shuffle, and static checks on both platforms. The short
+  suite retains the main local lifecycle, the two
   essential recovery states for each durable effect, core compare-and-swap
   races, representative rooted-filesystem and real-Git integration, and command
   and installer contracts.
@@ -351,9 +351,9 @@ Testing has three tiers:
   and workflows, the baseline script, or the Go module files. It can also be
   dispatched for an exact commit SHA with the `full` profile.
 - Stress validation is operator-invoked for an exact SHA with the `stress`
-  profile. It runs three fixed shuffle seeds, shuffled race, single-slot
-  compatibility, and repeated concurrency-sensitive scenarios. There is no
-  scheduled stress workflow.
+  profile. It runs three fixed shuffle seeds, single-slot compatibility, and
+  repeated concurrency-sensitive scenarios. There is no scheduled stress
+  workflow.
 
 Every hosted job checks out the exact requested head, disables persisted
 credentials and dependency caching, leaves token variables empty, and runs its
