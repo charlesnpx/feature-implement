@@ -248,10 +248,6 @@ func buildLock(manifest Manifest, files []PlanFile) Lock {
 			}
 		}
 	}
-	state := RuntimeState{SchemaVersion: runtimeStateSchemaVersion}
-	for _, unit := range units {
-		state.MergeUnits = append(state.MergeUnits, MergeUnitState{ID: unit.ID, Status: MergeUnitPending})
-	}
 	return Lock{
 		SchemaVersion: 1,
 		ManifestID:    manifest.ID,
@@ -262,6 +258,5 @@ func buildLock(manifest Manifest, files []PlanFile) Lock {
 		Epics:         manifest.Epics,
 		MergeUnits:    units,
 		Files:         files,
-		State:         state,
 	}
 }
