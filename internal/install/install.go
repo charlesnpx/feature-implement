@@ -235,6 +235,8 @@ func resultFromPlan(operation, version string, plan []plannedFile) (Result, erro
 		Capabilities: []string{"query", "write"},
 		Setup: []SetupRequirement{
 			{Kind: "executable", Executable: "git", RequiredFor: []string{"query", "write"}, Remediation: "Install Git, then verify with `git --version`."},
+			{Kind: "executable", Executable: "gh", RequiredFor: []string{"write"}, Remediation: "Install GitHub CLI, then run `gh auth login`."},
+			{Kind: "github-cli-auth", RequiredFor: []string{"write"}, Remediation: "Run `gh auth login`, then verify with `gh auth status`."},
 		},
 		Targets:  targets,
 		Warnings: []string{},
