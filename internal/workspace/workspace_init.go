@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const WorkspaceRuntimeProjectionFileName = "runtime-projection.v4.json"
+const WorkspaceRuntimeProjectionFileName = "runtime-projection.v5.json"
 
 type WorkspaceInitializationResult struct {
 	storedGeneration StoredGeneration

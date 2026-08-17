@@ -217,7 +217,7 @@ derived plan checkpoint:
 ```
 
 Runtime state is append-only under `<runtime-root>/state/`. A runtime without
-the local v4 format marker is rejected with a regeneration diagnostic; it is
+the local v5 format marker is rejected with a regeneration diagnostic; it is
 not interpreted or migrated.
 
 ## Local execution
@@ -256,9 +256,9 @@ completion proves the recorded Git topology and workflow state only.
 
 Workspace v2 is a local-only execution model. Operators commit exact plan
 sources and generated lock bytes in a clean plan repository, initialize a fresh
-local v4 runtime, recover before each work cycle, and use journal-derived
+local v5 runtime, recover before each work cycle, and use journal-derived
 reports as the source of truth. Earlier draft runtime state is intentionally not
-migrated; a runtime without the local v4 marker must be regenerated from the
+migrated; a runtime without the local v5 marker must be regenerated from the
 committed plan and current lock.
 
 ### Supported repository profile

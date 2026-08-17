@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,7 +11,7 @@ import (
 	"testing"
 )
 
-func TestRuntimeStorageCreatesV4MarkerAndRejectsLegacyWithoutMutation(t *testing.T) {
+func TestRuntimeStorageCreatesV5MarkerAndRejectsLegacyWithoutMutation(t *testing.T) {
 	parent := canonicalRuntimeTestTempDir(t)
 	legacy := filepath.Join(parent, "legacy")
 	if err := os.MkdirAll(filepath.Join(legacy, WorkspaceStateDirectoryName), 0o700); err != nil {
@@ -36,7 +37,7 @@ func TestRuntimeStorageCreatesV4MarkerAndRejectsLegacyWithoutMutation(t *testing
 		t.Fatalf("legacy runtime changed: %q, %v", content, err)
 	}
 	if _, err := os.Lstat(filepath.Join(legacy, RuntimeFormatFileName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("legacy runtime acquired v4 marker: %v", err)
+		t.Fatalf("legacy runtime acquired v5 marker: %v", err)
 	}
 
 	fresh := filepath.Join(parent, "fresh")
@@ -58,8 +59,49 @@ func TestRuntimeStorageCreatesV4MarkerAndRejectsLegacyWithoutMutation(t *testing
 			t.Fatalf("runtime path %s = %v, %v", candidate, info, err)
 		}
 	}
+	marker, err := os.ReadFile(filepath.Join(fresh, RuntimeFormatFileName))
+	if err != nil {
+		t.Fatalf("read v5 runtime marker: %v", err)
+	}
+	var wire runtimeFormatMarkerWire
+	if err := json.Unmarshal(marker, &wire); err != nil {
+		t.Fatalf("decode v5 runtime marker: %v", err)
+	}
+	if wire.SchemaVersion != 5 {
+		t.Fatalf("runtime marker schema version = %d, want 5", wire.SchemaVersion)
+	}
 	if _, err := os.Lstat(filepath.Join(fresh, WorkspaceStateDirectoryName, "runtime-state.identity.v3.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("fresh runtime acquired removed identity marker: %v", err)
+	}
+}
+
+func TestRuntimeStorageRejectsV4MarkerAtFormatGate(t *testing.T) {
+	runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "runtime")
+	if err := os.MkdirAll(filepath.Join(runtimePath, WorkspaceStateDirectoryName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker, err := json.Marshal(runtimeFormatMarkerWire{
+		SchemaVersion: 4,
+		Kind:          localRuntimeFormatKind,
+		StateRoot:     WorkspaceStateDirectoryName,
+		Capabilities:  append([]string(nil), requiredRuntimeCapabilities...),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimePath, "feature.runtime.v4.json"), marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := OpenRuntimeStorage(runtimePath, false); err == nil ||
+		!strings.Contains(
+			err.Error(),
+			"Runtime format predates the debloated local contract; regenerate from the committed plan and current lock.",
+		) {
+		t.Fatalf("v4 runtime format gate error = %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(runtimePath, RuntimeFormatFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("v4 runtime acquired v5 marker: %v", err)
 	}
 }
 
@@ -120,11 +162,11 @@ func TestRuntimeInitializationRejectsUnknownNonEmptyState(t *testing.T) {
 		t.Fatalf("unknown state error = %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(runtimePath, RuntimeFormatFileName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("unknown state acquired v4 marker: %v", err)
+		t.Fatalf("unknown state acquired v5 marker: %v", err)
 	}
 }
 
-func TestConcurrentRuntimeInitializationPublishesOneV4Runtime(t *testing.T) {
+func TestConcurrentRuntimeInitializationPublishesOneV5Runtime(t *testing.T) {
 	runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "runtime")
 	const contenders = 8
 	start := make(chan struct{})
