@@ -362,10 +362,22 @@ type canonicalPolicy struct {
 	MaxReviewRounds      uint16 `json:"max_review_rounds"`
 	MaxReviewFixes       uint16 `json:"max_review_fixes"`
 }
+
+type canonicalAttemptBoundaryPolicy struct {
+	Checkpoint    AttemptCheckpointMode   `json:"checkpoint"`
+	Escalation    AttemptEscalationPolicy `json:"escalation"`
+	SerialSegment string                  `json:"serial_segment,omitempty"`
+}
+
+type canonicalProfileBoundaryPolicy struct {
+	Escalation AttemptEscalationPolicy `json:"escalation"`
+}
+
 type canonicalProfile struct {
-	ID     string          `json:"id"`
-	Runner string          `json:"runner"`
-	Policy canonicalPolicy `json:"policy"`
+	ID       string                          `json:"id"`
+	Runner   string                          `json:"runner"`
+	Policy   canonicalPolicy                 `json:"policy"`
+	Boundary *canonicalProfileBoundaryPolicy `json:"boundary,omitempty"`
 }
 type canonicalReviewProfile struct {
 	ID             string               `json:"id"`
@@ -373,15 +385,14 @@ type canonicalReviewProfile struct {
 	ReviewerPolicy ReviewReviewerPolicy `json:"reviewer_policy"`
 }
 type canonicalUnitExecution struct {
-	PlanID            string                      `json:"plan_id"`
-	MergeUnitID       string                      `json:"merge_unit_id"`
-	Profile           string                      `json:"profile"`
-	Policy            canonicalPolicy             `json:"policy"`
-	BoundaryMode      AttemptBoundaryMode         `json:"boundary_mode"`
-	SerialSegment     string                      `json:"serial_segment,omitempty"`
-	CommitProtocol    *canonicalCommitProtocol    `json:"commit_protocol,omitempty"`
-	ReviewFixProtocol *canonicalReviewFixProtocol `json:"review_fix_protocol,omitempty"`
-	ReviewLoop        *canonicalReviewLoop        `json:"review_loop,omitempty"`
+	PlanID            string                         `json:"plan_id"`
+	MergeUnitID       string                         `json:"merge_unit_id"`
+	Profile           string                         `json:"profile"`
+	Policy            canonicalPolicy                `json:"policy"`
+	Boundary          canonicalAttemptBoundaryPolicy `json:"boundary"`
+	CommitProtocol    *canonicalCommitProtocol       `json:"commit_protocol,omitempty"`
+	ReviewFixProtocol *canonicalReviewFixProtocol    `json:"review_fix_protocol,omitempty"`
+	ReviewLoop        *canonicalReviewLoop           `json:"review_loop,omitempty"`
 }
 
 type canonicalReviewLoop struct {
@@ -425,7 +436,14 @@ type canonicalReviewFixProtocol struct {
 func canonicalExecutionBytes(config ExecutionConfig) ([]byte, error) {
 	value := canonicalExecution{SchemaVersion: 2, Policy: canonicalizePolicy(config.policy)}
 	for _, profile := range config.profiles {
-		value.Profiles = append(value.Profiles, canonicalProfile{ID: profile.id.String(), Runner: profile.runner.String(), Policy: canonicalizePolicy(profile.policy)})
+		canonicalProfile := canonicalProfile{
+			ID: profile.id.String(), Runner: profile.runner.String(), Policy: canonicalizePolicy(profile.policy),
+		}
+		if profile.boundary != nil {
+			boundary := canonicalizeProfileBoundaryPolicy(*profile.boundary)
+			canonicalProfile.Boundary = &boundary
+		}
+		value.Profiles = append(value.Profiles, canonicalProfile)
 	}
 	for _, profile := range config.reviewProfiles {
 		value.ReviewProfiles = append(value.ReviewProfiles, canonicalReviewProfile{
@@ -435,8 +453,7 @@ func canonicalExecutionBytes(config ExecutionConfig) ([]byte, error) {
 	for _, unit := range config.mergeUnits {
 		canonicalUnit := canonicalUnitExecution{
 			PlanID: unit.planID.String(), MergeUnitID: unit.mergeUnitID.String(), Profile: unit.profileID.String(),
-			Policy: canonicalizePolicy(unit.policy), BoundaryMode: unit.boundary.mode,
-			SerialSegment: unit.boundary.serialSegment.String(),
+			Policy: canonicalizePolicy(unit.policy), Boundary: canonicalizeAttemptBoundaryPolicy(unit.boundary),
 		}
 		if unit.commitProtocol != nil {
 			protocol := canonicalizeCommitProtocol(*unit.commitProtocol)
@@ -460,6 +477,17 @@ func canonicalExecutionBytes(config ExecutionConfig) ([]byte, error) {
 		value.MergeUnits = append(value.MergeUnits, canonicalUnit)
 	}
 	return json.Marshal(value)
+}
+
+func canonicalizeAttemptBoundaryPolicy(policy AttemptBoundaryPolicy) canonicalAttemptBoundaryPolicy {
+	return canonicalAttemptBoundaryPolicy{
+		Checkpoint: policy.checkpoint, Escalation: policy.escalation,
+		SerialSegment: policy.serialSegment.String(),
+	}
+}
+
+func canonicalizeProfileBoundaryPolicy(policy ProfileBoundaryPolicy) canonicalProfileBoundaryPolicy {
+	return canonicalProfileBoundaryPolicy{Escalation: policy.escalation}
 }
 
 func canonicalizeCommitProtocol(protocol CommitProtocol) canonicalCommitProtocol {

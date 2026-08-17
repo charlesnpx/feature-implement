@@ -332,22 +332,93 @@ func TestExecutionConfigRequiresExplicitSupportedBoundaryPolicy(t *testing.T) {
 	t.Parallel()
 
 	fixture := newDefinitionFixture(t)
+	valid := string(fixture.sources.ExecutionConfig.Bytes)
+	config, err := workspace.DecodeExecutionConfig([]byte(valid))
+	if err != nil {
+		t.Fatalf("two-field boundary config decode: %v", err)
+	}
+	boundary := config.MergeUnits()[0].Boundary()
+	if boundary.Checkpoint() != workspace.AttemptCheckpointPauseOnly ||
+		boundary.Escalation() != workspace.AttemptEscalationAllowed {
+		t.Fatalf("decoded boundary = checkpoint %q escalation %q", boundary.Checkpoint(), boundary.Escalation())
+	}
+
 	withoutBoundary := cloneDefinitionSources(fixture.sources)
 	withoutBoundary.ExecutionConfig.Bytes = []byte(strings.Replace(
 		string(withoutBoundary.ExecutionConfig.Bytes),
-		"    boundary:\n      mode: pause_only\n      serial_segment: serial-alpha\n",
+		"    boundary:\n      checkpoint: pause_only\n      escalation: allowed\n      serial_segment: serial-alpha\n",
 		"",
 		1,
 	))
 	if _, err := workspace.ValidateDefinition(withoutBoundary); err == nil || !strings.Contains(err.Error(), "boundary policy must be explicit") {
 		t.Fatalf("missing boundary policy = %v", err)
 	}
-	unsupported := cloneDefinitionSources(fixture.sources)
-	unsupported.ExecutionConfig.Bytes = []byte(strings.Replace(
-		string(unsupported.ExecutionConfig.Bytes), "mode: pause_only", "mode: maybe_pause", 1,
-	))
-	if _, err := workspace.ValidateDefinition(unsupported); err == nil || !strings.Contains(err.Error(), "unsupported") {
-		t.Fatalf("unsupported boundary policy = %v", err)
+
+	legacy := strings.Replace(
+		valid, "checkpoint: pause_only\n      escalation: allowed", "mode: pause_only", 1,
+	)
+	if _, err := workspace.DecodeExecutionConfig([]byte(legacy)); err == nil ||
+		!strings.Contains(err.Error(), "checkpoint") || !strings.Contains(err.Error(), "escalation") {
+		t.Fatalf("legacy boundary mode error = %v", err)
+	}
+
+	for _, test := range []struct {
+		name    string
+		source  string
+		wantErr string
+	}{
+		{
+			name:    "missing checkpoint",
+			source:  strings.Replace(valid, "      checkpoint: pause_only\n", "", 1),
+			wantErr: "checkpoint and escalation",
+		},
+		{
+			name:    "missing escalation",
+			source:  strings.Replace(valid, "      escalation: allowed\n", "", 1),
+			wantErr: "checkpoint and escalation",
+		},
+		{
+			name:    "unknown checkpoint",
+			source:  strings.Replace(valid, "checkpoint: pause_only", "checkpoint: unsupported", 1),
+			wantErr: "boundary checkpoint",
+		},
+		{
+			name:    "unknown escalation",
+			source:  strings.Replace(valid, "escalation: allowed", "escalation: unsupported", 1),
+			wantErr: "boundary escalation",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := workspace.DecodeExecutionConfig([]byte(test.source)); err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("boundary config error = %v", err)
+			}
+		})
+	}
+}
+
+func TestExecutionConfigValidatesBoundaryAgainstOptionalProfileBoundary(t *testing.T) {
+	t.Parallel()
+
+	fixture := newDefinitionFixture(t)
+	if _, err := workspace.DecodeExecutionConfig(fixture.sources.ExecutionConfig.Bytes); err != nil {
+		t.Fatalf("absent profile boundary decode: %v", err)
+	}
+	withProfileBoundary := strings.Replace(
+		string(fixture.sources.ExecutionConfig.Bytes),
+		"merge_units:\n",
+		"    boundary:\n      escalation: forbidden\nmerge_units:\n",
+		1,
+	)
+	if _, err := workspace.DecodeExecutionConfig([]byte(withProfileBoundary)); err == nil ||
+		!strings.Contains(err.Error(), "merge unit alpha-plan/unit-one boundary weakens escalation") {
+		t.Fatalf("profile boundary escalation weakening error = %v", err)
+	}
+	strengthened := strings.ReplaceAll(
+		withProfileBoundary,
+		"escalation: allowed", "escalation: forbidden",
+	)
+	if _, err := workspace.DecodeExecutionConfig([]byte(strengthened)); err != nil {
+		t.Fatalf("profile boundary escalation strengthening decode: %v", err)
 	}
 }
 
@@ -2801,8 +2872,8 @@ func TestSerialSegmentsFenceOnlyMatchingSegments(t *testing.T) {
 	))
 	fixture.sources.ExecutionConfig.Bytes = []byte(strings.Replace(
 		string(fixture.sources.ExecutionConfig.Bytes),
-		"    boundary:\n      mode: complete_goal_and_wait",
-		"    boundary:\n      mode: complete_goal_and_wait\n      serial_segment: serial-alpha",
+		"    boundary:\n      checkpoint: complete_goal_and_wait\n      escalation: allowed",
+		"    boundary:\n      checkpoint: complete_goal_and_wait\n      escalation: allowed\n      serial_segment: serial-alpha",
 		1,
 	))
 	definition := mustDefinition(t, fixture.sources)

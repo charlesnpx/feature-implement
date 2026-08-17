@@ -6,19 +6,20 @@ import (
 )
 
 type attemptReservedPayloadWire struct {
-	WorkspaceID   string              `json:"workspace_id"`
-	Generation    string              `json:"generation"`
-	AttemptID     string              `json:"attempt_id"`
-	PlanID        string              `json:"plan_id"`
-	MergeUnitID   string              `json:"merge_unit_id"`
-	AttemptNumber uint64              `json:"attempt_number"`
-	Base          string              `json:"base"`
-	Branch        string              `json:"branch"`
-	Worktree      string              `json:"worktree"`
-	BoundaryMode  AttemptBoundaryMode `json:"boundary_mode"`
-	SerialSegment string              `json:"serial_segment,omitempty"`
-	GoalID        string              `json:"goal_id"`
-	GoalScope     GoalScope           `json:"goal_scope"`
+	WorkspaceID   string                  `json:"workspace_id"`
+	Generation    string                  `json:"generation"`
+	AttemptID     string                  `json:"attempt_id"`
+	PlanID        string                  `json:"plan_id"`
+	MergeUnitID   string                  `json:"merge_unit_id"`
+	AttemptNumber uint64                  `json:"attempt_number"`
+	Base          string                  `json:"base"`
+	Branch        string                  `json:"branch"`
+	Worktree      string                  `json:"worktree"`
+	Checkpoint    AttemptCheckpointMode   `json:"checkpoint"`
+	Escalation    AttemptEscalationPolicy `json:"escalation"`
+	SerialSegment string                  `json:"serial_segment,omitempty"`
+	GoalID        string                  `json:"goal_id"`
+	GoalScope     GoalScope               `json:"goal_scope"`
 }
 
 type attemptMaterializationPayloadWire struct {
@@ -58,7 +59,7 @@ type attemptBoundaryPayloadWire struct {
 	AttemptID       string                `json:"attempt_id"`
 	BoundaryID      string                `json:"boundary_id"`
 	Ordinal         uint64                `json:"ordinal"`
-	Mode            AttemptBoundaryMode   `json:"mode"`
+	Checkpoint      AttemptCheckpointMode `json:"checkpoint"`
 	SerialSegment   string                `json:"serial_segment,omitempty"`
 	LeaseID         string                `json:"lease_id"`
 	GoalID          string                `json:"goal_id"`
@@ -128,8 +129,9 @@ func marshalAttemptJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, b
 			AttemptID: event.attemptID.String(),
 			PlanID:    event.mergeUnit.planID.String(), MergeUnitID: event.mergeUnit.mergeUnitID.String(),
 			AttemptNumber: event.attemptNumber, Base: event.base.String(), Branch: event.branch,
-			Worktree: event.worktree, BoundaryMode: event.boundaryMode, SerialSegment: event.serialSegment.String(),
-			GoalID: event.goal.id.String(), GoalScope: event.goal.scope,
+			Worktree: event.worktree, Checkpoint: event.checkpoint, Escalation: event.escalation,
+			SerialSegment: event.serialSegment.String(),
+			GoalID:        event.goal.id.String(), GoalScope: event.goal.scope,
 		}
 	case AttemptMaterializationIntendedJournalEvent:
 		value = attemptMaterializationPayloadWire{
@@ -146,7 +148,7 @@ func marshalAttemptJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, b
 	case AttemptBoundaryReachedJournalEvent:
 		value = attemptBoundaryPayloadWire{
 			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(), AttemptID: event.attemptID.String(),
-			BoundaryID: event.boundaryID.String(), Ordinal: event.ordinal, Mode: event.mode,
+			BoundaryID: event.boundaryID.String(), Ordinal: event.ordinal, Checkpoint: event.checkpoint,
 			SerialSegment: event.serialSegment.String(), LeaseID: event.leaseID.String(),
 			GoalID: event.goal.id.String(), GoalScope: event.goal.scope,
 			Head: event.head.String(), Evidence: evidencePayloadFromDomain(event.evidence),
@@ -228,7 +230,7 @@ func decodeAttemptJournalEvent(
 		}
 		event, err := NewAttemptReservedJournalEvent(
 			workspaceID, generation, attemptID, mergeUnit, wire.AttemptNumber,
-			base, wire.Branch, wire.Worktree, wire.BoundaryMode, segment, goal,
+			base, wire.Branch, wire.Worktree, wire.Checkpoint, wire.Escalation, segment, goal,
 		)
 		return event, true, err
 	case JournalEventAttemptMaterializationIntended:
@@ -301,7 +303,7 @@ func decodeAttemptJournalEvent(
 			return nil, true, err
 		}
 		event, err := NewAttemptBoundaryReachedJournalEvent(
-			workspaceID, attemptID, generation, wire.Ordinal, wire.Mode, segment,
+			workspaceID, attemptID, generation, wire.Ordinal, wire.Checkpoint, segment,
 			leaseID, goal, head, evidence,
 		)
 		if err != nil {

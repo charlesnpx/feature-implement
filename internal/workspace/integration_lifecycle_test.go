@@ -367,8 +367,8 @@ func TestIntegrationCompletionAccountsForAndReleasesLeaseAndSerialSegment(
 	))
 	fixture.sources.ExecutionConfig.Bytes = []byte(strings.Replace(
 		string(fixture.sources.ExecutionConfig.Bytes),
-		"    boundary:\n      mode: complete_goal_and_wait",
-		"    boundary:\n      mode: complete_goal_and_wait\n      serial_segment: serial-alpha",
+		"    boundary:\n      checkpoint: complete_goal_and_wait\n      escalation: allowed",
+		"    boundary:\n      checkpoint: complete_goal_and_wait\n      escalation: allowed\n      serial_segment: serial-alpha",
 		1,
 	))
 	core := newAttemptHarnessFromFixture(t, fixture, "unit-one")
@@ -1397,7 +1397,7 @@ func TestExecutionConfigRejectsPostIntegrationChecks(t *testing.T) {
 	configuration := string(fixture.sources.ExecutionConfig.Bytes)
 	configuration = strings.Replace(
 		configuration,
-		"    boundary:\n      mode: pause_only",
+		"    boundary:\n      checkpoint: pause_only\n      escalation: allowed",
 		`    post_integration_checks:
       - id: parent-sensitive
         command:
@@ -1405,7 +1405,8 @@ func TestExecutionConfigRejectsPostIntegrationChecks(t *testing.T) {
           - show
           - --first-parent
     boundary:
-      mode: pause_only`,
+      checkpoint: pause_only
+      escalation: allowed`,
 		1,
 	)
 	if configuration == string(fixture.sources.ExecutionConfig.Bytes) {

@@ -14,7 +14,7 @@ import (
 
 const (
 	PlanCheckpointGeneratorVersion = "feature-plan-checkpoint/v2"
-	PlanCheckpointArtifactFileName = "plan-checkpoint.v4.json"
+	PlanCheckpointArtifactFileName = "plan-checkpoint.v5.json"
 	maxPlanGitOutputBytes          = 8 * 1024 * 1024
 )
 

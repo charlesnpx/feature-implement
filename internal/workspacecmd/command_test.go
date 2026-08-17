@@ -402,7 +402,8 @@ merge_units:
     merge_unit_id: unit-one
     profile: standard
     boundary:
-      mode: pause_only
+      checkpoint: pause_only
+      escalation: allowed
       serial_segment: command-segment
     policy:
       require_passing_checks: true

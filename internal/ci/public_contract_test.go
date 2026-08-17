@@ -39,7 +39,7 @@ func TestPublishedPublicContractIncludesLicenseOperationsAndNotices(t *testing.T
 		"### Deferred GitHub design",
 		"### License and third-party notices",
 		"Local completion is not",
-		"runtime without the local v4 marker must",
+		"runtime without the local v5 marker must",
 		"committed plan and current lock",
 		"The target must be a local non-bare Git repository",
 	} {

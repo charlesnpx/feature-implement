@@ -301,7 +301,7 @@ func TestWorkspaceSchemaExampleAndJournalBackedStatus(t *testing.T) {
 	if !strings.HasPrefix(initialized.PlanCheckpoint, "sha256:") {
 		t.Fatalf("workspace plan checkpoint is not a digest: %q", initialized.PlanCheckpoint)
 	}
-	if _, err := os.Stat(filepath.Join(workspaceDir, "state", "plan-checkpoint.v4.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(workspaceDir, "state", "plan-checkpoint.v5.json")); err != nil {
 		t.Fatalf("expected runtime checkpoint artifact: %v", err)
 	}
 	if len(initialized.Report.Scheduler.Units) != 1 || initialized.Report.Scheduler.Units[0].Status != "ready" {
@@ -464,7 +464,8 @@ merge_units:
     merge_unit_id: unit-one
     profile: standard
     boundary:
-      mode: pause_only
+      checkpoint: pause_only
+      escalation: allowed
       serial_segment: serial-one
     policy:
       require_passing_checks: true

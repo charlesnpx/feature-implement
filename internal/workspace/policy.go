@@ -3,21 +3,37 @@ package workspace
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
-type AttemptBoundaryMode string
+type AttemptCheckpointMode string
 
 const (
-	AttemptBoundaryPauseOnly           AttemptBoundaryMode = "pause_only"
-	AttemptBoundaryCompleteGoalAndWait AttemptBoundaryMode = "complete_goal_and_wait"
+	AttemptCheckpointNone                AttemptCheckpointMode = "none"
+	AttemptCheckpointPauseOnly           AttemptCheckpointMode = "pause_only"
+	AttemptCheckpointCompleteGoalAndWait AttemptCheckpointMode = "complete_goal_and_wait"
 )
 
-func (mode AttemptBoundaryMode) valid() bool {
-	return mode == AttemptBoundaryPauseOnly || mode == AttemptBoundaryCompleteGoalAndWait
+func (mode AttemptCheckpointMode) valid() bool {
+	return mode == AttemptCheckpointNone ||
+		mode == AttemptCheckpointPauseOnly ||
+		mode == AttemptCheckpointCompleteGoalAndWait
+}
+
+type AttemptEscalationPolicy string
+
+const (
+	AttemptEscalationAllowed   AttemptEscalationPolicy = "allowed"
+	AttemptEscalationForbidden AttemptEscalationPolicy = "forbidden"
+)
+
+func (policy AttemptEscalationPolicy) valid() bool {
+	return policy == AttemptEscalationAllowed || policy == AttemptEscalationForbidden
 }
 
 type AttemptBoundaryPolicy struct {
-	mode          AttemptBoundaryMode
+	checkpoint    AttemptCheckpointMode
+	escalation    AttemptEscalationPolicy
 	serialSegment ID
 }
 
@@ -25,9 +41,22 @@ func newAttemptBoundaryPolicy(wire *attemptBoundaryPolicyWire, location string) 
 	if wire == nil {
 		return AttemptBoundaryPolicy{}, fmt.Errorf("%s boundary policy must be explicit", location)
 	}
-	mode := AttemptBoundaryMode(wire.Mode)
-	if !mode.valid() {
-		return AttemptBoundaryPolicy{}, fmt.Errorf("%s boundary mode %q is unsupported", location, wire.Mode)
+	if wire.Checkpoint == "" || wire.Escalation == "" {
+		return AttemptBoundaryPolicy{}, fmt.Errorf(
+			"%s boundary policy must explicitly define checkpoint and escalation", location,
+		)
+	}
+	checkpoint := AttemptCheckpointMode(wire.Checkpoint)
+	if !checkpoint.valid() {
+		return AttemptBoundaryPolicy{}, fmt.Errorf(
+			"%s boundary checkpoint %q is unsupported", location, wire.Checkpoint,
+		)
+	}
+	escalation := AttemptEscalationPolicy(wire.Escalation)
+	if !escalation.valid() {
+		return AttemptBoundaryPolicy{}, fmt.Errorf(
+			"%s boundary escalation %q is unsupported", location, wire.Escalation,
+		)
 	}
 	var serialSegment ID
 	if wire.SerialSegment != nil {
@@ -37,11 +66,46 @@ func newAttemptBoundaryPolicy(wire *attemptBoundaryPolicyWire, location string) 
 		}
 		serialSegment = parsed
 	}
-	return AttemptBoundaryPolicy{mode: mode, serialSegment: serialSegment}, nil
+	return AttemptBoundaryPolicy{
+		checkpoint: checkpoint, escalation: escalation, serialSegment: serialSegment,
+	}, nil
 }
 
-func (policy AttemptBoundaryPolicy) Mode() AttemptBoundaryMode { return policy.mode }
-func (policy AttemptBoundaryPolicy) SerialSegment() ID         { return policy.serialSegment }
+func (policy AttemptBoundaryPolicy) Checkpoint() AttemptCheckpointMode { return policy.checkpoint }
+func (policy AttemptBoundaryPolicy) Escalation() AttemptEscalationPolicy {
+	return policy.escalation
+}
+func (policy AttemptBoundaryPolicy) SerialSegment() ID { return policy.serialSegment }
+
+type ProfileBoundaryPolicy struct {
+	escalation AttemptEscalationPolicy
+}
+
+func newProfileBoundaryPolicy(wire *profileBoundaryPolicyWire, location string) (ProfileBoundaryPolicy, error) {
+	if wire == nil || wire.Escalation == "" {
+		return ProfileBoundaryPolicy{}, fmt.Errorf(
+			"%s boundary policy must explicitly define escalation", location,
+		)
+	}
+	escalation := AttemptEscalationPolicy(wire.Escalation)
+	if !escalation.valid() {
+		return ProfileBoundaryPolicy{}, fmt.Errorf(
+			"%s boundary escalation %q is unsupported", location, wire.Escalation,
+		)
+	}
+	return ProfileBoundaryPolicy{escalation: escalation}, nil
+}
+
+func (policy ProfileBoundaryPolicy) Escalation() AttemptEscalationPolicy {
+	return policy.escalation
+}
+
+func (policy AttemptBoundaryPolicy) validateStrengthens(base ProfileBoundaryPolicy, location string) error {
+	if base.escalation == AttemptEscalationForbidden && policy.escalation == AttemptEscalationAllowed {
+		return fmt.Errorf("%s weakens escalation", location)
+	}
+	return nil
+}
 
 // ExecutionPolicy uses explicit fields whose strengthening directions are
 // defined below. Required controls may only become true, permissions may only
@@ -97,14 +161,21 @@ func (policy ExecutionPolicy) validateStrengthens(base ExecutionPolicy, location
 }
 
 type ExecutionProfile struct {
-	id     ID
-	runner ID
-	policy ExecutionPolicy
+	id       ID
+	runner   ID
+	policy   ExecutionPolicy
+	boundary *ProfileBoundaryPolicy
 }
 
 func (profile ExecutionProfile) ID() ID                  { return profile.id }
 func (profile ExecutionProfile) Runner() ID              { return profile.runner }
 func (profile ExecutionProfile) Policy() ExecutionPolicy { return profile.policy }
+func (profile ExecutionProfile) Boundary() (ProfileBoundaryPolicy, bool) {
+	if profile.boundary == nil {
+		return ProfileBoundaryPolicy{}, false
+	}
+	return *profile.boundary, true
+}
 
 type UnitExecution struct {
 	planID            ID
@@ -154,6 +225,11 @@ type ExecutionConfig struct {
 func DecodeExecutionConfig(source []byte) (ExecutionConfig, error) {
 	var wire executionConfigWire
 	if err := decodeStrictV2("execution config", source, &wire); err != nil {
+		if strings.Contains(err.Error(), "field mode not found") {
+			return ExecutionConfig{}, fmt.Errorf(
+				"execution config boundary mode is unsupported; use checkpoint and escalation: %w", err,
+			)
+		}
 		return ExecutionConfig{}, err
 	}
 	return normalizeExecutionConfig(wire)
@@ -185,10 +261,20 @@ func normalizeExecutionConfig(wire executionConfigWire) (ExecutionConfig, error)
 		if err := profilePolicy.validateStrengthens(policy, fmt.Sprintf("profile %s policy", profileID)); err != nil {
 			return ExecutionConfig{}, err
 		}
+		var profileBoundary *ProfileBoundaryPolicy
+		if item.Boundary != nil {
+			boundary, err := newProfileBoundaryPolicy(item.Boundary, fmt.Sprintf("profile %s", profileID))
+			if err != nil {
+				return ExecutionConfig{}, err
+			}
+			profileBoundary = &boundary
+		}
 		if _, exists := profileByID[profileID.String()]; exists {
 			return ExecutionConfig{}, fmt.Errorf("duplicate execution profile %s", profileID)
 		}
-		profile := ExecutionProfile{id: profileID, runner: runnerID, policy: profilePolicy}
+		profile := ExecutionProfile{
+			id: profileID, runner: runnerID, policy: profilePolicy, boundary: profileBoundary,
+		}
 		profileByID[profileID.String()] = profile
 		profiles = append(profiles, profile)
 	}
@@ -227,6 +313,13 @@ func normalizeExecutionConfig(wire executionConfigWire) (ExecutionConfig, error)
 		boundary, err := newAttemptBoundaryPolicy(item.Boundary, fmt.Sprintf("merge unit %s/%s", planID, mergeUnitID))
 		if err != nil {
 			return ExecutionConfig{}, err
+		}
+		if profile.boundary != nil {
+			if err := boundary.validateStrengthens(
+				*profile.boundary, fmt.Sprintf("merge unit %s/%s boundary", planID, mergeUnitID),
+			); err != nil {
+				return ExecutionConfig{}, err
+			}
 		}
 		commitProtocol, err := normalizeCommitProtocol(
 			item.CommitProtocol, profile.runner, fmt.Sprintf("merge unit %s/%s commit_protocol", planID, mergeUnitID),
