@@ -98,7 +98,8 @@ merge_units:
     merge_unit_id: unit-one
     profile: standard
     boundary:
-      mode: pause_only
+      checkpoint: pause_only
+      escalation: allowed
       serial_segment: serial-alpha
     policy:
       require_passing_checks: true
@@ -110,7 +111,8 @@ merge_units:
     merge_unit_id: unit-two
     profile: standard
     boundary:
-      mode: complete_goal_and_wait
+      checkpoint: complete_goal_and_wait
+      escalation: allowed
     policy:
       require_passing_checks: true
       allow_write_network: false
@@ -346,7 +348,8 @@ merge_units:
     merge_unit_id: beta-unit
     profile: standard
     boundary:
-      mode: pause_only
+      checkpoint: pause_only
+      escalation: allowed
     policy:
       require_passing_checks: true
       allow_write_network: false
@@ -383,7 +386,8 @@ func TestEffectiveDefinitionRejectsCombinedCrossPlanCycle(t *testing.T) {
     merge_unit_id: unit-one
     profile: standard
     boundary:
-      mode: pause_only
+      checkpoint: pause_only
+      escalation: allowed
     policy:
       require_passing_checks: true
       allow_write_network: false
@@ -394,7 +398,8 @@ func TestEffectiveDefinitionRejectsCombinedCrossPlanCycle(t *testing.T) {
     merge_unit_id: unit-two
     profile: standard
     boundary:
-      mode: pause_only
+      checkpoint: pause_only
+      escalation: allowed
     policy:
       require_passing_checks: true
       allow_write_network: false

@@ -72,9 +72,10 @@ type executionPolicyWire struct {
 }
 
 type executionProfileWire struct {
-	ID     string              `yaml:"id"`
-	Runner string              `yaml:"runner"`
-	Policy executionPolicyWire `yaml:"policy"`
+	ID       string                     `yaml:"id"`
+	Runner   string                     `yaml:"runner"`
+	Policy   executionPolicyWire        `yaml:"policy"`
+	Boundary *profileBoundaryPolicyWire `yaml:"boundary"`
 }
 
 type reviewProfileWire struct {
@@ -100,8 +101,13 @@ type reviewLoopWire struct {
 }
 
 type attemptBoundaryPolicyWire struct {
-	Mode          string  `yaml:"mode"`
+	Checkpoint    string  `yaml:"checkpoint"`
+	Escalation    string  `yaml:"escalation"`
 	SerialSegment *string `yaml:"serial_segment"`
+}
+
+type profileBoundaryPolicyWire struct {
+	Escalation string `yaml:"escalation"`
 }
 
 type commitProtocolWire struct {

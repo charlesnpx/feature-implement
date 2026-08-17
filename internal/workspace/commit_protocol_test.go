@@ -1226,7 +1226,8 @@ merge_units:
     merge_unit_id: unit-one
     profile: standard
     boundary:
-      mode: pause_only
+      checkpoint: pause_only
+      escalation: allowed
     policy:
       require_passing_checks: true
       allow_write_network: false

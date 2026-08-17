@@ -678,7 +678,7 @@ func attemptBoundaryStatus(
 			Choices: append([]string{}, choices...),
 		}
 	}
-	if boundary.mode == AttemptBoundaryCompleteGoalAndWait && !boundary.goalCompletedOK {
+	if boundary.checkpoint == AttemptCheckpointCompleteGoalAndWait && !boundary.goalCompletedOK {
 		return true, "complete_goal_and_wait", []BoundaryDirectiveView{
 			view("complete_goal_and_wait", boundary.goal, boundary.idempotencyKey, nil),
 		}
@@ -688,7 +688,7 @@ func attemptBoundaryStatus(
 			view("owner_gate", boundary.goal, Digest{}, []string{string(OwnerBoundaryContinue)}),
 		}
 	}
-	if boundary.mode == AttemptBoundaryCompleteGoalAndWait {
+	if boundary.checkpoint == AttemptCheckpointCompleteGoalAndWait {
 		if !boundary.nextGoalIntentOK {
 			return true, "next_goal_intent_not_recorded", directives
 		}

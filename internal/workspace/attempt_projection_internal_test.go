@@ -20,7 +20,7 @@ func TestAttemptProjectionRecomputesOrchestrationAcknowledgementRequestDigest(t 
 	}
 	boundary := RuntimeBoundaryProjection{
 		boundaryID: boundaryID, ordinal: 1, record: 2,
-		mode: AttemptBoundaryCompleteGoalAndWait, goal: goal, head: head,
+		checkpoint: AttemptCheckpointCompleteGoalAndWait, goal: goal, head: head,
 		directiveDigest: DigestBytes([]byte("projection-directive")),
 		idempotencyKey:  DigestBytes([]byte("projection-idempotency")),
 	}

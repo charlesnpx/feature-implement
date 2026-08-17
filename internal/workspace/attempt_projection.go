@@ -135,7 +135,7 @@ type RuntimeBoundaryProjection struct {
 	ordinal          uint64
 	record           uint64
 	resumedRecord    uint64
-	mode             AttemptBoundaryMode
+	checkpoint       AttemptCheckpointMode
 	serialSegment    ID
 	leaseID          ID
 	goal             GoalBinding
@@ -154,13 +154,15 @@ type RuntimeBoundaryProjection struct {
 	nextGoalOK       bool
 }
 
-func (boundary RuntimeBoundaryProjection) BoundaryID() ID            { return boundary.boundaryID }
-func (boundary RuntimeBoundaryProjection) Ordinal() uint64           { return boundary.ordinal }
-func (boundary RuntimeBoundaryProjection) Record() uint64            { return boundary.record }
-func (boundary RuntimeBoundaryProjection) ResumedRecord() uint64     { return boundary.resumedRecord }
-func (boundary RuntimeBoundaryProjection) Mode() AttemptBoundaryMode { return boundary.mode }
-func (boundary RuntimeBoundaryProjection) SerialSegment() ID         { return boundary.serialSegment }
-func (boundary RuntimeBoundaryProjection) LeaseID() ID               { return boundary.leaseID }
+func (boundary RuntimeBoundaryProjection) BoundaryID() ID        { return boundary.boundaryID }
+func (boundary RuntimeBoundaryProjection) Ordinal() uint64       { return boundary.ordinal }
+func (boundary RuntimeBoundaryProjection) Record() uint64        { return boundary.record }
+func (boundary RuntimeBoundaryProjection) ResumedRecord() uint64 { return boundary.resumedRecord }
+func (boundary RuntimeBoundaryProjection) Checkpoint() AttemptCheckpointMode {
+	return boundary.checkpoint
+}
+func (boundary RuntimeBoundaryProjection) SerialSegment() ID { return boundary.serialSegment }
+func (boundary RuntimeBoundaryProjection) LeaseID() ID       { return boundary.leaseID }
 func (boundary RuntimeBoundaryProjection) LeaseFencedAndReleased() bool {
 	return boundary.record != 0
 }
@@ -193,7 +195,8 @@ type RuntimeAttemptProjection struct {
 	base                  GitObjectID
 	branch                string
 	worktree              string
-	boundaryMode          AttemptBoundaryMode
+	checkpoint            AttemptCheckpointMode
+	escalation            AttemptEscalationPolicy
 	serialSegment         ID
 	serialSegmentHeld     bool
 	phase                 AttemptRuntimePhase
@@ -210,15 +213,16 @@ type RuntimeAttemptProjection struct {
 	integration           *RuntimeIntegrationProjection
 }
 
-func (attempt RuntimeAttemptProjection) AttemptID() ID                 { return attempt.attemptID }
-func (attempt RuntimeAttemptProjection) MergeUnit() MergeUnitReference { return attempt.mergeUnit }
-func (attempt RuntimeAttemptProjection) Generation() Digest            { return attempt.generation }
-func (attempt RuntimeAttemptProjection) AttemptNumber() uint64         { return attempt.attemptNumber }
-func (attempt RuntimeAttemptProjection) Base() GitObjectID             { return attempt.base }
-func (attempt RuntimeAttemptProjection) Branch() string                { return attempt.branch }
-func (attempt RuntimeAttemptProjection) Worktree() string              { return attempt.worktree }
-func (attempt RuntimeAttemptProjection) BoundaryMode() AttemptBoundaryMode {
-	return attempt.boundaryMode
+func (attempt RuntimeAttemptProjection) AttemptID() ID                     { return attempt.attemptID }
+func (attempt RuntimeAttemptProjection) MergeUnit() MergeUnitReference     { return attempt.mergeUnit }
+func (attempt RuntimeAttemptProjection) Generation() Digest                { return attempt.generation }
+func (attempt RuntimeAttemptProjection) AttemptNumber() uint64             { return attempt.attemptNumber }
+func (attempt RuntimeAttemptProjection) Base() GitObjectID                 { return attempt.base }
+func (attempt RuntimeAttemptProjection) Branch() string                    { return attempt.branch }
+func (attempt RuntimeAttemptProjection) Worktree() string                  { return attempt.worktree }
+func (attempt RuntimeAttemptProjection) Checkpoint() AttemptCheckpointMode { return attempt.checkpoint }
+func (attempt RuntimeAttemptProjection) Escalation() AttemptEscalationPolicy {
+	return attempt.escalation
 }
 func (attempt RuntimeAttemptProjection) SerialSegment() ID          { return attempt.serialSegment }
 func (attempt RuntimeAttemptProjection) SerialSegmentHeld() bool    { return attempt.serialSegmentHeld }
@@ -330,7 +334,8 @@ func reduceAttemptRuntime(
 		next.attempts = append(next.attempts, RuntimeAttemptProjection{
 			attemptID: event.attemptID, mergeUnit: event.mergeUnit, generation: event.generation,
 			attemptNumber: event.attemptNumber, base: event.base,
-			branch: event.branch, worktree: event.worktree, boundaryMode: event.boundaryMode,
+			branch: event.branch, worktree: event.worktree,
+			checkpoint: event.checkpoint, escalation: event.escalation,
 			serialSegment: event.serialSegment, serialSegmentHeld: !event.serialSegment.IsZero(),
 			goal: event.goal, phase: AttemptReserved, reservationRecord: record.sequence,
 		})
@@ -368,7 +373,7 @@ func reduceAttemptRuntime(
 			return err
 		}
 		if attempt.phase != AttemptActive || attempt.leaseID != event.leaseID || attempt.goal != event.goal ||
-			attempt.boundaryMode != event.mode || attempt.serialSegment != event.serialSegment ||
+			attempt.checkpoint != event.checkpoint || attempt.serialSegment != event.serialSegment ||
 			event.ordinal != uint64(len(attempt.boundaries)+1) {
 			return fmt.Errorf("attempt boundary does not match the active lease, goal, policy, and ordinal")
 		}
@@ -379,7 +384,7 @@ func reduceAttemptRuntime(
 		updated.leaseID = ID{}
 		updated.boundaries = append(updated.boundaries, RuntimeBoundaryProjection{
 			boundaryID: event.boundaryID, ordinal: event.ordinal, record: record.sequence,
-			mode: event.mode, serialSegment: event.serialSegment,
+			checkpoint: event.checkpoint, serialSegment: event.serialSegment,
 			leaseID: event.leaseID,
 			goal:    event.goal, head: event.head, evidence: cloneEvidence(event.evidence),
 			evidenceDigest: event.evidenceDigest, directiveDigest: event.directiveDigest,
@@ -393,7 +398,7 @@ func reduceAttemptRuntime(
 		if err != nil {
 			return err
 		}
-		if boundary.mode != AttemptBoundaryCompleteGoalAndWait || !boundary.goalCompletedOK ||
+		if boundary.checkpoint != AttemptCheckpointCompleteGoalAndWait || !boundary.goalCompletedOK ||
 			!boundary.ownerResponseOK || boundary.nextGoalIntentOK || event.goal == boundary.goal {
 			return fmt.Errorf("next-goal intent is out of order, duplicate, or reuses the completed goal")
 		}
@@ -418,7 +423,7 @@ func reduceAttemptRuntime(
 		if err != nil {
 			return err
 		}
-		if boundary.mode != AttemptBoundaryCompleteGoalAndWait {
+		if boundary.checkpoint != AttemptCheckpointCompleteGoalAndWait {
 			return fmt.Errorf(
 				"pause-only boundary %s cannot acknowledge goal completion or creation",
 				boundary.boundaryID,
@@ -478,7 +483,7 @@ func reduceAttemptRuntime(
 			return err
 		}
 		if boundary.ownerResponseOK ||
-			boundary.mode == AttemptBoundaryCompleteGoalAndWait &&
+			boundary.checkpoint == AttemptCheckpointCompleteGoalAndWait &&
 				!boundary.goalCompletedOK {
 			return fmt.Errorf(
 				"owner response is duplicate or precedes goal-completion acknowledgement",
@@ -517,7 +522,7 @@ func reduceAttemptRuntime(
 		if !boundary.ownerResponseOK || event.verifiedHead != boundary.head || event.serialSegment != attempt.serialSegment {
 			return fmt.Errorf("attempt resume requires owner response, unchanged head, and matching serial policy")
 		}
-		if boundary.mode == AttemptBoundaryCompleteGoalAndWait {
+		if boundary.checkpoint == AttemptCheckpointCompleteGoalAndWait {
 			if !boundary.nextGoalOK || event.goal != boundary.nextGoal.goal {
 				return fmt.Errorf("complete-goal boundary resume requires acknowledged next goal")
 			}
@@ -664,23 +669,23 @@ func canonicalAttemptRuntime(attempt RuntimeAttemptProjection) (json.RawMessage,
 		IdempotencyKey string    `json:"idempotency_key"`
 	}
 	type boundaryJSON struct {
-		BoundaryID      string               `json:"boundary_id"`
-		Ordinal         uint64               `json:"ordinal"`
-		Record          uint64               `json:"record"`
-		ResumedRecord   uint64               `json:"resumed_record"`
-		Mode            AttemptBoundaryMode  `json:"mode"`
-		SerialSegment   string               `json:"serial_segment,omitempty"`
-		LeaseID         string               `json:"lease_id"`
-		GoalID          string               `json:"goal_id"`
-		GoalScope       GoalScope            `json:"goal_scope"`
-		Head            string               `json:"head"`
-		EvidenceDigest  string               `json:"evidence_digest"`
-		DirectiveDigest string               `json:"directive_digest,omitempty"`
-		IdempotencyKey  string               `json:"idempotency_key,omitempty"`
-		GoalCompleted   *acknowledgementJSON `json:"goal_completed,omitempty"`
-		OwnerResponse   *ownerJSON           `json:"owner_response,omitempty"`
-		NextGoalIntent  *nextGoalIntentJSON  `json:"next_goal_intent,omitempty"`
-		NextGoal        *acknowledgementJSON `json:"next_goal,omitempty"`
+		BoundaryID      string                `json:"boundary_id"`
+		Ordinal         uint64                `json:"ordinal"`
+		Record          uint64                `json:"record"`
+		ResumedRecord   uint64                `json:"resumed_record"`
+		Checkpoint      AttemptCheckpointMode `json:"checkpoint"`
+		SerialSegment   string                `json:"serial_segment,omitempty"`
+		LeaseID         string                `json:"lease_id"`
+		GoalID          string                `json:"goal_id"`
+		GoalScope       GoalScope             `json:"goal_scope"`
+		Head            string                `json:"head"`
+		EvidenceDigest  string                `json:"evidence_digest"`
+		DirectiveDigest string                `json:"directive_digest,omitempty"`
+		IdempotencyKey  string                `json:"idempotency_key,omitempty"`
+		GoalCompleted   *acknowledgementJSON  `json:"goal_completed,omitempty"`
+		OwnerResponse   *ownerJSON            `json:"owner_response,omitempty"`
+		NextGoalIntent  *nextGoalIntentJSON   `json:"next_goal_intent,omitempty"`
+		NextGoal        *acknowledgementJSON  `json:"next_goal,omitempty"`
 	}
 	type integrationJSON struct {
 		IntentDigest     string `json:"intent_digest"`
@@ -694,30 +699,31 @@ func canonicalAttemptRuntime(attempt RuntimeAttemptProjection) (json.RawMessage,
 		AcceptanceMode   string `json:"acceptance_mode"`
 	}
 	type attemptJSON struct {
-		AttemptID             string              `json:"attempt_id"`
-		PlanID                string              `json:"plan_id"`
-		MergeUnitID           string              `json:"merge_unit_id"`
-		Generation            string              `json:"generation"`
-		AttemptNumber         uint64              `json:"attempt_number"`
-		Base                  string              `json:"base"`
-		Branch                string              `json:"branch"`
-		Worktree              string              `json:"worktree"`
-		BoundaryMode          AttemptBoundaryMode `json:"boundary_mode"`
-		SerialSegment         string              `json:"serial_segment,omitempty"`
-		SerialSegmentHeld     bool                `json:"serial_segment_held"`
-		Phase                 AttemptRuntimePhase `json:"phase"`
-		ReservationRecord     uint64              `json:"reservation_record"`
-		MaterializationRecord uint64              `json:"materialization_record"`
-		StartRecord           uint64              `json:"start_record"`
-		VerifiedHead          string              `json:"verified_head,omitempty"`
-		InspectionDigest      string              `json:"inspection_digest,omitempty"`
-		LeaseID               string              `json:"lease_id,omitempty"`
-		GoalID                string              `json:"goal_id,omitempty"`
-		GoalScope             GoalScope           `json:"goal_scope,omitempty"`
-		Boundaries            []boundaryJSON      `json:"boundaries"`
-		CommitProtocol        json.RawMessage     `json:"commit_protocol,omitempty"`
-		ReviewFixes           json.RawMessage     `json:"review_fixes,omitempty"`
-		Integration           *integrationJSON    `json:"integration,omitempty"`
+		AttemptID             string                  `json:"attempt_id"`
+		PlanID                string                  `json:"plan_id"`
+		MergeUnitID           string                  `json:"merge_unit_id"`
+		Generation            string                  `json:"generation"`
+		AttemptNumber         uint64                  `json:"attempt_number"`
+		Base                  string                  `json:"base"`
+		Branch                string                  `json:"branch"`
+		Worktree              string                  `json:"worktree"`
+		Checkpoint            AttemptCheckpointMode   `json:"checkpoint"`
+		Escalation            AttemptEscalationPolicy `json:"escalation"`
+		SerialSegment         string                  `json:"serial_segment,omitempty"`
+		SerialSegmentHeld     bool                    `json:"serial_segment_held"`
+		Phase                 AttemptRuntimePhase     `json:"phase"`
+		ReservationRecord     uint64                  `json:"reservation_record"`
+		MaterializationRecord uint64                  `json:"materialization_record"`
+		StartRecord           uint64                  `json:"start_record"`
+		VerifiedHead          string                  `json:"verified_head,omitempty"`
+		InspectionDigest      string                  `json:"inspection_digest,omitempty"`
+		LeaseID               string                  `json:"lease_id,omitempty"`
+		GoalID                string                  `json:"goal_id,omitempty"`
+		GoalScope             GoalScope               `json:"goal_scope,omitempty"`
+		Boundaries            []boundaryJSON          `json:"boundaries"`
+		CommitProtocol        json.RawMessage         `json:"commit_protocol,omitempty"`
+		ReviewFixes           json.RawMessage         `json:"review_fixes,omitempty"`
+		Integration           *integrationJSON        `json:"integration,omitempty"`
 	}
 	ackJSON := func(value RuntimeOrchestrationAcknowledgement) *acknowledgementJSON {
 		return &acknowledgementJSON{
@@ -729,7 +735,8 @@ func canonicalAttemptRuntime(attempt RuntimeAttemptProjection) (json.RawMessage,
 		AttemptID: attempt.attemptID.String(), PlanID: attempt.mergeUnit.planID.String(),
 		MergeUnitID: attempt.mergeUnit.mergeUnitID.String(), Generation: attempt.generation.String(),
 		AttemptNumber: attempt.attemptNumber, Base: attempt.base.String(),
-		Branch: attempt.branch, Worktree: attempt.worktree, BoundaryMode: attempt.boundaryMode,
+		Branch: attempt.branch, Worktree: attempt.worktree,
+		Checkpoint: attempt.checkpoint, Escalation: attempt.escalation,
 		SerialSegment: attempt.serialSegment.String(), SerialSegmentHeld: attempt.serialSegmentHeld,
 		Phase: attempt.phase, ReservationRecord: attempt.reservationRecord,
 		MaterializationRecord: attempt.materializationRecord, StartRecord: attempt.startRecord,
@@ -769,9 +776,10 @@ func canonicalAttemptRuntime(attempt RuntimeAttemptProjection) (json.RawMessage,
 	for _, boundary := range attempt.boundaries {
 		item := boundaryJSON{
 			BoundaryID: boundary.boundaryID.String(), Ordinal: boundary.ordinal, Record: boundary.record,
-			ResumedRecord: boundary.resumedRecord, Mode: boundary.mode, SerialSegment: boundary.serialSegment.String(),
-			LeaseID: boundary.leaseID.String(),
-			GoalID:  boundary.goal.id.String(), GoalScope: boundary.goal.scope, Head: boundary.head.String(),
+			ResumedRecord: boundary.resumedRecord, Checkpoint: boundary.checkpoint,
+			SerialSegment: boundary.serialSegment.String(),
+			LeaseID:       boundary.leaseID.String(),
+			GoalID:        boundary.goal.id.String(), GoalScope: boundary.goal.scope, Head: boundary.head.String(),
 			EvidenceDigest: boundary.evidenceDigest.String(), DirectiveDigest: boundary.directiveDigest.String(),
 			IdempotencyKey: boundary.idempotencyKey.String(),
 		}
