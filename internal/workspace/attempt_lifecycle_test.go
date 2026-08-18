@@ -2489,6 +2489,74 @@ func TestAttemptBoundaryRejectsDisallowedKindsBeforeAppend(t *testing.T) {
 	}
 }
 
+func TestAttemptBoundaryRejectsDifferentKindSameEvidenceOnPausedRetry(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name          string
+		replacement   string
+		recordedKind  workspace.AttemptBoundaryKind
+		requestedKind workspace.AttemptBoundaryKind
+	}{
+		{
+			name:          "checkpoint-none retry cannot replace recorded escalation",
+			replacement:   "checkpoint: none\n      escalation: allowed\n      serial_segment: serial-alpha",
+			recordedKind:  workspace.AttemptBoundaryKindEscalation,
+			requestedKind: workspace.AttemptBoundaryKindCheckpoint,
+		},
+		{
+			name:          "escalation-forbidden retry cannot replace recorded checkpoint",
+			replacement:   "checkpoint: pause_only\n      escalation: forbidden\n      serial_segment: serial-alpha",
+			recordedKind:  workspace.AttemptBoundaryKindCheckpoint,
+			requestedKind: workspace.AttemptBoundaryKindEscalation,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newDefinitionFixture(t)
+			configuration := string(fixture.sources.ExecutionConfig.Bytes)
+			updated := strings.Replace(
+				configuration,
+				"checkpoint: pause_only\n      escalation: allowed\n      serial_segment: serial-alpha",
+				test.replacement,
+				1,
+			)
+			if updated == configuration {
+				t.Fatal("failed to install boundary policy fixture")
+			}
+			fixture.sources.ExecutionConfig.Bytes = []byte(updated)
+			harness := newAttemptHarnessFromFixture(t, fixture, "unit-one")
+			attempt := harness.reserve(t, "2026-07-21T11:01:00Z")
+			attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T11:02:00Z")
+			evidence := boundaryEvidence(t, test.name)
+			if _, err := workspace.RecordAttemptBoundary(
+				context.Background(), harness.journal, harness.definition, harness.git,
+				workspace.RecordAttemptBoundaryRequest{
+					AttemptID: attempt.AttemptID(), Kind: test.recordedKind,
+					Evidence: evidence, OccurredAt: mustTime(t, "2026-07-21T11:03:00Z"),
+				},
+			); err != nil {
+				t.Fatalf("record %s boundary: %v", test.recordedKind, err)
+			}
+			before := journalRecordCount(t, harness.journal)
+			_, err := workspace.RecordAttemptBoundary(
+				context.Background(), harness.journal, harness.definition, harness.git,
+				workspace.RecordAttemptBoundaryRequest{
+					AttemptID: attempt.AttemptID(), Kind: test.requestedKind,
+					Evidence: evidence, OccurredAt: mustTime(t, "2026-07-21T11:04:00Z"),
+				},
+			)
+			if err == nil || !strings.Contains(err.Error(), "different boundary kind") ||
+				!strings.Contains(err.Error(), string(test.requestedKind)) ||
+				!strings.Contains(err.Error(), string(test.recordedKind)) {
+				t.Fatalf("different-kind paused retry error = %v", err)
+			}
+			if after := journalRecordCount(t, harness.journal); after != before {
+				t.Fatalf("different-kind paused retry wrote journal records: before=%d after=%d", before, after)
+			}
+		})
+	}
+}
+
 func TestAttemptBoundaryRequiresSupportedKind(t *testing.T) {
 	t.Parallel()
 

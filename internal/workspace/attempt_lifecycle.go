@@ -464,6 +464,12 @@ func RecordAttemptBoundary(
 		if !ok {
 			return AttemptBoundaryResult{}, fmt.Errorf("attempt %s has inconsistent paused state", attempt.attemptID)
 		}
+		if request.Kind != boundary.kind {
+			return AttemptBoundaryResult{}, fmt.Errorf(
+				"attempt %s is already paused with different boundary kind: requested %q, recorded %q",
+				attempt.attemptID, request.Kind, boundary.kind,
+			)
+		}
 		requestedDigest, digestErr := digestBoundaryEvidence(sortedEvidenceForProjection(request.Evidence))
 		if digestErr != nil {
 			return AttemptBoundaryResult{}, digestErr
