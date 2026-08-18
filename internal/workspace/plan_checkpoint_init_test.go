@@ -142,7 +142,7 @@ policy:
   require_passing_checks: true
   allow_write_network: false
   max_attempts: 1
-  max_review_rounds: 1
+  max_review_rounds: 2
   max_review_fixes: 1
 profiles:
   - id: standard
@@ -151,7 +151,7 @@ profiles:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 1
-      max_review_rounds: 1
+      max_review_rounds: 2
       max_review_fixes: 1
 merge_units:
   - plan_id: alpha-plan
@@ -165,7 +165,7 @@ merge_units:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 1
-      max_review_rounds: 1
+      max_review_rounds: 2
       max_review_fixes: 1
 `)
 	if _, err := workspacecmd.Execute(context.Background(), workspacecmd.Options{

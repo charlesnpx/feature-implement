@@ -222,6 +222,11 @@ func TestExecutionPolicyRejectsImplicitOrWeakeningPrecedence(t *testing.T) {
 			wantErr: "root.policy.allow_write_network must be a boolean",
 		},
 		{
+			name:    "root review fix budget lacks reconfirmation round",
+			source:  strings.Replace(valid, "  max_review_rounds: 4\n", "  max_review_rounds: 1\n", 1),
+			wantErr: "policy max_review_fixes requires max_review_rounds of at least 2",
+		},
+		{
 			name:    "profile weakens maximum",
 			source:  strings.Replace(valid, "      max_attempts: 4\n", "      max_attempts: 6\n", 1),
 			wantErr: "profile standard policy weakens max_attempts",
