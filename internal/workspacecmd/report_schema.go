@@ -251,6 +251,16 @@ func ReportSchemas() map[string]any {
 			"report_digest": nonEmptyText(),
 		},
 	)
+	abandonment := object(
+		[]string{"reason", "feature_ref", "record", "released"},
+		map[string]any{
+			"reason":       nonEmptyText(),
+			"feature_ref":  nonEmptyText(),
+			"feature_head": text(),
+			"record":       integer(1),
+			"released":     boolean(),
+		},
+	)
 	report := object(
 		[]string{
 			"schema_version", "workflow", "target", "attempts",
@@ -268,6 +278,7 @@ func ReportSchemas() map[string]any {
 			"integration":    integration,
 			"drift":          drift,
 			"completion":     completion,
+			"abandonment":    abandonment,
 			"report_digest":  nonEmptyText(),
 		},
 	)

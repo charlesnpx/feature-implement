@@ -3,6 +3,7 @@ package workspace
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 type FeatureRefCreationIntendedJournalEvent struct {
@@ -139,6 +140,72 @@ func (event FeatureRefCreatedJournalEvent) Head() GitObjectID {
 	return event.head
 }
 
+// WorkspaceAbandonedJournalEvent records the final release of a workspace's
+// local feature-ref ownership. A zero feature head means creation had not
+// completed, so no ref was released.
+type WorkspaceAbandonedJournalEvent struct {
+	workspaceID ID
+	generation  Digest
+	featureRef  string
+	featureHead GitObjectID
+	reason      string
+}
+
+func NewWorkspaceAbandonedJournalEvent(
+	workspaceID ID,
+	generation Digest,
+	featureRef string,
+	featureHead GitObjectID,
+	reason string,
+) (WorkspaceAbandonedJournalEvent, error) {
+	event := WorkspaceAbandonedJournalEvent{
+		workspaceID: workspaceID,
+		generation:  generation,
+		featureRef:  strings.TrimSpace(featureRef),
+		featureHead: featureHead,
+		reason:      strings.TrimSpace(reason),
+	}
+	if err := event.validate(); err != nil {
+		return WorkspaceAbandonedJournalEvent{}, err
+	}
+	return event, nil
+}
+
+func (WorkspaceAbandonedJournalEvent) isWorkspaceJournalEvent() {}
+func (WorkspaceAbandonedJournalEvent) eventType() JournalEventType {
+	return JournalEventWorkspaceAbandoned
+}
+func (event WorkspaceAbandonedJournalEvent) boundGeneration() Digest {
+	return event.generation
+}
+func (event WorkspaceAbandonedJournalEvent) validate() error {
+	if event.workspaceID.IsZero() || event.generation.IsZero() {
+		return fmt.Errorf("workspace abandonment requires workspace and generation bindings")
+	}
+	normalized, err := normalizeFullyQualifiedBaseRef(event.featureRef)
+	if err != nil || normalized != event.featureRef ||
+		!strings.HasPrefix(event.featureRef, "refs/heads/feature/") {
+		return fmt.Errorf("workspace abandonment requires the exact owned feature ref")
+	}
+	if err := validateBoundedText("workspace abandonment reason", event.reason, 16*1024); err != nil {
+		return err
+	}
+	return nil
+}
+func (event WorkspaceAbandonedJournalEvent) WorkspaceID() ID {
+	return event.workspaceID
+}
+func (event WorkspaceAbandonedJournalEvent) Generation() Digest {
+	return event.generation
+}
+func (event WorkspaceAbandonedJournalEvent) FeatureRef() string {
+	return event.featureRef
+}
+func (event WorkspaceAbandonedJournalEvent) FeatureHead() GitObjectID {
+	return event.featureHead
+}
+func (event WorkspaceAbandonedJournalEvent) Reason() string { return event.reason }
+
 func digestFeatureRefCreationIntent(
 	workspaceID ID,
 	generation Digest,
@@ -182,6 +249,8 @@ func localTargetJournalEventResources(
 		workspaceID, featureRef = event.workspaceID, event.binding.featureRef
 	case FeatureRefCreatedJournalEvent:
 		workspaceID, featureRef = event.workspaceID, event.featureRef
+	case WorkspaceAbandonedJournalEvent:
+		workspaceID, featureRef = event.workspaceID, event.featureRef
 	default:
 		return nil, nil, false
 	}
@@ -194,7 +263,8 @@ func localTargetJournalEventResources(
 
 func isLocalTargetJournalEvent(event WorkspaceJournalEvent) bool {
 	switch event.(type) {
-	case FeatureRefCreationIntendedJournalEvent, FeatureRefCreatedJournalEvent:
+	case FeatureRefCreationIntendedJournalEvent, FeatureRefCreatedJournalEvent,
+		WorkspaceAbandonedJournalEvent:
 		return true
 	default:
 		return false
@@ -208,6 +278,8 @@ func cloneLocalTargetJournalEvent(
 	case FeatureRefCreationIntendedJournalEvent:
 		return event
 	case FeatureRefCreatedJournalEvent:
+		return event
+	case WorkspaceAbandonedJournalEvent:
 		return event
 	default:
 		return nil

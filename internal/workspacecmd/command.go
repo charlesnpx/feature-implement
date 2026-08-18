@@ -95,7 +95,7 @@ func Execute(ctx context.Context, options Options) (any, error) {
 		return nil, removedWorkspaceCommand(action)
 	case "validate", "init", "status", "recover", "scheduler", "gates", "report":
 		// handled below
-	case "attempt", "commit", "review", "integrate", "complete":
+	case "attempt", "commit", "review", "integrate", "complete", "abandon":
 		// handled below
 	default:
 		return nil, fmt.Errorf("unsupported workspace command %q", action)
@@ -153,6 +153,8 @@ func Execute(ctx context.Context, options Options) (any, error) {
 		return executeIntegration(ctx, bundle, options)
 	case "complete":
 		return executeCompletion(ctx, bundle, options)
+	case "abandon":
+		return executeAbandon(ctx, bundle, options)
 	default:
 		panic("unreachable")
 	}
@@ -346,6 +348,9 @@ func RequestSchemas() map[string]any {
 			"attempt_id": stringProperty(),
 		})),
 		"complete.verify": request([]string{"occurred_at"}, occurred(map[string]any{})),
+		"abandon": request([]string{"occurred_at", "reason"}, occurred(map[string]any{
+			"reason": stringProperty(),
+		})),
 	}
 	return map[string]any{
 		"$schema": "https://json-schema.org/draft/2020-12/schema", "schema_version": requestSchemaVersion,

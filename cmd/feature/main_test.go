@@ -228,7 +228,7 @@ func TestWorkspaceSchemaExampleAndJournalBackedStatus(t *testing.T) {
 	}
 	for _, name := range []string{
 		"init", "attempt.reserve", "attempt.adopt-head",
-		"review.record", "integrate.merge-unit", "complete.verify",
+		"review.record", "integrate.merge-unit", "complete.verify", "abandon",
 	} {
 		if _, exists := requestSchema.Requests[name]; !exists {
 			t.Fatalf("request schema omits %s", name)

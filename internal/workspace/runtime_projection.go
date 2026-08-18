@@ -137,6 +137,33 @@ func (completion RuntimeWorkspaceCompletionProjection) EventDigest() Digest {
 	return completion.eventDigest
 }
 
+type RuntimeWorkspaceAbandonmentProjection struct {
+	featureRef  string
+	featureHead GitObjectID
+	reason      string
+	record      uint64
+	eventDigest Digest
+}
+
+func (abandonment RuntimeWorkspaceAbandonmentProjection) FeatureRef() string {
+	return abandonment.featureRef
+}
+func (abandonment RuntimeWorkspaceAbandonmentProjection) FeatureHead() GitObjectID {
+	return abandonment.featureHead
+}
+func (abandonment RuntimeWorkspaceAbandonmentProjection) Reason() string {
+	return abandonment.reason
+}
+func (abandonment RuntimeWorkspaceAbandonmentProjection) Record() uint64 {
+	return abandonment.record
+}
+func (abandonment RuntimeWorkspaceAbandonmentProjection) EventDigest() Digest {
+	return abandonment.eventDigest
+}
+func (abandonment RuntimeWorkspaceAbandonmentProjection) Released() bool {
+	return !abandonment.featureHead.IsZero()
+}
+
 type WorkspaceRuntimeProjection struct {
 	workspaceID                  ID
 	activeGeneration             Digest
@@ -147,6 +174,7 @@ type WorkspaceRuntimeProjection struct {
 	recoveries                   []RuntimeRecoveryProjection
 	attempts                     []RuntimeAttemptProjection
 	completion                   *RuntimeWorkspaceCompletionProjection
+	abandonment                  *RuntimeWorkspaceAbandonmentProjection
 }
 
 func (projection WorkspaceRuntimeProjection) WorkspaceID() ID { return projection.workspaceID }
@@ -183,6 +211,15 @@ func (projection WorkspaceRuntimeProjection) Completion() (
 	}
 	return *projection.completion, true
 }
+func (projection WorkspaceRuntimeProjection) Abandonment() (
+	RuntimeWorkspaceAbandonmentProjection,
+	bool,
+) {
+	if projection.abandonment == nil {
+		return RuntimeWorkspaceAbandonmentProjection{}, false
+	}
+	return *projection.abandonment, true
+}
 
 func RebuildWorkspaceRuntime(snapshot JournalSnapshot) (WorkspaceRuntimeProjection, error) {
 	return RebuildProjection(snapshot, WorkspaceRuntimeProjection{}, reduceWorkspaceRuntime)
@@ -208,12 +245,20 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 			)
 		}
 	}
+	if current.abandonment != nil {
+		if _, recovery := record.event.(JournalTailRecoveredEvent); !recovery {
+			return WorkspaceRuntimeProjection{}, fmt.Errorf(
+				"workspace abandonment is final for local workflow mutations",
+			)
+		}
+	}
 	if !current.activeGeneration.IsZero() {
 		target, hasTarget := current.LocalTarget()
 		ready := hasTarget && target.Created()
 		switch record.event.(type) {
 		case FeatureRefCreationIntendedJournalEvent,
 			FeatureRefCreatedJournalEvent,
+			WorkspaceAbandonedJournalEvent,
 			JournalTailRecoveredEvent:
 			// Initialization and journal-tail recovery are the only transitions
 			// admitted before durable feature-ref completion.
@@ -339,6 +384,12 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 		); err != nil {
 			return WorkspaceRuntimeProjection{}, err
 		}
+	case WorkspaceAbandonedJournalEvent:
+		if err := reduceWorkspaceAbandonmentRuntime(
+			current, &next, record, event,
+		); err != nil {
+			return WorkspaceRuntimeProjection{}, err
+		}
 	default:
 		if event, ok := record.event.(ReviewHeadAdoptedJournalEvent); ok {
 			if err := reduceReviewHeadAdoption(current, &next, record, event); err != nil {
@@ -440,6 +491,10 @@ func cloneWorkspaceRuntime(source WorkspaceRuntimeProjection) WorkspaceRuntimePr
 		completion := *source.completion
 		result.completion = &completion
 	}
+	if source.abandonment != nil {
+		abandonment := *source.abandonment
+		result.abandonment = &abandonment
+	}
 	return result
 }
 
@@ -469,6 +524,13 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 		Record       uint64 `json:"record"`
 		EventDigest  string `json:"event_digest"`
 	}
+	type abandonmentJSON struct {
+		FeatureRef  string `json:"feature_ref"`
+		FeatureHead string `json:"feature_head,omitempty"`
+		Reason      string `json:"reason"`
+		Record      uint64 `json:"record"`
+		EventDigest string `json:"event_digest"`
+	}
 	type runtimeJSON struct {
 		SchemaVersion                int               `json:"schema_version"`
 		WorkspaceID                  string            `json:"workspace_id"`
@@ -480,6 +542,7 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 		Recoveries                   []recoveryJSON    `json:"recoveries"`
 		Attempts                     []json.RawMessage `json:"attempts"`
 		Completion                   *completionJSON   `json:"completion,omitempty"`
+		Abandonment                  *abandonmentJSON  `json:"abandonment,omitempty"`
 	}
 	value := runtimeJSON{
 		SchemaVersion: JournalSchemaVersion, WorkspaceID: projection.workspaceID.String(),
@@ -511,6 +574,15 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 			ReportDigest: projection.completion.reportDigest.String(),
 			Record:       projection.completion.record,
 			EventDigest:  projection.completion.eventDigest.String(),
+		}
+	}
+	if projection.abandonment != nil {
+		value.Abandonment = &abandonmentJSON{
+			FeatureRef:  projection.abandonment.featureRef,
+			FeatureHead: projection.abandonment.featureHead.String(),
+			Reason:      projection.abandonment.reason,
+			Record:      projection.abandonment.record,
+			EventDigest: projection.abandonment.eventDigest.String(),
 		}
 	}
 	for _, recovery := range projection.recoveries {

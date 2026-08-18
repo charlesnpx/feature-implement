@@ -18,6 +18,12 @@ type completeVerifyInput struct {
 	OccurredAt    string `json:"occurred_at"`
 }
 
+type abandonInput struct {
+	SchemaVersion int    `json:"schema_version"`
+	OccurredAt    string `json:"occurred_at"`
+	Reason        string `json:"reason"`
+}
+
 func executeIntegration(
 	ctx context.Context,
 	bundle workspace.WorkspaceBundle,
@@ -115,4 +121,44 @@ func executeCompletion(
 		bundle.Definition(),
 		nil,
 	)
+}
+
+func executeAbandon(
+	ctx context.Context,
+	bundle workspace.WorkspaceBundle,
+	options Options,
+) (MutationResult, error) {
+	if options.Subaction != "" {
+		return MutationResult{}, fmt.Errorf(
+			"workspace abandon does not accept a subaction",
+		)
+	}
+	var input abandonInput
+	if err := decodeRequest(options.Input, &input); err != nil {
+		return MutationResult{}, err
+	}
+	occurredAt, err := parseOccurredAt(
+		input.SchemaVersion, input.OccurredAt,
+	)
+	if err != nil {
+		return MutationResult{}, err
+	}
+	journal, _, err := openWritableJournal(options)
+	if err != nil {
+		return MutationResult{}, err
+	}
+	defer journal.Close()
+	if _, err := workspace.AbandonWorkspace(
+		ctx,
+		journal,
+		bundle.Definition(),
+		workspace.DefaultLocalTargetGitAdapter(),
+		workspace.AbandonWorkspaceRequest{
+			OccurredAt: occurredAt,
+			Reason:     input.Reason,
+		},
+	); err != nil {
+		return MutationResult{}, err
+	}
+	return mutationResult("abandon", journal, bundle.Definition(), nil)
 }

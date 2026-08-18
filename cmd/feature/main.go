@@ -56,6 +56,7 @@ func usage(w io.Writer) {
   feature workspace schema [bundle|requests|reports] [--json]
   feature workspace example
   feature workspace validate --bundle <dir> [--write-locks] [--json]
+  feature workspace abandon --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
   feature workspace <action> [<subaction>] --bundle <dir> --workspace <dir> [--input <json-file|->] [--json]
   feature version`)
 }
@@ -424,6 +425,7 @@ func usageWorkspace(w io.Writer) {
   feature workspace review start|reserve|record|reserve-fix|apply-fix|record-fix|ready --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
   feature workspace integrate merge-unit --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
   feature workspace complete verify --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
+  feature workspace abandon --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
 
 The attempt boundary request requires kind: checkpoint or escalation.
 

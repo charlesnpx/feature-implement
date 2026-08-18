@@ -283,6 +283,12 @@ func (adapter LocalTargetGitAdapter) inspect(
 	if err != nil {
 		return LocalTargetInspection{}, err
 	}
+	releaseMarkerExists, _, err := adapter.inspectReleaseMarkerRef(
+		ctx, target.root, target.featureBranch, objectFormat,
+	)
+	if err != nil {
+		return LocalTargetInspection{}, err
+	}
 	if err := adapter.validateFeatureNamespace(
 		ctx, target.root, target.featureBranch, true,
 	); err != nil {
@@ -293,6 +299,12 @@ func (adapter LocalTargetGitAdapter) inspect(
 	)
 	if err != nil {
 		return LocalTargetInspection{}, err
+	}
+	if !options.allowFeatureRef && releaseMarkerExists {
+		return LocalTargetInspection{}, releasedFeatureRefAdoptionError(
+			target.FeatureRef(),
+			localTargetReleaseMarkerRef(target.featureBranch),
+		)
 	}
 	if featureExists {
 		if !options.allowFeatureRef {
@@ -1299,8 +1311,61 @@ func (adapter LocalTargetGitAdapter) inspectFeatureRef(
 	return true, head, marker, nil
 }
 
+func (adapter LocalTargetGitAdapter) inspectReleaseMarkerRef(
+	ctx context.Context,
+	root, featureBranch string,
+	algorithm GitHashAlgorithm,
+) (bool, GitObjectID, error) {
+	markerRef := localTargetReleaseMarkerRef(featureBranch)
+	output, exitCode, err := adapter.git.run(
+		ctx, root, "show-ref", "--verify", markerRef,
+	)
+	if err != nil {
+		return false, GitObjectID{}, err
+	}
+	if exitCode == 1 || exitCode == 128 {
+		return false, GitObjectID{}, nil
+	}
+	if exitCode != 0 {
+		return false, GitObjectID{}, fmt.Errorf(
+			"inspect feature-ref release marker %s: Git exited with status %d",
+			markerRef, exitCode,
+		)
+	}
+	fields := strings.Fields(string(output))
+	if len(fields) != 2 || fields[1] != markerRef {
+		return false, GitObjectID{}, fmt.Errorf(
+			"Git returned malformed feature-ref release marker data",
+		)
+	}
+	head, err := qualifyGitObjectID(algorithm, fields[0])
+	if err != nil {
+		return false, GitObjectID{}, err
+	}
+	return true, head, nil
+}
+
 func localTargetReflogMessage(intentDigest Digest) string {
 	return "feature-implement feature-ref creation " + intentDigest.String()
+}
+
+const localTargetReleaseReflogPrefix = "feature-implement feature-ref released "
+
+const localTargetReleaseMarkerRefPrefix = "refs/feature-implement/released/"
+
+func localTargetReleaseReflogMessage(intentDigest Digest) string {
+	return localTargetReleaseReflogPrefix + intentDigest.String()
+}
+
+func localTargetReleaseMarkerRef(featureBranch string) string {
+	return localTargetReleaseMarkerRefPrefix + featureBranch
+}
+
+func releasedFeatureRefAdoptionError(featureRef, markerRef string) error {
+	return fmt.Errorf(
+		"feature ref %s was released by an abandoned workspace (marker %s); choose a new feature branch",
+		featureRef, markerRef,
+	)
 }
 
 func gitObjectHex(object GitObjectID) string {
@@ -1323,6 +1388,78 @@ func (adapter LocalTargetGitAdapter) verifyOwnedFeatureRefAt(
 		expectedFeatureHead:   expectedHead,
 		expectedFeatureMarker: expectedMarker,
 	})
+}
+
+func (adapter LocalTargetGitAdapter) ReleaseOwnedFeatureRef(
+	ctx context.Context,
+	binding LocalTargetBinding,
+	ownedHead GitObjectID,
+	expectedMarker string,
+	intentDigest Digest,
+) (resultErr error) {
+	if ctx == nil || binding.IsZero() || ownedHead.IsZero() ||
+		ownedHead.Algorithm() != binding.objectFormat || expectedMarker == "" ||
+		intentDigest.IsZero() {
+		return fmt.Errorf(
+			"feature ref release requires context, binding, owned head, marker, and intent digest",
+		)
+	}
+	session, err := adapter.openBoundSession(binding)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, session.Close())
+	}()
+	return session.releaseOwnedFeatureRef(
+		ctx, ownedHead, expectedMarker, intentDigest,
+	)
+}
+
+func (adapter LocalTargetGitAdapter) VerifyReleasedFeatureRefAt(
+	ctx context.Context,
+	binding LocalTargetBinding,
+	ownedHead GitObjectID,
+	intentDigest Digest,
+) (LocalTargetInspection, error) {
+	if intentDigest.IsZero() {
+		return LocalTargetInspection{}, fmt.Errorf(
+			"released feature-ref verification requires a durable intent digest",
+		)
+	}
+	exists, head, marker, err := adapter.inspectFeatureRef(
+		ctx,
+		binding.root,
+		binding.featureRef,
+		binding.objectFormat,
+	)
+	if err != nil {
+		return LocalTargetInspection{}, err
+	}
+	if !exists || head != ownedHead || marker == "" {
+		return LocalTargetInspection{}, fmt.Errorf(
+			"released feature ref does not retain its exact durable head and ownership marker",
+		)
+	}
+	inspection, err := adapter.verifyOwnedFeatureRefAt(
+		ctx, binding, ownedHead, marker,
+	)
+	if err != nil {
+		return LocalTargetInspection{}, err
+	}
+	markerExists, markerHead, err := adapter.inspectReleaseMarkerRef(
+		ctx, binding.root, binding.featureBranch, binding.objectFormat,
+	)
+	if err != nil {
+		return LocalTargetInspection{}, err
+	}
+	if !markerExists || markerHead != ownedHead {
+		return LocalTargetInspection{}, fmt.Errorf(
+			"release marker ref %s does not point to durable owned head %s",
+			localTargetReleaseMarkerRef(binding.featureBranch), ownedHead,
+		)
+	}
+	return inspection, nil
 }
 
 func (adapter LocalTargetGitAdapter) inspectUncreatedTarget(

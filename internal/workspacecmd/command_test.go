@@ -140,6 +140,15 @@ func TestLocalCommandDecodersRequireExactReceiptFreeFields(t *testing.T) {
 			target: func() any { return &completeVerifyInput{} },
 			want:   "unknown field",
 		},
+		{
+			name: "abandon requires reason",
+			source: `{
+  "schema_version": 2,
+  "occurred_at": "2026-07-22T10:00:00Z"
+}`,
+			target: func() any { return &abandonInput{} },
+			want:   "reason",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -156,6 +165,14 @@ func TestLocalCommandDecodersRequireExactReceiptFreeFields(t *testing.T) {
   "occurred_at": "2026-07-22T10:00:00Z"
 }`), &completion); err != nil {
 		t.Fatalf("valid completion envelope: %v", err)
+	}
+	var abandonment abandonInput
+	if err := decodeRequest([]byte(`{
+  "schema_version": 2,
+  "occurred_at": "2026-07-22T10:00:00Z",
+  "reason": "superseded by a newer generation"
+}`), &abandonment); err != nil {
+		t.Fatalf("valid abandonment envelope: %v", err)
 	}
 }
 
@@ -198,12 +215,13 @@ func TestRequestSchemasExposeOnlySupportedLocalMutations(t *testing.T) {
 		"review.ready",
 		"integrate.merge-unit",
 		"complete.verify",
+		"abandon",
 	} {
 		if _, exists := schemas[required]; !exists {
 			t.Fatalf("request schemas omit %s", required)
 		}
 	}
-	if len(schemas) != 20 {
+	if len(schemas) != 21 {
 		t.Fatalf("request schema count = %d: %+v", len(schemas), schemas)
 	}
 	for _, action := range []string{
@@ -245,6 +263,16 @@ func TestDecodeRequestKeepsSchemaOptionalFieldsOptional(t *testing.T) {
 
 func TestReportDirectiveSchemaKeepsChoicesOptional(t *testing.T) {
 	reports := ReportSchemas()["reports"].(map[string]any)
+	report := reports["report"].(map[string]any)
+	reportProperties := report["properties"].(map[string]any)
+	abandonment, exists := reportProperties["abandonment"]
+	if !exists {
+		t.Fatalf("report schema omits abandonment: %+v", reportProperties)
+	}
+	abandonmentProperties := abandonment.(map[string]any)["properties"].(map[string]any)
+	if _, exists := abandonmentProperties["reason"]; !exists {
+		t.Fatalf("abandonment schema omits reason: %+v", abandonmentProperties)
+	}
 	scheduler := reports["scheduler"].(map[string]any)
 	properties := scheduler["properties"].(map[string]any)
 	units := properties["units"].(map[string]any)
@@ -304,6 +332,21 @@ func TestDeferredLocalCommandsStrictlyDecodeTheirFinalEnvelopes(
 	if err == nil ||
 		!strings.Contains(err.Error(), "workspace directory is required") {
 		t.Fatalf("valid completion envelope error = %v", err)
+	}
+	_, err = executeAbandon(
+		context.Background(),
+		workspace.WorkspaceBundle{},
+		Options{
+			Input: []byte(`{
+  "schema_version": 2,
+  "occurred_at": "2026-07-22T10:00:00Z",
+  "reason": "superseded by a newer generation"
+}`),
+		},
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "workspace directory is required") {
+		t.Fatalf("valid abandonment envelope error = %v", err)
 	}
 }
 
