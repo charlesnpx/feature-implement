@@ -94,15 +94,13 @@ readiness.
 
 ## Integrate, resolve boundaries, and complete
 
-1. Submit `integrate merge-unit` only for the exact accepted head and tree.
-   Configured review requires matching `review ready`; review-optional work
-   requires matching `attempt adopt-head`.
-2. Integration creates a deterministic two-parent commit whose first parent is
-   the expected feature head, second parent is the accepted attempt head, and
-   tree is the accepted attempt tree. It compare-and-swap updates only the
-   workspace-owned feature ref.
-3. Submit `attempt boundary` with exact local evidence. Treat every returned
-   directive as authoritative workflow state:
+1. Before integration, submit `attempt boundary` with exact local evidence only
+   when the merge unit configures a checkpoint other than `none`, or when the
+   agent genuinely needs an allowed escalation. The request requires `kind`:
+   use `checkpoint` for the configured gate and `escalation` for a genuine
+   agent-raised stop. Record it while the attempt is active, before
+   `integrate merge-unit`.
+2. Treat every returned directive as authoritative workflow state:
 
    - `complete_goal_and_wait`: complete the exact goal and submit
      `attempt acknowledge` with the returned directive and idempotency values.
@@ -112,9 +110,19 @@ readiness.
    - `create_next_goal`: create exactly the returned goal, then submit its
      matching acknowledgement.
 
-4. Call `attempt resume` only after every required acknowledgement and owner
-   response is recorded. Do not resume a completed merge unit.
-5. After all merge units are integrated, all boundaries are resolved, and no
+3. When a boundary was recorded, call `attempt resume` only after every required
+   acknowledgement and owner response is recorded. Do not resume a completed
+   merge unit.
+4. After any required boundary is resolved and the attempt is active again, or
+   immediately when no boundary is needed, submit `integrate merge-unit` only
+   for the exact accepted head and tree. Configured review requires matching
+   `review ready`; review-optional work requires matching `attempt adopt-head`.
+5. Integration creates a deterministic two-parent commit whose first parent is
+   the expected feature head, second parent is the accepted attempt head, and
+   tree is the accepted attempt tree. It compare-and-swap updates only the
+   workspace-owned feature ref. The completed attempt cannot reach another
+   `attempt boundary`.
+6. After all merge units are integrated, all boundaries are resolved, and no
    attempt or local effect remains active, run `complete verify`.
 
 ## Finish
