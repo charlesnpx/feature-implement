@@ -112,6 +112,26 @@ func TestREADMEExecutionConfigurationSampleGuardRejectsLegacyBoundaryMode(t *tes
 	t.Fatal("README execution-configuration sample guard accepted an in-memory legacy boundary mode")
 }
 
+func TestREADMEExecutionConfigurationSampleGuardRejectsMisspelledBoundary(t *testing.T) {
+	readme := string(readRepositoryFile(t, "README.md"))
+	invalidReadme := strings.ReplaceAll(readme, "\n    boundary:", "\n    boundry:")
+	if invalidReadme == readme {
+		t.Fatal("README fixture is missing the boundary mappings in the execution-configuration sample")
+	}
+
+	for _, sample := range executionConfigurationSamples(t, invalidReadme) {
+		if !strings.Contains(sample.source, "boundry:") {
+			continue
+		}
+		if _, err := workspace.DecodeExecutionConfig([]byte(sample.source)); err != nil {
+			t.Logf("in-memory invalid README execution-configuration sample was rejected: %v", err)
+			return
+		}
+		t.Fatal("README execution-configuration sample guard accepted an in-memory misspelled boundary")
+	}
+	t.Fatal("README execution-configuration sample guard skipped an in-memory misspelled boundary")
+}
+
 type readmeYAMLBlock struct {
 	startLine int
 	source    string
@@ -123,12 +143,12 @@ func executionConfigurationSamples(t *testing.T, readme string) []readmeYAMLBloc
 	for _, block := range readmeYAMLBlocks(t, readme) {
 		if hasYAMLScalar(block.source, "schema_version", "2") &&
 			hasYAMLMapping(block.source, "merge_units") &&
-			hasYAMLMapping(block.source, "boundary") {
+			(hasYAMLMapping(block.source, "policy") || hasYAMLMapping(block.source, "profiles")) {
 			samples = append(samples, block)
 		}
 	}
 	if len(samples) == 0 {
-		t.Fatal("README has no fenced execution-configuration YAML sample with schema_version, merge_units, and boundary mappings")
+		t.Fatal("README has no fenced execution-configuration YAML sample with schema_version, merge_units, and a policy or profiles mapping")
 	}
 	return samples
 }
