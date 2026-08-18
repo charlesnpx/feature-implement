@@ -154,6 +154,72 @@ func TestWorkspaceRuntimeViewsExposeOnlyLocalStateAndReplayDeterministically(
 	}
 }
 
+func TestWorkspaceRuntimeViewsDistinguishPausedBoundaryKinds(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name         string
+		boundaryKind workspace.AttemptBoundaryKind
+	}{
+		{name: "planned checkpoint", boundaryKind: workspace.AttemptBoundaryKindCheckpoint},
+		{name: "raised escalation", boundaryKind: workspace.AttemptBoundaryKindEscalation},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			harness := newAttemptHarness(t, "unit-one")
+			attempt := harness.reserve(t, "2026-07-21T11:01:00Z")
+			attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T11:02:00Z")
+			if _, err := workspace.RecordAttemptBoundary(
+				context.Background(), harness.journal, harness.definition, harness.git,
+				workspace.RecordAttemptBoundaryRequest{
+					AttemptID: attempt.AttemptID(), Kind: test.boundaryKind,
+					Evidence: boundaryEvidence(t, test.name), OccurredAt: mustTime(t, "2026-07-21T11:03:00Z"),
+				},
+			); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := harness.journal.ReadSnapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			report, err := workspace.RebuildWorkspaceReport(snapshot, harness.definition)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			assertDirective := func(surface string, pending bool, directives []workspace.BoundaryDirectiveView) {
+				t.Helper()
+				if !pending || len(directives) != 1 {
+					t.Fatalf("%s paused boundary = pending=%v directives=%+v", surface, pending, directives)
+				}
+				directive := directives[0]
+				if directive.Kind != "owner_gate" || directive.BoundaryKind != string(test.boundaryKind) {
+					t.Fatalf("%s directive = %+v", surface, directive)
+				}
+			}
+
+			status := schedulerUnitByID(t, report.Scheduler, "unit-one")
+			if status.Status != workspace.SchedulerUnitPaused {
+				t.Fatalf("status unit = %+v", status)
+			}
+			assertDirective("status", status.BoundaryPending, status.PendingDirectives)
+			if len(report.Attempts) != 1 || report.Attempts[0].Phase != workspace.AttemptPaused {
+				t.Fatalf("report attempts = %+v", report.Attempts)
+			}
+			assertDirective("report", report.Attempts[0].BoundaryPending, report.Attempts[0].PendingDirectives)
+
+			encoded, err := json.Marshal(report)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(encoded), `"boundary_kind":"`+string(test.boundaryKind)+`"`) {
+				t.Fatalf("report JSON does not expose %q boundary kind: %s", test.boundaryKind, encoded)
+			}
+		})
+	}
+}
+
 func schedulerUnitByID(
 	t *testing.T,
 	view workspace.SchedulerView,
