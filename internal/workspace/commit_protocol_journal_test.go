@@ -175,7 +175,8 @@ func TestJournaledCommitProtocolRecoversCommitAndCheckCrashWindows(t *testing.T)
 	if _, err := workspace.RecordAttemptBoundary(
 		context.Background(), harness.journal, harness.definition, harness.git,
 		workspace.RecordAttemptBoundaryRequest{
-			AttemptID: attempt.AttemptID(), Evidence: boundaryEvidence(t, "premature"),
+			AttemptID: attempt.AttemptID(), Kind: workspace.AttemptBoundaryKindCheckpoint,
+			Evidence:   boundaryEvidence(t, "premature"),
 			OccurredAt: mustTime(t, "2026-07-21T11:02:00Z"),
 		},
 	); err == nil || !strings.Contains(err.Error(), "before its configured commit protocol completes") {
@@ -278,7 +279,8 @@ func TestJournaledCommitProtocolRecoversCommitAndCheckCrashWindows(t *testing.T)
 	if _, err := workspace.RecordAttemptBoundary(
 		context.Background(), harness.journal, harness.definition, harness.git,
 		workspace.RecordAttemptBoundaryRequest{
-			AttemptID: attempt.AttemptID(), Evidence: boundaryEvidence(t, "extra-commit"),
+			AttemptID: attempt.AttemptID(), Kind: workspace.AttemptBoundaryKindCheckpoint,
+			Evidence:   boundaryEvidence(t, "extra-commit"),
 			OccurredAt: mustTime(t, "2026-07-21T11:06:00Z"),
 		},
 	); err == nil || !strings.Contains(err.Error(), "Git verification failed") {
@@ -289,7 +291,8 @@ func TestJournaledCommitProtocolRecoversCommitAndCheckCrashWindows(t *testing.T)
 	boundary, err := workspace.RecordAttemptBoundary(
 		context.Background(), harness.journal, harness.definition, harness.git,
 		workspace.RecordAttemptBoundaryRequest{
-			AttemptID: attempt.AttemptID(), Evidence: boundaryEvidence(t, "complete"),
+			AttemptID: attempt.AttemptID(), Kind: workspace.AttemptBoundaryKindCheckpoint,
+			Evidence:   boundaryEvidence(t, "complete"),
 			OccurredAt: mustTime(t, "2026-07-21T11:07:00Z"),
 		},
 	)
@@ -663,7 +666,8 @@ func TestJournaledReviewFixReplayBudgetExactHeadAndBoundary(t *testing.T) {
 	boundary, err := workspace.RecordAttemptBoundary(
 		context.Background(), scenario.harness.journal, scenario.harness.definition, scenario.harness.git,
 		workspace.RecordAttemptBoundaryRequest{
-			AttemptID: scenario.attempt.AttemptID(), Evidence: boundaryEvidence(t, "review-fixes-complete"),
+			AttemptID: scenario.attempt.AttemptID(), Kind: workspace.AttemptBoundaryKindCheckpoint,
+			Evidence:   boundaryEvidence(t, "review-fixes-complete"),
 			OccurredAt: mustTime(t, "2026-07-21T12:18:00Z"),
 		},
 	)
@@ -697,7 +701,8 @@ func TestAttemptBoundaryRejectsInFlightReviewFix(t *testing.T) {
 	if _, err := workspace.RecordAttemptBoundary(
 		context.Background(), scenario.harness.journal, scenario.harness.definition, scenario.harness.git,
 		workspace.RecordAttemptBoundaryRequest{
-			AttemptID: scenario.attempt.AttemptID(), Evidence: boundaryEvidence(t, "review-fix-in-flight"),
+			AttemptID: scenario.attempt.AttemptID(), Kind: workspace.AttemptBoundaryKindCheckpoint,
+			Evidence:   boundaryEvidence(t, "review-fix-in-flight"),
 			OccurredAt: mustTime(t, "2026-07-21T12:19:00Z"),
 		},
 	); err == nil || !strings.Contains(err.Error(), "in-flight review fix") {

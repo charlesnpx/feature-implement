@@ -243,6 +243,7 @@ type AttemptBoundaryReachedJournalEvent struct {
 	attemptID       ID
 	boundaryID      ID
 	ordinal         uint64
+	kind            AttemptBoundaryKind
 	checkpoint      AttemptCheckpointMode
 	serialSegment   ID
 	leaseID         ID
@@ -258,6 +259,7 @@ func NewAttemptBoundaryReachedJournalEvent(
 	workspaceID, attemptID ID,
 	generation Digest,
 	ordinal uint64,
+	kind AttemptBoundaryKind,
 	checkpoint AttemptCheckpointMode,
 	serialSegment, leaseID ID,
 	goal GoalBinding,
@@ -274,14 +276,14 @@ func NewAttemptBoundaryReachedJournalEvent(
 		return AttemptBoundaryReachedJournalEvent{}, err
 	}
 	directiveDigest, idempotencyKey, err := deriveBoundaryDirectiveBindings(
-		workspaceID, generation, attemptID, boundaryID, checkpoint, goal, head, evidenceDigest,
+		workspaceID, generation, attemptID, boundaryID, kind, checkpoint, goal, head, evidenceDigest,
 	)
 	if err != nil {
 		return AttemptBoundaryReachedJournalEvent{}, err
 	}
 	event := AttemptBoundaryReachedJournalEvent{
 		workspaceID: workspaceID, generation: generation, attemptID: attemptID,
-		boundaryID: boundaryID, ordinal: ordinal, checkpoint: checkpoint, serialSegment: serialSegment,
+		boundaryID: boundaryID, ordinal: ordinal, kind: kind, checkpoint: checkpoint, serialSegment: serialSegment,
 		leaseID: leaseID, goal: goal, head: head,
 		evidence: evidenceCopy, evidenceDigest: evidenceDigest,
 		directiveDigest: directiveDigest, idempotencyKey: idempotencyKey,
@@ -299,10 +301,14 @@ func (AttemptBoundaryReachedJournalEvent) eventType() JournalEventType {
 func (event AttemptBoundaryReachedJournalEvent) boundGeneration() Digest { return event.generation }
 func (event AttemptBoundaryReachedJournalEvent) validate() error {
 	if event.workspaceID.IsZero() || event.generation.IsZero() || event.attemptID.IsZero() ||
-		event.boundaryID.IsZero() || event.ordinal == 0 || !event.checkpoint.valid() || event.leaseID.IsZero() ||
+		event.boundaryID.IsZero() || event.ordinal == 0 || !event.kind.valid() || !event.checkpoint.valid() || event.leaseID.IsZero() ||
 		event.goal.IsZero() || event.head.IsZero() ||
 		len(event.evidence) == 0 || event.evidenceDigest.IsZero() {
 		return fmt.Errorf("attempt boundary requires attempt, lease, goal, head, and evidence bindings")
+	}
+	if event.kind == AttemptBoundaryKindCheckpoint && event.checkpoint == AttemptCheckpointNone ||
+		event.kind == AttemptBoundaryKindEscalation && event.checkpoint != AttemptCheckpointPauseOnly {
+		return fmt.Errorf("attempt boundary kind does not match its resolved checkpoint shape")
 	}
 	for _, item := range event.evidence {
 		if err := item.validate(); err != nil {
@@ -318,7 +324,7 @@ func (event AttemptBoundaryReachedJournalEvent) validate() error {
 		return fmt.Errorf("boundary identity does not match its immutable bindings")
 	}
 	directive, key, err := deriveBoundaryDirectiveBindings(
-		event.workspaceID, event.generation, event.attemptID, event.boundaryID, event.checkpoint, event.goal, event.head,
+		event.workspaceID, event.generation, event.attemptID, event.boundaryID, event.kind, event.checkpoint, event.goal, event.head,
 		event.evidenceDigest,
 	)
 	if err != nil || directive != event.directiveDigest || key != event.idempotencyKey {
@@ -331,6 +337,9 @@ func (event AttemptBoundaryReachedJournalEvent) Generation() Digest { return eve
 func (event AttemptBoundaryReachedJournalEvent) AttemptID() ID      { return event.attemptID }
 func (event AttemptBoundaryReachedJournalEvent) BoundaryID() ID     { return event.boundaryID }
 func (event AttemptBoundaryReachedJournalEvent) Ordinal() uint64    { return event.ordinal }
+func (event AttemptBoundaryReachedJournalEvent) Kind() AttemptBoundaryKind {
+	return event.kind
+}
 func (event AttemptBoundaryReachedJournalEvent) Checkpoint() AttemptCheckpointMode {
 	return event.checkpoint
 }
@@ -811,17 +820,19 @@ func deriveBoundaryDirectiveBindings(
 	workspaceID ID,
 	generation Digest,
 	attemptID, boundaryID ID,
+	kind AttemptBoundaryKind,
 	checkpoint AttemptCheckpointMode,
 	goal GoalBinding,
 	head GitObjectID,
 	evidenceDigest Digest,
 ) (Digest, Digest, error) {
 	if workspaceID.IsZero() || generation.IsZero() || attemptID.IsZero() || boundaryID.IsZero() ||
-		!checkpoint.valid() || goal.IsZero() || head.IsZero() || evidenceDigest.IsZero() {
+		!kind.valid() || !checkpoint.valid() || goal.IsZero() || head.IsZero() || evidenceDigest.IsZero() {
 		return Digest{}, Digest{}, fmt.Errorf("boundary directive requires immutable boundary bindings")
 	}
 	type directiveJSON struct {
 		SchemaVersion int                   `json:"schema_version"`
+		Kind          AttemptBoundaryKind   `json:"kind"`
 		Checkpoint    AttemptCheckpointMode `json:"checkpoint"`
 		WorkspaceID   string                `json:"workspace_id"`
 		Generation    string                `json:"generation"`
@@ -833,7 +844,7 @@ func deriveBoundaryDirectiveBindings(
 		Evidence      string                `json:"evidence_digest"`
 	}
 	content, err := json.Marshal(directiveJSON{
-		SchemaVersion: JournalSchemaVersion, Checkpoint: checkpoint, WorkspaceID: workspaceID.String(),
+		SchemaVersion: JournalSchemaVersion, Kind: kind, Checkpoint: checkpoint, WorkspaceID: workspaceID.String(),
 		Generation: generation.String(), AttemptID: attemptID.String(), BoundaryID: boundaryID.String(),
 		GoalID: goal.id.String(), GoalScope: goal.scope, Head: head.String(), Evidence: evidenceDigest.String(),
 	})

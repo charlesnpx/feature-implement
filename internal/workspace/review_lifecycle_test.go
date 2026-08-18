@@ -376,7 +376,8 @@ func TestReviewLifecycleVerifiesLocalExactHeadEvidenceAndBoundaryReadiness(t *te
 	if _, err := workspace.RecordAttemptBoundary(
 		context.Background(), harness.journal, harness.definition, harness.git,
 		workspace.RecordAttemptBoundaryRequest{
-			AttemptID: harness.attempt.AttemptID(), Evidence: boundaryEvidence(t, "too-early"),
+			AttemptID: harness.attempt.AttemptID(), Kind: workspace.AttemptBoundaryKindCheckpoint,
+			Evidence:   boundaryEvidence(t, "too-early"),
 			OccurredAt: mustTime(t, "2026-07-21T11:00:01Z"),
 		},
 	); err == nil || !strings.Contains(err.Error(), "every configured review profile") {
@@ -509,7 +510,8 @@ func TestReviewLifecycleVerifiesLocalExactHeadEvidenceAndBoundaryReadiness(t *te
 	result, err := workspace.RecordAttemptBoundary(
 		context.Background(), harness.journal, harness.definition, harness.git,
 		workspace.RecordAttemptBoundaryRequest{
-			AttemptID: harness.attempt.AttemptID(), Evidence: boundaryEvidence(t, "reviewed"),
+			AttemptID: harness.attempt.AttemptID(), Kind: workspace.AttemptBoundaryKindCheckpoint,
+			Evidence:   boundaryEvidence(t, "reviewed"),
 			OccurredAt: mustTime(t, "2026-07-21T11:00:06Z"),
 		},
 	)
@@ -1173,7 +1175,8 @@ func TestReviewFixCommitInvalidatesReadinessUntilAllProfilesReconfirm(t *testing
 	if _, err := workspace.RecordAttemptBoundary(
 		context.Background(), harness.journal, harness.definition, harness.git,
 		workspace.RecordAttemptBoundaryRequest{
-			AttemptID: harness.attempt.AttemptID(), Evidence: boundaryEvidence(t, "unconfirmed-fix"),
+			AttemptID: harness.attempt.AttemptID(), Kind: workspace.AttemptBoundaryKindCheckpoint,
+			Evidence:   boundaryEvidence(t, "unconfirmed-fix"),
 			OccurredAt: mustTime(t, "2026-07-21T11:20:05Z"),
 		},
 	); err == nil || !strings.Contains(err.Error(), "every configured review profile") {
@@ -1296,7 +1299,8 @@ func TestReviewFixCommitInvalidatesReadinessUntilAllProfilesReconfirm(t *testing
 	if _, err := workspace.RecordAttemptBoundary(
 		context.Background(), harness.journal, harness.definition, harness.git,
 		workspace.RecordAttemptBoundaryRequest{
-			AttemptID: harness.attempt.AttemptID(), Evidence: boundaryEvidence(t, "confirmed-fix"),
+			AttemptID: harness.attempt.AttemptID(), Kind: workspace.AttemptBoundaryKindCheckpoint,
+			Evidence:   boundaryEvidence(t, "confirmed-fix"),
 			OccurredAt: mustTime(t, "2026-07-21T11:20:12Z"),
 		},
 	); err != nil {

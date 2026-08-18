@@ -349,8 +349,20 @@ func MaterializeAttempt(
 	return loadRuntimeAttempt(journal, attempt.attemptID)
 }
 
+type AttemptBoundaryKind string
+
+const (
+	AttemptBoundaryKindCheckpoint AttemptBoundaryKind = "checkpoint"
+	AttemptBoundaryKindEscalation AttemptBoundaryKind = "escalation"
+)
+
+func (kind AttemptBoundaryKind) valid() bool {
+	return kind == AttemptBoundaryKindCheckpoint || kind == AttemptBoundaryKindEscalation
+}
+
 type RecordAttemptBoundaryRequest struct {
 	AttemptID  ID
+	Kind       AttemptBoundaryKind
 	Evidence   []Evidence
 	OccurredAt time.Time
 	Fault      AttemptLifecycleFaultInjector
@@ -433,8 +445,8 @@ func RecordAttemptBoundary(
 	git AttemptGitPort,
 	request RecordAttemptBoundaryRequest,
 ) (AttemptBoundaryResult, error) {
-	if journal == nil || git == nil || request.AttemptID.IsZero() || request.OccurredAt.IsZero() {
-		return AttemptBoundaryResult{}, fmt.Errorf("attempt boundary requires journal, Git adapter, attempt, and occurrence time")
+	if journal == nil || git == nil || request.AttemptID.IsZero() || !request.Kind.valid() || request.OccurredAt.IsZero() {
+		return AttemptBoundaryResult{}, fmt.Errorf("attempt boundary requires journal, Git adapter, attempt, kind, and occurrence time")
 	}
 	if len(request.Evidence) == 0 {
 		return AttemptBoundaryResult{}, fmt.Errorf("attempt boundary requires typed evidence")
@@ -452,6 +464,12 @@ func RecordAttemptBoundary(
 		if !ok {
 			return AttemptBoundaryResult{}, fmt.Errorf("attempt %s has inconsistent paused state", attempt.attemptID)
 		}
+		if request.Kind != boundary.kind {
+			return AttemptBoundaryResult{}, fmt.Errorf(
+				"attempt %s is already paused with different boundary kind: requested %q, recorded %q",
+				attempt.attemptID, request.Kind, boundary.kind,
+			)
+		}
 		requestedDigest, digestErr := digestBoundaryEvidence(sortedEvidenceForProjection(request.Evidence))
 		if digestErr != nil {
 			return AttemptBoundaryResult{}, digestErr
@@ -463,6 +481,24 @@ func RecordAttemptBoundary(
 	}
 	if attempt.phase != AttemptActive {
 		return AttemptBoundaryResult{}, fmt.Errorf("attempt %s must be active to reach a boundary", attempt.attemptID)
+	}
+	resolvedCheckpoint := attempt.checkpoint
+	switch request.Kind {
+	case AttemptBoundaryKindCheckpoint:
+		if attempt.checkpoint == AttemptCheckpointNone {
+			return AttemptBoundaryResult{}, fmt.Errorf(
+				"merge unit %s rejects checkpoint boundary: configured checkpoint policy %q",
+				attempt.mergeUnit, attempt.checkpoint,
+			)
+		}
+	case AttemptBoundaryKindEscalation:
+		if attempt.escalation == AttemptEscalationForbidden {
+			return AttemptBoundaryResult{}, fmt.Errorf(
+				"merge unit %s rejects escalation boundary: configured escalation policy %q",
+				attempt.mergeUnit, attempt.escalation,
+			)
+		}
+		resolvedCheckpoint = AttemptCheckpointPauseOnly
 	}
 	unitExecution, err := executionForMergeUnit(definition.execution, attempt.mergeUnit)
 	if err != nil {
@@ -549,7 +585,7 @@ func RecordAttemptBoundary(
 	}
 	event, err := NewAttemptBoundaryReachedJournalEvent(
 		runtime.workspaceID, attempt.attemptID, attempt.generation,
-		uint64(len(attempt.boundaries)+1), attempt.checkpoint, attempt.serialSegment,
+		uint64(len(attempt.boundaries)+1), request.Kind, resolvedCheckpoint, attempt.serialSegment,
 		attempt.leaseID, attempt.goal, inspection.worktreeHead,
 		sortedEvidenceForProjection(request.Evidence),
 	)

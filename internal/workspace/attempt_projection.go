@@ -135,6 +135,7 @@ type RuntimeBoundaryProjection struct {
 	ordinal          uint64
 	record           uint64
 	resumedRecord    uint64
+	kind             AttemptBoundaryKind
 	checkpoint       AttemptCheckpointMode
 	serialSegment    ID
 	leaseID          ID
@@ -158,6 +159,9 @@ func (boundary RuntimeBoundaryProjection) BoundaryID() ID        { return bounda
 func (boundary RuntimeBoundaryProjection) Ordinal() uint64       { return boundary.ordinal }
 func (boundary RuntimeBoundaryProjection) Record() uint64        { return boundary.record }
 func (boundary RuntimeBoundaryProjection) ResumedRecord() uint64 { return boundary.resumedRecord }
+func (boundary RuntimeBoundaryProjection) Kind() AttemptBoundaryKind {
+	return boundary.kind
+}
 func (boundary RuntimeBoundaryProjection) Checkpoint() AttemptCheckpointMode {
 	return boundary.checkpoint
 }
@@ -373,9 +377,21 @@ func reduceAttemptRuntime(
 			return err
 		}
 		if attempt.phase != AttemptActive || attempt.leaseID != event.leaseID || attempt.goal != event.goal ||
-			attempt.checkpoint != event.checkpoint || attempt.serialSegment != event.serialSegment ||
+			attempt.serialSegment != event.serialSegment ||
 			event.ordinal != uint64(len(attempt.boundaries)+1) {
 			return fmt.Errorf("attempt boundary does not match the active lease, goal, policy, and ordinal")
+		}
+		switch event.kind {
+		case AttemptBoundaryKindCheckpoint:
+			if attempt.checkpoint == AttemptCheckpointNone || event.checkpoint != attempt.checkpoint {
+				return fmt.Errorf("checkpoint boundary does not match the reserved merge-unit checkpoint policy")
+			}
+		case AttemptBoundaryKindEscalation:
+			if attempt.escalation != AttemptEscalationAllowed || event.checkpoint != AttemptCheckpointPauseOnly {
+				return fmt.Errorf("escalation boundary does not match the reserved merge-unit escalation policy")
+			}
+		default:
+			return fmt.Errorf("attempt boundary has unsupported kind %q", event.kind)
 		}
 		updated := &next.attempts[index]
 		updated.phase = AttemptPaused
@@ -384,7 +400,7 @@ func reduceAttemptRuntime(
 		updated.leaseID = ID{}
 		updated.boundaries = append(updated.boundaries, RuntimeBoundaryProjection{
 			boundaryID: event.boundaryID, ordinal: event.ordinal, record: record.sequence,
-			checkpoint: event.checkpoint, serialSegment: event.serialSegment,
+			kind: event.kind, checkpoint: event.checkpoint, serialSegment: event.serialSegment,
 			leaseID: event.leaseID,
 			goal:    event.goal, head: event.head, evidence: cloneEvidence(event.evidence),
 			evidenceDigest: event.evidenceDigest, directiveDigest: event.directiveDigest,
@@ -673,6 +689,7 @@ func canonicalAttemptRuntime(attempt RuntimeAttemptProjection) (json.RawMessage,
 		Ordinal         uint64                `json:"ordinal"`
 		Record          uint64                `json:"record"`
 		ResumedRecord   uint64                `json:"resumed_record"`
+		Kind            AttemptBoundaryKind   `json:"kind"`
 		Checkpoint      AttemptCheckpointMode `json:"checkpoint"`
 		SerialSegment   string                `json:"serial_segment,omitempty"`
 		LeaseID         string                `json:"lease_id"`
@@ -776,7 +793,7 @@ func canonicalAttemptRuntime(attempt RuntimeAttemptProjection) (json.RawMessage,
 	for _, boundary := range attempt.boundaries {
 		item := boundaryJSON{
 			BoundaryID: boundary.boundaryID.String(), Ordinal: boundary.ordinal, Record: boundary.record,
-			ResumedRecord: boundary.resumedRecord, Checkpoint: boundary.checkpoint,
+			ResumedRecord: boundary.resumedRecord, Kind: boundary.kind, Checkpoint: boundary.checkpoint,
 			SerialSegment: boundary.serialSegment.String(),
 			LeaseID:       boundary.leaseID.String(),
 			GoalID:        boundary.goal.id.String(), GoalScope: boundary.goal.scope, Head: boundary.head.String(),

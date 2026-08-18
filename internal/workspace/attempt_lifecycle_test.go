@@ -2348,7 +2348,8 @@ func TestPauseOnlyBoundaryAtomicallyPausesAndResumesSameGoal(t *testing.T) {
 	result, err := workspace.RecordAttemptBoundary(
 		context.Background(), harness.journal, harness.definition, harness.git,
 		workspace.RecordAttemptBoundaryRequest{
-			AttemptID: attempt.AttemptID(), Evidence: evidence, OccurredAt: mustTime(t, "2026-07-21T11:03:00Z"),
+			AttemptID: attempt.AttemptID(), Kind: workspace.AttemptBoundaryKindCheckpoint,
+			Evidence: evidence, OccurredAt: mustTime(t, "2026-07-21T11:03:00Z"),
 		},
 	)
 	if err != nil {
@@ -2360,9 +2361,16 @@ func TestPauseOnlyBoundaryAtomicallyPausesAndResumesSameGoal(t *testing.T) {
 		t.Fatalf("pause-only boundary did not atomically close and release: %#v", paused)
 	}
 	boundary := result.Boundary()
-	if boundary.LeaseID() != lease || boundary.EvidenceDigest().IsZero() ||
+	if boundary.Kind() != workspace.AttemptBoundaryKindCheckpoint ||
+		boundary.Checkpoint() != workspace.AttemptCheckpointPauseOnly ||
+		boundary.LeaseID() != lease || boundary.EvidenceDigest().IsZero() ||
 		boundary.Head() != unconstrainedHead || !boundary.LeaseFencedAndReleased() {
 		t.Fatalf("boundary did not checkpoint closed bindings: %#v", boundary)
+	}
+	replayed := mustRuntimeAttempt(t, harness.journal, attempt.AttemptID())
+	replayedBoundary, ok := replayed.CurrentBoundary()
+	if !ok || replayedBoundary.Kind() != workspace.AttemptBoundaryKindCheckpoint {
+		t.Fatalf("replayed planned checkpoint kind = %#v exists=%v", replayedBoundary, ok)
 	}
 	ownerDirective, ok := result.Directives()[0].(workspace.OwnerGateDirective)
 	if !ok || ownerDirective.DirectiveDigest() != boundary.DirectiveDigest() ||
@@ -2422,6 +2430,208 @@ func TestPauseOnlyBoundaryAtomicallyPausesAndResumesSameGoal(t *testing.T) {
 	if resumed.Phase() != workspace.AttemptActive || resumed.Goal() != harness.goal ||
 		resumed.LeaseID() == lease || !resumed.SerialSegmentHeld() {
 		t.Fatalf("pause-only resume bindings = %#v", resumed)
+	}
+}
+
+func TestAttemptBoundaryRejectsDisallowedKindsBeforeAppend(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name        string
+		replacement string
+		kind        workspace.AttemptBoundaryKind
+		want        string
+	}{
+		{
+			name:        "checkpoint when checkpoint policy is none",
+			replacement: "checkpoint: none\n      escalation: allowed\n      serial_segment: serial-alpha",
+			kind:        workspace.AttemptBoundaryKindCheckpoint,
+			want:        "configured checkpoint policy \"none\"",
+		},
+		{
+			name:        "escalation when escalation policy is forbidden",
+			replacement: "checkpoint: pause_only\n      escalation: forbidden\n      serial_segment: serial-alpha",
+			kind:        workspace.AttemptBoundaryKindEscalation,
+			want:        "configured escalation policy \"forbidden\"",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newDefinitionFixture(t)
+			configuration := string(fixture.sources.ExecutionConfig.Bytes)
+			updated := strings.Replace(
+				configuration,
+				"checkpoint: pause_only\n      escalation: allowed\n      serial_segment: serial-alpha",
+				test.replacement,
+				1,
+			)
+			if updated == configuration {
+				t.Fatal("failed to install boundary policy fixture")
+			}
+			fixture.sources.ExecutionConfig.Bytes = []byte(updated)
+			harness := newAttemptHarnessFromFixture(t, fixture, "unit-one")
+			attempt := harness.reserve(t, "2026-07-21T11:01:00Z")
+			attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T11:02:00Z")
+			before := journalRecordCount(t, harness.journal)
+			_, err := workspace.RecordAttemptBoundary(
+				context.Background(), harness.journal, harness.definition, harness.git,
+				workspace.RecordAttemptBoundaryRequest{
+					AttemptID: attempt.AttemptID(), Kind: test.kind,
+					Evidence: boundaryEvidence(t, test.name), OccurredAt: mustTime(t, "2026-07-21T11:03:00Z"),
+				},
+			)
+			if err == nil || !strings.Contains(err.Error(), "alpha-plan/unit-one") || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("disallowed boundary error = %v", err)
+			}
+			if after := journalRecordCount(t, harness.journal); after != before {
+				t.Fatalf("rejected boundary wrote journal records: before=%d after=%d", before, after)
+			}
+		})
+	}
+}
+
+func TestAttemptBoundaryRejectsDifferentKindSameEvidenceOnPausedRetry(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name          string
+		replacement   string
+		recordedKind  workspace.AttemptBoundaryKind
+		requestedKind workspace.AttemptBoundaryKind
+	}{
+		{
+			name:          "checkpoint-none retry cannot replace recorded escalation",
+			replacement:   "checkpoint: none\n      escalation: allowed\n      serial_segment: serial-alpha",
+			recordedKind:  workspace.AttemptBoundaryKindEscalation,
+			requestedKind: workspace.AttemptBoundaryKindCheckpoint,
+		},
+		{
+			name:          "escalation-forbidden retry cannot replace recorded checkpoint",
+			replacement:   "checkpoint: pause_only\n      escalation: forbidden\n      serial_segment: serial-alpha",
+			recordedKind:  workspace.AttemptBoundaryKindCheckpoint,
+			requestedKind: workspace.AttemptBoundaryKindEscalation,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newDefinitionFixture(t)
+			configuration := string(fixture.sources.ExecutionConfig.Bytes)
+			updated := strings.Replace(
+				configuration,
+				"checkpoint: pause_only\n      escalation: allowed\n      serial_segment: serial-alpha",
+				test.replacement,
+				1,
+			)
+			if updated == configuration {
+				t.Fatal("failed to install boundary policy fixture")
+			}
+			fixture.sources.ExecutionConfig.Bytes = []byte(updated)
+			harness := newAttemptHarnessFromFixture(t, fixture, "unit-one")
+			attempt := harness.reserve(t, "2026-07-21T11:01:00Z")
+			attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T11:02:00Z")
+			evidence := boundaryEvidence(t, test.name)
+			if _, err := workspace.RecordAttemptBoundary(
+				context.Background(), harness.journal, harness.definition, harness.git,
+				workspace.RecordAttemptBoundaryRequest{
+					AttemptID: attempt.AttemptID(), Kind: test.recordedKind,
+					Evidence: evidence, OccurredAt: mustTime(t, "2026-07-21T11:03:00Z"),
+				},
+			); err != nil {
+				t.Fatalf("record %s boundary: %v", test.recordedKind, err)
+			}
+			before := journalRecordCount(t, harness.journal)
+			_, err := workspace.RecordAttemptBoundary(
+				context.Background(), harness.journal, harness.definition, harness.git,
+				workspace.RecordAttemptBoundaryRequest{
+					AttemptID: attempt.AttemptID(), Kind: test.requestedKind,
+					Evidence: evidence, OccurredAt: mustTime(t, "2026-07-21T11:04:00Z"),
+				},
+			)
+			if err == nil || !strings.Contains(err.Error(), "different boundary kind") ||
+				!strings.Contains(err.Error(), string(test.requestedKind)) ||
+				!strings.Contains(err.Error(), string(test.recordedKind)) {
+				t.Fatalf("different-kind paused retry error = %v", err)
+			}
+			if after := journalRecordCount(t, harness.journal); after != before {
+				t.Fatalf("different-kind paused retry wrote journal records: before=%d after=%d", before, after)
+			}
+		})
+	}
+}
+
+func TestAttemptBoundaryRequiresSupportedKind(t *testing.T) {
+	t.Parallel()
+
+	harness := newAttemptHarness(t, "unit-one")
+	attempt := harness.reserve(t, "2026-07-21T11:01:00Z")
+	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T11:02:00Z")
+	before := journalRecordCount(t, harness.journal)
+	for _, kind := range []workspace.AttemptBoundaryKind{"", "unsupported"} {
+		_, err := workspace.RecordAttemptBoundary(
+			context.Background(), harness.journal, harness.definition, harness.git,
+			workspace.RecordAttemptBoundaryRequest{
+				AttemptID: attempt.AttemptID(), Kind: kind,
+				Evidence:   boundaryEvidence(t, "invalid-kind-"+string(kind)),
+				OccurredAt: mustTime(t, "2026-07-21T11:03:00Z"),
+			},
+		)
+		if err == nil || !strings.Contains(err.Error(), "kind") {
+			t.Fatalf("boundary kind %q error = %v", kind, err)
+		}
+	}
+	if after := journalRecordCount(t, harness.journal); after != before {
+		t.Fatalf("unsupported boundary kinds wrote journal records: before=%d after=%d", before, after)
+	}
+}
+
+func TestEscalationOnCompleteGoalUnitUsesPauseOnlyShape(t *testing.T) {
+	t.Parallel()
+
+	harness := newIndependentAttemptHarness(t, "unit-two")
+	attempt := harness.reserve(t, "2026-07-21T12:01:00Z")
+	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T12:02:00Z")
+	result, err := workspace.RecordAttemptBoundary(
+		context.Background(), harness.journal, harness.definition, harness.git,
+		workspace.RecordAttemptBoundaryRequest{
+			AttemptID: attempt.AttemptID(), Kind: workspace.AttemptBoundaryKindEscalation,
+			Evidence: boundaryEvidence(t, "raised-escalation"), OccurredAt: mustTime(t, "2026-07-21T12:03:00Z"),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary := result.Boundary()
+	if boundary.Kind() != workspace.AttemptBoundaryKindEscalation ||
+		boundary.Checkpoint() != workspace.AttemptCheckpointPauseOnly || len(result.Directives()) != 1 {
+		t.Fatalf("escalation boundary shape = %#v directives=%#v", boundary, result.Directives())
+	}
+	if _, ok := result.Directives()[0].(workspace.OwnerGateDirective); !ok {
+		t.Fatalf("escalation directive = %#v", result.Directives())
+	}
+	if _, pending := workspace.PendingAttemptBoundaryDirective(mustRuntime(t, harness.journal), attempt.AttemptID()); pending {
+		t.Fatal("escalation incorrectly requested goal-completion acknowledgement")
+	}
+	replayed := mustRuntimeAttempt(t, harness.journal, attempt.AttemptID())
+	replayedBoundary, ok := replayed.CurrentBoundary()
+	if !ok || replayedBoundary.Kind() != workspace.AttemptBoundaryKindEscalation ||
+		replayedBoundary.Checkpoint() != workspace.AttemptCheckpointPauseOnly {
+		t.Fatalf("replayed escalation shape = %#v exists=%v", replayedBoundary, ok)
+	}
+	if _, err := workspace.RecordOwnerBoundaryResponse(
+		harness.journal, harness.definition,
+		workspace.RecordOwnerBoundaryResponseRequest{
+			AttemptID: attempt.AttemptID(), BoundaryID: boundary.BoundaryID(),
+			DirectiveDigest: boundary.DirectiveDigest(), Goal: boundary.Goal(),
+			ExpectedHead: boundary.Head(), Response: workspace.OwnerBoundaryContinue,
+			OccurredAt: mustTime(t, "2026-07-21T12:04:00Z"),
+		},
+	); err != nil {
+		t.Fatalf("escalation owner response = %v", err)
+	}
+	resumed, err := workspace.ResumeAttempt(
+		context.Background(), harness.journal, harness.definition, harness.git,
+		workspace.ResumeAttemptRequest{AttemptID: attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T12:05:00Z")},
+	)
+	if err != nil || resumed.Goal() != attempt.Goal() {
+		t.Fatalf("escalation resumed goal = %#v err=%v", resumed, err)
 	}
 }
 
@@ -2525,7 +2735,8 @@ func TestCompleteGoalBoundaryRecoversIdempotentlyThroughHandoffAndRejectsStaleHe
 	_, err := workspace.RecordAttemptBoundary(
 		context.Background(), harness.journal, harness.definition, harness.git,
 		workspace.RecordAttemptBoundaryRequest{
-			AttemptID: attempt.AttemptID(), Evidence: evidence, OccurredAt: mustTime(t, "2026-07-21T12:03:00Z"),
+			AttemptID: attempt.AttemptID(), Kind: workspace.AttemptBoundaryKindCheckpoint,
+			Evidence: evidence, OccurredAt: mustTime(t, "2026-07-21T12:03:00Z"),
 			Fault: failAt(workspace.AttemptFaultAfterBoundary, crash),
 		},
 	)
@@ -2535,11 +2746,16 @@ func TestCompleteGoalBoundaryRecoversIdempotentlyThroughHandoffAndRejectsStaleHe
 	result, err := workspace.RecordAttemptBoundary(
 		context.Background(), harness.journal, harness.definition, harness.git,
 		workspace.RecordAttemptBoundaryRequest{
-			AttemptID: attempt.AttemptID(), Evidence: evidence, OccurredAt: mustTime(t, "2026-07-21T12:04:00Z"),
+			AttemptID: attempt.AttemptID(), Kind: workspace.AttemptBoundaryKindCheckpoint,
+			Evidence: evidence, OccurredAt: mustTime(t, "2026-07-21T12:04:00Z"),
 		},
 	)
 	if err != nil || len(result.Directives()) != 1 {
 		t.Fatalf("boundary retry = %#v, %v", result, err)
+	}
+	if result.Boundary().Kind() != workspace.AttemptBoundaryKindCheckpoint ||
+		result.Boundary().Checkpoint() != workspace.AttemptCheckpointCompleteGoalAndWait {
+		t.Fatalf("complete-goal checkpoint shape = %#v", result.Boundary())
 	}
 	directive, ok := result.Directives()[0].(workspace.CompleteGoalAndWaitDirective)
 	if !ok || directive.DirectiveDigest().IsZero() || directive.IdempotencyKey().IsZero() {
@@ -2637,7 +2853,8 @@ func TestCompleteGoalBoundaryRecoversIdempotentlyThroughHandoffAndRejectsStaleHe
 	if _, err := workspace.RecordAttemptBoundary(
 		context.Background(), harness.journal, harness.definition, harness.git,
 		workspace.RecordAttemptBoundaryRequest{
-			AttemptID: attempt.AttemptID(), Evidence: boundaryEvidence(t, "different-evidence"),
+			AttemptID: attempt.AttemptID(), Kind: workspace.AttemptBoundaryKindCheckpoint,
+			Evidence:   boundaryEvidence(t, "different-evidence"),
 			OccurredAt: mustTime(t, "2026-07-21T12:06:45Z"),
 		},
 	); err == nil || !strings.Contains(err.Error(), "different boundary evidence") {
