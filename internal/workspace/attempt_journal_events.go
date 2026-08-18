@@ -62,7 +62,8 @@ type AttemptReservedJournalEvent struct {
 	base          GitObjectID
 	branch        string
 	worktree      string
-	boundaryMode  AttemptBoundaryMode
+	checkpoint    AttemptCheckpointMode
+	escalation    AttemptEscalationPolicy
 	serialSegment ID
 	goal          GoalBinding
 }
@@ -75,7 +76,8 @@ func NewAttemptReservedJournalEvent(
 	attemptNumber uint64,
 	base GitObjectID,
 	branch, worktree string,
-	boundaryMode AttemptBoundaryMode,
+	checkpoint AttemptCheckpointMode,
+	escalation AttemptEscalationPolicy,
 	serialSegment ID,
 	goal GoalBinding,
 ) (AttemptReservedJournalEvent, error) {
@@ -83,7 +85,7 @@ func NewAttemptReservedJournalEvent(
 		workspaceID: workspaceID, generation: generation,
 		attemptID: attemptID, mergeUnit: mergeUnit, attemptNumber: attemptNumber,
 		base: base, branch: branch, worktree: filepath.Clean(worktree),
-		boundaryMode: boundaryMode, serialSegment: serialSegment, goal: goal,
+		checkpoint: checkpoint, escalation: escalation, serialSegment: serialSegment, goal: goal,
 	}
 	if err := event.validate(); err != nil {
 		return AttemptReservedJournalEvent{}, err
@@ -99,7 +101,8 @@ func (event AttemptReservedJournalEvent) boundGeneration() Digest {
 func (event AttemptReservedJournalEvent) validate() error {
 	if event.workspaceID.IsZero() || event.generation.IsZero() ||
 		event.attemptID.IsZero() || event.mergeUnit.planID.IsZero() || event.mergeUnit.mergeUnitID.IsZero() ||
-		event.attemptNumber == 0 || event.base.IsZero() || !event.boundaryMode.valid() || event.goal.IsZero() {
+		event.attemptNumber == 0 || event.base.IsZero() || !event.checkpoint.valid() ||
+		!event.escalation.valid() || event.goal.IsZero() {
 		return fmt.Errorf("attempt reservation requires immutable workspace, generation, unit, attempt, base, and boundary bindings")
 	}
 	if !filepath.IsAbs(event.worktree) || filepath.Clean(event.worktree) != event.worktree {
@@ -120,16 +123,17 @@ func (event AttemptReservedJournalEvent) validate() error {
 	}
 	return nil
 }
-func (event AttemptReservedJournalEvent) WorkspaceID() ID               { return event.workspaceID }
-func (event AttemptReservedJournalEvent) Generation() Digest            { return event.generation }
-func (event AttemptReservedJournalEvent) AttemptID() ID                 { return event.attemptID }
-func (event AttemptReservedJournalEvent) MergeUnit() MergeUnitReference { return event.mergeUnit }
-func (event AttemptReservedJournalEvent) AttemptNumber() uint64         { return event.attemptNumber }
-func (event AttemptReservedJournalEvent) Base() GitObjectID             { return event.base }
-func (event AttemptReservedJournalEvent) Branch() string                { return event.branch }
-func (event AttemptReservedJournalEvent) Worktree() string              { return event.worktree }
-func (event AttemptReservedJournalEvent) BoundaryMode() AttemptBoundaryMode {
-	return event.boundaryMode
+func (event AttemptReservedJournalEvent) WorkspaceID() ID                   { return event.workspaceID }
+func (event AttemptReservedJournalEvent) Generation() Digest                { return event.generation }
+func (event AttemptReservedJournalEvent) AttemptID() ID                     { return event.attemptID }
+func (event AttemptReservedJournalEvent) MergeUnit() MergeUnitReference     { return event.mergeUnit }
+func (event AttemptReservedJournalEvent) AttemptNumber() uint64             { return event.attemptNumber }
+func (event AttemptReservedJournalEvent) Base() GitObjectID                 { return event.base }
+func (event AttemptReservedJournalEvent) Branch() string                    { return event.branch }
+func (event AttemptReservedJournalEvent) Worktree() string                  { return event.worktree }
+func (event AttemptReservedJournalEvent) Checkpoint() AttemptCheckpointMode { return event.checkpoint }
+func (event AttemptReservedJournalEvent) Escalation() AttemptEscalationPolicy {
+	return event.escalation
 }
 func (event AttemptReservedJournalEvent) SerialSegment() ID { return event.serialSegment }
 func (event AttemptReservedJournalEvent) Goal() GoalBinding { return event.goal }
@@ -239,7 +243,8 @@ type AttemptBoundaryReachedJournalEvent struct {
 	attemptID       ID
 	boundaryID      ID
 	ordinal         uint64
-	mode            AttemptBoundaryMode
+	kind            AttemptBoundaryKind
+	checkpoint      AttemptCheckpointMode
 	serialSegment   ID
 	leaseID         ID
 	goal            GoalBinding
@@ -254,7 +259,8 @@ func NewAttemptBoundaryReachedJournalEvent(
 	workspaceID, attemptID ID,
 	generation Digest,
 	ordinal uint64,
-	mode AttemptBoundaryMode,
+	kind AttemptBoundaryKind,
+	checkpoint AttemptCheckpointMode,
 	serialSegment, leaseID ID,
 	goal GoalBinding,
 	head GitObjectID,
@@ -270,14 +276,14 @@ func NewAttemptBoundaryReachedJournalEvent(
 		return AttemptBoundaryReachedJournalEvent{}, err
 	}
 	directiveDigest, idempotencyKey, err := deriveBoundaryDirectiveBindings(
-		workspaceID, generation, attemptID, boundaryID, mode, goal, head, evidenceDigest,
+		workspaceID, generation, attemptID, boundaryID, kind, checkpoint, goal, head, evidenceDigest,
 	)
 	if err != nil {
 		return AttemptBoundaryReachedJournalEvent{}, err
 	}
 	event := AttemptBoundaryReachedJournalEvent{
 		workspaceID: workspaceID, generation: generation, attemptID: attemptID,
-		boundaryID: boundaryID, ordinal: ordinal, mode: mode, serialSegment: serialSegment,
+		boundaryID: boundaryID, ordinal: ordinal, kind: kind, checkpoint: checkpoint, serialSegment: serialSegment,
 		leaseID: leaseID, goal: goal, head: head,
 		evidence: evidenceCopy, evidenceDigest: evidenceDigest,
 		directiveDigest: directiveDigest, idempotencyKey: idempotencyKey,
@@ -295,10 +301,14 @@ func (AttemptBoundaryReachedJournalEvent) eventType() JournalEventType {
 func (event AttemptBoundaryReachedJournalEvent) boundGeneration() Digest { return event.generation }
 func (event AttemptBoundaryReachedJournalEvent) validate() error {
 	if event.workspaceID.IsZero() || event.generation.IsZero() || event.attemptID.IsZero() ||
-		event.boundaryID.IsZero() || event.ordinal == 0 || !event.mode.valid() || event.leaseID.IsZero() ||
+		event.boundaryID.IsZero() || event.ordinal == 0 || !event.kind.valid() || !event.checkpoint.valid() || event.leaseID.IsZero() ||
 		event.goal.IsZero() || event.head.IsZero() ||
 		len(event.evidence) == 0 || event.evidenceDigest.IsZero() {
 		return fmt.Errorf("attempt boundary requires attempt, lease, goal, head, and evidence bindings")
+	}
+	if event.kind == AttemptBoundaryKindCheckpoint && event.checkpoint == AttemptCheckpointNone ||
+		event.kind == AttemptBoundaryKindEscalation && event.checkpoint != AttemptCheckpointPauseOnly {
+		return fmt.Errorf("attempt boundary kind does not match its resolved checkpoint shape")
 	}
 	for _, item := range event.evidence {
 		if err := item.validate(); err != nil {
@@ -314,7 +324,7 @@ func (event AttemptBoundaryReachedJournalEvent) validate() error {
 		return fmt.Errorf("boundary identity does not match its immutable bindings")
 	}
 	directive, key, err := deriveBoundaryDirectiveBindings(
-		event.workspaceID, event.generation, event.attemptID, event.boundaryID, event.mode, event.goal, event.head,
+		event.workspaceID, event.generation, event.attemptID, event.boundaryID, event.kind, event.checkpoint, event.goal, event.head,
 		event.evidenceDigest,
 	)
 	if err != nil || directive != event.directiveDigest || key != event.idempotencyKey {
@@ -322,17 +332,22 @@ func (event AttemptBoundaryReachedJournalEvent) validate() error {
 	}
 	return nil
 }
-func (event AttemptBoundaryReachedJournalEvent) WorkspaceID() ID           { return event.workspaceID }
-func (event AttemptBoundaryReachedJournalEvent) Generation() Digest        { return event.generation }
-func (event AttemptBoundaryReachedJournalEvent) AttemptID() ID             { return event.attemptID }
-func (event AttemptBoundaryReachedJournalEvent) BoundaryID() ID            { return event.boundaryID }
-func (event AttemptBoundaryReachedJournalEvent) Ordinal() uint64           { return event.ordinal }
-func (event AttemptBoundaryReachedJournalEvent) Mode() AttemptBoundaryMode { return event.mode }
-func (event AttemptBoundaryReachedJournalEvent) SerialSegment() ID         { return event.serialSegment }
-func (event AttemptBoundaryReachedJournalEvent) LeaseID() ID               { return event.leaseID }
-func (AttemptBoundaryReachedJournalEvent) FencesAndReleasesLease() bool    { return true }
-func (event AttemptBoundaryReachedJournalEvent) Goal() GoalBinding         { return event.goal }
-func (event AttemptBoundaryReachedJournalEvent) Head() GitObjectID         { return event.head }
+func (event AttemptBoundaryReachedJournalEvent) WorkspaceID() ID    { return event.workspaceID }
+func (event AttemptBoundaryReachedJournalEvent) Generation() Digest { return event.generation }
+func (event AttemptBoundaryReachedJournalEvent) AttemptID() ID      { return event.attemptID }
+func (event AttemptBoundaryReachedJournalEvent) BoundaryID() ID     { return event.boundaryID }
+func (event AttemptBoundaryReachedJournalEvent) Ordinal() uint64    { return event.ordinal }
+func (event AttemptBoundaryReachedJournalEvent) Kind() AttemptBoundaryKind {
+	return event.kind
+}
+func (event AttemptBoundaryReachedJournalEvent) Checkpoint() AttemptCheckpointMode {
+	return event.checkpoint
+}
+func (event AttemptBoundaryReachedJournalEvent) SerialSegment() ID      { return event.serialSegment }
+func (event AttemptBoundaryReachedJournalEvent) LeaseID() ID            { return event.leaseID }
+func (AttemptBoundaryReachedJournalEvent) FencesAndReleasesLease() bool { return true }
+func (event AttemptBoundaryReachedJournalEvent) Goal() GoalBinding      { return event.goal }
+func (event AttemptBoundaryReachedJournalEvent) Head() GitObjectID      { return event.head }
 func (event AttemptBoundaryReachedJournalEvent) Evidence() []Evidence {
 	return cloneEvidence(event.evidence)
 }
@@ -688,7 +703,7 @@ func attemptJournalEventResources(event WorkspaceJournalEvent) ([]JournalResourc
 			EvidenceJournalResource(event.evidenceDigest),
 		}
 		writes = append([]JournalResource(nil), reads...)
-		if event.mode == AttemptBoundaryCompleteGoalAndWait {
+		if event.checkpoint == AttemptCheckpointCompleteGoalAndWait {
 			directive := BoundaryDirectiveJournalResource(event.boundaryID)
 			reads, writes = append(reads, directive), append(writes, directive)
 		}
@@ -805,29 +820,31 @@ func deriveBoundaryDirectiveBindings(
 	workspaceID ID,
 	generation Digest,
 	attemptID, boundaryID ID,
-	mode AttemptBoundaryMode,
+	kind AttemptBoundaryKind,
+	checkpoint AttemptCheckpointMode,
 	goal GoalBinding,
 	head GitObjectID,
 	evidenceDigest Digest,
 ) (Digest, Digest, error) {
 	if workspaceID.IsZero() || generation.IsZero() || attemptID.IsZero() || boundaryID.IsZero() ||
-		!mode.valid() || goal.IsZero() || head.IsZero() || evidenceDigest.IsZero() {
+		!kind.valid() || !checkpoint.valid() || goal.IsZero() || head.IsZero() || evidenceDigest.IsZero() {
 		return Digest{}, Digest{}, fmt.Errorf("boundary directive requires immutable boundary bindings")
 	}
 	type directiveJSON struct {
-		SchemaVersion int                 `json:"schema_version"`
-		Kind          AttemptBoundaryMode `json:"kind"`
-		WorkspaceID   string              `json:"workspace_id"`
-		Generation    string              `json:"generation"`
-		AttemptID     string              `json:"attempt_id"`
-		BoundaryID    string              `json:"boundary_id"`
-		GoalID        string              `json:"goal_id"`
-		GoalScope     GoalScope           `json:"goal_scope"`
-		Head          string              `json:"head"`
-		Evidence      string              `json:"evidence_digest"`
+		SchemaVersion int                   `json:"schema_version"`
+		Kind          AttemptBoundaryKind   `json:"kind"`
+		Checkpoint    AttemptCheckpointMode `json:"checkpoint"`
+		WorkspaceID   string                `json:"workspace_id"`
+		Generation    string                `json:"generation"`
+		AttemptID     string                `json:"attempt_id"`
+		BoundaryID    string                `json:"boundary_id"`
+		GoalID        string                `json:"goal_id"`
+		GoalScope     GoalScope             `json:"goal_scope"`
+		Head          string                `json:"head"`
+		Evidence      string                `json:"evidence_digest"`
 	}
 	content, err := json.Marshal(directiveJSON{
-		SchemaVersion: JournalSchemaVersion, Kind: mode, WorkspaceID: workspaceID.String(),
+		SchemaVersion: JournalSchemaVersion, Kind: kind, Checkpoint: checkpoint, WorkspaceID: workspaceID.String(),
 		Generation: generation.String(), AttemptID: attemptID.String(), BoundaryID: boundaryID.String(),
 		GoalID: goal.id.String(), GoalScope: goal.scope, Head: head.String(), Evidence: evidenceDigest.String(),
 	})
@@ -835,7 +852,7 @@ func deriveBoundaryDirectiveBindings(
 		return Digest{}, Digest{}, err
 	}
 	directive := DigestBytes(content)
-	if mode == AttemptBoundaryPauseOnly {
+	if checkpoint != AttemptCheckpointCompleteGoalAndWait {
 		return directive, Digest{}, nil
 	}
 	key := DigestBytes([]byte("complete_goal_and_wait_v2\n" + directive.String() + "\n"))
@@ -874,7 +891,7 @@ func deriveOwnerResponseRequestDigest(
 			"owner response requires a complete exact boundary and closed response",
 		)
 	}
-	if boundary.mode == AttemptBoundaryCompleteGoalAndWait &&
+	if boundary.checkpoint == AttemptCheckpointCompleteGoalAndWait &&
 		(!boundary.goalCompletedOK ||
 			boundary.goalCompleted.requestDigest.IsZero()) {
 		return Digest{}, fmt.Errorf(
@@ -888,7 +905,7 @@ func deriveOwnerResponseRequestDigest(
 		Generation    string                `json:"generation"`
 		AttemptID     string                `json:"attempt_id"`
 		BoundaryID    string                `json:"boundary_id"`
-		Mode          AttemptBoundaryMode   `json:"mode"`
+		Checkpoint    AttemptCheckpointMode `json:"checkpoint"`
 		Directive     string                `json:"directive_digest"`
 		GoalID        string                `json:"goal_id"`
 		GoalScope     GoalScope             `json:"goal_scope"`
@@ -904,7 +921,7 @@ func deriveOwnerResponseRequestDigest(
 		Generation:    generation.String(),
 		AttemptID:     attemptID.String(),
 		BoundaryID:    boundary.boundaryID.String(),
-		Mode:          boundary.mode,
+		Checkpoint:    boundary.checkpoint,
 		Directive:     boundary.directiveDigest.String(),
 		GoalID:        boundary.goal.id.String(),
 		GoalScope:     boundary.goal.scope,

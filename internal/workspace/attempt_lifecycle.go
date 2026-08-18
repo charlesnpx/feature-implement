@@ -156,7 +156,8 @@ func ReserveAttempt(
 	event, err := NewAttemptReservedJournalEvent(
 		manifest.id, definition.generation, identity.attemptID,
 		request.MergeUnit, request.AttemptNumber, base, identity.branch, worktree,
-		unitExecution.boundary.mode, unitExecution.boundary.serialSegment, request.Goal,
+		unitExecution.boundary.checkpoint, unitExecution.boundary.escalation,
+		unitExecution.boundary.serialSegment, request.Goal,
 	)
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
@@ -348,8 +349,20 @@ func MaterializeAttempt(
 	return loadRuntimeAttempt(journal, attempt.attemptID)
 }
 
+type AttemptBoundaryKind string
+
+const (
+	AttemptBoundaryKindCheckpoint AttemptBoundaryKind = "checkpoint"
+	AttemptBoundaryKindEscalation AttemptBoundaryKind = "escalation"
+)
+
+func (kind AttemptBoundaryKind) valid() bool {
+	return kind == AttemptBoundaryKindCheckpoint || kind == AttemptBoundaryKindEscalation
+}
+
 type RecordAttemptBoundaryRequest struct {
 	AttemptID  ID
+	Kind       AttemptBoundaryKind
 	Evidence   []Evidence
 	OccurredAt time.Time
 	Fault      AttemptLifecycleFaultInjector
@@ -432,8 +445,8 @@ func RecordAttemptBoundary(
 	git AttemptGitPort,
 	request RecordAttemptBoundaryRequest,
 ) (AttemptBoundaryResult, error) {
-	if journal == nil || git == nil || request.AttemptID.IsZero() || request.OccurredAt.IsZero() {
-		return AttemptBoundaryResult{}, fmt.Errorf("attempt boundary requires journal, Git adapter, attempt, and occurrence time")
+	if journal == nil || git == nil || request.AttemptID.IsZero() || !request.Kind.valid() || request.OccurredAt.IsZero() {
+		return AttemptBoundaryResult{}, fmt.Errorf("attempt boundary requires journal, Git adapter, attempt, kind, and occurrence time")
 	}
 	if len(request.Evidence) == 0 {
 		return AttemptBoundaryResult{}, fmt.Errorf("attempt boundary requires typed evidence")
@@ -451,6 +464,12 @@ func RecordAttemptBoundary(
 		if !ok {
 			return AttemptBoundaryResult{}, fmt.Errorf("attempt %s has inconsistent paused state", attempt.attemptID)
 		}
+		if request.Kind != boundary.kind {
+			return AttemptBoundaryResult{}, fmt.Errorf(
+				"attempt %s is already paused with different boundary kind: requested %q, recorded %q",
+				attempt.attemptID, request.Kind, boundary.kind,
+			)
+		}
 		requestedDigest, digestErr := digestBoundaryEvidence(sortedEvidenceForProjection(request.Evidence))
 		if digestErr != nil {
 			return AttemptBoundaryResult{}, digestErr
@@ -462,6 +481,24 @@ func RecordAttemptBoundary(
 	}
 	if attempt.phase != AttemptActive {
 		return AttemptBoundaryResult{}, fmt.Errorf("attempt %s must be active to reach a boundary", attempt.attemptID)
+	}
+	resolvedCheckpoint := attempt.checkpoint
+	switch request.Kind {
+	case AttemptBoundaryKindCheckpoint:
+		if attempt.checkpoint == AttemptCheckpointNone {
+			return AttemptBoundaryResult{}, fmt.Errorf(
+				"merge unit %s rejects checkpoint boundary: configured checkpoint policy %q",
+				attempt.mergeUnit, attempt.checkpoint,
+			)
+		}
+	case AttemptBoundaryKindEscalation:
+		if attempt.escalation == AttemptEscalationForbidden {
+			return AttemptBoundaryResult{}, fmt.Errorf(
+				"merge unit %s rejects escalation boundary: configured escalation policy %q",
+				attempt.mergeUnit, attempt.escalation,
+			)
+		}
+		resolvedCheckpoint = AttemptCheckpointPauseOnly
 	}
 	unitExecution, err := executionForMergeUnit(definition.execution, attempt.mergeUnit)
 	if err != nil {
@@ -548,7 +585,7 @@ func RecordAttemptBoundary(
 	}
 	event, err := NewAttemptBoundaryReachedJournalEvent(
 		runtime.workspaceID, attempt.attemptID, attempt.generation,
-		uint64(len(attempt.boundaries)+1), attempt.boundaryMode, attempt.serialSegment,
+		uint64(len(attempt.boundaries)+1), request.Kind, resolvedCheckpoint, attempt.serialSegment,
 		attempt.leaseID, attempt.goal, inspection.worktreeHead,
 		sortedEvidenceForProjection(request.Evidence),
 	)
@@ -578,7 +615,7 @@ func PendingAttemptBoundaryDirective(
 		return CompleteGoalAndWaitDirective{}, false
 	}
 	boundary, exists := attempt.CurrentBoundary()
-	if !exists || boundary.mode != AttemptBoundaryCompleteGoalAndWait || boundary.goalCompletedOK {
+	if !exists || boundary.checkpoint != AttemptCheckpointCompleteGoalAndWait || boundary.goalCompletedOK {
 		return CompleteGoalAndWaitDirective{}, false
 	}
 	return completeGoalDirective(projection, attempt, boundary), true
@@ -594,7 +631,7 @@ func PendingOwnerGateDirective(
 	}
 	boundary, exists := attempt.CurrentBoundary()
 	if !exists || boundary.ownerResponseOK ||
-		boundary.mode == AttemptBoundaryCompleteGoalAndWait && !boundary.goalCompletedOK {
+		boundary.checkpoint == AttemptCheckpointCompleteGoalAndWait && !boundary.goalCompletedOK {
 		return OwnerGateDirective{}, false
 	}
 	return ownerGateDirective(projection, attempt, boundary), true
@@ -677,7 +714,7 @@ func ReserveNextGoalCreation(
 	if err != nil {
 		return NextGoalCreationIntent{}, err
 	}
-	if boundary.mode != AttemptBoundaryCompleteGoalAndWait || !boundary.goalCompletedOK || !boundary.ownerResponseOK {
+	if boundary.checkpoint != AttemptCheckpointCompleteGoalAndWait || !boundary.goalCompletedOK || !boundary.ownerResponseOK {
 		return NextGoalCreationIntent{}, fmt.Errorf("next-goal intent requires completed-goal acknowledgement and the exact owner response")
 	}
 	if boundary.nextGoalIntentOK {
@@ -762,7 +799,7 @@ func RecordOrchestrationAcknowledgement(
 	if err != nil {
 		return RuntimeOrchestrationAcknowledgement{}, err
 	}
-	if boundary.mode == AttemptBoundaryPauseOnly {
+	if boundary.checkpoint != AttemptCheckpointCompleteGoalAndWait {
 		return RuntimeOrchestrationAcknowledgement{}, fmt.Errorf("pause-only boundary %s cannot acknowledge broader goal lifecycle", boundary.boundaryID)
 	}
 	if request.DirectiveDigest != boundary.directiveDigest {
@@ -927,7 +964,7 @@ func ResumeAttempt(
 		return RuntimeAttemptProjection{}, fmt.Errorf("attempt %s cannot resume before the exact owner response", attempt.attemptID)
 	}
 	goal := boundary.goal
-	if boundary.mode == AttemptBoundaryCompleteGoalAndWait {
+	if boundary.checkpoint == AttemptCheckpointCompleteGoalAndWait {
 		if !boundary.nextGoalOK {
 			return RuntimeAttemptProjection{}, fmt.Errorf("attempt %s cannot resume before next-goal acknowledgement", attempt.attemptID)
 		}
@@ -1150,10 +1187,10 @@ func boundaryResult(
 	boundary RuntimeBoundaryProjection,
 ) (AttemptBoundaryResult, error) {
 	result := AttemptBoundaryResult{attempt: cloneRuntimeAttempt(attempt), boundary: cloneRuntimeBoundary(boundary)}
-	if boundary.mode == AttemptBoundaryPauseOnly && !boundary.ownerResponseOK {
-		result.directives = []AttemptBoundaryDirective{ownerGateDirective(runtime, attempt, boundary)}
-	} else if boundary.mode == AttemptBoundaryCompleteGoalAndWait && !boundary.goalCompletedOK {
+	if boundary.checkpoint == AttemptCheckpointCompleteGoalAndWait && !boundary.goalCompletedOK {
 		result.directives = []AttemptBoundaryDirective{completeGoalDirective(runtime, attempt, boundary)}
+	} else if !boundary.ownerResponseOK {
+		result.directives = []AttemptBoundaryDirective{ownerGateDirective(runtime, attempt, boundary)}
 	}
 	return result, nil
 }

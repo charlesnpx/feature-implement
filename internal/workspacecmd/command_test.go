@@ -253,14 +253,21 @@ func TestReportDirectiveSchemaKeepsChoicesOptional(t *testing.T) {
 	directives := unitProperties["pending_directives"].(map[string]any)
 	directive := directives["items"].(map[string]any)
 	required := directive["required"].([]string)
+	boundaryKindRequired := false
 	for _, name := range required {
 		if name == "choices" {
 			t.Fatalf("directive schema still requires omitted empty choices: %+v", required)
+		}
+		if name == "boundary_kind" {
+			boundaryKindRequired = true
 		}
 	}
 	directiveProperties := directive["properties"].(map[string]any)
 	if _, exists := directiveProperties["choices"]; !exists {
 		t.Fatalf("directive schema no longer describes choices: %+v", directiveProperties)
+	}
+	if _, exists := directiveProperties["boundary_kind"]; !exists || !boundaryKindRequired {
+		t.Fatalf("directive schema does not require boundary kind: %+v / %+v", required, directiveProperties)
 	}
 }
 
@@ -402,7 +409,8 @@ merge_units:
     merge_unit_id: unit-one
     profile: standard
     boundary:
-      mode: pause_only
+      checkpoint: pause_only
+      escalation: allowed
       serial_segment: command-segment
     policy:
       require_passing_checks: true

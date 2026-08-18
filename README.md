@@ -139,8 +139,8 @@ merge_units:
       - story-first-contract
 ```
 
-Execution configuration assigns every merge unit exactly one profile, a policy
-that may only narrow its parent, and an explicit boundary:
+Execution configuration assigns every merge unit exactly one profile, an
+execution policy that may only narrow its parent, and an explicit boundary:
 
 ```yaml
 schema_version: 2
@@ -159,12 +159,15 @@ profiles:
       max_attempts: 3
       max_review_rounds: 3
       max_review_fixes: 2
+    boundary:
+      escalation: allowed
 merge_units:
   - plan_id: sample-plan
     merge_unit_id: first-contract
     profile: standard
     boundary:
-      mode: pause_only
+      checkpoint: pause_only
+      escalation: allowed
       serial_segment: serial-first-contract
     policy:
       require_passing_checks: true
@@ -173,6 +176,22 @@ merge_units:
       max_review_rounds: 3
       max_review_fixes: 2
 ```
+
+`checkpoint` is the owner's planned gate; `escalation` is the agent's
+permission to stop on its own when something genuinely goes wrong. The four
+workflow combinations are:
+
+| checkpoint | escalation | behavior |
+|---|---|---|
+| `none` | `allowed` | Runs unit to unit without stopping; the agent may still stop if it hits something real. The block-of-units default. |
+| `none` | `forbidden` | Cannot stop for any reason — finish or fail. For unattended and CI runs. |
+| `pause_only` | `allowed` | Stops here, owner responds `continue`, and resumes on the same goal. |
+| `complete_goal_and_wait` | `allowed` | Goal finishes here; after the owner responds, a next goal is reserved and acknowledged, and the attempt resumes on the new goal. |
+
+An execution profile may optionally declare `boundary` with `escalation` only.
+A merge unit may narrow `allowed` to `forbidden`, but never widen `forbidden`
+to `allowed`. Profiles deliberately do not declare `checkpoint`, because
+`pause_only` and `complete_goal_and_wait` do not order against each other.
 
 Commit protocols, review-fix protocols, and review loops are optional strict
 schemas within each merge-unit entry. Without a commit protocol, ordinary
@@ -217,7 +236,7 @@ derived plan checkpoint:
 ```
 
 Runtime state is append-only under `<runtime-root>/state/`. A runtime without
-the local v4 format marker is rejected with a regeneration diagnostic; it is
+the local v5 format marker is rejected with a regeneration diagnostic; it is
 not interpreted or migrated.
 
 ## Local execution
@@ -234,12 +253,17 @@ not interpreted or migrated.
    every result binds the exact request, head, tree, and evidence.
 6. Without configured review, submit `attempt adopt-head` for the exact clean
    descendant selected for integration.
-7. Submit `integrate merge-unit`. Integration creates a deterministic
-   two-parent local commit and compare-and-swap updates only the workspace-owned
-   feature ref.
-8. Record and resolve the attempt boundary and any returned local directives.
-   Acknowledgements and owner responses bind the exact directive, goal, head,
-   and idempotency inputs.
+7. Before integration, submit `attempt boundary` only when the merge unit
+   configures a checkpoint other than `none`, or when the agent genuinely needs
+   an allowed escalation. The request requires `kind`: use `checkpoint` for the
+   configured gate and `escalation` for a genuine agent-raised stop. Record it
+   while the attempt is active, before `integrate merge-unit`.
+8. Resolve every returned local directive and resume the attempt when a boundary
+   was recorded. If no boundary is needed, proceed directly. Only then submit
+   `integrate merge-unit` for the exact accepted head and tree. Integration
+   creates a deterministic two-parent local commit and compare-and-swap updates
+   only the workspace-owned feature ref. Acknowledgements and owner responses
+   bind the exact directive, goal, head, and idempotency inputs.
 9. After every unit is integrated and every boundary is resolved, run
    `complete verify` to record local workspace completion.
 
@@ -256,9 +280,9 @@ completion proves the recorded Git topology and workflow state only.
 
 Workspace v2 is a local-only execution model. Operators commit exact plan
 sources and generated lock bytes in a clean plan repository, initialize a fresh
-local v4 runtime, recover before each work cycle, and use journal-derived
+local v5 runtime, recover before each work cycle, and use journal-derived
 reports as the source of truth. Earlier draft runtime state is intentionally not
-migrated; a runtime without the local v4 marker must be regenerated from the
+migrated; a runtime without the local v5 marker must be regenerated from the
 committed plan and current lock.
 
 ### Supported repository profile
