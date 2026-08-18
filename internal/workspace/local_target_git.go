@@ -1390,18 +1390,16 @@ func (adapter LocalTargetGitAdapter) verifyOwnedFeatureRefAt(
 	})
 }
 
-func (adapter LocalTargetGitAdapter) ReleaseOwnedFeatureRef(
+func (adapter LocalTargetGitAdapter) EnsureReleasedFeatureRefMarker(
 	ctx context.Context,
 	binding LocalTargetBinding,
 	ownedHead GitObjectID,
-	expectedMarker string,
 	intentDigest Digest,
 ) (resultErr error) {
 	if ctx == nil || binding.IsZero() || ownedHead.IsZero() ||
-		ownedHead.Algorithm() != binding.objectFormat || expectedMarker == "" ||
-		intentDigest.IsZero() {
+		ownedHead.Algorithm() != binding.objectFormat || intentDigest.IsZero() {
 		return fmt.Errorf(
-			"feature ref release requires context, binding, owned head, marker, and intent digest",
+			"feature-ref release marker requires context, binding, owned head, and intent digest",
 		)
 	}
 	session, err := adapter.openBoundSession(binding)
@@ -1411,8 +1409,8 @@ func (adapter LocalTargetGitAdapter) ReleaseOwnedFeatureRef(
 	defer func() {
 		resultErr = errors.Join(resultErr, session.Close())
 	}()
-	return session.releaseOwnedFeatureRef(
-		ctx, ownedHead, expectedMarker, intentDigest,
+	return session.ensureReleasedFeatureRefMarker(
+		ctx, ownedHead, intentDigest,
 	)
 }
 
@@ -1421,45 +1419,26 @@ func (adapter LocalTargetGitAdapter) VerifyReleasedFeatureRefAt(
 	binding LocalTargetBinding,
 	ownedHead GitObjectID,
 	intentDigest Digest,
-) (LocalTargetInspection, error) {
-	if intentDigest.IsZero() {
+) (inspection LocalTargetInspection, resultErr error) {
+	if ctx == nil || binding.IsZero() || ownedHead.IsZero() ||
+		ownedHead.Algorithm() != binding.objectFormat || intentDigest.IsZero() {
 		return LocalTargetInspection{}, fmt.Errorf(
-			"released feature-ref verification requires a durable intent digest",
+			"released feature-ref verification requires context, binding, owned head, and intent digest",
 		)
 	}
-	exists, head, marker, err := adapter.inspectFeatureRef(
-		ctx,
-		binding.root,
-		binding.featureRef,
-		binding.objectFormat,
-	)
+	session, err := adapter.openBoundSession(binding)
 	if err != nil {
 		return LocalTargetInspection{}, err
 	}
-	if !exists || head != ownedHead || marker == "" {
-		return LocalTargetInspection{}, fmt.Errorf(
-			"released feature ref does not retain its exact durable head and ownership marker",
-		)
-	}
-	inspection, err := adapter.verifyOwnedFeatureRefAt(
-		ctx, binding, ownedHead, marker,
-	)
-	if err != nil {
+	defer func() {
+		resultErr = errors.Join(resultErr, session.Close())
+	}()
+	if err := session.verifyReleasedFeatureRefMarker(
+		ctx, ownedHead, intentDigest,
+	); err != nil {
 		return LocalTargetInspection{}, err
 	}
-	markerExists, markerHead, err := adapter.inspectReleaseMarkerRef(
-		ctx, binding.root, binding.featureBranch, binding.objectFormat,
-	)
-	if err != nil {
-		return LocalTargetInspection{}, err
-	}
-	if !markerExists || markerHead != ownedHead {
-		return LocalTargetInspection{}, fmt.Errorf(
-			"release marker ref %s does not point to durable owned head %s",
-			localTargetReleaseMarkerRef(binding.featureBranch), ownedHead,
-		)
-	}
-	return inspection, nil
+	return LocalTargetInspection{binding: binding}, nil
 }
 
 func (adapter LocalTargetGitAdapter) inspectUncreatedTarget(

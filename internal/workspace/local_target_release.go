@@ -72,14 +72,16 @@ func AbandonWorkspace(
 		if err != nil {
 			return WorkspaceAbandonmentResult{}, err
 		}
-		if err := git.ReleaseOwnedFeatureRef(
+		if _, err := git.verifyOwnedFeatureRefAt(
 			ctx,
 			target.binding,
 			target.createdHead,
 			expectedMarker,
-			target.intentDigest,
 		); err != nil {
-			return WorkspaceAbandonmentResult{}, err
+			return WorkspaceAbandonmentResult{}, fmt.Errorf(
+				"feature ref changed from its exact owned head and marker before release: %w",
+				err,
+			)
 		}
 		featureHead = target.createdHead
 	}
@@ -113,6 +115,13 @@ func AbandonWorkspace(
 	record, err := journal.AppendIfHead(appendRequest, snapshot.head)
 	if err != nil {
 		return WorkspaceAbandonmentResult{}, err
+	}
+	if target.Created() {
+		if err := git.EnsureReleasedFeatureRefMarker(
+			ctx, target.binding, target.createdHead, target.intentDigest,
+		); err != nil {
+			return WorkspaceAbandonmentResult{}, err
+		}
 	}
 
 	completedSnapshot, _, completedRuntime, err := readCompletionRuntime(
@@ -232,6 +241,14 @@ func verifyRecordedWorkspaceAbandonment(
 	}
 	if !abandonment.Released() {
 		return nil
+	}
+	if err := git.EnsureReleasedFeatureRefMarker(
+		ctx,
+		target.binding,
+		abandonment.FeatureHead(),
+		target.intentDigest,
+	); err != nil {
+		return fmt.Errorf("reconcile released feature ref: %w", err)
 	}
 	if _, err := git.VerifyReleasedFeatureRefAt(
 		ctx,

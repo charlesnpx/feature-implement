@@ -815,34 +815,77 @@ func (session *localTargetGitSession) inspectFeatureRef(
 
 func (session *localTargetGitSession) inspectReleaseMarkerRef(
 	ctx context.Context,
-) (bool, GitObjectID, error) {
+) (bool, GitObjectID, string, error) {
 	markerRef := localTargetReleaseMarkerRef(session.binding.featureBranch)
 	output, exitCode, err := session.run(
 		ctx, nil, "show-ref", "--verify", markerRef,
 	)
 	if err != nil {
-		return false, GitObjectID{}, err
+		return false, GitObjectID{}, "", err
 	}
 	if exitCode == 1 || exitCode == 128 {
-		return false, GitObjectID{}, nil
+		return false, GitObjectID{}, "", nil
 	}
 	if exitCode != 0 {
-		return false, GitObjectID{}, fmt.Errorf(
+		return false, GitObjectID{}, "", fmt.Errorf(
 			"inspect feature-ref release marker %s: Git exited with status %d",
 			markerRef, exitCode,
 		)
 	}
 	fields := strings.Fields(string(output))
 	if len(fields) != 2 || fields[1] != markerRef {
-		return false, GitObjectID{}, fmt.Errorf(
+		return false, GitObjectID{}, "", fmt.Errorf(
 			"Git returned malformed feature-ref release marker data",
 		)
 	}
 	head, err := qualifyGitObjectID(session.binding.objectFormat, fields[0])
 	if err != nil {
-		return false, GitObjectID{}, err
+		return false, GitObjectID{}, "", err
 	}
-	return true, head, nil
+	reflog, reflogExit, err := session.run(
+		ctx, nil,
+		"reflog", "show", "--no-show-signature", "--format=%gs", "-n", "1",
+		markerRef, "--",
+	)
+	if err != nil {
+		return false, GitObjectID{}, "", err
+	}
+	marker := ""
+	if reflogExit == 0 {
+		marker = strings.TrimSpace(string(reflog))
+	} else if reflogExit != 1 {
+		return false, GitObjectID{}, "", fmt.Errorf(
+			"inspect feature-ref release marker reflog: Git exited with status %d: %s",
+			reflogExit, strings.TrimSpace(string(reflog)),
+		)
+	}
+	return true, head, marker, nil
+}
+
+func (session *localTargetGitSession) verifyReleasedFeatureRefMarker(
+	ctx context.Context,
+	ownedHead GitObjectID,
+	intentDigest Digest,
+) error {
+	if ctx == nil || ownedHead.IsZero() ||
+		ownedHead.Algorithm() != session.binding.objectFormat || intentDigest.IsZero() {
+		return fmt.Errorf(
+			"released feature-ref verification requires owned head and intent digest",
+		)
+	}
+	markerRef := localTargetReleaseMarkerRef(session.binding.featureBranch)
+	markerExists, markerHead, marker, err := session.inspectReleaseMarkerRef(ctx)
+	if err != nil {
+		return err
+	}
+	if !markerExists || markerHead != ownedHead ||
+		marker != localTargetReleaseReflogMessage(intentDigest) {
+		return fmt.Errorf(
+			"release marker ref %s does not retain its exact durable head and reflog message",
+			markerRef,
+		)
+	}
+	return session.Verify()
 }
 
 func (session *localTargetGitSession) inspectOwnedState(
@@ -865,7 +908,7 @@ func (session *localTargetGitSession) inspectOwnedState(
 			session.binding.baseRef, baseHead, session.binding.baseCommit,
 		)
 	}
-	releaseMarkerExists, _, err := session.inspectReleaseMarkerRef(ctx)
+	releaseMarkerExists, _, _, err := session.inspectReleaseMarkerRef(ctx)
 	if err != nil {
 		return LocalTargetInspection{}, err
 	}
@@ -972,7 +1015,7 @@ func (session *localTargetGitSession) createFeatureRef(
 			session.binding.baseRef, baseHead, session.binding.baseCommit,
 		)
 	}
-	releaseMarkerExists, _, err := session.inspectReleaseMarkerRef(ctx)
+	releaseMarkerExists, _, _, err := session.inspectReleaseMarkerRef(ctx)
 	if err != nil {
 		return LocalTargetInspection{}, err
 	}
@@ -1022,39 +1065,26 @@ func (session *localTargetGitSession) createFeatureRef(
 	return session.inspectOwnedState(ctx, intentDigest, true)
 }
 
-func (session *localTargetGitSession) releaseOwnedFeatureRef(
+func (session *localTargetGitSession) ensureReleasedFeatureRefMarker(
 	ctx context.Context,
 	ownedHead GitObjectID,
-	expectedMarker string,
 	intentDigest Digest,
 ) error {
 	if ctx == nil || ownedHead.IsZero() ||
-		ownedHead.Algorithm() != session.binding.objectFormat ||
-		expectedMarker == "" || intentDigest.IsZero() {
+		ownedHead.Algorithm() != session.binding.objectFormat || intentDigest.IsZero() {
 		return fmt.Errorf(
-			"feature ref release requires owned head, marker, and intent digest",
+			"feature-ref release marker requires owned head and intent digest",
 		)
 	}
 	if err := session.Verify(); err != nil {
 		return err
-	}
-	exists, head, marker, err := session.inspectFeatureRef(ctx)
-	if err != nil {
-		return err
-	}
-	if !exists || head != ownedHead || marker != expectedMarker {
-		return fmt.Errorf(
-			"feature ref changed from its exact owned head and marker before release",
-		)
 	}
 	markerRef := localTargetReleaseMarkerRef(session.binding.featureBranch)
 	if err := session.ensureReleaseMarkerRefStorageAncestors(); err != nil {
 		return err
 	}
 	transaction := []byte(fmt.Sprintf(
-		"verify %s %s\ncreate %s %s\n",
-		session.binding.featureRef,
-		gitObjectHex(ownedHead),
+		"create %s %s\n",
 		markerRef,
 		gitObjectHex(ownedHead),
 	))
@@ -1074,42 +1104,6 @@ func (session *localTargetGitSession) releaseOwnedFeatureRef(
 				markerRef, exitCode, strings.TrimSpace(string(output)),
 			)
 		}
-		markerExists, markerHead, inspectErr := session.inspectReleaseMarkerRef(ctx)
-		if inspectErr != nil {
-			return inspectErr
-		}
-		if !markerExists {
-			return fmt.Errorf(
-				"release marker ref %s was reported as existing but is absent",
-				markerRef,
-			)
-		}
-		if markerHead != ownedHead {
-			return fmt.Errorf(
-				"release marker ref %s points to %s, expected owned head %s",
-				markerRef, markerHead, ownedHead,
-			)
-		}
 	}
-	exists, head, marker, err = session.inspectFeatureRef(ctx)
-	if err != nil {
-		return err
-	}
-	if !exists || head != ownedHead ||
-		marker != expectedMarker {
-		return fmt.Errorf(
-			"feature ref changed from its exact owned head and marker during release",
-		)
-	}
-	markerExists, markerHead, err := session.inspectReleaseMarkerRef(ctx)
-	if err != nil {
-		return err
-	}
-	if !markerExists || markerHead != ownedHead {
-		return fmt.Errorf(
-			"release marker ref %s does not point to owned head %s",
-			markerRef, ownedHead,
-		)
-	}
-	return session.Verify()
+	return session.verifyReleasedFeatureRefMarker(ctx, ownedHead, intentDigest)
 }

@@ -2,6 +2,7 @@ package workspace_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -211,6 +212,90 @@ func TestWorkspaceAbandonReleasesReadyRuntimeIsTerminalAndIdempotent(
 	)); markerHead != beforeHead {
 		t.Fatalf("release marker ref head after admission = %s, want %s", markerHead, beforeHead)
 	}
+
+	runTargetGitTest(t, root, "update-ref", "-d", featureRef, beforeHead)
+	retry, err = workspace.AbandonWorkspace(
+		context.Background(),
+		harness.journal,
+		harness.definition,
+		workspace.DefaultLocalTargetGitAdapter(),
+		workspace.AbandonWorkspaceRequest{
+			OccurredAt: mustTime(t, "2026-08-18T15:04:10Z"),
+			Reason:     reason,
+		},
+	)
+	if err != nil || retry.Record().Sequence() != 0 ||
+		journalRecordCount(t, harness.journal) != beforeRecords+1 {
+		t.Fatalf("idempotent abandonment after feature-ref removal = %#v err=%v", retry, err)
+	}
+	if branch := strings.TrimSpace(runTargetGitTest(
+		t, root, "for-each-ref", "--format=%(refname)", featureRef,
+	)); branch != "" {
+		t.Fatalf("feature ref reappeared during abandonment retry = %q", branch)
+	}
+
+	runTargetGitTest(t, root, "update-ref", "-d", releaseMarkerRef, beforeHead)
+	reconciled, err := workspace.AbandonWorkspace(
+		context.Background(),
+		harness.journal,
+		harness.definition,
+		workspace.DefaultLocalTargetGitAdapter(),
+		workspace.AbandonWorkspaceRequest{
+			OccurredAt: mustTime(t, "2026-08-18T15:04:11Z"),
+			Reason:     reason,
+		},
+	)
+	if err != nil || reconciled.Record().Sequence() != 0 ||
+		journalRecordCount(t, harness.journal) != beforeRecords+1 {
+		t.Fatalf("idempotent abandonment marker reconciliation = %#v err=%v", reconciled, err)
+	}
+	if markerHead := strings.TrimSpace(runTargetGitTest(
+		t, root, "rev-parse", releaseMarkerRef,
+	)); markerHead != beforeHead {
+		t.Fatalf("reconciled release marker head = %s, want %s", markerHead, beforeHead)
+	}
+	if marker := strings.TrimSpace(runTargetGitTest(
+		t, root, "reflog", "show", "--format=%gs", "-n", "1", releaseMarkerRef, "--",
+	)); marker != wantReleaseMarker {
+		t.Fatalf("reconciled release marker reflog = %q, want %q", marker, wantReleaseMarker)
+	}
+
+	runTargetGitTest(t, root, "update-ref", "-d", releaseMarkerRef, beforeHead)
+	runTargetGitTest(
+		t,
+		root,
+		"update-ref",
+		"--create-reflog",
+		"-m",
+		"unrelated release marker",
+		releaseMarkerRef,
+		beforeHead,
+	)
+	if markerHead := strings.TrimSpace(runTargetGitTest(
+		t, root, "rev-parse", releaseMarkerRef,
+	)); markerHead != beforeHead {
+		t.Fatalf("unrelated release marker head = %s, want %s", markerHead, beforeHead)
+	}
+	if marker := strings.TrimSpace(runTargetGitTest(
+		t, root, "reflog", "show", "--format=%gs", "-n", "1", releaseMarkerRef, "--",
+	)); marker != "unrelated release marker" {
+		t.Fatalf("unrelated release marker reflog = %q", marker)
+	}
+	_, err = workspace.AbandonWorkspace(
+		context.Background(),
+		harness.journal,
+		harness.definition,
+		workspace.DefaultLocalTargetGitAdapter(),
+		workspace.AbandonWorkspaceRequest{
+			OccurredAt: mustTime(t, "2026-08-18T15:04:12Z"),
+			Reason:     reason,
+		},
+	)
+	if err == nil || !strings.Contains(
+		err.Error(), "does not retain its exact durable head and reflog message",
+	) || journalRecordCount(t, harness.journal) != beforeRecords+1 {
+		t.Fatalf("unrelated release marker abandonment retry error = %v", err)
+	}
 }
 
 func TestWorkspaceAbandonBeforeFeatureRefCreationDoesNotTouchGit(t *testing.T) {
@@ -271,6 +356,17 @@ func TestWorkspaceAbandonBeforeFeatureRefCreationDoesNotTouchGit(t *testing.T) {
 	)); branch != "" {
 		t.Fatalf("pre-creation abandonment created feature branch %q", branch)
 	}
+	releaseMarkerRef := "refs/feature-implement/released/" +
+		definition.Workspace().FeatureBranch()
+	if marker := strings.TrimSpace(runTargetGitTest(
+		t,
+		definition.Workspace().RepositoryRoot(),
+		"for-each-ref",
+		"--format=%(refname)",
+		releaseMarkerRef,
+	)); marker != "" {
+		t.Fatalf("pre-creation abandonment created release marker ref %q", marker)
+	}
 }
 
 func TestWorkspaceAbandonRejectsFeatureRefDriftWithoutMutation(t *testing.T) {
@@ -329,6 +425,69 @@ func TestWorkspaceAbandonRejectsFeatureRefDriftWithoutMutation(t *testing.T) {
 		t, root, "reflog", "show", "--format=%gs", "-n", "1", featureRef, "--",
 	)); marker != beforeMarker {
 		t.Fatalf("drifted feature ref marker changed = %q, want %q", marker, beforeMarker)
+	}
+	releaseMarkerRef := "refs/feature-implement/released/" +
+		harness.definition.Workspace().FeatureBranch()
+	if marker := strings.TrimSpace(runTargetGitTest(
+		t, root, "for-each-ref", "--format=%(refname)", releaseMarkerRef,
+	)); marker != "" {
+		t.Fatalf("drifted feature ref abandonment created release marker ref %q", marker)
+	}
+}
+
+func TestWorkspaceAbandonAppendFailureDoesNotCreateReleaseMarker(t *testing.T) {
+	t.Parallel()
+
+	harness := newAttemptHarness(t, "unit-one")
+	if err := harness.journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	crash := errors.New("simulated abandonment append failure")
+	fired := false
+	journal, err := workspace.OpenWorkspaceJournalWithOptions(
+		harness.workspace,
+		workspace.JournalReadWrite,
+		workspace.JournalOptions{
+			FaultInjector: func(point workspace.JournalFaultPoint) error {
+				if point == workspace.JournalFaultBeforeAppend && !fired {
+					fired = true
+					return crash
+				}
+				return nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	beforeRecords := journalRecordCount(t, journal)
+	_, err = workspace.AbandonWorkspace(
+		context.Background(),
+		journal,
+		harness.definition,
+		workspace.DefaultLocalTargetGitAdapter(),
+		workspace.AbandonWorkspaceRequest{
+			OccurredAt: mustTime(t, "2026-08-18T15:25:00Z"),
+			Reason:     "simulated append failure",
+		},
+	)
+	if !errors.Is(err, crash) || !fired {
+		t.Fatalf("abandonment append failure = %v fired=%t", err, fired)
+	}
+	if records := journalRecordCount(t, journal); records != beforeRecords {
+		t.Fatalf("append failure abandonment records = %d, want %d", records, beforeRecords)
+	}
+	releaseMarkerRef := "refs/feature-implement/released/" +
+		harness.definition.Workspace().FeatureBranch()
+	if marker := strings.TrimSpace(runTargetGitTest(
+		t,
+		harness.definition.Workspace().RepositoryRoot(),
+		"for-each-ref",
+		"--format=%(refname)",
+		releaseMarkerRef,
+	)); marker != "" {
+		t.Fatalf("append failure abandonment created release marker ref %q", marker)
 	}
 }
 

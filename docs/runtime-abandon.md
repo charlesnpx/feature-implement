@@ -39,9 +39,9 @@ Its strict schema-version-two request is:
 
 | Situation | Behavior |
 |---|---|
-| Ready runtime with an owned feature ref | Verify its exact durable head and ownership marker, create a private release-marker ref at that head with expected-absent compare-and-swap, then append one `workspace_abandoned` event. |
+| Ready runtime with an owned feature ref | Preflight its exact durable head and ownership marker, append one `workspace_abandoned` event, then create the private release-marker ref at that head with expected-absent compare-and-swap. |
 | Creation intent exists but `feature_ref_created` does not | Append the abandonment event without a Git action. |
-| Same reason submitted again | Verify the recorded abandonment, unchanged feature ref, and release-marker ref, then return without a second event. |
+| Same reason submitted again | Verify the recorded abandonment and private release marker by its exact head and reflog message. If the marker is missing, recreate it at the recorded head; the feature ref is no longer checked. |
 | Different reason submitted again | Refuse the request and retain the journal unchanged. |
 | Runtime already completed | Refuse abandonment before changing the ref or journal. |
 | Any later local workflow mutation | Refuse it because abandonment is final. Journal-tail recovery remains admitted. |
@@ -58,8 +58,13 @@ It points at the runtime's durable owned head. Its creation reflog message is:
 feature-implement feature-ref released <intent-digest>
 ```
 
-The transaction verifies the feature ref at the durable head and creates the
-marker ref at that same head. It never updates the feature ref.
+The marker is valid only when both its head and newest reflog message exactly
+match those recorded values. Before appending, the operation preflights the
+feature ref at the durable head with its exact ownership marker. It appends the
+abandonment event before creating the marker ref, so an append failure cannot
+leave an orphaned marker without a durable explanation. If marker creation is
+interrupted after the append, the recorded event identifies the exact marker to
+recreate. Neither path updates the feature ref.
 
 ## Why release is not a feature-ref reflog entry
 
@@ -77,8 +82,8 @@ the feature ref value and its reflog unchanged.
 | `internal/workspace/local_target_journal_events.go` | Defines `WorkspaceAbandonedJournalEvent`, validates the bounded reason, and binds the event to the configured feature ref and optional durable head. |
 | `internal/workspace/local_target_journal_codec.go` | Canonically serializes and strictly reconstructs the abandonment event. |
 | `internal/workspace/runtime_projection.go` | Projects abandonment, includes it in canonical replay bytes, admits it before feature-ref completion, and rejects later workflow mutations. |
-| `internal/workspace/local_target_release.go` | Performs the idempotent lifecycle operation, verifies repeated requests, and binds a released ref to its exact durable head. |
-| `internal/workspace/local_target_git.go` and `internal/workspace/local_target_git_session.go` | Create and verify the private marker ref with an expected-absent transaction, preserve the feature ref, and identify released refs with an actionable message. |
+| `internal/workspace/local_target_release.go` | Preflights the owned feature ref, records abandonment before the Git effect, and reconciles repeated requests from the recorded state. |
+| `internal/workspace/local_target_git.go` and `internal/workspace/local_target_git_session.go` | Create and verify the private marker ref with an expected-absent transaction, exact head, and exact reflog message; preserve the feature ref; and identify released refs with an actionable message. |
 | `internal/workspace/completion.go` and `internal/workspace/runtime_views.go` | Surface abandonment in reports and make it a completion blocker. |
 | `internal/workspacecmd/` and `cmd/feature/main.go` | Decode the strict request, expose the command and schema, and return the refreshed report. |
 
