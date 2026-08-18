@@ -56,6 +56,22 @@ func TestHelpCommandsExitSuccessfully(t *testing.T) {
 	}
 }
 
+func TestWorkspaceAttemptBoundaryHelpStatesRequiredKinds(t *testing.T) {
+	stdout, stderr, err := runFeature(t, "workspace", "attempt", "boundary", "--help")
+	if err != nil {
+		t.Fatalf("workspace attempt boundary help failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	for _, text := range []string{
+		"attempt boundary request requires kind",
+		"checkpoint",
+		"escalation",
+	} {
+		if !strings.Contains(stdout, text) {
+			t.Fatalf("workspace attempt boundary help missing %q:\n%s", text, stdout)
+		}
+	}
+}
+
 func TestRemovedMutablePlanLifecycleFailsClearly(t *testing.T) {
 	for _, args := range [][]string{
 		{"status", "plan", "--json"},

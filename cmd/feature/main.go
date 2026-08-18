@@ -425,5 +425,7 @@ func usageWorkspace(w io.Writer) {
   feature workspace integrate merge-unit --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
   feature workspace complete verify --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
 
+The attempt boundary request requires kind: checkpoint or escalation.
+
 All mutations accept one strict schema-version-2 JSON request and record typed local journal events.`)
 }

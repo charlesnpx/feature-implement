@@ -39,6 +39,7 @@ type SchedulerUnitView struct {
 
 type BoundaryDirectiveView struct {
 	Kind            string   `json:"kind"`
+	BoundaryKind    string   `json:"boundary_kind"`
 	WorkspaceID     string   `json:"workspace_id"`
 	Generation      string   `json:"generation"`
 	AttemptID       string   `json:"attempt_id"`
@@ -671,7 +672,7 @@ func attemptBoundaryStatus(
 	}
 	view := func(kind string, goal GoalBinding, idempotency Digest, choices []string) BoundaryDirectiveView {
 		return BoundaryDirectiveView{
-			Kind: kind, WorkspaceID: core.workspaceID.String(), Generation: attempt.generation.String(),
+			Kind: kind, BoundaryKind: string(boundary.kind), WorkspaceID: core.workspaceID.String(), Generation: attempt.generation.String(),
 			AttemptID: attempt.attemptID.String(), BoundaryID: boundary.boundaryID.String(),
 			GoalID: goal.id.String(), GoalScope: string(goal.scope), Head: boundary.head.String(),
 			DirectiveDigest: boundary.directiveDigest.String(), IdempotencyKey: idempotency.String(),
