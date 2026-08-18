@@ -3,6 +3,7 @@ package workspacecmd
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/charlesnpx/feature-implement/internal/workspace"
@@ -43,6 +44,7 @@ type boundaryInput struct {
 	SchemaVersion int             `json:"schema_version"`
 	OccurredAt    string          `json:"occurred_at"`
 	AttemptID     string          `json:"attempt_id"`
+	Kind          string          `json:"kind"`
 	Evidence      []evidenceInput `json:"evidence"`
 }
 
@@ -140,8 +142,8 @@ func executeAttempt(ctx context.Context, bundle workspace.WorkspaceBundle, optio
 		}
 		return mutationResult("attempt.adopt-head", journal, definition, nil)
 	case "boundary":
-		var input boundaryInput
-		if err := decodeRequest(options.Input, &input); err != nil {
+		input, kind, err := decodeBoundaryInput(options.Input)
+		if err != nil {
 			return MutationResult{}, err
 		}
 		occurredAt, err := parseOccurredAt(input.SchemaVersion, input.OccurredAt)
@@ -157,7 +159,7 @@ func executeAttempt(ctx context.Context, bundle workspace.WorkspaceBundle, optio
 			return MutationResult{}, err
 		}
 		result, err := workspace.RecordAttemptBoundary(ctx, journal, definition, git, workspace.RecordAttemptBoundaryRequest{
-			AttemptID: attemptID, Evidence: evidence, OccurredAt: occurredAt,
+			AttemptID: attemptID, Kind: kind, Evidence: evidence, OccurredAt: occurredAt,
 		})
 		if err != nil {
 			return MutationResult{}, err
@@ -284,6 +286,44 @@ func executeAttempt(ctx context.Context, bundle workspace.WorkspaceBundle, optio
 	default:
 		return MutationResult{}, fmt.Errorf("unsupported workspace attempt action %q", options.Subaction)
 	}
+}
+
+func decodeBoundaryInput(source []byte) (boundaryInput, workspace.AttemptBoundaryKind, error) {
+	var input boundaryInput
+	if err := decodeRequest(source, &input); err != nil {
+		if strings.Contains(err.Error(), "required JSON field $.kind is missing") {
+			return input, "", requiredAttemptBoundaryKindError()
+		}
+		return input, "", err
+	}
+	kind, err := parseAttemptBoundaryKind(input.Kind)
+	return input, kind, err
+}
+
+func parseAttemptBoundaryKind(value string) (workspace.AttemptBoundaryKind, error) {
+	kind := workspace.AttemptBoundaryKind(value)
+	switch kind {
+	case workspace.AttemptBoundaryKindCheckpoint, workspace.AttemptBoundaryKindEscalation:
+		return kind, nil
+	default:
+		return "", invalidAttemptBoundaryKindError()
+	}
+}
+
+func invalidAttemptBoundaryKindError() error {
+	return fmt.Errorf(
+		"attempt boundary kind must be %q or %q",
+		workspace.AttemptBoundaryKindCheckpoint,
+		workspace.AttemptBoundaryKindEscalation,
+	)
+}
+
+func requiredAttemptBoundaryKindError() error {
+	return fmt.Errorf(
+		"attempt boundary kind is required; accepted values are %q or %q",
+		workspace.AttemptBoundaryKindCheckpoint,
+		workspace.AttemptBoundaryKindEscalation,
+	)
 }
 
 func decodeAttemptIDInput(source []byte) (attemptIDInput, time.Time, workspace.ID, error) {

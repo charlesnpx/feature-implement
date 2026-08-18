@@ -59,6 +59,7 @@ type attemptBoundaryPayloadWire struct {
 	AttemptID       string                `json:"attempt_id"`
 	BoundaryID      string                `json:"boundary_id"`
 	Ordinal         uint64                `json:"ordinal"`
+	Kind            AttemptBoundaryKind   `json:"kind"`
 	Checkpoint      AttemptCheckpointMode `json:"checkpoint"`
 	SerialSegment   string                `json:"serial_segment,omitempty"`
 	LeaseID         string                `json:"lease_id"`
@@ -148,7 +149,7 @@ func marshalAttemptJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, b
 	case AttemptBoundaryReachedJournalEvent:
 		value = attemptBoundaryPayloadWire{
 			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(), AttemptID: event.attemptID.String(),
-			BoundaryID: event.boundaryID.String(), Ordinal: event.ordinal, Checkpoint: event.checkpoint,
+			BoundaryID: event.boundaryID.String(), Ordinal: event.ordinal, Kind: event.kind, Checkpoint: event.checkpoint,
 			SerialSegment: event.serialSegment.String(), LeaseID: event.leaseID.String(),
 			GoalID: event.goal.id.String(), GoalScope: event.goal.scope,
 			Head: event.head.String(), Evidence: evidencePayloadFromDomain(event.evidence),
@@ -303,7 +304,7 @@ func decodeAttemptJournalEvent(
 			return nil, true, err
 		}
 		event, err := NewAttemptBoundaryReachedJournalEvent(
-			workspaceID, attemptID, generation, wire.Ordinal, wire.Checkpoint, segment,
+			workspaceID, attemptID, generation, wire.Ordinal, wire.Kind, wire.Checkpoint, segment,
 			leaseID, goal, head, evidence,
 		)
 		if err != nil {
