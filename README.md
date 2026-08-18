@@ -203,6 +203,8 @@ Agent-driven broad review is capped at three iterations. Start another
 iteration only when the preceding review found a Critical or High issue.
 After a review with no Critical or High findings, apply worthwhile Medium and
 Low fixes once, perform targeted confirmation, and stop the broad-review loop.
+`max_review_rounds` must be at least 2 for a fix budget to be usable, because a
+fix is reconfirmed by a following review round.
 
 ## Locks and runtime state
 

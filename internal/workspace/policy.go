@@ -126,6 +126,9 @@ func newExecutionPolicy(wire executionPolicyWire, location string) (ExecutionPol
 	if *wire.MaxAttempts == 0 || *wire.MaxReviewRounds == 0 || *wire.MaxReviewFixes == 0 {
 		return ExecutionPolicy{}, fmt.Errorf("%s budgets must be positive", location)
 	}
+	if *wire.MaxReviewFixes > 0 && *wire.MaxReviewRounds < 2 {
+		return ExecutionPolicy{}, fmt.Errorf("%s max_review_fixes requires max_review_rounds of at least 2 so a fix can be reconfirmed at the new head", location)
+	}
 	return ExecutionPolicy{
 		requirePassingChecks: *wire.RequirePassingChecks,
 		allowWriteNetwork:    *wire.AllowWriteNetwork,
