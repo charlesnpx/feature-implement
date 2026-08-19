@@ -134,7 +134,7 @@ func ReserveAttempt(
 	for _, unit := range view.Scheduler.Units {
 		if unit.PlanID == request.MergeUnit.planID.String() && unit.MergeUnitID == request.MergeUnit.mergeUnitID.String() {
 			status = unit.Status
-			blockers = workspaceUnitBlockerReasons(unit.Blockers)
+			blockers = unit.Blockers
 			ready = unit.Status == SchedulerUnitReady
 			break
 		}

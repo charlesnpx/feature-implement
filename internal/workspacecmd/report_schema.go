@@ -57,16 +57,6 @@ func WorkspaceViewSchema() map[string]any {
 			"choices":          array(nonEmptyText()),
 		},
 	)
-	blocker := object(
-		[]string{"kind", "reason", "dependency_sets"},
-		map[string]any{
-			"kind":   enum("dependency_sets"),
-			"reason": nonEmptyText(),
-			"dependency_sets": array(
-				array(nonEmptyText()),
-			),
-		},
-	)
 	schedulerUnit := object(
 		[]string{
 			"plan_id", "merge_unit_id", "status", "generation",
@@ -82,7 +72,7 @@ func WorkspaceViewSchema() map[string]any {
 			),
 			"generation":         nonEmptyText(),
 			"dependencies":       array(nonEmptyText()),
-			"blockers":           array(blocker),
+			"blockers":           array(nonEmptyText()),
 			"attempt_id":         nonEmptyText(),
 			"attempt_number":     integer(1),
 			"branch":             nonEmptyText(),

@@ -329,12 +329,9 @@ func sortedUniqueCompletionBlockers(values []string) []string {
 func workspaceCompletionViewState(
 	snapshot JournalSnapshot,
 	definition EffectiveWorkspaceDefinition,
-	reviews ReviewRuntimeProjection,
+	assessment workspaceCompletionAssessment,
 	runtime WorkspaceRuntimeProjection,
 ) ([]string, bool, Digest, error) {
-	assessment := assessWorkspaceCompletion(
-		snapshot, definition, reviews, runtime,
-	)
 	blockers := append([]string(nil), assessment.blockers...)
 	completion, recorded := runtime.Completion()
 	if !recorded {

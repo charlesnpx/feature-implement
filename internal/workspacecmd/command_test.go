@@ -275,9 +275,11 @@ func TestWorkspaceViewSchemaKeepsChoicesOptional(t *testing.T) {
 	}
 	blockers := unitProperties["blockers"].(map[string]any)
 	blocker := blockers["items"].(map[string]any)
-	blockerProperties := blocker["properties"].(map[string]any)
-	if _, exists := blockerProperties["dependency_sets"]; !exists {
-		t.Fatalf("workspace view blocker does not expose dependency sets: %+v", blockerProperties)
+	if blocker["type"] != "string" {
+		t.Fatalf("workspace view blocker is not a string: %+v", blocker)
+	}
+	if _, exists := blocker["properties"]; exists {
+		t.Fatalf("workspace view blocker retains object properties: %+v", blocker)
 	}
 }
 

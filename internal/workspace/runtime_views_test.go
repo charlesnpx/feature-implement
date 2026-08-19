@@ -60,6 +60,53 @@ func TestWorkspaceRuntimeViewsExposeOnlyLocalStateAndReplayDeterministically(
 			firstJSON, secondJSON,
 		)
 	}
+	coreDigest, err := workspace.VerifyWorkspaceRuntimeConformance(
+		snapshot, harness.definition.Generation(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewDigest, err := workspace.VerifyReviewRuntimeConformance(
+		snapshot, harness.definition,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Workflow.ProjectionDigest != coreDigest.String() ||
+		first.Workflow.ReviewProjectionDigest != reviewDigest.String() {
+		t.Fatalf("workspace view projection digests = %+v", first.Workflow)
+	}
+	var consumer struct {
+		Scheduler struct {
+			Units []struct {
+				MergeUnitID string   `json:"merge_unit_id"`
+				Blockers    []string `json:"blockers"`
+			} `json:"units"`
+		} `json:"scheduler"`
+	}
+	if err := json.Unmarshal(firstJSON, &consumer); err != nil {
+		t.Fatalf("consumer decoding string blockers: %v", err)
+	}
+	var blockedBlockers, unblockedBlockers []string
+	foundUnblocked := false
+	for _, unit := range consumer.Scheduler.Units {
+		switch unit.MergeUnitID {
+		case "unit-one":
+			unblockedBlockers = unit.Blockers
+			foundUnblocked = true
+		case "unit-two":
+			blockedBlockers = unit.Blockers
+		}
+	}
+	if len(blockedBlockers) != 1 ||
+		!strings.Contains(blockedBlockers[0], "[alpha-plan/unit-one]") ||
+		!foundUnblocked ||
+		len(unblockedBlockers) != 0 {
+		t.Fatalf(
+			"consumer string blockers = blocked=%+v unblocked=%+v",
+			blockedBlockers, unblockedBlockers,
+		)
+	}
 	for _, forbidden := range []string{
 		`"provider`, `"receipt`, `"authorization`,
 		`"queue`, `"reconciliation`, `"remote`,
@@ -127,10 +174,8 @@ func TestWorkspaceRuntimeViewsExposeOnlyLocalStateAndReplayDeterministically(
 		)
 	}
 	if len(unitTwo.Blockers) != 1 ||
-		!strings.Contains(unitTwo.Blockers[0].Reason, "unsatisfied dependency sets") ||
-		len(unitTwo.Blockers[0].DependencySets) != 1 ||
-		len(unitTwo.Blockers[0].DependencySets[0]) != 1 ||
-		unitTwo.Blockers[0].DependencySets[0][0] != "alpha-plan/unit-one" {
+		!strings.Contains(unitTwo.Blockers[0], "unsatisfied dependency sets") ||
+		!strings.Contains(unitTwo.Blockers[0], "[alpha-plan/unit-one]") {
 		t.Fatalf("blocked unit does not name its unsatisfied dependency set: %+v", unitTwo.Blockers)
 	}
 	gate := gateUnitByID(t, first.Gates, "unit-one")
@@ -158,6 +203,17 @@ func TestWorkspaceRuntimeViewsExposeOnlyLocalStateAndReplayDeterministically(
 			"drift/completion views = %+v / %+v",
 			first.Drift, first.Completion,
 		)
+	}
+}
+
+func TestWorkspaceViewRetainsZeroGenerationConformanceError(t *testing.T) {
+	t.Parallel()
+
+	_, err := workspace.RebuildWorkspaceView(
+		workspace.JournalSnapshot{}, workspace.EffectiveWorkspaceDefinition{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "replay conformance requires") {
+		t.Fatalf("zero-generation workspace view error = %v", err)
 	}
 }
 

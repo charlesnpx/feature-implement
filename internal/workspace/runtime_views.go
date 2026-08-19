@@ -21,19 +21,13 @@ const (
 	SchedulerUnitCompleted       SchedulerUnitStatus = "completed"
 )
 
-type WorkspaceUnitBlocker struct {
-	Kind           string     `json:"kind"`
-	Reason         string     `json:"reason"`
-	DependencySets [][]string `json:"dependency_sets,omitempty"`
-}
-
 type WorkspaceUnitState struct {
 	PlanID            string                       `json:"plan_id"`
 	MergeUnitID       string                       `json:"merge_unit_id"`
 	Status            SchedulerUnitStatus          `json:"status"`
 	Generation        string                       `json:"generation"`
 	Dependencies      []string                     `json:"dependencies"`
-	Blockers          []WorkspaceUnitBlocker       `json:"blockers"`
+	Blockers          []string                     `json:"blockers"`
 	AttemptID         string                       `json:"attempt_id,omitempty"`
 	AttemptNumber     uint64                       `json:"attempt_number,omitempty"`
 	Branch            string                       `json:"branch,omitempty"`
@@ -181,6 +175,12 @@ type WorkspaceCompletion struct {
 	ReportDigest string   `json:"report_digest,omitempty"`
 }
 
+type workspaceIntegrationDriftInput struct {
+	chain              []MergeUnitIntegrationIntent
+	target             LocalTargetBinding
+	completionRecorded bool
+}
+
 // WorkspaceView is the single journal-derived operator view. Its nested
 // sections retain the established wire layout while sharing one rebuild.
 type WorkspaceView struct {
@@ -196,9 +196,7 @@ type WorkspaceView struct {
 	Completion    WorkspaceCompletion  `json:"completion"`
 	ReportDigest  string               `json:"report_digest"`
 
-	snapshot JournalSnapshot
-	runtime  WorkspaceRuntimeProjection
-	reviews  ReviewRuntimeProjection
+	integrationDrift workspaceIntegrationDriftInput
 }
 
 func RebuildWorkspaceView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefinition) (WorkspaceView, error) {
@@ -206,11 +204,9 @@ func RebuildWorkspaceView(snapshot JournalSnapshot, definition EffectiveWorkspac
 	if err != nil {
 		return WorkspaceView{}, err
 	}
-	coreDigest, err := VerifyWorkspaceRuntimeConformance(snapshot, definition.generation)
-	if err != nil {
-		return WorkspaceView{}, err
-	}
-	reviewDigest, err := VerifyReviewRuntimeConformance(snapshot, definition)
+	coreDigest, reviewDigest, err := verifyWorkspaceViewProjectionConformance(
+		snapshot, definition, core, reviews,
+	)
 	if err != nil {
 		return WorkspaceView{}, err
 	}
@@ -241,7 +237,7 @@ func RebuildWorkspaceView(snapshot JournalSnapshot, definition EffectiveWorkspac
 			PlanID: reference.planID.String(), MergeUnitID: reference.mergeUnitID.String(),
 			Generation:        definition.generation.String(),
 			Dependencies:      make([]string, 0, len(dependencies[key])),
-			Blockers:          []WorkspaceUnitBlocker{},
+			Blockers:          []string{},
 			PendingDirectives: []WorkspaceBoundaryDirective{},
 		}
 		unsatisfiedDependencySets := make([][]string, 0, len(dependencies[key]))
@@ -256,11 +252,9 @@ func RebuildWorkspaceView(snapshot JournalSnapshot, definition EffectiveWorkspac
 			}
 		}
 		if len(unsatisfiedDependencySets) != 0 {
-			unit.Blockers = append(unit.Blockers, WorkspaceUnitBlocker{
-				Kind:           "dependency_sets",
-				Reason:         dependencySetReason(unsatisfiedDependencySets),
-				DependencySets: cloneDependencySets(unsatisfiedDependencySets),
-			})
+			unit.Blockers = append(
+				unit.Blockers, dependencySetReason(unsatisfiedDependencySets),
+			)
 		}
 
 		attempt, hasAttempt := attemptsByUnit[key]
@@ -298,7 +292,7 @@ func RebuildWorkspaceView(snapshot JournalSnapshot, definition EffectiveWorkspac
 		if len(unit.Blockers) == 0 {
 			dependencyGate.Status, dependencyGate.Reason = GatePassed, "all_dependencies_completed"
 		} else {
-			dependencyGate.Status, dependencyGate.Reason = GatePending, unit.Blockers[0].Reason
+			dependencyGate.Status, dependencyGate.Reason = GatePending, unit.Blockers[0]
 		}
 		unitGates.Checks = append(unitGates.Checks, dependencyGate)
 		if hasAttempt {
@@ -364,8 +358,9 @@ func RebuildWorkspaceView(snapshot JournalSnapshot, definition EffectiveWorkspac
 		})
 	}
 
+	assessment := assessWorkspaceCompletion(snapshot, definition, reviews, core)
 	completionBlockers, complete, completionDigest, err := workspaceCompletionViewState(
-		snapshot, definition, reviews, core,
+		snapshot, definition, assessment, core,
 	)
 	if err != nil {
 		return WorkspaceView{}, err
@@ -392,6 +387,13 @@ func RebuildWorkspaceView(snapshot JournalSnapshot, definition EffectiveWorkspac
 		}
 		gates.Completion.Reason = completionBlockers[0]
 	}
+	driftInput := workspaceIntegrationDriftInput{
+		chain: append([]MergeUnitIntegrationIntent(nil), assessment.chain...),
+	}
+	if target, exists := core.LocalTarget(); exists && target.Created() {
+		driftInput.target = target.Binding()
+	}
+	_, driftInput.completionRecorded = core.Completion()
 
 	view := WorkspaceView{
 		SchemaVersion: JournalSchemaVersion,
@@ -404,17 +406,15 @@ func RebuildWorkspaceView(snapshot JournalSnapshot, definition EffectiveWorkspac
 			ProjectionDigest:       coreDigest.String(),
 			ReviewProjectionDigest: reviewDigest.String(),
 		},
-		Target:      target,
-		Attempts:    workspaceAttemptViews(core, schedule),
-		Reviews:     workspaceReviewViews(reviews),
-		Scheduler:   schedule,
-		Gates:       gates,
-		Integration: integration,
-		Drift:       WorkspaceDrift{Reasons: []string{}},
-		Completion:  completion,
-		snapshot:    snapshot,
-		runtime:     core,
-		reviews:     reviews,
+		Target:           target,
+		Attempts:         workspaceAttemptViews(core, schedule),
+		Reviews:          workspaceReviewViews(reviews),
+		Scheduler:        schedule,
+		Gates:            gates,
+		Integration:      integration,
+		Drift:            WorkspaceDrift{Reasons: []string{}},
+		Completion:       completion,
+		integrationDrift: driftInput,
 	}
 	if err := setWorkspaceViewDigest(&view); err != nil {
 		return WorkspaceView{}, err
@@ -425,24 +425,18 @@ func RebuildWorkspaceView(snapshot JournalSnapshot, definition EffectiveWorkspac
 func ApplyWorkspaceIntegrationDrift(
 	ctx context.Context,
 	view *WorkspaceView,
-	definition EffectiveWorkspaceDefinition,
 	git IntegrationGitPort,
 ) error {
 	if ctx == nil || view == nil || git == nil {
 		return fmt.Errorf("workspace integration drift check requires context, view, and Git adapter")
 	}
-	assessment := assessWorkspaceCompletion(
-		view.snapshot, definition, view.reviews, view.runtime,
-	)
-	if len(assessment.chain) == 0 {
-		return nil
-	}
-	target, exists := view.runtime.LocalTarget()
-	if !exists || !target.Created() {
+	driftInput := view.integrationDrift
+	if len(driftInput.chain) == 0 || driftInput.target.IsZero() {
 		return nil
 	}
 	if err := git.VerifyCompletedIntegration(
-		ctx, target.binding, assessment.chain,
+		ctx, driftInput.target,
+		append([]MergeUnitIntegrationIntent(nil), driftInput.chain...),
 	); err == nil {
 		return nil
 	} else {
@@ -460,7 +454,7 @@ func ApplyWorkspaceIntegrationDrift(
 			[]string{},
 			view.Completion.Blockers...,
 		)
-		if _, recorded := view.runtime.Completion(); recorded {
+		if driftInput.completionRecorded {
 			view.Gates.Completion.Status = GateFailed
 		} else {
 			view.Gates.Completion.Status = GatePending
@@ -493,24 +487,6 @@ func dependencySetReason(sets [][]string) string {
 		parts = append(parts, "["+strings.Join(providers, ", ")+"]")
 	}
 	return "unsatisfied dependency sets: " + strings.Join(parts, ", ")
-}
-
-func cloneDependencySets(source [][]string) [][]string {
-	result := make([][]string, 0, len(source))
-	for _, set := range source {
-		result = append(result, append([]string(nil), set...))
-	}
-	return result
-}
-
-func workspaceUnitBlockerReasons(blockers []WorkspaceUnitBlocker) []string {
-	result := make([]string, 0, len(blockers))
-	for _, blocker := range blockers {
-		if blocker.Reason != "" {
-			result = append(result, blocker.Reason)
-		}
-	}
-	return result
 }
 
 func workspaceTargetView(
@@ -693,6 +669,43 @@ func rebuildViewProjections(
 		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, err
 	}
 	return core, reviews, nil
+}
+
+func verifyWorkspaceViewProjectionConformance(
+	snapshot JournalSnapshot,
+	definition EffectiveWorkspaceDefinition,
+	core WorkspaceRuntimeProjection,
+	reviews ReviewRuntimeProjection,
+) (Digest, Digest, error) {
+	independentReviews, err := RebuildReviewRuntime(snapshot, definition)
+	if err != nil {
+		return Digest{}, Digest{}, err
+	}
+	coreDigest, err := verifyProjectionConformance(
+		core,
+		independentReviews.core,
+		canonicalWorkspaceRuntime,
+		func(projection WorkspaceRuntimeProjection) Digest {
+			return projection.activeGeneration
+		},
+		definition.generation,
+	)
+	if err != nil {
+		return Digest{}, Digest{}, err
+	}
+	reviewDigest, err := verifyProjectionConformance(
+		reviews,
+		independentReviews,
+		canonicalReviewRuntime,
+		func(projection ReviewRuntimeProjection) Digest {
+			return projection.activeGeneration
+		},
+		definition.generation,
+	)
+	if err != nil {
+		return Digest{}, Digest{}, err
+	}
+	return coreDigest, reviewDigest, nil
 }
 
 func definitionDependencyGraph(definition EffectiveWorkspaceDefinition) (map[string][]MergeUnitReference, []MergeUnitReference) {

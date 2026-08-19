@@ -522,7 +522,7 @@ func readWorkspaceView(
 		return workspace.WorkspaceView{}, err
 	}
 	if err := workspace.ApplyWorkspaceIntegrationDrift(
-		ctx, &view, bundle.Definition(), workspace.DefaultLocalIntegrationGitAdapter(),
+		ctx, &view, workspace.DefaultLocalIntegrationGitAdapter(),
 	); err != nil {
 		return workspace.WorkspaceView{}, err
 	}
@@ -594,7 +594,7 @@ func mutationResult(
 		return MutationResult{}, err
 	}
 	if err := workspace.ApplyWorkspaceIntegrationDrift(
-		context.Background(), &report, definition,
+		context.Background(), &report,
 		workspace.DefaultLocalIntegrationGitAdapter(),
 	); err != nil {
 		return MutationResult{}, err
