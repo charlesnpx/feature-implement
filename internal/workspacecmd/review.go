@@ -119,23 +119,6 @@ type applyReviewFixInput struct {
 	Body               string   `json:"body,omitempty"`
 }
 
-type localReviewRepository struct {
-	git workspace.LocalCommitGitAdapter
-}
-
-func (adapter localReviewRepository) InspectReviewSnapshot(
-	ctx context.Context,
-	request workspace.ReviewRepositoryRequest,
-) (workspace.ReviewRepositorySnapshot, error) {
-	inspection, err := adapter.git.InspectCleanWorktreeHead(
-		ctx, request.Worktree(), request.Branch(), request.Head(),
-	)
-	if err != nil {
-		return workspace.ReviewRepositorySnapshot{}, err
-	}
-	return workspace.NewReviewRepositorySnapshot(inspection.Commit(), inspection.Tree(), true)
-}
-
 func executeReview(ctx context.Context, bundle workspace.WorkspaceBundle, options Options) (any, error) {
 	journal, _, err := openWritableJournal(options)
 	if err != nil {

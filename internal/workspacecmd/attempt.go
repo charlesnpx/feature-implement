@@ -76,6 +76,23 @@ type ownerResponseInput struct {
 	Response        string    `json:"response"`
 }
 
+type localReviewRepository struct {
+	git workspace.LocalCommitGitAdapter
+}
+
+func (adapter localReviewRepository) InspectReviewSnapshot(
+	ctx context.Context,
+	request workspace.ReviewRepositoryRequest,
+) (workspace.ReviewRepositorySnapshot, error) {
+	inspection, err := adapter.git.InspectCleanWorktreeHead(
+		ctx, request.Worktree(), request.Branch(), request.Head(),
+	)
+	if err != nil {
+		return workspace.ReviewRepositorySnapshot{}, err
+	}
+	return workspace.NewReviewRepositorySnapshot(inspection.Commit(), inspection.Tree(), true)
+}
+
 func executeAttempt(ctx context.Context, bundle workspace.WorkspaceBundle, options Options) (MutationResult, error) {
 	journal, _, err := openWritableJournal(options)
 	if err != nil {
