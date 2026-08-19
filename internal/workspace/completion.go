@@ -41,6 +41,9 @@ func assessWorkspaceCompletion(
 		runtime.activeGeneration != definition.generation {
 		add("workspace:generation_mismatch")
 	}
+	if _, abandoned := runtime.Abandonment(); abandoned {
+		add("workspace:abandoned")
+	}
 	target, targetReady := runtime.LocalTarget()
 	if !targetReady {
 		add("local_effect:feature_ref_intent_missing")

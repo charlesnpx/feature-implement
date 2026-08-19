@@ -52,6 +52,7 @@ feature workspace commit next ...
 feature workspace review start|reserve|record|reserve-fix|apply-fix|record-fix|ready ...
 feature workspace integrate merge-unit ...
 feature workspace complete verify ...
+feature workspace abandon --bundle <bundle-root> --workspace <runtime-root> --input <file|-> [--json]
 ```
 
 Every mutation accepts exactly one strict schema-version-two JSON request
@@ -268,6 +269,11 @@ not interpreted or migrated.
    bind the exact directive, goal, head, and idempotency inputs.
 9. After every unit is integrated and every boundary is resolved, run
    `complete verify` to record local workspace completion.
+
+If a runtime must be given up, submit `abandon` with a non-empty reason. It
+ends local workflow mutations. When the runtime created the feature ref, the
+ref keeps its exact head and is re-marked as released; delete or rename that
+branch manually before using a fresh branch.
 
 Every mutation returns a fresh journal-derived report. Treat that report as the
 source of truth instead of reconstructing state from remembered commands.

@@ -233,19 +233,48 @@ func validateBoundLocalTargetFeatureRefStorage(
 	commonRoot *VerifiedRoot,
 	featureRef string,
 ) error {
+	return validateBoundLocalTargetRefStorage(
+		commonRoot,
+		featureRef,
+		"refs/heads/feature/",
+		"feature ref",
+		"feature reflog",
+	)
+}
+
+func validateBoundLocalTargetReleaseMarkerStorage(
+	commonRoot *VerifiedRoot,
+	markerRef string,
+) error {
+	return validateBoundLocalTargetRefStorage(
+		commonRoot,
+		markerRef,
+		localTargetReleaseMarkerRefPrefix,
+		"feature-ref release marker",
+		"feature-ref release marker reflog",
+	)
+}
+
+func validateBoundLocalTargetRefStorage(
+	commonRoot *VerifiedRoot,
+	reference string,
+	allowedPrefix string,
+	refLabel string,
+	reflogLabel string,
+) error {
 	if commonRoot == nil || commonRoot.adapter == nil {
 		return fmt.Errorf("bound local target Git common directory is closed")
 	}
-	if !strings.HasPrefix(featureRef, "refs/heads/feature/") ||
-		path.Clean(featureRef) != featureRef {
-		return fmt.Errorf("bound local target feature ref is invalid")
+	if !strings.HasPrefix(reference, allowedPrefix) ||
+		path.Clean(reference) != reference {
+		return fmt.Errorf("bound local target %s is invalid", refLabel)
 	}
 	for _, candidate := range []struct {
 		path  string
 		label string
 	}{
-		{path: featureRef, label: "feature ref"},
-		{path: path.Join("logs", featureRef), label: "feature reflog"},
+		{path: reference, label: refLabel},
+		{path: path.Join("logs", reference), label: reflogLabel},
 	} {
 		if err := validateBoundLocalTargetStorageAncestors(
 			commonRoot, candidate.path, candidate.label,
@@ -376,10 +405,46 @@ func (session *localTargetGitSession) ensureFeatureRefStorageAncestors() error {
 	); err != nil {
 		return err
 	}
+	if err := session.ensureReferenceStorageAncestors(
+		session.binding.featureRef,
+		"feature ref",
+	); err != nil {
+		return err
+	}
+	return validateBoundLocalTargetFeatureRefStorage(
+		session.common.root,
+		session.binding.featureRef,
+	)
+}
+
+func (session *localTargetGitSession) ensureReleaseMarkerRefStorageAncestors() error {
+	markerRef := localTargetReleaseMarkerRef(session.binding.featureBranch)
+	if err := validateBoundLocalTargetReleaseMarkerStorage(
+		session.common.root,
+		markerRef,
+	); err != nil {
+		return err
+	}
+	if err := session.ensureReferenceStorageAncestors(
+		markerRef,
+		"feature-ref release marker",
+	); err != nil {
+		return err
+	}
+	return validateBoundLocalTargetReleaseMarkerStorage(
+		session.common.root,
+		markerRef,
+	)
+}
+
+func (session *localTargetGitSession) ensureReferenceStorageAncestors(
+	reference string,
+	label string,
+) error {
 	seen := make(map[string]struct{})
 	for _, candidate := range []string{
-		session.binding.featureRef,
-		path.Join("logs", session.binding.featureRef),
+		reference,
+		path.Join("logs", reference),
 	} {
 		ancestor := ""
 		for _, component := range strings.Split(path.Dir(candidate), "/") {
@@ -392,21 +457,18 @@ func (session *localTargetGitSession) ensureFeatureRefStorageAncestors() error {
 				ancestor, 0o700,
 			); err != nil {
 				return fmt.Errorf(
-					"prepare bound local target feature-ref storage ancestor %s: %w",
-					ancestor, err,
+					"prepare bound local target %s storage ancestor %s: %w",
+					label, ancestor, err,
 				)
 			}
 			if err := validateBoundLocalTargetStorageDirectory(
-				session.common.root, ancestor, "feature ref",
+				session.common.root, ancestor, label,
 			); err != nil {
 				return err
 			}
 		}
 	}
-	return validateBoundLocalTargetFeatureRefStorage(
-		session.common.root,
-		session.binding.featureRef,
-	)
+	return session.common.root.VerifyPath()
 }
 
 func (session *localTargetGitSession) Close() error {
@@ -751,6 +813,81 @@ func (session *localTargetGitSession) inspectFeatureRef(
 	return true, head, marker, nil
 }
 
+func (session *localTargetGitSession) inspectReleaseMarkerRef(
+	ctx context.Context,
+) (bool, GitObjectID, string, error) {
+	markerRef := localTargetReleaseMarkerRef(session.binding.featureBranch)
+	output, exitCode, err := session.run(
+		ctx, nil, "show-ref", "--verify", markerRef,
+	)
+	if err != nil {
+		return false, GitObjectID{}, "", err
+	}
+	if exitCode == 1 || exitCode == 128 {
+		return false, GitObjectID{}, "", nil
+	}
+	if exitCode != 0 {
+		return false, GitObjectID{}, "", fmt.Errorf(
+			"inspect feature-ref release marker %s: Git exited with status %d",
+			markerRef, exitCode,
+		)
+	}
+	fields := strings.Fields(string(output))
+	if len(fields) != 2 || fields[1] != markerRef {
+		return false, GitObjectID{}, "", fmt.Errorf(
+			"Git returned malformed feature-ref release marker data",
+		)
+	}
+	head, err := qualifyGitObjectID(session.binding.objectFormat, fields[0])
+	if err != nil {
+		return false, GitObjectID{}, "", err
+	}
+	reflog, reflogExit, err := session.run(
+		ctx, nil,
+		"reflog", "show", "--no-show-signature", "--format=%gs", "-n", "1",
+		markerRef, "--",
+	)
+	if err != nil {
+		return false, GitObjectID{}, "", err
+	}
+	marker := ""
+	if reflogExit == 0 {
+		marker = strings.TrimSpace(string(reflog))
+	} else if reflogExit != 1 {
+		return false, GitObjectID{}, "", fmt.Errorf(
+			"inspect feature-ref release marker reflog: Git exited with status %d: %s",
+			reflogExit, strings.TrimSpace(string(reflog)),
+		)
+	}
+	return true, head, marker, nil
+}
+
+func (session *localTargetGitSession) verifyReleasedFeatureRefMarker(
+	ctx context.Context,
+	ownedHead GitObjectID,
+	intentDigest Digest,
+) error {
+	if ctx == nil || ownedHead.IsZero() ||
+		ownedHead.Algorithm() != session.binding.objectFormat || intentDigest.IsZero() {
+		return fmt.Errorf(
+			"released feature-ref verification requires owned head and intent digest",
+		)
+	}
+	markerRef := localTargetReleaseMarkerRef(session.binding.featureBranch)
+	markerExists, markerHead, marker, err := session.inspectReleaseMarkerRef(ctx)
+	if err != nil {
+		return err
+	}
+	if !markerExists || markerHead != ownedHead ||
+		marker != localTargetReleaseReflogMessage(intentDigest) {
+		return fmt.Errorf(
+			"release marker ref %s does not retain its exact durable head and reflog message",
+			markerRef,
+		)
+	}
+	return session.Verify()
+}
+
 func (session *localTargetGitSession) inspectOwnedState(
 	ctx context.Context,
 	intentDigest Digest,
@@ -769,6 +906,16 @@ func (session *localTargetGitSession) inspectOwnedState(
 		return LocalTargetInspection{}, fmt.Errorf(
 			"base_ref %s resolves to %s, not pinned base_commit %s",
 			session.binding.baseRef, baseHead, session.binding.baseCommit,
+		)
+	}
+	releaseMarkerExists, _, _, err := session.inspectReleaseMarkerRef(ctx)
+	if err != nil {
+		return LocalTargetInspection{}, err
+	}
+	if releaseMarkerExists {
+		return LocalTargetInspection{}, releasedFeatureRefAdoptionError(
+			session.binding.featureRef,
+			localTargetReleaseMarkerRef(session.binding.featureBranch),
 		)
 	}
 	exists, head, marker, err := session.inspectFeatureRef(ctx)
@@ -868,6 +1015,16 @@ func (session *localTargetGitSession) createFeatureRef(
 			session.binding.baseRef, baseHead, session.binding.baseCommit,
 		)
 	}
+	releaseMarkerExists, _, _, err := session.inspectReleaseMarkerRef(ctx)
+	if err != nil {
+		return LocalTargetInspection{}, err
+	}
+	if releaseMarkerExists {
+		return LocalTargetInspection{}, releasedFeatureRefAdoptionError(
+			session.binding.featureRef,
+			localTargetReleaseMarkerRef(session.binding.featureBranch),
+		)
+	}
 	exists, _, _, err := session.inspectFeatureRef(ctx)
 	if err != nil {
 		return LocalTargetInspection{}, err
@@ -906,4 +1063,47 @@ func (session *localTargetGitSession) createFeatureRef(
 		)
 	}
 	return session.inspectOwnedState(ctx, intentDigest, true)
+}
+
+func (session *localTargetGitSession) ensureReleasedFeatureRefMarker(
+	ctx context.Context,
+	ownedHead GitObjectID,
+	intentDigest Digest,
+) error {
+	if ctx == nil || ownedHead.IsZero() ||
+		ownedHead.Algorithm() != session.binding.objectFormat || intentDigest.IsZero() {
+		return fmt.Errorf(
+			"feature-ref release marker requires owned head and intent digest",
+		)
+	}
+	if err := session.Verify(); err != nil {
+		return err
+	}
+	markerRef := localTargetReleaseMarkerRef(session.binding.featureBranch)
+	if err := session.ensureReleaseMarkerRefStorageAncestors(); err != nil {
+		return err
+	}
+	transaction := []byte(fmt.Sprintf(
+		"create %s %s\n",
+		markerRef,
+		gitObjectHex(ownedHead),
+	))
+	output, exitCode, err := session.run(
+		ctx,
+		transaction,
+		"update-ref", "--stdin", "--no-deref", "--create-reflog", "-m",
+		localTargetReleaseReflogMessage(intentDigest),
+	)
+	if err != nil {
+		return fmt.Errorf("create feature-ref release marker %s: %w", markerRef, err)
+	}
+	if exitCode != 0 {
+		if !strings.Contains(string(output), "reference already exists") {
+			return fmt.Errorf(
+				"create feature-ref release marker %s with expected-absent CAS: Git exited with status %d: %s",
+				markerRef, exitCode, strings.TrimSpace(string(output)),
+			)
+		}
+	}
+	return session.verifyReleasedFeatureRefMarker(ctx, ownedHead, intentDigest)
 }

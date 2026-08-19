@@ -82,6 +82,9 @@ func RecoverWorkspaceLocalEffects(
 			"local recovery definition does not match the active workspace generation",
 		)
 	}
+	if _, abandoned := runtime.Abandonment(); abandoned {
+		return result, nil
+	}
 
 	if _, completed := runtime.Completion(); !completed {
 		target, exists := runtime.LocalTarget()

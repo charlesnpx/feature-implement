@@ -216,6 +216,15 @@ func expectedLocalTargetReflogMarker(
 	runtime WorkspaceRuntimeProjection,
 	target RuntimeLocalTargetProjection,
 ) (string, error) {
+	if abandonment, abandoned := runtime.Abandonment(); abandoned {
+		if !target.Created() ||
+			abandonment.FeatureRef() != target.binding.featureRef ||
+			abandonment.FeatureHead() != target.createdHead {
+			return "", fmt.Errorf(
+				"workspace abandonment does not match the durable feature frontier",
+			)
+		}
+	}
 	if target.createdRecord == 0 || target.headRecord == 0 ||
 		target.createdHead.IsZero() {
 		return "", fmt.Errorf(

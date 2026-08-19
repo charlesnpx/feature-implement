@@ -125,6 +125,16 @@ readiness.
 6. After all merge units are integrated, all boundaries are resolved, and no
    attempt or local effect remains active, run `complete verify`.
 
+## Abandon a runtime
+
+If a runtime must be given up, stop local workflow activity and submit
+`feature workspace abandon` with its strict request and a non-empty reason.
+The operation ends further local workflow mutations. When the runtime created
+the feature ref, abandonment re-marks the same head as released; do not delete
+or move the branch as part of this operation. A released ref is not adopted by
+a fresh runtime. Delete or rename that branch manually before creating a fresh
+feature branch.
+
 ## Finish
 
 Run `status`, `scheduler`, `gates`, and `report` again. Report the workspace ID,

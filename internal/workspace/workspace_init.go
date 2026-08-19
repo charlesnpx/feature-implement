@@ -389,6 +389,11 @@ func inspectLocalTargetForInitializationAdmission(
 		)
 	}
 	target, ok := runtime.LocalTarget()
+	if _, abandoned := runtime.Abandonment(); abandoned {
+		return LocalTargetInspection{}, fmt.Errorf(
+			"workspace abandonment is final for local workflow mutations",
+		)
+	}
 	if !ok {
 		return adapter.inspectUncreatedTarget(ctx, definition.workspace.target)
 	}

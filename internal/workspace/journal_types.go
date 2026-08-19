@@ -149,6 +149,7 @@ const (
 	JournalEventMergeUnitIntegrationIntended   JournalEventType = "merge_unit_integration_intended"
 	JournalEventMergeUnitIntegrated            JournalEventType = "merge_unit_integrated"
 	JournalEventWorkspaceCompleted             JournalEventType = "workspace_completed"
+	JournalEventWorkspaceAbandoned             JournalEventType = "workspace_abandoned"
 )
 
 type WorkspaceJournalEvent interface {
@@ -352,6 +353,10 @@ func newJournalAppend(
 			return JournalAppend{}, fmt.Errorf(
 				"workspace completion events must use the complete local verification workflow",
 			)
+		case WorkspaceAbandonedJournalEvent:
+			return JournalAppend{}, fmt.Errorf(
+				"workspace abandonment events must use the exact local target release workflow",
+			)
 		}
 	}
 	if occurredAt.IsZero() {
@@ -386,7 +391,8 @@ func newJournalAppend(
 func supportedWorkspaceJournalEvent(event WorkspaceJournalEvent) bool {
 	switch event.(type) {
 	case WorkspaceInitializedJournalEvent, JournalTailRecoveredEvent,
-		FeatureRefCreationIntendedJournalEvent, FeatureRefCreatedJournalEvent:
+		FeatureRefCreationIntendedJournalEvent, FeatureRefCreatedJournalEvent,
+		WorkspaceAbandonedJournalEvent:
 		return true
 	default:
 		return isAttemptJournalEvent(event) || isCommitJournalEvent(event) ||

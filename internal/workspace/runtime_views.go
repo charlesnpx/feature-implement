@@ -174,18 +174,27 @@ type CompletionView struct {
 	ReportDigest string   `json:"report_digest,omitempty"`
 }
 
+type WorkspaceAbandonmentView struct {
+	Reason      string `json:"reason"`
+	FeatureRef  string `json:"feature_ref"`
+	FeatureHead string `json:"feature_head,omitempty"`
+	Record      uint64 `json:"record"`
+	Released    bool   `json:"released"`
+}
+
 type WorkspaceReport struct {
-	SchemaVersion int                    `json:"schema_version"`
-	Workflow      WorkspaceWorkflowView  `json:"workflow"`
-	Target        WorkspaceTargetView    `json:"target"`
-	Attempts      []WorkspaceAttemptView `json:"attempts"`
-	Reviews       []WorkspaceReviewView  `json:"reviews"`
-	Scheduler     SchedulerView          `json:"scheduler"`
-	Gates         GateView               `json:"gates"`
-	Integration   IntegrationView        `json:"integration"`
-	Drift         DriftView              `json:"drift"`
-	Completion    CompletionView         `json:"completion"`
-	ReportDigest  string                 `json:"report_digest"`
+	SchemaVersion int                       `json:"schema_version"`
+	Workflow      WorkspaceWorkflowView     `json:"workflow"`
+	Target        WorkspaceTargetView       `json:"target"`
+	Attempts      []WorkspaceAttemptView    `json:"attempts"`
+	Reviews       []WorkspaceReviewView     `json:"reviews"`
+	Scheduler     SchedulerView             `json:"scheduler"`
+	Gates         GateView                  `json:"gates"`
+	Integration   IntegrationView           `json:"integration"`
+	Drift         DriftView                 `json:"drift"`
+	Completion    CompletionView            `json:"completion"`
+	Abandonment   *WorkspaceAbandonmentView `json:"abandonment,omitempty"`
+	ReportDigest  string                    `json:"report_digest"`
 }
 
 func RebuildSchedulerView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefinition) (SchedulerView, error) {
@@ -354,7 +363,9 @@ func RebuildGateView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefi
 		view.Completion.Status = GatePending
 		view.Completion.Reason = "workspace_completion_not_recorded"
 	default:
-		if _, recorded := core.Completion(); recorded {
+		if _, abandoned := core.Abandonment(); abandoned {
+			view.Completion.Status = GateFailed
+		} else if _, recorded := core.Completion(); recorded {
 			view.Completion.Status = GateFailed
 		} else {
 			view.Completion.Status = GatePending
@@ -437,6 +448,15 @@ func RebuildWorkspaceReport(snapshot JournalSnapshot, definition EffectiveWorksp
 		Drift:       DriftView{Reasons: []string{}},
 		Completion:  completion,
 	}
+	if abandonment, exists := core.Abandonment(); exists {
+		report.Abandonment = &WorkspaceAbandonmentView{
+			Reason:      abandonment.Reason(),
+			FeatureRef:  abandonment.FeatureRef(),
+			FeatureHead: abandonment.FeatureHead().String(),
+			Record:      abandonment.Record(),
+			Released:    abandonment.Released(),
+		}
+	}
 	if err := setWorkspaceReportDigest(&report); err != nil {
 		return WorkspaceReport{}, err
 	}
@@ -463,6 +483,9 @@ func RebuildWorkspaceReportWithGit(
 	)
 	if err != nil {
 		return WorkspaceReport{}, err
+	}
+	if _, abandoned := core.Abandonment(); abandoned {
+		return report, nil
 	}
 	assessment := assessWorkspaceCompletion(
 		snapshot, definition, reviews, core,
