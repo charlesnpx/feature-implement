@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -154,6 +155,16 @@ func TestAttemptWorktreeMaterializesExactRequestedTree(t *testing.T) {
 	if gotTree != wantTree {
 		t.Fatalf("materialized tree = %s, want %s", gotTree, wantTree)
 	}
+	runnerBytes, err := os.ReadFile(filepath.Join(
+		attempt.Worktree(), "bin", "run",
+	))
+	if err != nil || !bytes.Equal(
+		runnerBytes, []byte("#!/bin/sh\necho feature\n"),
+	) {
+		t.Fatalf("materialized executable bytes = %q, %v", runnerBytes, err)
+	}
+	runTargetGitTest(t, attempt.Worktree(), "update-index", "--refresh")
+	runTargetGitTest(t, attempt.Worktree(), "diff-files", "--quiet")
 	runnerInfo, err := os.Lstat(filepath.Join(attempt.Worktree(), "bin", "run"))
 	if err != nil || runnerInfo.Mode()&0o111 == 0 {
 		t.Fatalf("materialized executable mode = %v, %v", runnerInfo.Mode(), err)
@@ -214,6 +225,72 @@ func TestFeatureRefCASRejectsDriftWithoutChangingTheRef(t *testing.T) {
 	}
 	if journalRecordCount(t, scenario.journal) != beforeRecords {
 		t.Fatal("rejected feature-ref publication changed the journal")
+	}
+}
+
+func TestIndependentIntegrationConstructionReturnsTheSameCommitAndTree(t *testing.T) {
+	t.Parallel()
+
+	fixture := newDefinitionFixture(t)
+	definition := mustDefinition(t, fixture.sources)
+	repositoryRoot := definition.Workspace().RepositoryRoot()
+	acceptedTree := safetyNetGitObject(
+		t,
+		repositoryRoot,
+		"rev-parse",
+		rawGitObject(definition.Workspace().BaseCommit())+"^{tree}",
+	)
+	acceptedHead := createIntegrationTestCommit(
+		t,
+		repositoryRoot,
+		acceptedTree,
+		[]workspace.GitObjectID{definition.Workspace().BaseCommit()},
+		"accepted attempt",
+	)
+	runTargetGitTest(
+		t,
+		repositoryRoot,
+		"update-ref",
+		"refs/safety-net/accepted",
+		rawGitObject(acceptedHead),
+	)
+	worktreeRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type identity struct {
+		commit workspace.GitObjectID
+		tree   workspace.GitObjectID
+	}
+	constructions := make([]identity, 0, 2)
+	for range 2 {
+		scenario := newIndependentIntegrationConstruction(
+			t, definition, worktreeRoot, acceptedHead, acceptedTree,
+		)
+		commit := stopRealIntegrationAfterCommit(t, scenario)
+		constructions = append(constructions, identity{
+			commit: commit,
+			tree: safetyNetGitObject(
+				t,
+				scenario.repositoryRoot,
+				"rev-parse",
+				rawGitObject(commit)+"^{tree}",
+			),
+		})
+		discardIndependentIntegrationConstruction(t, scenario, commit)
+	}
+	if constructions[0].commit != constructions[1].commit ||
+		constructions[0].tree != constructions[1].tree ||
+		constructions[0].tree != acceptedTree {
+		t.Fatalf(
+			"integration identities = first %s/%s second %s/%s accepted tree %s",
+			constructions[0].commit,
+			constructions[0].tree,
+			constructions[1].commit,
+			constructions[1].tree,
+			acceptedTree,
+		)
 	}
 }
 
@@ -376,6 +453,9 @@ func TestInitializationRefusesUnownedFeatureRefWithoutMutation(t *testing.T) {
 	refBefore := strings.TrimSpace(runTargetGitTest(
 		t, primary, "rev-parse", featureRef,
 	))
+	reflogBefore := []byte(runTargetGitTest(
+		t, primary, "reflog", "show", "--format=%H %gD %gs", featureRef,
+	))
 	statusBefore := []byte(runTargetGitTest(
 		t, primary, "status", "--porcelain=v2", "-z", "--untracked-files=all",
 	))
@@ -396,10 +476,15 @@ func TestInitializationRefusesUnownedFeatureRefWithoutMutation(t *testing.T) {
 	refAfter := strings.TrimSpace(runTargetGitTest(
 		t, primary, "rev-parse", featureRef,
 	))
+	reflogAfter := []byte(runTargetGitTest(
+		t, primary, "reflog", "show", "--format=%H %gD %gs", featureRef,
+	))
 	statusAfter := []byte(runTargetGitTest(
 		t, primary, "status", "--porcelain=v2", "-z", "--untracked-files=all",
 	))
-	if refAfter != refBefore || !bytes.Equal(statusBefore, statusAfter) {
+	if refAfter != refBefore ||
+		!bytes.Equal(reflogBefore, reflogAfter) ||
+		!bytes.Equal(statusBefore, statusAfter) {
 		t.Fatal("unowned feature-ref rejection mutated the primary checkout")
 	}
 	for _, path := range []string{
@@ -470,6 +555,169 @@ func reserveSafetyNetMaterializationAttempt(
 		definition: definition,
 		journal:    journal,
 		attempt:    attempt,
+	}
+}
+
+func newIndependentIntegrationConstruction(
+	t *testing.T,
+	definition workspace.EffectiveWorkspaceDefinition,
+	worktreeRoot string,
+	acceptedHead, acceptedTree workspace.GitObjectID,
+) *realIntegrationScenario {
+	t.Helper()
+
+	runtimeRoot := t.TempDir()
+	initialized, err := workspace.InitializeWorkspaceV2WithOptions(
+		context.Background(),
+		runtimeRoot,
+		definition,
+		mustTime(t, "2026-08-18T13:20:00Z"),
+		workspace.WorkspaceInitializationOptions{WorktreeRoot: worktreeRoot},
+	)
+	if err != nil {
+		t.Fatalf("initialize independent integration construction: %v", err)
+	}
+	journal, err := workspace.OpenWorkspaceJournal(
+		runtimeRoot, workspace.JournalReadWrite,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	target, ok := initialized.Runtime().LocalTarget()
+	if !ok || target.CreatedHead().IsZero() {
+		t.Fatal("independent integration construction has no local target")
+	}
+	goal, err := workspace.NewGoalBinding(
+		workspace.MustID("integration-determinism-goal"),
+		workspace.GoalScopeMergeUnit,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mergeUnit := mustMergeUnitReference(t, "alpha-plan", "unit-one")
+	attempt, err := workspace.ReserveAttempt(
+		context.Background(),
+		journal,
+		definition,
+		workspace.DefaultLocalAttemptGitAdapter(),
+		workspace.ReserveAttemptRequest{
+			MergeUnit:     mergeUnit,
+			AttemptNumber: 1,
+			Goal:          goal,
+			OccurredAt:    mustTime(t, "2026-08-18T13:20:01Z"),
+		},
+	)
+	if err != nil {
+		t.Fatalf("reserve independent integration attempt: %v", err)
+	}
+	attempt, err = workspace.MaterializeAttempt(
+		context.Background(),
+		journal,
+		definition,
+		workspace.DefaultLocalAttemptGitAdapter(),
+		workspace.MaterializeAttemptRequest{
+			AttemptID:  attempt.AttemptID(),
+			OccurredAt: mustTime(t, "2026-08-18T13:20:02Z"),
+		},
+	)
+	if err != nil {
+		t.Fatalf("materialize independent integration attempt: %v", err)
+	}
+	repositoryRoot := definition.Workspace().RepositoryRoot()
+	runTargetGitTest(
+		t,
+		repositoryRoot,
+		"update-ref",
+		"refs/heads/"+attempt.Branch(),
+		rawGitObject(acceptedHead),
+	)
+	runTargetGitTest(
+		t, attempt.Worktree(), "reset", "--hard", rawGitObject(acceptedHead),
+	)
+	repositorySnapshot, err := workspace.NewReviewRepositorySnapshot(
+		acceptedHead, acceptedTree, true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &reviewRepositoryStub{snapshot: repositorySnapshot}
+	if _, err := workspace.AdoptAttemptHead(
+		context.Background(),
+		journal,
+		definition,
+		repository,
+		workspace.AdoptAttemptHeadRequest{
+			AttemptID:  attempt.AttemptID(),
+			OccurredAt: mustTime(t, "2026-08-18T13:20:03Z"),
+		},
+	); err != nil {
+		t.Fatalf("adopt independent integration head: %v", err)
+	}
+	attempt = mustRuntimeAttempt(t, journal, attempt.AttemptID())
+	return &realIntegrationScenario{
+		attemptHarness: attemptHarness{
+			definition: definition,
+			journal:    journal,
+			workspace:  runtimeRoot,
+			git:        &fakeAttemptGit{},
+			base:       target.CreatedHead(),
+			unit:       mergeUnit,
+			goal:       goal,
+			worktrees:  worktreeRoot,
+		},
+		attempt:        attempt,
+		repository:     repository,
+		repositoryRoot: repositoryRoot,
+		acceptedHead:   acceptedHead,
+		acceptedTree:   acceptedTree,
+	}
+}
+
+func discardIndependentIntegrationConstruction(
+	t *testing.T,
+	scenario *realIntegrationScenario,
+	expectedMerge workspace.GitObjectID,
+) {
+	t.Helper()
+
+	if err := scenario.journal.Close(); err != nil {
+		t.Fatalf("close independent integration journal: %v", err)
+	}
+	runTargetGitTest(
+		t,
+		scenario.repositoryRoot,
+		"worktree",
+		"remove",
+		"--force",
+		scenario.attempt.Worktree(),
+	)
+	runTargetGitTest(
+		t,
+		scenario.repositoryRoot,
+		"update-ref",
+		"-d",
+		"refs/heads/"+scenario.attempt.Branch(),
+	)
+	runTargetGitTest(
+		t,
+		scenario.repositoryRoot,
+		"update-ref",
+		"-d",
+		scenario.definition.Workspace().FeatureRef(),
+	)
+	runTargetGitTest(
+		t, scenario.repositoryRoot, "prune", "--expire=now",
+	)
+	if err := exec.Command(
+		"git",
+		"-C",
+		scenario.repositoryRoot,
+		"cat-file",
+		"-e",
+		rawGitObject(expectedMerge)+"^{commit}",
+	).Run(); err == nil {
+		t.Fatalf("prune retained prior independent integration commit %s", expectedMerge)
 	}
 }
 

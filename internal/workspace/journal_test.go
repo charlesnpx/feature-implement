@@ -13,36 +13,32 @@ import (
 	"github.com/charlesnpx/feature-implement/internal/workspace"
 )
 
-func TestJournalAppendIsReadableAndRebuildable(t *testing.T) {
+func TestJournalLifecycleAppendIsReadableAndRebuildable(t *testing.T) {
 	t.Parallel()
 
 	fixture := newJournalSafetyNetFixture(t)
-	record, err := fixture.journal.AppendIfHead(
-		fixture.append, workspace.JournalGenesisHash(),
-	)
-	if err != nil {
-		t.Fatalf("append initial journal record: %v", err)
-	}
-
 	snapshot, err := fixture.journal.ReadSnapshot()
 	if err != nil {
-		t.Fatalf("read appended journal: %v", err)
+		t.Fatalf("read lifecycle-appended journal: %v", err)
 	}
-	if len(snapshot.Records()) != 1 || snapshot.Head() != record.EventHash() {
-		t.Fatalf("readable append snapshot = %#v", snapshot.Records())
+	initialized := fixture.initialized.Snapshot()
+	if len(snapshot.Records()) == 0 ||
+		snapshot.Head() != initialized.Head() ||
+		snapshot.ByteLength() != initialized.ByteLength() {
+		t.Fatalf("readable lifecycle snapshot = %#v", snapshot.Records())
 	}
 
 	rebuilt, err := workspace.RebuildWorkspaceRuntime(snapshot)
 	if err != nil {
-		t.Fatalf("rebuild runtime from appended record: %v", err)
+		t.Fatalf("rebuild runtime from lifecycle records: %v", err)
 	}
-	if rebuilt.WorkspaceID() != fixture.workspaceID ||
-		rebuilt.ActiveGeneration() != fixture.generation ||
-		rebuilt.WorktreeRoot() != fixture.worktreeRoot {
+	if rebuilt.WorkspaceID() != fixture.definition.Workspace().ID() ||
+		rebuilt.ActiveGeneration() != fixture.definition.Generation() ||
+		rebuilt.WorktreeRoot() != fixture.initialized.Runtime().WorktreeRoot() {
 		t.Fatalf("rebuilt runtime = %#v", rebuilt)
 	}
 	if _, err := workspace.VerifyWorkspaceRuntimeConformance(
-		snapshot, fixture.generation,
+		snapshot, fixture.definition.Generation(),
 	); err != nil {
 		t.Fatalf("replay conformance: %v", err)
 	}
@@ -148,18 +144,16 @@ func TestJournalAppendIfHeadRejectsStaleHeadWithoutMutation(t *testing.T) {
 	t.Parallel()
 
 	fixture := newJournalSafetyNetFixture(t)
-	if _, err := fixture.journal.AppendIfHead(
-		fixture.append, workspace.JournalGenesisHash(),
-	); err != nil {
-		t.Fatalf("append initial record: %v", err)
-	}
 	before, err := fixture.journal.ReadSnapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
+	if before.Head() == workspace.JournalGenesisHash() {
+		t.Fatal("lifecycle fixture has no journal head")
+	}
 
 	_, err = fixture.journal.AppendIfHead(
-		fixture.append, workspace.JournalGenesisHash(),
+		workspace.JournalAppend{}, workspace.JournalGenesisHash(),
 	)
 	if err == nil || !strings.Contains(err.Error(), "stale journal head") {
 		t.Fatalf("stale expected head error = %v", err)
@@ -179,6 +173,17 @@ func TestJournalWriterLockAllowsOneAppendWithoutPartialRecord(t *testing.T) {
 	t.Parallel()
 
 	fixture := newJournalSafetyNetFixture(t)
+	before, err := fixture.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	goal, err := workspace.NewGoalBinding(
+		workspace.MustID("journal-writer-lock-goal"),
+		workspace.GoalScopeMergeUnit,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := fixture.journal.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -200,8 +205,17 @@ func TestJournalWriterLockAllowsOneAppendWithoutPartialRecord(t *testing.T) {
 				results <- err
 				return
 			}
-			_, err = journal.AppendIfHead(
-				fixture.append, workspace.JournalGenesisHash(),
+			_, err = workspace.ReserveAttempt(
+				context.Background(),
+				journal,
+				fixture.definition,
+				&fakeAttemptGit{},
+				workspace.ReserveAttemptRequest{
+					MergeUnit:     mustMergeUnitReference(t, "alpha-plan", "unit-one"),
+					AttemptNumber: 1,
+					Goal:          goal,
+					OccurredAt:    mustTime(t, "2026-08-18T11:00:01Z"),
+				},
 			)
 			results <- err
 			<-release
@@ -248,31 +262,43 @@ func TestJournalWriterLockAllowsOneAppendWithoutPartialRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read journal after competing writers: %v", err)
 	}
-	if len(snapshot.Records()) != 1 || snapshot.Head().IsZero() {
+	if len(snapshot.Records()) != len(before.Records())+1 ||
+		snapshot.Head().IsZero() ||
+		snapshot.ByteLength() <= before.ByteLength() {
 		t.Fatalf("writer competition journal = %#v", snapshot.Records())
+	}
+	if _, err := workspace.VerifyWorkspaceRuntimeConformance(
+		snapshot, fixture.definition.Generation(),
+	); err != nil {
+		t.Fatalf("writer competition conformance: %v", err)
 	}
 }
 
 type journalSafetyNetFixture struct {
 	workspaceDir string
 	journal      *workspace.WorkspaceJournal
-	append       workspace.JournalAppend
-	workspaceID  workspace.ID
-	generation   workspace.Digest
-	worktreeRoot workspace.WorkspaceWorktreeRootBinding
+	definition   workspace.EffectiveWorkspaceDefinition
+	initialized  workspace.WorkspaceInitializationResult
 }
 
 func newJournalSafetyNetFixture(t *testing.T) journalSafetyNetFixture {
 	t.Helper()
 
+	definition := mustDefinition(t, newDefinitionFixture(t).sources)
 	workspaceDir := t.TempDir()
 	worktreePath, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	worktreeRoot, err := workspace.NewWorkspaceWorktreeRootBinding(worktreePath)
+	initialized, err := workspace.InitializeWorkspaceV2WithOptions(
+		context.Background(),
+		workspaceDir,
+		definition,
+		mustTime(t, "2026-08-18T11:00:00Z"),
+		workspace.WorkspaceInitializationOptions{WorktreeRoot: worktreePath},
+	)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("initialize journal safety-net fixture: %v", err)
 	}
 	journal, err := workspace.OpenWorkspaceJournal(
 		workspaceDir, workspace.JournalReadWrite,
@@ -282,48 +308,11 @@ func newJournalSafetyNetFixture(t *testing.T) journalSafetyNetFixture {
 	}
 	t.Cleanup(func() { _ = journal.Close() })
 
-	workspaceID := workspace.MustID("journal-safety-net")
-	generation := workspace.DigestBytes([]byte("journal-safety-net-generation"))
-	definitionDigest := workspace.DigestBytes([]byte("journal-safety-net-definition"))
-	event, err := workspace.NewWorkspaceInitializedJournalEvent(
-		workspaceID, generation, definitionDigest, worktreeRoot,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	workspaceResource := workspace.WorkspaceJournalResource(workspaceID)
-	generationResource := workspace.GenerationJournalResource(generation)
-	workspaceRevision, err := workspace.NewJournalResourceRevision(
-		workspaceResource, 0,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	generationRevision, err := workspace.NewJournalResourceRevision(
-		generationResource, 0,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	appendRequest, err := workspace.NewJournalAppend(
-		event,
-		mustTime(t, "2026-08-18T11:00:00Z"),
-		[]workspace.JournalResourceRevision{
-			workspaceRevision,
-			generationRevision,
-		},
-		[]workspace.JournalResource{workspaceResource, generationResource},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
 	return journalSafetyNetFixture{
 		workspaceDir: workspaceDir,
 		journal:      journal,
-		append:       appendRequest,
-		workspaceID:  workspaceID,
-		generation:   generation,
-		worktreeRoot: worktreeRoot,
+		definition:   definition,
+		initialized:  initialized,
 	}
 }
 
