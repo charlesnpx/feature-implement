@@ -86,6 +86,12 @@ func TestRemovedMutablePlanLifecycleFailsClearly(t *testing.T) {
 			t.Fatalf("removed command feature %s failed unclearly: %s", strings.Join(args, " "), stderr)
 		}
 	}
+	for _, action := range []string{"scheduler", "gates", "report"} {
+		_, stderr, err := runFeature(t, "workspace", action)
+		if err == nil || !strings.Contains(stderr, "unsupported workspace command") {
+			t.Fatalf("removed workspace read command %q error = %v, %s", action, err, stderr)
+		}
+	}
 	stdout, stderr, err := runFeature(t, "--help")
 	if err != nil {
 		t.Fatalf("help: %v: %s", err, stderr)
@@ -154,6 +160,8 @@ func TestRemovedWorkspaceCommandsAndWrongSubactionsFailClearly(
 	for _, removed := range []string{
 		"queue", "receipts", "reconcile", "control",
 		"provider", "commit next|rebase", "candidate-bundle",
+		"feature workspace scheduler", "feature workspace gates",
+		"feature workspace report",
 	} {
 		if strings.Contains(help, removed) {
 			t.Fatalf(
@@ -242,23 +250,33 @@ func TestWorkspaceSchemaExampleAndJournalBackedStatus(t *testing.T) {
 			t.Fatalf("request schema exposes removed surface %q", removed)
 		}
 	}
-	reportSchema := runFeatureOutput(
+	viewSchema := runFeatureOutput(
 		t, "workspace", "schema", "reports", "--json",
 	)
+	var viewSchemaObject map[string]any
+	if err := json.Unmarshal([]byte(viewSchema), &viewSchemaObject); err != nil {
+		t.Fatalf("workspace view schema is not JSON: %v\n%s", err, viewSchema)
+	}
+	if viewSchemaObject["additionalProperties"] != false {
+		t.Fatalf("workspace view schema allows unknown fields: %+v", viewSchemaObject)
+	}
+	if _, exists := viewSchemaObject["reports"]; exists {
+		t.Fatalf("workspace schema still publishes multiple report shapes: %+v", viewSchemaObject)
+	}
 	for _, required := range []string{
-		`"status"`, `"scheduler"`, `"gates"`, `"report"`,
+		`"scheduler"`, `"gates"`,
 		`"workflow"`, `"target"`, `"attempts"`, `"reviews"`,
 		`"integration"`, `"drift"`, `"completion"`,
 	} {
-		if !strings.Contains(reportSchema, required) {
-			t.Fatalf("report schema omits %s: %s", required, reportSchema)
+		if !strings.Contains(viewSchema, required) {
+			t.Fatalf("workspace view schema omits %s: %s", required, viewSchema)
 		}
 	}
 	for _, removed := range []string{
 		`provider`, `receipt`, `authorization`, `queue`, `reconciliation`,
 	} {
-		if strings.Contains(reportSchema, removed) {
-			t.Fatalf("report schema exposes removed term %q: %s", removed, reportSchema)
+		if strings.Contains(viewSchema, removed) {
+			t.Fatalf("workspace view schema exposes removed term %q: %s", removed, viewSchema)
 		}
 	}
 	if example := runFeatureOutput(t, "workspace", "example"); !strings.Contains(example, `"schema_version": 2`) ||
@@ -330,7 +348,7 @@ func TestWorkspaceSchemaExampleAndJournalBackedStatus(t *testing.T) {
 	}
 	for _, required := range []string{
 		"workflow", "target", "attempts", "reviews",
-		"integration", "drift", "completion",
+		"scheduler", "gates", "integration", "drift", "completion",
 	} {
 		if _, exists := report[required]; !exists {
 			t.Fatalf("journal-backed status omits %s: %s", required, status)

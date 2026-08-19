@@ -39,9 +39,8 @@ Never edit `generated/`, `<runtime-dir>/state/`, or journal records by hand.
 
 ## Select and materialize a merge unit
 
-1. Run `feature workspace recover`, then `status`, `scheduler`, `gates`, and
-   `report`.
-2. Select only a scheduler unit whose status is `ready`. Respect dependency
+1. Run `feature workspace recover`, then `status`.
+2. Select only a merge unit whose status is `ready`. Respect dependency
    order and the attempt budget.
 3. Submit `attempt reserve` with the plan ID, merge-unit ID, next attempt
    number, and a stable merge-unit goal. The CLI derives the exact base,
@@ -49,7 +48,7 @@ Never edit `generated/`, `<runtime-dir>/state/`, or journal records by hand.
 4. Submit `attempt materialize` for the returned attempt ID.
 5. Verify the returned worktree and branch. Work only there.
 
-Every successful mutation returns a fresh journal-derived report. Use it as the
+Every successful mutation returns a fresh journal-derived workspace view. Use it as the
 source of truth.
 
 ## Implement and commit
@@ -127,7 +126,7 @@ readiness.
 
 ## Finish
 
-Run `status`, `scheduler`, `gates`, and `report` again. Report the workspace ID,
+Run `status` again. Report the workspace ID,
 generation, plan checkpoint, feature branch and head, completed merge units,
 local completion digest, validation results, and any intentionally retained
 attempt worktrees. Do not claim completion while a gate, directive, drift

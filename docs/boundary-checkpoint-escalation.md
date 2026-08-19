@@ -66,7 +66,7 @@ default:
   handing it off.
 
 The recorded kind is carried on `AttemptBoundaryReachedJournalEvent`, folded
-into the directive digest, and exposed by `status` and `report` as
+into the directive digest, and exposed by `status` as
 `boundary_kind` alongside the directive `kind`.
 
 ## Implemented enforcement
@@ -78,7 +78,7 @@ into the directive digest, and exposed by `status` and `report` as
 | `internal/workspace/attempt_lifecycle.go` | Reserve binds both fields. `RecordAttemptBoundary` rejects a checkpoint on `checkpoint: none` and an escalation on `escalation: forbidden` before appending. |
 | `internal/workspace/attempt_projection.go` | Boundary projection validates the recorded kind against the reserved policy. A `pause_only` shape resumes the same goal; `complete_goal_and_wait` requires the acknowledged next goal. |
 | Journal codec and events | The kind is serialized, reconstructed, and included in directive bindings. |
-| `internal/workspace/runtime_views.go` | `status` and `report` expose `boundary_kind`. |
+| `internal/workspace/runtime_views.go` | `status` exposes `boundary_kind`. |
 
 ## Profile narrowing
 
@@ -152,4 +152,4 @@ gates separate from agent permissions.
 
 ## Cost of getting it wrong
 
-Worth stating plainly, because it is the argument for `escalation: forbidden` existing at all. A paused attempt releases its serial segment but never integrates, so every dependent merge unit stays blocked behind it. In an unattended run that is a silent stall until a human notices. Failing is the better outcome: the attempt closes, the failure surfaces in `report`, and the unit is retryable within `max_attempts`.
+Worth stating plainly, because it is the argument for `escalation: forbidden` existing at all. A paused attempt releases its serial segment but never integrates, so every dependent merge unit stays blocked behind it. In an unattended run that is a silent stall until a human notices. Failing is the better outcome: the attempt closes, the failure surfaces in `status`, and the unit is retryable within `max_attempts`.

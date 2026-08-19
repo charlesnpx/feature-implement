@@ -2,10 +2,10 @@ package workspacecmd
 
 import "github.com/charlesnpx/feature-implement/internal/workspace"
 
-// ReportSchemas describes the complete local-only JSON report surface. Journal
-// digests are corruption-detection values for local durable state; they do not
-// authenticate an owner, reviewer, or other identity.
-func ReportSchemas() map[string]any {
+// WorkspaceViewSchema describes the one complete local-only workspace view.
+// Journal digests are corruption-detection values for local durable state;
+// they do not authenticate an owner, reviewer, or other identity.
+func WorkspaceViewSchema() map[string]any {
 	text := func() map[string]any {
 		return map[string]any{"type": "string"}
 	}
@@ -251,7 +251,7 @@ func ReportSchemas() map[string]any {
 			"report_digest": nonEmptyText(),
 		},
 	)
-	report := object(
+	view := object(
 		[]string{
 			"schema_version", "workflow", "target", "attempts",
 			"reviews", "scheduler", "gates", "integration", "drift",
@@ -271,15 +271,7 @@ func ReportSchemas() map[string]any {
 			"report_digest":  nonEmptyText(),
 		},
 	)
-	return map[string]any{
-		"$schema":        "https://json-schema.org/draft/2020-12/schema",
-		"$comment":       "Owner and reviewer labels are descriptive metadata. Journal hashes detect local corruption; they are not authentication.",
-		"schema_version": workspace.JournalSchemaVersion,
-		"reports": map[string]any{
-			"status":    report,
-			"scheduler": scheduler,
-			"gates":     gates,
-			"report":    report,
-		},
-	}
+	view["$schema"] = "https://json-schema.org/draft/2020-12/schema"
+	view["$comment"] = "Owner and reviewer labels are descriptive metadata. Journal hashes detect local corruption; they are not authentication."
+	return view
 }

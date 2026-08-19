@@ -45,7 +45,7 @@ feature workspace schema bundle|requests|reports [--json]
 feature workspace example
 feature workspace validate --bundle <bundle-root> [--write-locks] [--json]
 feature workspace init|recover --bundle <bundle-root> --workspace <runtime-root> --input <file|-> [--json]
-feature workspace status|scheduler|gates|report --bundle <bundle-root> --workspace <runtime-root> [--json]
+feature workspace status --bundle <bundle-root> --workspace <runtime-root> [--json]
 
 feature workspace attempt reserve|materialize|adopt-head|boundary|next-goal|acknowledge|owner-response|resume ...
 feature workspace commit next ...
@@ -241,7 +241,7 @@ not interpreted or migrated.
 
 ## Local execution
 
-1. Run `recover`, then read `status`, `scheduler`, `gates`, and `report`.
+1. Run `recover`, then read `status`.
 2. Select a `ready` merge unit. Submit `attempt reserve` with its plan ID,
    merge-unit ID, next attempt number, and goal. The base, branch, and worktree
    root are derived from locked runtime state.
@@ -267,7 +267,7 @@ not interpreted or migrated.
 9. After every unit is integrated and every boundary is resolved, run
    `complete verify` to record local workspace completion.
 
-Every mutation returns a fresh journal-derived report. Treat that report as the
+Every mutation returns a fresh journal-derived workspace view. Treat that view as the
 source of truth instead of reconstructing state from remembered commands.
 
 The journal hash chain and stored digests detect accidental corruption; they

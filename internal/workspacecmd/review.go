@@ -8,11 +8,11 @@ import (
 )
 
 type ReviewCommandResult struct {
-	SchemaVersion int                       `json:"schema_version"`
-	Status        string                    `json:"status"`
-	Action        string                    `json:"action"`
-	Detail        any                       `json:"detail,omitempty"`
-	Report        workspace.WorkspaceReport `json:"report"`
+	SchemaVersion int                     `json:"schema_version"`
+	Status        string                  `json:"status"`
+	Action        string                  `json:"action"`
+	Detail        any                     `json:"detail,omitempty"`
+	Report        workspace.WorkspaceView `json:"report"`
 }
 
 type ReviewRequestView struct {
@@ -339,7 +339,7 @@ func reviewReadResult(
 	if err != nil {
 		return ReviewCommandResult{}, err
 	}
-	report, err := workspace.RebuildWorkspaceReport(snapshot, definition)
+	report, err := workspace.RebuildWorkspaceView(snapshot, definition)
 	if err != nil {
 		return ReviewCommandResult{}, err
 	}

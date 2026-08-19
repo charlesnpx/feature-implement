@@ -32,13 +32,13 @@ func TestWorkspaceRuntimeViewsExposeOnlyLocalStateAndReplayDeterministically(
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := workspace.RebuildWorkspaceReport(
+	first, err := workspace.RebuildWorkspaceView(
 		snapshot, harness.definition,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := workspace.RebuildWorkspaceReport(
+	second, err := workspace.RebuildWorkspaceView(
 		snapshot, harness.definition,
 	)
 	if err != nil {
@@ -58,6 +58,53 @@ func TestWorkspaceRuntimeViewsExposeOnlyLocalStateAndReplayDeterministically(
 		t.Fatalf(
 			"journal replay is not deterministic:\n%s\n%s",
 			firstJSON, secondJSON,
+		)
+	}
+	coreDigest, err := workspace.VerifyWorkspaceRuntimeConformance(
+		snapshot, harness.definition.Generation(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewDigest, err := workspace.VerifyReviewRuntimeConformance(
+		snapshot, harness.definition,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Workflow.ProjectionDigest != coreDigest.String() ||
+		first.Workflow.ReviewProjectionDigest != reviewDigest.String() {
+		t.Fatalf("workspace view projection digests = %+v", first.Workflow)
+	}
+	var consumer struct {
+		Scheduler struct {
+			Units []struct {
+				MergeUnitID string   `json:"merge_unit_id"`
+				Blockers    []string `json:"blockers"`
+			} `json:"units"`
+		} `json:"scheduler"`
+	}
+	if err := json.Unmarshal(firstJSON, &consumer); err != nil {
+		t.Fatalf("consumer decoding string blockers: %v", err)
+	}
+	var blockedBlockers, unblockedBlockers []string
+	foundUnblocked := false
+	for _, unit := range consumer.Scheduler.Units {
+		switch unit.MergeUnitID {
+		case "unit-one":
+			unblockedBlockers = unit.Blockers
+			foundUnblocked = true
+		case "unit-two":
+			blockedBlockers = unit.Blockers
+		}
+	}
+	if len(blockedBlockers) != 1 ||
+		!strings.Contains(blockedBlockers[0], "[alpha-plan/unit-one]") ||
+		!foundUnblocked ||
+		len(unblockedBlockers) != 0 {
+		t.Fatalf(
+			"consumer string blockers = blocked=%+v unblocked=%+v",
+			blockedBlockers, unblockedBlockers,
 		)
 	}
 	for _, forbidden := range []string{
@@ -126,6 +173,11 @@ func TestWorkspaceRuntimeViewsExposeOnlyLocalStateAndReplayDeterministically(
 			unitOne, unitTwo,
 		)
 	}
+	if len(unitTwo.Blockers) != 1 ||
+		!strings.Contains(unitTwo.Blockers[0], "unsatisfied dependency sets") ||
+		!strings.Contains(unitTwo.Blockers[0], "[alpha-plan/unit-one]") {
+		t.Fatalf("blocked unit does not name its unsatisfied dependency set: %+v", unitTwo.Blockers)
+	}
 	gate := gateUnitByID(t, first.Gates, "unit-one")
 	if gateCheckByName(t, gate, "integration").Status !=
 		workspace.GatePending {
@@ -151,6 +203,17 @@ func TestWorkspaceRuntimeViewsExposeOnlyLocalStateAndReplayDeterministically(
 			"drift/completion views = %+v / %+v",
 			first.Drift, first.Completion,
 		)
+	}
+}
+
+func TestWorkspaceViewRetainsZeroGenerationConformanceError(t *testing.T) {
+	t.Parallel()
+
+	_, err := workspace.RebuildWorkspaceView(
+		workspace.JournalSnapshot{}, workspace.EffectiveWorkspaceDefinition{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "replay conformance requires") {
+		t.Fatalf("zero-generation workspace view error = %v", err)
 	}
 }
 
@@ -183,12 +246,12 @@ func TestWorkspaceRuntimeViewsDistinguishPausedBoundaryKinds(
 			if err != nil {
 				t.Fatal(err)
 			}
-			report, err := workspace.RebuildWorkspaceReport(snapshot, harness.definition)
+			report, err := workspace.RebuildWorkspaceView(snapshot, harness.definition)
 			if err != nil {
 				t.Fatal(err)
 			}
 
-			assertDirective := func(surface string, pending bool, directives []workspace.BoundaryDirectiveView) {
+			assertDirective := func(surface string, pending bool, directives []workspace.WorkspaceBoundaryDirective) {
 				t.Helper()
 				if !pending || len(directives) != 1 {
 					t.Fatalf("%s paused boundary = pending=%v directives=%+v", surface, pending, directives)
@@ -222,9 +285,9 @@ func TestWorkspaceRuntimeViewsDistinguishPausedBoundaryKinds(
 
 func schedulerUnitByID(
 	t *testing.T,
-	view workspace.SchedulerView,
+	view workspace.WorkspaceSchedule,
 	id string,
-) workspace.SchedulerUnitView {
+) workspace.WorkspaceUnitState {
 	t.Helper()
 	for _, unit := range view.Units {
 		if unit.MergeUnitID == id {
@@ -232,14 +295,14 @@ func schedulerUnitByID(
 		}
 	}
 	t.Fatalf("scheduler has no merge unit %s: %+v", id, view.Units)
-	return workspace.SchedulerUnitView{}
+	return workspace.WorkspaceUnitState{}
 }
 
 func gateUnitByID(
 	t *testing.T,
-	view workspace.GateView,
+	view workspace.WorkspaceGates,
 	id string,
-) workspace.UnitGateView {
+) workspace.WorkspaceUnitGates {
 	t.Helper()
 	for _, unit := range view.Units {
 		if unit.MergeUnitID == id {
@@ -247,14 +310,14 @@ func gateUnitByID(
 		}
 	}
 	t.Fatalf("gate view has no merge unit %s: %+v", id, view.Units)
-	return workspace.UnitGateView{}
+	return workspace.WorkspaceUnitGates{}
 }
 
 func gateCheckByName(
 	t *testing.T,
-	unit workspace.UnitGateView,
+	unit workspace.WorkspaceUnitGates,
 	name string,
-) workspace.GateCheckView {
+) workspace.WorkspaceGate {
 	t.Helper()
 	for _, check := range unit.Checks {
 		if check.Name == name {
@@ -265,14 +328,14 @@ func gateCheckByName(
 		"gate view for %s has no check %s: %+v",
 		unit.MergeUnitID, name, unit.Checks,
 	)
-	return workspace.GateCheckView{}
+	return workspace.WorkspaceGate{}
 }
 
 func integrationUnitByID(
 	t *testing.T,
-	view workspace.IntegrationView,
+	view workspace.WorkspaceIntegration,
 	id string,
-) workspace.IntegrationUnitView {
+) workspace.WorkspaceIntegrationUnit {
 	t.Helper()
 	for _, unit := range view.Units {
 		if unit.MergeUnitID == id {
@@ -283,5 +346,5 @@ func integrationUnitByID(
 		"integration view has no merge unit %s: %+v",
 		id, view.Units,
 	)
-	return workspace.IntegrationUnitView{}
+	return workspace.WorkspaceIntegrationUnit{}
 }

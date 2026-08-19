@@ -46,6 +46,21 @@ func VerifyReplayConformance[State any](
 	if err != nil {
 		return Digest{}, err
 	}
+	return verifyProjectionConformance(
+		first, second, canonical, activeGeneration, expectedGeneration,
+	)
+}
+
+func verifyProjectionConformance[State any](
+	first State,
+	second State,
+	canonical func(State) ([]byte, error),
+	activeGeneration func(State) Digest,
+	expectedGeneration Digest,
+) (Digest, error) {
+	if canonical == nil || activeGeneration == nil || expectedGeneration.IsZero() {
+		return Digest{}, fmt.Errorf("replay conformance requires constructors, reducer, canonicalizer, and active generation")
+	}
 	firstBytes, err := canonical(first)
 	if err != nil {
 		return Digest{}, err

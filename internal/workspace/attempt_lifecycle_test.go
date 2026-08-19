@@ -302,7 +302,8 @@ func TestAttemptReservationEnforcesSchedulerOrderAndEffectiveAttemptBudget(t *te
 			MergeUnit: blockedUnit, AttemptNumber: 1, Goal: harness.goal,
 			OccurredAt: mustTime(t, "2026-07-21T10:01:00Z"),
 		},
-	); err == nil || !strings.Contains(err.Error(), "not scheduler-ready") || !strings.Contains(err.Error(), "dependency:alpha-plan/unit-one") {
+	); err == nil || !strings.Contains(err.Error(), "not scheduler-ready") ||
+		!strings.Contains(err.Error(), "unsatisfied dependency sets: [alpha-plan/unit-one]") {
 		t.Fatalf("dependency-bypassing reservation error = %v", err)
 	}
 	if _, err := workspace.ReserveAttempt(

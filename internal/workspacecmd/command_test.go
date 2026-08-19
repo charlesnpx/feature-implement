@@ -243,11 +243,15 @@ func TestDecodeRequestKeepsSchemaOptionalFieldsOptional(t *testing.T) {
 	}
 }
 
-func TestReportDirectiveSchemaKeepsChoicesOptional(t *testing.T) {
-	reports := ReportSchemas()["reports"].(map[string]any)
-	scheduler := reports["scheduler"].(map[string]any)
-	properties := scheduler["properties"].(map[string]any)
-	units := properties["units"].(map[string]any)
+func TestWorkspaceViewSchemaKeepsChoicesOptional(t *testing.T) {
+	view := WorkspaceViewSchema()
+	if view["additionalProperties"] != false {
+		t.Fatalf("workspace view schema permits unknown fields: %+v", view)
+	}
+	properties := view["properties"].(map[string]any)
+	scheduler := properties["scheduler"].(map[string]any)
+	schedulerProperties := scheduler["properties"].(map[string]any)
+	units := schedulerProperties["units"].(map[string]any)
 	unit := units["items"].(map[string]any)
 	unitProperties := unit["properties"].(map[string]any)
 	directives := unitProperties["pending_directives"].(map[string]any)
@@ -268,6 +272,14 @@ func TestReportDirectiveSchemaKeepsChoicesOptional(t *testing.T) {
 	}
 	if _, exists := directiveProperties["boundary_kind"]; !exists || !boundaryKindRequired {
 		t.Fatalf("directive schema does not require boundary kind: %+v / %+v", required, directiveProperties)
+	}
+	blockers := unitProperties["blockers"].(map[string]any)
+	blocker := blockers["items"].(map[string]any)
+	if blocker["type"] != "string" {
+		t.Fatalf("workspace view blocker is not a string: %+v", blocker)
+	}
+	if _, exists := blocker["properties"]; exists {
+		t.Fatalf("workspace view blocker retains object properties: %+v", blocker)
 	}
 }
 
@@ -756,7 +768,7 @@ merge_units:
 			"post-completion feature-ref drift was not rejected",
 		)
 	}
-	drifted, err := readReport(
+	drifted, err := readWorkspaceView(
 		context.Background(), bundle, workspaceDir,
 	)
 	if err != nil {

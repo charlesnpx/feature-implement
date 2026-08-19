@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 type SchedulerUnitStatus string
@@ -20,24 +21,24 @@ const (
 	SchedulerUnitCompleted       SchedulerUnitStatus = "completed"
 )
 
-type SchedulerUnitView struct {
-	PlanID            string                  `json:"plan_id"`
-	MergeUnitID       string                  `json:"merge_unit_id"`
-	Status            SchedulerUnitStatus     `json:"status"`
-	Generation        string                  `json:"generation"`
-	Dependencies      []string                `json:"dependencies"`
-	Blockers          []string                `json:"blockers"`
-	AttemptID         string                  `json:"attempt_id,omitempty"`
-	AttemptNumber     uint64                  `json:"attempt_number,omitempty"`
-	Branch            string                  `json:"branch,omitempty"`
-	Worktree          string                  `json:"worktree,omitempty"`
-	Head              string                  `json:"head,omitempty"`
-	BoundaryPending   bool                    `json:"boundary_pending"`
-	BoundaryReason    string                  `json:"boundary_reason,omitempty"`
-	PendingDirectives []BoundaryDirectiveView `json:"pending_directives"`
+type WorkspaceUnitState struct {
+	PlanID            string                       `json:"plan_id"`
+	MergeUnitID       string                       `json:"merge_unit_id"`
+	Status            SchedulerUnitStatus          `json:"status"`
+	Generation        string                       `json:"generation"`
+	Dependencies      []string                     `json:"dependencies"`
+	Blockers          []string                     `json:"blockers"`
+	AttemptID         string                       `json:"attempt_id,omitempty"`
+	AttemptNumber     uint64                       `json:"attempt_number,omitempty"`
+	Branch            string                       `json:"branch,omitempty"`
+	Worktree          string                       `json:"worktree,omitempty"`
+	Head              string                       `json:"head,omitempty"`
+	BoundaryPending   bool                         `json:"boundary_pending"`
+	BoundaryReason    string                       `json:"boundary_reason,omitempty"`
+	PendingDirectives []WorkspaceBoundaryDirective `json:"pending_directives"`
 }
 
-type BoundaryDirectiveView struct {
+type WorkspaceBoundaryDirective struct {
 	Kind            string   `json:"kind"`
 	BoundaryKind    string   `json:"boundary_kind"`
 	WorkspaceID     string   `json:"workspace_id"`
@@ -52,12 +53,12 @@ type BoundaryDirectiveView struct {
 	Choices         []string `json:"choices,omitempty"`
 }
 
-type SchedulerView struct {
-	SchemaVersion int                 `json:"schema_version"`
-	WorkspaceID   string              `json:"workspace_id"`
-	Generation    string              `json:"generation"`
-	JournalHead   string              `json:"journal_head"`
-	Units         []SchedulerUnitView `json:"units"`
+type WorkspaceSchedule struct {
+	SchemaVersion int                  `json:"schema_version"`
+	WorkspaceID   string               `json:"workspace_id"`
+	Generation    string               `json:"generation"`
+	JournalHead   string               `json:"journal_head"`
+	Units         []WorkspaceUnitState `json:"units"`
 }
 
 type GateStatus string
@@ -68,32 +69,32 @@ const (
 	GateFailed  GateStatus = "failed"
 )
 
-type GateCheckView struct {
+type WorkspaceGate struct {
 	Name       string     `json:"name"`
 	Status     GateStatus `json:"status"`
 	Generation string     `json:"generation"`
 	Reason     string     `json:"reason"`
 }
 
-type UnitGateView struct {
+type WorkspaceUnitGates struct {
 	PlanID      string          `json:"plan_id"`
 	MergeUnitID string          `json:"merge_unit_id"`
 	AttemptID   string          `json:"attempt_id,omitempty"`
-	Checks      []GateCheckView `json:"checks"`
+	Checks      []WorkspaceGate `json:"checks"`
 	MergeReady  bool            `json:"merge_ready"`
 }
 
-type GateView struct {
-	SchemaVersion      int            `json:"schema_version"`
-	WorkspaceID        string         `json:"workspace_id"`
-	Generation         string         `json:"generation"`
-	JournalHead        string         `json:"journal_head"`
-	Units              []UnitGateView `json:"units"`
-	Completion         GateCheckView  `json:"completion"`
-	CompletionBlockers []string       `json:"completion_blockers"`
+type WorkspaceGates struct {
+	SchemaVersion      int                  `json:"schema_version"`
+	WorkspaceID        string               `json:"workspace_id"`
+	Generation         string               `json:"generation"`
+	JournalHead        string               `json:"journal_head"`
+	Units              []WorkspaceUnitGates `json:"units"`
+	Completion         WorkspaceGate        `json:"completion"`
+	CompletionBlockers []string             `json:"completion_blockers"`
 }
 
-type WorkspaceWorkflowView struct {
+type WorkspaceWorkflow struct {
 	WorkspaceID            string `json:"workspace_id"`
 	Generation             string `json:"generation"`
 	JournalHead            string `json:"journal_head"`
@@ -103,7 +104,7 @@ type WorkspaceWorkflowView struct {
 	ReviewProjectionDigest string `json:"review_projection_digest"`
 }
 
-type WorkspaceTargetView struct {
+type WorkspaceTarget struct {
 	Root             string `json:"root"`
 	GitDirectory     string `json:"git_directory"`
 	CommonDirectory  string `json:"common_directory"`
@@ -119,25 +120,25 @@ type WorkspaceTargetView struct {
 	Ready            bool   `json:"ready"`
 }
 
-type WorkspaceAttemptView struct {
-	AttemptID         string                  `json:"attempt_id"`
-	PlanID            string                  `json:"plan_id"`
-	MergeUnitID       string                  `json:"merge_unit_id"`
-	Generation        string                  `json:"generation"`
-	AttemptNumber     uint64                  `json:"attempt_number"`
-	Base              string                  `json:"base"`
-	Branch            string                  `json:"branch"`
-	Worktree          string                  `json:"worktree"`
-	Phase             AttemptRuntimePhase     `json:"phase"`
-	Head              string                  `json:"head,omitempty"`
-	GoalID            string                  `json:"goal_id"`
-	GoalScope         GoalScope               `json:"goal_scope"`
-	BoundaryPending   bool                    `json:"boundary_pending"`
-	BoundaryReason    string                  `json:"boundary_reason,omitempty"`
-	PendingDirectives []BoundaryDirectiveView `json:"pending_directives"`
+type WorkspaceAttempt struct {
+	AttemptID         string                       `json:"attempt_id"`
+	PlanID            string                       `json:"plan_id"`
+	MergeUnitID       string                       `json:"merge_unit_id"`
+	Generation        string                       `json:"generation"`
+	AttemptNumber     uint64                       `json:"attempt_number"`
+	Base              string                       `json:"base"`
+	Branch            string                       `json:"branch"`
+	Worktree          string                       `json:"worktree"`
+	Phase             AttemptRuntimePhase          `json:"phase"`
+	Head              string                       `json:"head,omitempty"`
+	GoalID            string                       `json:"goal_id"`
+	GoalScope         GoalScope                    `json:"goal_scope"`
+	BoundaryPending   bool                         `json:"boundary_pending"`
+	BoundaryReason    string                       `json:"boundary_reason,omitempty"`
+	PendingDirectives []WorkspaceBoundaryDirective `json:"pending_directives"`
 }
 
-type WorkspaceReviewView struct {
+type WorkspaceReview struct {
 	AttemptID             string `json:"attempt_id"`
 	PlanID                string `json:"plan_id"`
 	MergeUnitID           string `json:"merge_unit_id"`
@@ -151,7 +152,7 @@ type WorkspaceReviewView struct {
 	MergeReady            bool   `json:"merge_ready"`
 }
 
-type IntegrationUnitView struct {
+type WorkspaceIntegrationUnit struct {
 	PlanID      string `json:"plan_id"`
 	MergeUnitID string `json:"merge_unit_id"`
 	AttemptID   string `json:"attempt_id,omitempty"`
@@ -159,67 +160,105 @@ type IntegrationUnitView struct {
 	Status      string `json:"status"`
 }
 
-type IntegrationView struct {
-	Units []IntegrationUnitView `json:"units"`
+type WorkspaceIntegration struct {
+	Units []WorkspaceIntegrationUnit `json:"units"`
 }
 
-type DriftView struct {
+type WorkspaceDrift struct {
 	Detected bool     `json:"detected"`
 	Reasons  []string `json:"reasons"`
 }
 
-type CompletionView struct {
+type WorkspaceCompletion struct {
 	Complete     bool     `json:"complete"`
 	Blockers     []string `json:"blockers"`
 	ReportDigest string   `json:"report_digest,omitempty"`
 }
 
-type WorkspaceReport struct {
-	SchemaVersion int                    `json:"schema_version"`
-	Workflow      WorkspaceWorkflowView  `json:"workflow"`
-	Target        WorkspaceTargetView    `json:"target"`
-	Attempts      []WorkspaceAttemptView `json:"attempts"`
-	Reviews       []WorkspaceReviewView  `json:"reviews"`
-	Scheduler     SchedulerView          `json:"scheduler"`
-	Gates         GateView               `json:"gates"`
-	Integration   IntegrationView        `json:"integration"`
-	Drift         DriftView              `json:"drift"`
-	Completion    CompletionView         `json:"completion"`
-	ReportDigest  string                 `json:"report_digest"`
+type workspaceIntegrationDriftInput struct {
+	chain              []MergeUnitIntegrationIntent
+	target             LocalTargetBinding
+	completionRecorded bool
 }
 
-func RebuildSchedulerView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefinition) (SchedulerView, error) {
-	core, reviews, err := rebuildViewProjections(snapshot, definition)
-	if err != nil {
-		return SchedulerView{}, err
-	}
-	dependencies, references := definitionDependencyGraph(definition)
-	attempts := latestAttemptsByMergeUnit(core)
+// WorkspaceView is the single journal-derived operator view. Its nested
+// sections retain the established wire layout while sharing one rebuild.
+type WorkspaceView struct {
+	SchemaVersion int                  `json:"schema_version"`
+	Workflow      WorkspaceWorkflow    `json:"workflow"`
+	Target        WorkspaceTarget      `json:"target"`
+	Attempts      []WorkspaceAttempt   `json:"attempts"`
+	Reviews       []WorkspaceReview    `json:"reviews"`
+	Scheduler     WorkspaceSchedule    `json:"scheduler"`
+	Gates         WorkspaceGates       `json:"gates"`
+	Integration   WorkspaceIntegration `json:"integration"`
+	Drift         WorkspaceDrift       `json:"drift"`
+	Completion    WorkspaceCompletion  `json:"completion"`
+	ReportDigest  string               `json:"report_digest"`
 
-	view := SchedulerView{
+	integrationDrift workspaceIntegrationDriftInput
+}
+
+func RebuildWorkspaceView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefinition) (WorkspaceView, error) {
+	reviews, err := RebuildReviewRuntime(snapshot, definition)
+	if err != nil {
+		return WorkspaceView{}, err
+	}
+	core := reviews.core
+	coreDigest, reviewDigest, err := verifyWorkspaceViewProjectionConformance(
+		snapshot, definition, core, reviews,
+	)
+	if err != nil {
+		return WorkspaceView{}, err
+	}
+	target, err := workspaceTargetView(core, definition)
+	if err != nil {
+		return WorkspaceView{}, err
+	}
+
+	dependencies, references := definitionDependencyGraph(definition)
+	attemptsByUnit := latestAttemptsByMergeUnit(core)
+	unitExecution := unitExecutionsByMergeUnit(definition)
+	schedule := WorkspaceSchedule{
 		SchemaVersion: JournalSchemaVersion, WorkspaceID: core.workspaceID.String(),
 		Generation: core.activeGeneration.String(), JournalHead: snapshot.head.String(),
-		Units: make([]SchedulerUnitView, 0, len(references)),
+		Units: make([]WorkspaceUnitState, 0, len(references)),
+	}
+	gates := WorkspaceGates{
+		SchemaVersion: JournalSchemaVersion, WorkspaceID: core.workspaceID.String(),
+		Generation: core.activeGeneration.String(), JournalHead: snapshot.head.String(),
+		Units: make([]WorkspaceUnitGates, 0, len(references)),
+	}
+	integration := WorkspaceIntegration{
+		Units: make([]WorkspaceIntegrationUnit, 0, len(references)),
 	}
 	for _, reference := range references {
 		key := reference.key()
-		unit := SchedulerUnitView{
+		unit := WorkspaceUnitState{
 			PlanID: reference.planID.String(), MergeUnitID: reference.mergeUnitID.String(),
-			Generation: definition.generation.String(), Dependencies: make([]string, 0, len(dependencies[key])),
-			Blockers: []string{}, PendingDirectives: []BoundaryDirectiveView{},
+			Generation:        definition.generation.String(),
+			Dependencies:      make([]string, 0, len(dependencies[key])),
+			Blockers:          []string{},
+			PendingDirectives: []WorkspaceBoundaryDirective{},
 		}
+		unsatisfiedDependencySets := make([][]string, 0, len(dependencies[key]))
 		for _, dependency := range dependencies[key] {
-			unit.Dependencies = append(unit.Dependencies, dependency.String())
-			dependencyAttempt, completed := attempts[dependency.key()]
-			if !completed ||
-				dependencyAttempt.phase != AttemptCompleted {
-				unit.Blockers = append(
-					unit.Blockers,
-					"dependency:"+dependency.String(),
+			dependencyID := dependency.String()
+			unit.Dependencies = append(unit.Dependencies, dependencyID)
+			dependencyAttempt, completed := attemptsByUnit[dependency.key()]
+			if !completed || dependencyAttempt.phase != AttemptCompleted {
+				unsatisfiedDependencySets = append(
+					unsatisfiedDependencySets, []string{dependencyID},
 				)
 			}
 		}
-		attempt, hasAttempt := attempts[key]
+		if len(unsatisfiedDependencySets) != 0 {
+			unit.Blockers = append(
+				unit.Blockers, dependencySetReason(unsatisfiedDependencySets),
+			)
+		}
+
+		attempt, hasAttempt := attemptsByUnit[key]
 		if hasAttempt && attempt.phase.retryableTerminal() {
 			hasAttempt = false
 		}
@@ -232,9 +271,7 @@ func RebuildSchedulerView(snapshot JournalSnapshot, definition EffectiveWorkspac
 			unit.Head = attempt.verifiedHead.String()
 			unit.BoundaryPending, unit.BoundaryReason, unit.PendingDirectives = attemptBoundaryStatus(core, attempt)
 			if attempt.phase == AttemptActive {
-				if state, exists := reviews.State(
-					attempt.attemptID,
-				); exists {
+				if state, exists := reviews.State(attempt.attemptID); exists {
 					if _, exhausted := state.Exhaustion(); exhausted {
 						unit.Status = SchedulerUnitReviewExhausted
 					}
@@ -245,47 +282,26 @@ func RebuildSchedulerView(snapshot JournalSnapshot, definition EffectiveWorkspac
 		} else {
 			unit.Status = SchedulerUnitBlocked
 		}
-		view.Units = append(view.Units, unit)
-	}
-	return view, nil
-}
 
-func RebuildGateView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefinition) (GateView, error) {
-	core, reviews, err := rebuildViewProjections(snapshot, definition)
-	if err != nil {
-		return GateView{}, err
-	}
-	scheduler, err := RebuildSchedulerView(snapshot, definition)
-	if err != nil {
-		return GateView{}, err
-	}
-	attempts := latestAttemptsByMergeUnit(core)
-	unitExecution := unitExecutionsByMergeUnit(definition)
-	view := GateView{
-		SchemaVersion: JournalSchemaVersion, WorkspaceID: core.workspaceID.String(),
-		Generation: core.activeGeneration.String(), JournalHead: snapshot.head.String(),
-		Units: make([]UnitGateView, 0, len(scheduler.Units)),
-	}
-	for _, scheduled := range scheduler.Units {
-		key := scheduled.PlanID + "\x00" + scheduled.MergeUnitID
-		unit := UnitGateView{PlanID: scheduled.PlanID, MergeUnitID: scheduled.MergeUnitID, Checks: []GateCheckView{}}
-		dependencyGate := GateCheckView{Name: "dependencies", Generation: definition.generation.String()}
-		if len(scheduled.Blockers) == 0 {
+		unitGates := WorkspaceUnitGates{
+			PlanID: unit.PlanID, MergeUnitID: unit.MergeUnitID,
+			Checks: []WorkspaceGate{},
+		}
+		dependencyGate := WorkspaceGate{
+			Name: "dependencies", Generation: definition.generation.String(),
+		}
+		if len(unit.Blockers) == 0 {
 			dependencyGate.Status, dependencyGate.Reason = GatePassed, "all_dependencies_completed"
 		} else {
-			dependencyGate.Status, dependencyGate.Reason = GatePending, scheduled.Blockers[0]
+			dependencyGate.Status, dependencyGate.Reason = GatePending, unit.Blockers[0]
 		}
-		unit.Checks = append(unit.Checks, dependencyGate)
-
-		attempt, hasAttempt := attempts[key]
-		if hasAttempt && attempt.phase.retryableTerminal() {
-			hasAttempt = false
-		}
+		unitGates.Checks = append(unitGates.Checks, dependencyGate)
 		if hasAttempt {
-			unit.AttemptID = attempt.attemptID.String()
+			unitGates.AttemptID = attempt.attemptID.String()
 		}
-		commitGate := GateCheckView{Name: "commit", Generation: definition.generation.String()}
+
 		execution := unitExecution[key]
+		commitGate := WorkspaceGate{Name: "commit", Generation: definition.generation.String()}
 		_, commitConfigured := execution.CommitProtocol()
 		switch {
 		case !hasAttempt:
@@ -297,9 +313,9 @@ func RebuildGateView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefi
 		default:
 			commitGate.Status, commitGate.Reason = GatePending, "protocol_incomplete"
 		}
-		unit.Checks = append(unit.Checks, commitGate)
+		unitGates.Checks = append(unitGates.Checks, commitGate)
 
-		reviewGate := GateCheckView{Name: "review", Generation: definition.generation.String()}
+		reviewGate := WorkspaceGate{Name: "review", Generation: definition.generation.String()}
 		_, reviewConfigured := execution.ReviewLoop()
 		switch {
 		case !hasAttempt:
@@ -320,106 +336,69 @@ func RebuildGateView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefi
 				reviewGate.Status, reviewGate.Reason = GatePending, "review_not_started"
 			}
 		}
-		unit.Checks = append(unit.Checks, reviewGate)
+		unitGates.Checks = append(unitGates.Checks, reviewGate)
 
-		integrationGate := GateCheckView{Name: "integration", Generation: definition.generation.String()}
-		if scheduled.Status == SchedulerUnitCompleted {
+		integrationGate := WorkspaceGate{Name: "integration", Generation: definition.generation.String()}
+		integrationStatus := "pending"
+		if unit.Status == SchedulerUnitCompleted {
 			integrationGate.Status, integrationGate.Reason = GatePassed, "merge_unit_integrated"
+			integrationStatus = "integrated"
 		} else {
 			integrationGate.Status, integrationGate.Reason = GatePending, "not_integrated"
 		}
-		unit.Checks = append(unit.Checks, integrationGate)
-		unit.MergeReady = dependencyGate.Status == GatePassed && commitGate.Status == GatePassed &&
-			reviewGate.Status == GatePassed && integrationGate.Status != GatePassed
-		view.Units = append(view.Units, unit)
+		unitGates.Checks = append(unitGates.Checks, integrationGate)
+		unitGates.MergeReady = dependencyGate.Status == GatePassed &&
+			commitGate.Status == GatePassed && reviewGate.Status == GatePassed &&
+			integrationGate.Status != GatePassed
+
+		schedule.Units = append(schedule.Units, unit)
+		gates.Units = append(gates.Units, unitGates)
+		integration.Units = append(integration.Units, WorkspaceIntegrationUnit{
+			PlanID: unit.PlanID, MergeUnitID: unit.MergeUnitID,
+			AttemptID: unit.AttemptID, Head: unit.Head, Status: integrationStatus,
+		})
 	}
-	blockers, complete, _, err := workspaceCompletionViewState(
-		snapshot, definition, reviews, core,
+
+	assessment := assessWorkspaceCompletion(snapshot, definition, reviews, core)
+	completionBlockers, complete, completionDigest, err := workspaceCompletionViewState(
+		snapshot, definition, assessment, core,
 	)
 	if err != nil {
-		return GateView{}, err
+		return WorkspaceView{}, err
 	}
-	view.Completion = GateCheckView{
-		Name:       "completion",
-		Generation: definition.generation.String(),
+	completion := WorkspaceCompletion{
+		Complete:     complete,
+		Blockers:     completionBlockers,
+		ReportDigest: completionDigest.String(),
 	}
-	view.CompletionBlockers = append(
-		[]string{}, blockers...,
-	)
+	gates.Completion = WorkspaceGate{
+		Name: "completion", Generation: definition.generation.String(),
+	}
+	gates.CompletionBlockers = append([]string{}, completionBlockers...)
 	switch {
 	case complete:
-		view.Completion.Status = GatePassed
-		view.Completion.Reason = "workspace_completed"
-	case len(blockers) == 0:
-		view.Completion.Status = GatePending
-		view.Completion.Reason = "workspace_completion_not_recorded"
+		gates.Completion.Status, gates.Completion.Reason = GatePassed, "workspace_completed"
+	case len(completionBlockers) == 0:
+		gates.Completion.Status, gates.Completion.Reason = GatePending, "workspace_completion_not_recorded"
 	default:
 		if _, recorded := core.Completion(); recorded {
-			view.Completion.Status = GateFailed
+			gates.Completion.Status = GateFailed
 		} else {
-			view.Completion.Status = GatePending
+			gates.Completion.Status = GatePending
 		}
-		view.Completion.Reason = blockers[0]
+		gates.Completion.Reason = completionBlockers[0]
 	}
-	return view, nil
-}
+	driftInput := workspaceIntegrationDriftInput{
+		chain: append([]MergeUnitIntegrationIntent(nil), assessment.chain...),
+	}
+	if target, exists := core.LocalTarget(); exists && target.Created() {
+		driftInput.target = target.Binding()
+	}
+	_, driftInput.completionRecorded = core.Completion()
 
-func RebuildCompletionView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefinition) (CompletionView, error) {
-	core, reviews, err := rebuildViewProjections(
-		snapshot, definition,
-	)
-	if err != nil {
-		return CompletionView{}, err
-	}
-	blockers, complete, reportDigest, err :=
-		workspaceCompletionViewState(
-			snapshot, definition, reviews, core,
-		)
-	if err != nil {
-		return CompletionView{}, err
-	}
-	return CompletionView{
-		Complete:     complete,
-		Blockers:     blockers,
-		ReportDigest: reportDigest.String(),
-	}, nil
-}
-
-func RebuildWorkspaceReport(snapshot JournalSnapshot, definition EffectiveWorkspaceDefinition) (WorkspaceReport, error) {
-	core, reviews, err := rebuildViewProjections(snapshot, definition)
-	if err != nil {
-		return WorkspaceReport{}, err
-	}
-	coreDigest, err := VerifyWorkspaceRuntimeConformance(snapshot, definition.generation)
-	if err != nil {
-		return WorkspaceReport{}, err
-	}
-	reviewDigest, err := VerifyReviewRuntimeConformance(snapshot, definition)
-	if err != nil {
-		return WorkspaceReport{}, err
-	}
-	scheduler, err := RebuildSchedulerView(snapshot, definition)
-	if err != nil {
-		return WorkspaceReport{}, err
-	}
-	gates, err := RebuildGateView(snapshot, definition)
-	if err != nil {
-		return WorkspaceReport{}, err
-	}
-	target, err := workspaceTargetView(core, definition)
-	if err != nil {
-		return WorkspaceReport{}, err
-	}
-	attempts := workspaceAttemptViews(core, scheduler)
-	reviewViews := workspaceReviewViews(reviews)
-	integration := workspaceIntegrationView(scheduler)
-	completion, err := RebuildCompletionView(snapshot, definition)
-	if err != nil {
-		return WorkspaceReport{}, err
-	}
-	report := WorkspaceReport{
+	view := WorkspaceView{
 		SchemaVersion: JournalSchemaVersion,
-		Workflow: WorkspaceWorkflowView{
+		Workflow: WorkspaceWorkflow{
 			WorkspaceID:            core.workspaceID.String(),
 			Generation:             core.activeGeneration.String(),
 			JournalHead:            snapshot.head.String(),
@@ -428,111 +407,102 @@ func RebuildWorkspaceReport(snapshot JournalSnapshot, definition EffectiveWorksp
 			ProjectionDigest:       coreDigest.String(),
 			ReviewProjectionDigest: reviewDigest.String(),
 		},
-		Target:      target,
-		Attempts:    attempts,
-		Reviews:     reviewViews,
-		Scheduler:   scheduler,
-		Gates:       gates,
-		Integration: integration,
-		Drift:       DriftView{Reasons: []string{}},
-		Completion:  completion,
+		Target:           target,
+		Attempts:         workspaceAttemptViews(core, schedule),
+		Reviews:          workspaceReviewViews(reviews),
+		Scheduler:        schedule,
+		Gates:            gates,
+		Integration:      integration,
+		Drift:            WorkspaceDrift{Reasons: []string{}},
+		Completion:       completion,
+		integrationDrift: driftInput,
 	}
-	if err := setWorkspaceReportDigest(&report); err != nil {
-		return WorkspaceReport{}, err
+	if err := setWorkspaceViewDigest(&view); err != nil {
+		return WorkspaceView{}, err
 	}
-	return report, nil
+	return view, nil
 }
 
-func RebuildWorkspaceReportWithGit(
+func ApplyWorkspaceIntegrationDrift(
 	ctx context.Context,
-	snapshot JournalSnapshot,
-	definition EffectiveWorkspaceDefinition,
+	view *WorkspaceView,
 	git IntegrationGitPort,
-) (WorkspaceReport, error) {
-	if ctx == nil || git == nil {
-		return WorkspaceReport{}, fmt.Errorf(
-			"Git-aware workspace report requires context and integration Git adapter",
-		)
+) error {
+	if ctx == nil || view == nil || git == nil {
+		return fmt.Errorf("workspace integration drift check requires context, view, and Git adapter")
 	}
-	report, err := RebuildWorkspaceReport(snapshot, definition)
-	if err != nil {
-		return WorkspaceReport{}, err
-	}
-	core, reviews, err := rebuildViewProjections(
-		snapshot, definition,
-	)
-	if err != nil {
-		return WorkspaceReport{}, err
-	}
-	assessment := assessWorkspaceCompletion(
-		snapshot, definition, reviews, core,
-	)
-	if len(assessment.chain) == 0 {
-		return report, nil
-	}
-	target, exists := core.LocalTarget()
-	if !exists || !target.Created() {
-		return report, nil
+	driftInput := view.integrationDrift
+	if len(driftInput.chain) == 0 || driftInput.target.IsZero() {
+		return nil
 	}
 	if err := git.VerifyCompletedIntegration(
-		ctx, target.binding, assessment.chain,
+		ctx, driftInput.target,
+		append([]MergeUnitIntegrationIntent(nil), driftInput.chain...),
 	); err == nil {
-		return report, nil
+		return nil
 	} else {
-		report.Drift.Detected = true
-		report.Drift.Reasons = []string{err.Error()}
-		report.Completion.Complete = false
-		report.Completion.Blockers =
+		view.Drift.Detected = true
+		view.Drift.Reasons = []string{err.Error()}
+		view.Completion.Complete = false
+		view.Completion.Blockers =
 			sortedUniqueCompletionBlockers(
 				append(
-					report.Completion.Blockers,
+					view.Completion.Blockers,
 					"git:completed_integration_drift",
 				),
 			)
-		report.Gates.CompletionBlockers = append(
+		view.Gates.CompletionBlockers = append(
 			[]string{},
-			report.Completion.Blockers...,
+			view.Completion.Blockers...,
 		)
-		if _, recorded := core.Completion(); recorded {
-			report.Gates.Completion.Status = GateFailed
+		if driftInput.completionRecorded {
+			view.Gates.Completion.Status = GateFailed
 		} else {
-			report.Gates.Completion.Status = GatePending
+			view.Gates.Completion.Status = GatePending
 		}
-		report.Gates.Completion.Reason =
+		view.Gates.Completion.Reason =
 			"git:completed_integration_drift"
 	}
-	if err := setWorkspaceReportDigest(&report); err != nil {
-		return WorkspaceReport{}, err
+	if err := setWorkspaceViewDigest(view); err != nil {
+		return err
 	}
-	return report, nil
+	return nil
 }
 
-func setWorkspaceReportDigest(report *WorkspaceReport) error {
-	if report == nil {
-		return fmt.Errorf("workspace report is required")
+func setWorkspaceViewDigest(view *WorkspaceView) error {
+	if view == nil {
+		return fmt.Errorf("workspace view is required")
 	}
-	report.ReportDigest = ""
-	canonical, err := json.Marshal(report)
+	view.ReportDigest = ""
+	canonical, err := json.Marshal(view)
 	if err != nil {
 		return err
 	}
-	report.ReportDigest = DigestBytes(canonical).String()
+	view.ReportDigest = DigestBytes(canonical).String()
 	return nil
+}
+
+func dependencySetReason(sets [][]string) string {
+	parts := make([]string, 0, len(sets))
+	for _, providers := range sets {
+		parts = append(parts, "["+strings.Join(providers, ", ")+"]")
+	}
+	return "unsatisfied dependency sets: " + strings.Join(parts, ", ")
 }
 
 func workspaceTargetView(
 	core WorkspaceRuntimeProjection,
 	definition EffectiveWorkspaceDefinition,
-) (WorkspaceTargetView, error) {
+) (WorkspaceTarget, error) {
 	target, exists := core.LocalTarget()
 	if !exists {
 		configured := definition.workspace.target
 		if configured.IsZero() {
-			return WorkspaceTargetView{}, fmt.Errorf(
-				"workspace report requires a configured local target",
+			return WorkspaceTarget{}, fmt.Errorf(
+				"workspace view requires a configured local target",
 			)
 		}
-		return WorkspaceTargetView{
+		return WorkspaceTarget{
 			Root:          configured.Root(),
 			BaseRef:       configured.BaseRef(),
 			BaseCommit:    configured.BaseCommit().String(),
@@ -546,7 +516,7 @@ func workspaceTargetView(
 	if target.Created() {
 		featureHead = target.CreatedHead().String()
 	}
-	return WorkspaceTargetView{
+	return WorkspaceTarget{
 		Root:             binding.Root(),
 		GitDirectory:     binding.GitDirectory(),
 		CommonDirectory:  binding.CommonDirectory(),
@@ -565,18 +535,18 @@ func workspaceTargetView(
 
 func workspaceAttemptViews(
 	core WorkspaceRuntimeProjection,
-	scheduler SchedulerView,
-) []WorkspaceAttemptView {
-	scheduled := make(map[string]SchedulerUnitView, len(scheduler.Units))
+	scheduler WorkspaceSchedule,
+) []WorkspaceAttempt {
+	scheduled := make(map[string]WorkspaceUnitState, len(scheduler.Units))
 	for _, unit := range scheduler.Units {
 		if unit.AttemptID != "" {
 			scheduled[unit.AttemptID] = unit
 		}
 	}
-	result := make([]WorkspaceAttemptView, 0, len(core.attempts))
+	result := make([]WorkspaceAttempt, 0, len(core.attempts))
 	for _, attempt := range core.attempts {
 		unit := scheduled[attempt.attemptID.String()]
-		result = append(result, WorkspaceAttemptView{
+		result = append(result, WorkspaceAttempt{
 			AttemptID:         attempt.attemptID.String(),
 			PlanID:            attempt.mergeUnit.planID.String(),
 			MergeUnitID:       attempt.mergeUnit.mergeUnitID.String(),
@@ -591,7 +561,7 @@ func workspaceAttemptViews(
 			GoalScope:         attempt.goal.scope,
 			BoundaryPending:   unit.BoundaryPending,
 			BoundaryReason:    unit.BoundaryReason,
-			PendingDirectives: append([]BoundaryDirectiveView(nil), unit.PendingDirectives...),
+			PendingDirectives: append([]WorkspaceBoundaryDirective(nil), unit.PendingDirectives...),
 		})
 	}
 	sort.Slice(result, func(i, j int) bool {
@@ -610,9 +580,9 @@ func workspaceAttemptViews(
 
 func workspaceReviewViews(
 	reviews ReviewRuntimeProjection,
-) []WorkspaceReviewView {
+) []WorkspaceReview {
 	states := reviews.States()
-	result := make([]WorkspaceReviewView, 0, len(states))
+	result := make([]WorkspaceReview, 0, len(states))
 	for _, state := range states {
 		status := "active"
 		if state.MergeReady() {
@@ -622,7 +592,7 @@ func workspaceReviewViews(
 		} else if _, pending := state.PendingFix(); pending {
 			status = "fix_pending"
 		}
-		result = append(result, WorkspaceReviewView{
+		result = append(result, WorkspaceReview{
 			AttemptID:             state.AttemptID().String(),
 			PlanID:                state.MergeUnit().PlanID().String(),
 			MergeUnitID:           state.MergeUnit().MergeUnitID().String(),
@@ -642,36 +612,17 @@ func workspaceReviewViews(
 	return result
 }
 
-func workspaceIntegrationView(
-	scheduler SchedulerView,
-) IntegrationView {
-	view := IntegrationView{
-		Units: make([]IntegrationUnitView, 0, len(scheduler.Units)),
-	}
-	for _, unit := range scheduler.Units {
-		status := "pending"
-		if unit.Status == SchedulerUnitCompleted {
-			status = "integrated"
-		}
-		view.Units = append(view.Units, IntegrationUnitView{
-			PlanID: unit.PlanID, MergeUnitID: unit.MergeUnitID,
-			AttemptID: unit.AttemptID, Head: unit.Head, Status: status,
-		})
-	}
-	return view
-}
-
 func attemptBoundaryStatus(
 	core WorkspaceRuntimeProjection,
 	attempt RuntimeAttemptProjection,
-) (bool, string, []BoundaryDirectiveView) {
-	directives := []BoundaryDirectiveView{}
+) (bool, string, []WorkspaceBoundaryDirective) {
+	directives := []WorkspaceBoundaryDirective{}
 	boundary, exists := attempt.CurrentBoundary()
 	if !exists {
 		return false, "", directives
 	}
-	view := func(kind string, goal GoalBinding, idempotency Digest, choices []string) BoundaryDirectiveView {
-		return BoundaryDirectiveView{
+	view := func(kind string, goal GoalBinding, idempotency Digest, choices []string) WorkspaceBoundaryDirective {
+		return WorkspaceBoundaryDirective{
 			Kind: kind, BoundaryKind: string(boundary.kind), WorkspaceID: core.workspaceID.String(), Generation: attempt.generation.String(),
 			AttemptID: attempt.attemptID.String(), BoundaryID: boundary.boundaryID.String(),
 			GoalID: goal.id.String(), GoalScope: string(goal.scope), Head: boundary.head.String(),
@@ -680,12 +631,12 @@ func attemptBoundaryStatus(
 		}
 	}
 	if boundary.checkpoint == AttemptCheckpointCompleteGoalAndWait && !boundary.goalCompletedOK {
-		return true, "complete_goal_and_wait", []BoundaryDirectiveView{
+		return true, "complete_goal_and_wait", []WorkspaceBoundaryDirective{
 			view("complete_goal_and_wait", boundary.goal, boundary.idempotencyKey, nil),
 		}
 	}
 	if !boundary.ownerResponseOK {
-		return true, "owner_gate", []BoundaryDirectiveView{
+		return true, "owner_gate", []WorkspaceBoundaryDirective{
 			view("owner_gate", boundary.goal, Digest{}, []string{string(OwnerBoundaryContinue)}),
 		}
 	}
@@ -694,7 +645,7 @@ func attemptBoundaryStatus(
 			return true, "next_goal_intent_not_recorded", directives
 		}
 		if !boundary.nextGoalOK {
-			return true, "create_next_goal", []BoundaryDirectiveView{
+			return true, "create_next_goal", []WorkspaceBoundaryDirective{
 				view("create_next_goal", boundary.nextGoalIntent.goal, boundary.nextGoalIntent.idempotencyKey, nil),
 			}
 		}
@@ -702,23 +653,41 @@ func attemptBoundaryStatus(
 	return false, "", directives
 }
 
-func rebuildViewProjections(
+func verifyWorkspaceViewProjectionConformance(
 	snapshot JournalSnapshot,
 	definition EffectiveWorkspaceDefinition,
-) (WorkspaceRuntimeProjection, ReviewRuntimeProjection, error) {
-	core, err := RebuildWorkspaceRuntime(snapshot)
+	core WorkspaceRuntimeProjection,
+	reviews ReviewRuntimeProjection,
+) (Digest, Digest, error) {
+	independentReviews, err := RebuildReviewRuntime(snapshot, definition)
 	if err != nil {
-		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, err
+		return Digest{}, Digest{}, err
 	}
-	if core.workspaceID != definition.workspace.id || core.activeGeneration != definition.generation {
-		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{},
-			fmt.Errorf("workspace report definition does not match active journal generation")
-	}
-	reviews, err := RebuildReviewRuntime(snapshot, definition)
+	coreDigest, err := verifyProjectionConformance(
+		core,
+		independentReviews.core,
+		canonicalWorkspaceRuntime,
+		func(projection WorkspaceRuntimeProjection) Digest {
+			return projection.activeGeneration
+		},
+		definition.generation,
+	)
 	if err != nil {
-		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, err
+		return Digest{}, Digest{}, err
 	}
-	return core, reviews, nil
+	reviewDigest, err := verifyProjectionConformance(
+		reviews,
+		independentReviews,
+		canonicalReviewRuntime,
+		func(projection ReviewRuntimeProjection) Digest {
+			return projection.activeGeneration
+		},
+		definition.generation,
+	)
+	if err != nil {
+		return Digest{}, Digest{}, err
+	}
+	return coreDigest, reviewDigest, nil
 }
 
 func definitionDependencyGraph(definition EffectiveWorkspaceDefinition) (map[string][]MergeUnitReference, []MergeUnitReference) {
