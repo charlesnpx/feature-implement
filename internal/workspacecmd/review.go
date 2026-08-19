@@ -102,6 +102,14 @@ type recordReviewInput struct {
 	Isolation             isolationInput       `json:"isolation"`
 }
 
+type recordReviewFailureInput struct {
+	SchemaVersion     int    `json:"schema_version"`
+	OccurredAt        string `json:"occurred_at"`
+	AttemptID         string `json:"attempt_id"`
+	ReservationDigest string `json:"reservation_digest"`
+	FailureDigest     string `json:"failure_digest"`
+}
+
 type reviewFixInput struct {
 	SchemaVersion      int      `json:"schema_version"`
 	OccurredAt         string   `json:"occurred_at"`
@@ -247,6 +255,35 @@ func executeReview(ctx context.Context, bundle workspace.WorkspaceBundle, option
 			"result_digest": verified.Submission().Digest().String(),
 		}
 		return reviewCommandResult("review.record", detail, journal, definition)
+	case "record-failure":
+		var input recordReviewFailureInput
+		if err := decodeRequest(options.Input, &input); err != nil {
+			return nil, err
+		}
+		occurredAt, err := parseOccurredAt(input.SchemaVersion, input.OccurredAt)
+		if err != nil {
+			return nil, err
+		}
+		attemptID, err := parseID(input.AttemptID, "attempt_id")
+		if err != nil {
+			return nil, err
+		}
+		reservation, err := parseDigest(input.ReservationDigest, "reservation_digest")
+		if err != nil {
+			return nil, err
+		}
+		failure, err := parseDigest(input.FailureDigest, "failure_digest")
+		if err != nil {
+			return nil, err
+		}
+		if _, _, err := workspace.RecordAttemptReviewInvocationFailure(
+			journal, definition, workspace.RecordAttemptReviewInvocationFailureRequest{
+				AttemptID: attemptID, ReservationDigest: reservation, FailureDigest: failure, OccurredAt: occurredAt,
+			},
+		); err != nil {
+			return nil, err
+		}
+		return reviewCommandResult("review.record-failure", nil, journal, definition)
 	case "reserve-fix", "apply-fix", "record-fix":
 		var input reviewFixInput
 		body := ""

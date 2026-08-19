@@ -193,7 +193,11 @@ func TestRequestSchemasExposeOnlySupportedLocalMutations(t *testing.T) {
 			)
 		}
 	}
-	schemas := RequestSchemas()["requests"].(map[string]any)
+	result, err := Execute(context.Background(), Options{Action: "schema", Subaction: "requests"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemas := result.(map[string]any)["requests"].(map[string]any)
 	for _, required := range []string{
 		"init",
 		"recover",
@@ -209,6 +213,7 @@ func TestRequestSchemasExposeOnlySupportedLocalMutations(t *testing.T) {
 		"review.start",
 		"review.reserve",
 		"review.record",
+		"review.record-failure",
 		"review.reserve-fix",
 		"review.apply-fix",
 		"review.record-fix",
@@ -221,7 +226,7 @@ func TestRequestSchemasExposeOnlySupportedLocalMutations(t *testing.T) {
 			t.Fatalf("request schemas omit %s", required)
 		}
 	}
-	if len(schemas) != 21 {
+	if len(schemas) != 22 {
 		t.Fatalf("request schema count = %d: %+v", len(schemas), schemas)
 	}
 	for _, action := range []string{

@@ -93,6 +93,17 @@ func TestExecuteAttemptBoundaryRequiresKindAndRecordsBoundary(t *testing.T) {
 }
 
 func newAttemptBoundaryCommandFixture(t *testing.T) attemptBoundaryCommandFixture {
+	return newAttemptCommandFixture(t, false)
+}
+
+func newReviewRecordFailureCommandFixture(t *testing.T) attemptBoundaryCommandFixture {
+	return newAttemptCommandFixture(t, true)
+}
+
+func newAttemptCommandFixture(
+	t *testing.T,
+	withReviewLoop bool,
+) attemptBoundaryCommandFixture {
 	t.Helper()
 	repositoryRoot := canonicalWorkspaceCommandTempDir(t)
 	runGitTest(t, repositoryRoot, "init", "-b", "main")
@@ -163,7 +174,28 @@ merge_units:
     story_ids:
       - story-one
 `)
-	write("config/execution.yaml", `schema_version: 2
+	reviewProfiles := ""
+	reviewLoop := ""
+	if withReviewLoop {
+		reviewProfiles = `review_profiles:
+  - id: isolation
+    runner: isolation-runner
+    reviewer_policy: retain
+`
+		reviewLoop = `    review_fix_protocol:
+      subject_prefix: Review fix
+      body_policy: required
+      allowed_paths:
+        - src/**
+      frozen_paths: []
+      checks: []
+    review_loop:
+      profiles:
+        - isolation
+      max_infrastructure_retries: 2
+`
+	}
+	write("config/execution.yaml", fmt.Sprintf(`schema_version: 2
 policy:
   require_passing_checks: true
   allow_write_network: false
@@ -179,7 +211,7 @@ profiles:
       max_attempts: 2
       max_review_rounds: 2
       max_review_fixes: 1
-merge_units:
+%smerge_units:
   - plan_id: alpha-plan
     merge_unit_id: unit-one
     profile: standard
@@ -193,7 +225,7 @@ merge_units:
       max_attempts: 2
       max_review_rounds: 2
       max_review_fixes: 1
-`)
+%s`, reviewProfiles, reviewLoop))
 	if _, err := Execute(context.Background(), Options{
 		Action:           "validate",
 		BundleDir:        bundleRoot,
@@ -269,6 +301,15 @@ merge_units:
 	)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if withReviewLoop {
+		if err := os.WriteFile(
+			filepath.Join(attempt.Worktree(), "reviewable.txt"), []byte("reviewable\n"), 0o600,
+		); err != nil {
+			t.Fatal(err)
+		}
+		runGitTest(t, attempt.Worktree(), "add", "reviewable.txt")
+		runGitTest(t, attempt.Worktree(), "commit", "-m", "Reviewable implementation")
 	}
 	return attemptBoundaryCommandFixture{
 		bundleRoot: bundleRoot, workspaceDir: workspaceDir, attemptID: attempt.AttemptID(),

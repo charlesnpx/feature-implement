@@ -84,7 +84,8 @@ Run a broad read-only review loop for every merge unit.
    invocation with `review reserve`, and submit the local result through
    `review record`. Preserve exact finding details, evidence digests, the
    descriptive reviewer label, request digest, head, tree, and isolation
-   fields.
+   fields. If an invocation breaks isolation, submit `review record-failure`
+   with the external audit digest rather than falsify a review result.
 5. Use `review reserve-fix`, `apply-fix`, and `record-fix` for accepted
    findings. Seek `review ready` without exceeding configured budgets.
 6. Without a configured review loop, apply accepted fixes with ordinary local

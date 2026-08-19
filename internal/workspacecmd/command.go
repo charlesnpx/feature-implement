@@ -180,7 +180,7 @@ func validateWorkspaceSubaction(action, subaction string) error {
 		supported = stringSet("next")
 	case "review":
 		supported = stringSet(
-			"start", "reserve", "record", "reserve-fix",
+			"start", "reserve", "record", "record-failure", "reserve-fix",
 			"apply-fix", "record-fix", "ready",
 		)
 	case "integrate":
@@ -333,6 +333,11 @@ func RequestSchemas() map[string]any {
 			"status":                 enumProperty("completed", "infrastructure_failure"),
 			"findings":               map[string]any{"type": "array", "items": reviewFinding},
 			"infrastructure_failure": optionalString(), "isolation": isolation,
+		})),
+		"review.record-failure": request([]string{
+			"occurred_at", "attempt_id", "reservation_digest", "failure_digest",
+		}, occurred(map[string]any{
+			"attempt_id": stringProperty(), "reservation_digest": stringProperty(), "failure_digest": stringProperty(),
 		})),
 		"review.reserve-fix": request([]string{"occurred_at", "attempt_id", "ordinal", "accepted_finding_ids"}, occurred(map[string]any{
 			"attempt_id": stringProperty(), "ordinal": integerProperty(1), "accepted_finding_ids": arrayOfStrings(),
