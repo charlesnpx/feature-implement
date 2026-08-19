@@ -49,7 +49,7 @@ feature workspace status|scheduler|gates|report --bundle <bundle-root> --workspa
 
 feature workspace attempt reserve|materialize|adopt-head|boundary|next-goal|acknowledge|owner-response|resume ...
 feature workspace commit next ...
-feature workspace review start|reserve|record|reserve-fix|apply-fix|record-fix|ready ...
+feature workspace review start|reserve|record|record-failure|reserve-fix|apply-fix|record-fix|ready ...
 feature workspace integrate merge-unit ...
 feature workspace complete verify ...
 feature workspace abandon --bundle <bundle-root> --workspace <runtime-root> --input <file|-> [--json]
@@ -253,7 +253,9 @@ not interpreted or migrated.
    local commits and keep the worktree clean.
 5. For configured review, use `review start`, `reserve`, `record`, bounded fix
    actions, and `ready`. Reviewer labels are descriptive local metadata, and
-   every result binds the exact request, head, tree, and evidence.
+   every result binds the exact request, head, tree, and evidence. If a reviewer
+   breaks isolation, submit `review record-failure` with the external audit
+   digest rather than falsify a review result.
 6. Without configured review, submit `attempt adopt-head` for the exact clean
    descendant selected for integration.
 7. Before integration, submit `attempt boundary` only when the merge unit
