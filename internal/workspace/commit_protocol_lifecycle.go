@@ -591,22 +591,11 @@ func appendCommitProtocolEventAtSnapshot(
 	event WorkspaceJournalEvent,
 	occurredAt time.Time,
 ) (JournalRecord, error) {
-	reads, writes, ok := commitJournalEventResources(event)
-	if !ok {
-		return JournalRecord{}, fmt.Errorf("unsupported commit protocol event %T", event)
-	}
 	runtime, err := RebuildWorkspaceRuntime(snapshot)
 	if err != nil {
 		return JournalRecord{}, err
 	}
-	reads, _ = normalizeJournalWriteSet(reads)
-	writes, _ = normalizeJournalWriteSet(writes)
-	readSet := make([]JournalResourceRevision, 0, len(reads))
-	for _, resource := range reads {
-		revision, _ := NewJournalResourceRevision(resource, snapshot.Revision(resource))
-		readSet = append(readSet, revision)
-	}
-	appendRequest, err := newPrivilegedJournalAppend(event, occurredAt, readSet, writes)
+	appendRequest, err := newWorkflowJournalAppend(event, occurredAt)
 	if err != nil {
 		return JournalRecord{}, err
 	}

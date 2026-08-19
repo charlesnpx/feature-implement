@@ -93,9 +93,9 @@ unit beneath it to exactly one shape.
 
 ## Format and configuration migration
 
-The current local runtime marker is `feature.runtime.v5.json`. A root with the
-old `feature.runtime.v4.json` marker is rejected at the format gate with the
-existing regeneration diagnostic; v4 is not interpreted or migrated.
+The current local runtime marker is `feature.runtime.v6.json`. A root with the
+old `feature.runtime.v5.json` marker is rejected at the format gate with the
+existing regeneration diagnostic; v5 is not interpreted or migrated.
 
 The execution-config `schema_version` remains 2. The earlier proposal to bump
 it was rejected as disproportionate: `decodeStrictV2` gates every strict

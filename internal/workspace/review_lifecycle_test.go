@@ -1241,17 +1241,6 @@ func TestReviewFixCommitInvalidatesReadinessUntilAllProfilesReconfirm(t *testing
 	if len(records) == 0 || records[len(records)-1].EventType() != workspace.JournalEventCommitProtocolRebased {
 		t.Fatalf("review-fix rebase journal tail = %#v", records)
 	}
-	wantReviewResource := workspace.ReviewJournalResource(harness.attempt.AttemptID())
-	foundReviewRead := false
-	for _, revision := range records[len(records)-1].ReadSet() {
-		if revision.Resource() == wantReviewResource {
-			foundReviewRead = true
-			break
-		}
-	}
-	if !foundReviewRead {
-		t.Fatal("review-fix rebase does not bind the review-loop resource revision")
-	}
 	harness.git.setHead(t, harness.attempt.Branch(), rebasedHead, true)
 	harness.repository.snapshot, _ = workspace.NewReviewRepositorySnapshot(rebasedHead, rebasedTree, true)
 	if _, record, err := workspace.RecordReviewFixApplication(

@@ -350,36 +350,6 @@ func (event ReviewFixAppliedJournalEvent) AttemptID() ID       { return event.at
 func (event ReviewFixAppliedJournalEvent) LoopDigest() Digest  { return event.loopDigest }
 func (event ReviewFixAppliedJournalEvent) Fix() ApplyReviewFix { return cloneApplyReviewFix(event.fix) }
 
-func ReviewJournalResource(attemptID ID) JournalResource {
-	resource, _ := NewJournalResource(JournalResourceReview, attemptID.String()+"/loop")
-	return resource
-}
-
-func ReviewBudgetJournalResource(attemptID ID) JournalResource {
-	resource, _ := NewJournalResource(JournalResourceBudget, attemptID.String()+"/review-loop")
-	return resource
-}
-
-func ReviewProfileResultJournalResource(attemptID ID, round, profileOrdinal, invocation uint16) JournalResource {
-	identity := fmt.Sprintf("%s/%d/%d/%d", attemptID, round, profileOrdinal, invocation)
-	resource, _ := NewJournalResource(JournalResourceReviewProfile, identity)
-	return resource
-}
-
-func ReviewInvocationJournalResource(attemptID ID, reservationDigest Digest) JournalResource {
-	resource, _ := NewJournalResource(
-		JournalResourceReviewProfile,
-		attemptID.String()+"/reservation/"+reservationDigest.String(),
-	)
-	return resource
-}
-
-func ReviewFixReservationJournalResource(attemptID ID, ordinal uint16) JournalResource {
-	identity := fmt.Sprintf("%s/fix-reservation/%d", attemptID, ordinal)
-	resource, _ := NewJournalResource(JournalResourceReview, identity)
-	return resource
-}
-
 func isReviewJournalEvent(event WorkspaceJournalEvent) bool {
 	switch event.(type) {
 	case ReviewHeadAdoptedJournalEvent, ReviewRoundStartedJournalEvent, ReviewInvocationReservedJournalEvent,
@@ -389,61 +359,6 @@ func isReviewJournalEvent(event WorkspaceJournalEvent) bool {
 	default:
 		return false
 	}
-}
-
-func reviewJournalEventResources(event WorkspaceJournalEvent) ([]JournalResource, []JournalResource, bool) {
-	var workspaceID, attemptID ID
-	var generation Digest
-	var reads []JournalResource
-	switch event := event.(type) {
-	case ReviewHeadAdoptedJournalEvent:
-		workspaceID, generation, attemptID = event.workspaceID, event.generation, event.attemptID
-		reads = []JournalResource{AttemptJournalResource(attemptID), ReviewJournalResource(attemptID)}
-	case ReviewRoundStartedJournalEvent:
-		workspaceID, generation, attemptID = event.workspaceID, event.generation, event.attemptID
-		reads = []JournalResource{
-			AttemptJournalResource(attemptID), ReviewJournalResource(attemptID), ReviewBudgetJournalResource(attemptID),
-		}
-	case ReviewInvocationReservedJournalEvent:
-		workspaceID, generation, attemptID = event.workspaceID, event.generation, event.attemptID
-		request := event.reservation.request
-		reads = []JournalResource{
-			AttemptJournalResource(attemptID), ReviewJournalResource(attemptID), ReviewBudgetJournalResource(attemptID),
-			ReviewProfileResultJournalResource(attemptID, request.round, request.profileOrdinal, request.invocation),
-			ReviewInvocationJournalResource(attemptID, event.reservation.digest),
-		}
-	case ReviewInvocationFailedJournalEvent:
-		workspaceID, generation, attemptID = event.workspaceID, event.generation, event.attemptID
-		reads = []JournalResource{
-			AttemptJournalResource(attemptID), ReviewJournalResource(attemptID), ReviewBudgetJournalResource(attemptID),
-			ReviewInvocationJournalResource(attemptID, event.reservationDigest),
-		}
-	case ReviewResultRecordedJournalEvent:
-		workspaceID, generation, attemptID = event.workspaceID, event.generation, event.attemptID
-		reads = []JournalResource{
-			AttemptJournalResource(attemptID), ReviewJournalResource(attemptID), ReviewBudgetJournalResource(attemptID),
-			ReviewProfileResultJournalResource(attemptID, event.round, event.profileOrdinal, event.invocation),
-			ReviewInvocationJournalResource(attemptID, event.reservationDigest),
-		}
-	case ReviewFindingFixReservedJournalEvent:
-		workspaceID, generation, attemptID = event.workspaceID, event.generation, event.attemptID
-		reads = []JournalResource{
-			AttemptJournalResource(attemptID), ReviewJournalResource(attemptID), ReviewBudgetJournalResource(attemptID),
-			ReviewFixJournalResource(attemptID),
-			ReviewFixReservationJournalResource(attemptID, event.reservation.ordinal),
-		}
-	case ReviewFixAppliedJournalEvent:
-		workspaceID, generation, attemptID = event.workspaceID, event.generation, event.attemptID
-		reads = []JournalResource{
-			AttemptJournalResource(attemptID), ReviewJournalResource(attemptID), ReviewBudgetJournalResource(attemptID),
-			ReviewFixJournalResource(attemptID), EvidenceJournalResource(event.fix.evidence),
-			ReviewFixReservationJournalResource(attemptID, event.fix.ordinal),
-		}
-	default:
-		return nil, nil, false
-	}
-	reads = append(reads, WorkspaceJournalResource(workspaceID), GenerationJournalResource(generation))
-	return reads, append([]JournalResource(nil), reads...), true
 }
 
 func cloneReviewJournalEvent(event WorkspaceJournalEvent) WorkspaceJournalEvent {
@@ -477,19 +392,8 @@ func cloneApplyReviewFix(fix ApplyReviewFix) ApplyReviewFix {
 }
 
 func validateReviewJournalRecordFootprint(event WorkspaceJournalEvent) error {
-	reads, writes, ok := reviewJournalEventResources(event)
-	if !ok {
-		return fmt.Errorf("unsupported review journal footprint event %T", event)
-	}
-	reads, _ = normalizeJournalWriteSet(reads)
-	writes, _ = normalizeJournalWriteSet(writes)
-	readSet := make([]JournalResourceRevision, 0, len(reads))
-	for _, resource := range reads {
-		revision, _ := NewJournalResourceRevision(resource, ^uint64(0))
-		readSet = append(readSet, revision)
-	}
-	request, err := newPrivilegedJournalAppend(
-		event, time.Date(9999, time.December, 31, 23, 59, 59, 999999999, time.UTC), readSet, writes,
+	request, err := newWorkflowJournalAppend(
+		event, time.Date(9999, time.December, 31, 23, 59, 59, 999999999, time.UTC),
 	)
 	if err != nil {
 		return err

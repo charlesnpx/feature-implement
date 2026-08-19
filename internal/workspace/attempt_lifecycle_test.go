@@ -2386,18 +2386,6 @@ func TestPauseOnlyBoundaryAtomicallyPausesAndResumesSameGoal(t *testing.T) {
 	if last.EventType() != workspace.JournalEventAttemptBoundary {
 		t.Fatalf("last record = %s, expected atomic boundary", last.EventType())
 	}
-	writtenKinds := map[workspace.JournalResourceKind]bool{}
-	for _, resource := range last.WriteSet() {
-		writtenKinds[resource.Kind()] = true
-	}
-	for _, kind := range []workspace.JournalResourceKind{
-		workspace.JournalResourceAttempt, workspace.JournalResourceLease,
-		workspace.JournalResourceEvidence, workspace.JournalResourceSerialSegment,
-	} {
-		if !writtenKinds[kind] {
-			t.Fatalf("atomic boundary did not write %s resource", kind)
-		}
-	}
 	if _, err := workspace.RecordOrchestrationAcknowledgement(
 		harness.journal, harness.definition,
 		workspace.RecordOrchestrationAcknowledgementRequest{

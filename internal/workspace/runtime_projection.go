@@ -228,10 +228,7 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 	if !isIntegrationJournalEvent(record.event) {
 		for _, attempt := range current.attempts {
 			if attempt.integration != nil &&
-				journalResourcesContain(
-					record.writeSet,
-					AttemptJournalResource(attempt.attemptID),
-				) {
+				journalEventTargetsAttempt(record.event, attempt.attemptID) {
 				return WorkspaceRuntimeProjection{}, fmt.Errorf(
 					"attempt %s is frozen after durable integration intent",
 					attempt.attemptID,
@@ -362,16 +359,19 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 	return next, nil
 }
 
-func journalResourcesContain(
-	values []JournalResource,
-	wanted JournalResource,
-) bool {
-	for _, value := range values {
-		if value == wanted {
-			return true
-		}
+func journalEventTargetsAttempt(event WorkspaceJournalEvent, attemptID ID) bool {
+	switch event := event.(type) {
+	case ReviewHeadAdoptedJournalEvent:
+		return event.attemptID == attemptID
+	case ReviewInvocationReservedJournalEvent:
+		return event.attemptID == attemptID
+	case ReviewInvocationFailedJournalEvent:
+		return event.attemptID == attemptID
+	case ReviewFindingFixReservedJournalEvent:
+		return event.attemptID == attemptID
 	}
-	return false
+	bound, ok := event.(interface{ AttemptID() ID })
+	return ok && bound.AttemptID() == attemptID
 }
 
 func requireReadyLocalTarget(runtime WorkspaceRuntimeProjection) error {

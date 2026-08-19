@@ -2,7 +2,6 @@ package workspace
 
 import (
 	"fmt"
-	"sort"
 )
 
 type MergeUnitIntegrationIntendedJournalEvent struct {
@@ -200,14 +199,6 @@ func (event MergeUnitIntegratedJournalEvent) SerialSegment() ID {
 	return event.serialSegment
 }
 
-func IntegrationJournalResource(attemptID ID) JournalResource {
-	resource, _ := NewJournalResource(
-		JournalResourceIntegration,
-		attemptID.String()+"/merge-unit",
-	)
-	return resource
-}
-
 func isIntegrationJournalEvent(event WorkspaceJournalEvent) bool {
 	switch event.(type) {
 	case MergeUnitIntegrationIntendedJournalEvent,
@@ -216,99 +207,6 @@ func isIntegrationJournalEvent(event WorkspaceJournalEvent) bool {
 	default:
 		return false
 	}
-}
-
-func integrationJournalEventResources(
-	event WorkspaceJournalEvent,
-) ([]JournalResource, []JournalResource, bool) {
-	var workspaceID, attemptID ID
-	var generation Digest
-	var mergeUnit MergeUnitReference
-	var featureRef string
-	switch event := event.(type) {
-	case MergeUnitIntegrationIntendedJournalEvent:
-		workspaceID = event.intent.workspaceID
-		generation = event.intent.generation
-		attemptID = event.intent.attemptID
-		mergeUnit = event.intent.mergeUnit
-		featureRef = event.intent.featureRef
-	case MergeUnitIntegratedJournalEvent:
-		workspaceID = event.workspaceID
-		generation = event.generation
-		attemptID = event.attemptID
-		mergeUnit = event.mergeUnit
-		featureRef = event.featureRef
-	default:
-		return nil, nil, false
-	}
-	reads := []JournalResource{
-		WorkspaceJournalResource(workspaceID),
-		GenerationJournalResource(generation),
-		AttemptJournalResource(attemptID),
-		MergeUnitJournalResource(mergeUnit),
-		IntegrationJournalResource(attemptID),
-		featureRefJournalResource(workspaceID, featureRef),
-		ReviewJournalResource(attemptID),
-	}
-	writes := []JournalResource{
-		AttemptJournalResource(attemptID),
-		MergeUnitJournalResource(mergeUnit),
-		IntegrationJournalResource(attemptID),
-		featureRefJournalResource(workspaceID, featureRef),
-	}
-	if completed, ok := event.(MergeUnitIntegratedJournalEvent); ok {
-		lease := LeaseJournalResource(completed.leaseID)
-		reads, writes = append(reads, lease), append(writes, lease)
-		if !completed.serialSegment.IsZero() {
-			segment := SerialSegmentJournalResource(
-				completed.serialSegment,
-			)
-			reads, writes = append(reads, segment),
-				append(writes, segment)
-		}
-		for _, superseded := range completed.supersededAttempts {
-			attemptResource := AttemptJournalResource(
-				superseded.attemptID,
-			)
-			mergeUnitResource := MergeUnitJournalResource(
-				superseded.mergeUnit,
-			)
-			integrationResource := IntegrationJournalResource(
-				superseded.attemptID,
-			)
-			reviewResource := ReviewJournalResource(
-				superseded.attemptID,
-			)
-			reads = append(
-				reads,
-				attemptResource,
-				mergeUnitResource,
-				integrationResource,
-				reviewResource,
-			)
-			writes = append(
-				writes,
-				attemptResource,
-				mergeUnitResource,
-			)
-			if !superseded.leaseID.IsZero() {
-				lease := LeaseJournalResource(
-					superseded.leaseID,
-				)
-				reads, writes = append(reads, lease),
-					append(writes, lease)
-			}
-			if superseded.serialSegmentHeld {
-				segment := SerialSegmentJournalResource(
-					superseded.serialSegment,
-				)
-				reads, writes = append(reads, segment),
-					append(writes, segment)
-			}
-		}
-	}
-	return normalizedIntegrationEventResources(reads),
-		normalizedIntegrationEventResources(writes), true
 }
 
 func cloneIntegrationJournalEvent(
@@ -326,21 +224,4 @@ func cloneIntegrationJournalEvent(
 	default:
 		return nil
 	}
-}
-
-func normalizedIntegrationEventResources(
-	resources []JournalResource,
-) []JournalResource {
-	byKey := make(map[string]JournalResource, len(resources))
-	for _, resource := range resources {
-		byKey[resource.key()] = resource
-	}
-	result := make([]JournalResource, 0, len(byKey))
-	for _, resource := range byKey {
-		result = append(result, resource)
-	}
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].key() < result[j].key()
-	})
-	return result
 }

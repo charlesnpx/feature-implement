@@ -81,27 +81,6 @@ func isCompletionJournalEvent(event WorkspaceJournalEvent) bool {
 	return ok
 }
 
-func completionJournalEventResources(
-	event WorkspaceJournalEvent,
-) ([]JournalResource, []JournalResource, bool) {
-	completed, ok := event.(WorkspaceCompletedJournalEvent)
-	if !ok {
-		return nil, nil, false
-	}
-	reads := []JournalResource{
-		WorkspaceJournalResource(completed.workspaceID),
-		GenerationJournalResource(completed.generation),
-		featureRefJournalResource(
-			completed.workspaceID, completed.featureRef,
-		),
-		CompletionJournalResource(completed.workspaceID),
-	}
-	writes := []JournalResource{
-		CompletionJournalResource(completed.workspaceID),
-	}
-	return reads, writes, true
-}
-
 func cloneCompletionJournalEvent(
 	event WorkspaceJournalEvent,
 ) WorkspaceJournalEvent {

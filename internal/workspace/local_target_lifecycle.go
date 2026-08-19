@@ -61,8 +61,8 @@ func initializeLocalTarget(
 		if err != nil {
 			return JournalSnapshot{}, err
 		}
-		appendRequest, err := localTargetJournalAppend(
-			intent, occurredAt, snapshot,
+		appendRequest, err := newWorkflowJournalAppend(
+			intent, occurredAt,
 		)
 		if err != nil {
 			return JournalSnapshot{}, err
@@ -184,8 +184,8 @@ func initializeLocalTarget(
 	if err != nil {
 		return JournalSnapshot{}, err
 	}
-	appendRequest, err := localTargetJournalAppend(
-		completion, occurredAt, snapshot,
+	appendRequest, err := newWorkflowJournalAppend(
+		completion, occurredAt,
 	)
 	if err != nil {
 		return JournalSnapshot{}, err
@@ -246,29 +246,6 @@ func expectedLocalTargetReflogMarker(
 	}
 	return "", fmt.Errorf(
 		"local target feature head has no exact durable transition",
-	)
-}
-
-func localTargetJournalAppend(
-	event WorkspaceJournalEvent,
-	occurredAt time.Time,
-	snapshot JournalSnapshot,
-) (JournalAppend, error) {
-	reads, writes, ok := localTargetJournalEventResources(event)
-	if !ok {
-		return JournalAppend{}, fmt.Errorf(
-			"local target append requires a local target journal event",
-		)
-	}
-	revisions := make([]JournalResourceRevision, 0, len(reads))
-	for _, resource := range reads {
-		revision, _ := NewJournalResourceRevision(
-			resource, snapshot.Revision(resource),
-		)
-		revisions = append(revisions, revision)
-	}
-	return newPrivilegedJournalAppend(
-		event, occurredAt, revisions, writes,
 	)
 }
 

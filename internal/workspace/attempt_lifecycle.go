@@ -162,7 +162,7 @@ func ReserveAttempt(
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
-	if _, err := appendAttemptLifecycleEvent(journal, snapshot, runtime, event, request.OccurredAt, true); err != nil {
+	if _, err := appendAttemptLifecycleEvent(journal, snapshot, runtime, event, request.OccurredAt); err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
 	if err := injectAttemptLifecycleFault(request.Fault, AttemptFaultAfterReservation); err != nil {
@@ -206,7 +206,7 @@ func MaterializeAttempt(
 		if err != nil {
 			return RuntimeAttemptProjection{}, err
 		}
-		if _, err := appendAttemptLifecycleEvent(journal, snapshot, runtime, event, request.OccurredAt, true); err != nil {
+		if _, err := appendAttemptLifecycleEvent(journal, snapshot, runtime, event, request.OccurredAt); err != nil {
 			return RuntimeAttemptProjection{}, err
 		}
 		if err := injectAttemptLifecycleFault(request.Fault, AttemptFaultAfterMaterializationIntent); err != nil {
@@ -340,7 +340,7 @@ func MaterializeAttempt(
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
-	if _, err := appendAttemptLifecycleEvent(journal, snapshot, runtime, event, request.OccurredAt, true); err != nil {
+	if _, err := appendAttemptLifecycleEvent(journal, snapshot, runtime, event, request.OccurredAt); err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
 	if err := injectAttemptLifecycleFault(request.Fault, AttemptFaultAfterStart); err != nil {
@@ -727,7 +727,7 @@ func RecordAttemptBoundary(
 	if err != nil {
 		return AttemptBoundaryResult{}, err
 	}
-	if _, err := appendAttemptLifecycleEvent(journal, snapshot, runtime, event, request.OccurredAt, true); err != nil {
+	if _, err := appendAttemptLifecycleEvent(journal, snapshot, runtime, event, request.OccurredAt); err != nil {
 		return AttemptBoundaryResult{}, err
 	}
 	if err := injectAttemptLifecycleFault(request.Fault, AttemptFaultAfterBoundary); err != nil {
@@ -875,7 +875,7 @@ func ReserveNextGoalCreation(
 	if err != nil {
 		return NextGoalCreationIntent{}, err
 	}
-	if _, err := appendAttemptLifecycleEvent(journal, snapshot, runtime, event, request.OccurredAt, true); err != nil {
+	if _, err := appendAttemptLifecycleEvent(journal, snapshot, runtime, event, request.OccurredAt); err != nil {
 		return NextGoalCreationIntent{}, err
 	}
 	if err := injectAttemptLifecycleFault(request.Fault, AttemptFaultAfterNextGoalIntent); err != nil {
@@ -975,7 +975,7 @@ func RecordOrchestrationAcknowledgement(
 	if err != nil {
 		return RuntimeOrchestrationAcknowledgement{}, err
 	}
-	if _, err := appendAttemptLifecycleEvent(journal, snapshot, runtime, event, request.OccurredAt, true); err != nil {
+	if _, err := appendAttemptLifecycleEvent(journal, snapshot, runtime, event, request.OccurredAt); err != nil {
 		return RuntimeOrchestrationAcknowledgement{}, err
 	}
 	if err := injectAttemptLifecycleFault(request.Fault, AttemptFaultAfterOrchestrationAck); err != nil {
@@ -1051,7 +1051,7 @@ func RecordOwnerBoundaryResponse(
 	if err != nil {
 		return RuntimeOwnerBoundaryResponse{}, err
 	}
-	if _, err := appendAttemptLifecycleEvent(journal, snapshot, runtime, event, request.OccurredAt, true); err != nil {
+	if _, err := appendAttemptLifecycleEvent(journal, snapshot, runtime, event, request.OccurredAt); err != nil {
 		return RuntimeOwnerBoundaryResponse{}, err
 	}
 	if err := injectAttemptLifecycleFault(request.Fault, AttemptFaultAfterOwnerResponse); err != nil {
@@ -1129,7 +1129,7 @@ func ResumeAttempt(
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
-	if _, err := appendAttemptLifecycleEvent(journal, snapshot, runtime, event, request.OccurredAt, true); err != nil {
+	if _, err := appendAttemptLifecycleEvent(journal, snapshot, runtime, event, request.OccurredAt); err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
 	if err := injectAttemptLifecycleFault(request.Fault, AttemptFaultAfterResume); err != nil {
@@ -1171,26 +1171,8 @@ func appendAttemptLifecycleEvent(
 	runtime WorkspaceRuntimeProjection,
 	event WorkspaceJournalEvent,
 	occurredAt time.Time,
-	privileged bool,
 ) (JournalRecord, error) {
-	reads, writes, ok := attemptJournalEventResources(event)
-	if !ok {
-		return JournalRecord{}, fmt.Errorf("unsupported attempt lifecycle event %T", event)
-	}
-	reads = normalizedAttemptEventResources(reads)
-	writes = normalizedAttemptEventResources(writes)
-	readSet := make([]JournalResourceRevision, 0, len(reads))
-	for _, resource := range reads {
-		revision, _ := NewJournalResourceRevision(resource, snapshot.Revision(resource))
-		readSet = append(readSet, revision)
-	}
-	var request JournalAppend
-	var err error
-	if privileged {
-		request, err = newPrivilegedJournalAppend(event, occurredAt, readSet, writes)
-	} else {
-		request, err = NewJournalAppend(event, occurredAt, readSet, writes)
-	}
+	request, err := newWorkflowJournalAppend(event, occurredAt)
 	if err != nil {
 		return JournalRecord{}, err
 	}

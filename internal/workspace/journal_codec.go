@@ -10,39 +10,25 @@ import (
 	"time"
 )
 
-type journalResourceWire struct {
-	Kind     JournalResourceKind `json:"kind"`
-	Identity string              `json:"identity"`
-}
-
-type journalResourceRevisionWire struct {
-	Resource journalResourceWire `json:"resource"`
-	Revision uint64              `json:"revision"`
-}
-
 type journalRecordWire struct {
-	SchemaVersion int                           `json:"schema_version"`
-	Sequence      uint64                        `json:"sequence"`
-	OccurredAt    string                        `json:"occurred_at"`
-	PreviousHash  string                        `json:"previous_hash"`
-	EventHash     string                        `json:"event_hash"`
-	Generation    string                        `json:"generation"`
-	ReadSet       []journalResourceRevisionWire `json:"read_set"`
-	WriteSet      []journalResourceWire         `json:"write_set"`
-	Type          JournalEventType              `json:"type"`
-	Payload       json.RawMessage               `json:"payload"`
+	SchemaVersion int              `json:"schema_version"`
+	Sequence      uint64           `json:"sequence"`
+	OccurredAt    string           `json:"occurred_at"`
+	PreviousHash  string           `json:"previous_hash"`
+	EventHash     string           `json:"event_hash"`
+	Generation    string           `json:"generation"`
+	Type          JournalEventType `json:"type"`
+	Payload       json.RawMessage  `json:"payload"`
 }
 
 type journalRecordBodyWire struct {
-	SchemaVersion int                           `json:"schema_version"`
-	Sequence      uint64                        `json:"sequence"`
-	OccurredAt    string                        `json:"occurred_at"`
-	PreviousHash  string                        `json:"previous_hash"`
-	Generation    string                        `json:"generation"`
-	ReadSet       []journalResourceRevisionWire `json:"read_set"`
-	WriteSet      []journalResourceWire         `json:"write_set"`
-	Type          JournalEventType              `json:"type"`
-	Payload       json.RawMessage               `json:"payload"`
+	SchemaVersion int              `json:"schema_version"`
+	Sequence      uint64           `json:"sequence"`
+	OccurredAt    string           `json:"occurred_at"`
+	PreviousHash  string           `json:"previous_hash"`
+	Generation    string           `json:"generation"`
+	Type          JournalEventType `json:"type"`
+	Payload       json.RawMessage  `json:"payload"`
 }
 
 type workspaceInitializedPayloadWire struct {
@@ -75,9 +61,7 @@ func buildJournalRecord(snapshot JournalSnapshot, request JournalAppend) (Journa
 	record := JournalRecord{
 		sequence: uint64(len(snapshot.records)) + 1, occurredAt: request.occurredAt.UTC(),
 		previousHash: snapshot.head, generation: request.event.boundGeneration(),
-		readSet:  append([]JournalResourceRevision(nil), request.readSet...),
-		writeSet: append([]JournalResource(nil), request.writeSet...),
-		event:    cloneWorkspaceJournalEvent(request.event),
+		event: cloneWorkspaceJournalEvent(request.event),
 	}
 	body, err := marshalJournalRecordBody(record)
 	if err != nil {
@@ -93,14 +77,12 @@ func marshalJournalRecord(record JournalRecord) ([]byte, error) {
 		return nil, err
 	}
 	value := journalRecordWire{
-		SchemaVersion: JournalSchemaVersion,
+		SchemaVersion: journalRecordSchemaVersion,
 		Sequence:      record.sequence,
 		OccurredAt:    record.occurredAt.UTC().Format(time.RFC3339Nano),
 		PreviousHash:  record.previousHash.String(),
 		EventHash:     record.eventHash.String(),
 		Generation:    record.generation.String(),
-		ReadSet:       journalReadSetWire(record.readSet),
-		WriteSet:      journalWriteSetWire(record.writeSet),
 		Type:          record.event.eventType(),
 		Payload:       payload,
 	}
@@ -113,36 +95,15 @@ func marshalJournalRecordBody(record JournalRecord) ([]byte, error) {
 		return nil, err
 	}
 	value := journalRecordBodyWire{
-		SchemaVersion: JournalSchemaVersion,
+		SchemaVersion: journalRecordSchemaVersion,
 		Sequence:      record.sequence,
 		OccurredAt:    record.occurredAt.UTC().Format(time.RFC3339Nano),
 		PreviousHash:  record.previousHash.String(),
 		Generation:    record.generation.String(),
-		ReadSet:       journalReadSetWire(record.readSet),
-		WriteSet:      journalWriteSetWire(record.writeSet),
 		Type:          record.event.eventType(),
 		Payload:       payload,
 	}
 	return json.Marshal(value)
-}
-
-func journalReadSetWire(values []JournalResourceRevision) []journalResourceRevisionWire {
-	result := make([]journalResourceRevisionWire, 0, len(values))
-	for _, revision := range values {
-		result = append(result, journalResourceRevisionWire{
-			Resource: journalResourceWire{Kind: revision.resource.kind, Identity: revision.resource.identity},
-			Revision: revision.revision,
-		})
-	}
-	return result
-}
-
-func journalWriteSetWire(values []JournalResource) []journalResourceWire {
-	result := make([]journalResourceWire, 0, len(values))
-	for _, resource := range values {
-		result = append(result, journalResourceWire{Kind: resource.kind, Identity: resource.identity})
-	}
-	return result
 }
 
 func marshalWorkspaceJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, error) {
@@ -203,8 +164,10 @@ func parseJournalRecord(raw []byte) (JournalRecord, error) {
 	if err := decodeStrictJSON(raw, &wire); err != nil {
 		return JournalRecord{}, err
 	}
-	if wire.SchemaVersion != JournalSchemaVersion {
-		return JournalRecord{}, fmt.Errorf("journal schema_version %d is not supported", wire.SchemaVersion)
+	if wire.SchemaVersion != journalRecordSchemaVersion {
+		return JournalRecord{}, fmt.Errorf(
+			"journal format is incompatible with this runtime; regenerate from committed sources",
+		)
 	}
 	if wire.Sequence == 0 {
 		return JournalRecord{}, fmt.Errorf("journal sequence must be positive")
@@ -225,22 +188,8 @@ func parseJournalRecord(raw []byte) (JournalRecord, error) {
 	if err != nil {
 		return JournalRecord{}, fmt.Errorf("journal generation: %w", err)
 	}
-	readSet, err := parseJournalReadSet(wire.ReadSet)
-	if err != nil {
-		return JournalRecord{}, err
-	}
-	writeSet, err := parseJournalWriteSet(wire.WriteSet)
-	if err != nil {
-		return JournalRecord{}, err
-	}
-	if len(writeSet) == 0 {
-		return JournalRecord{}, fmt.Errorf("journal write_set must not be empty")
-	}
 	event, err := decodeWorkspaceJournalEvent(wire.Type, wire.Payload)
 	if err != nil {
-		return JournalRecord{}, err
-	}
-	if err := validateJournalEventResources(event, readSet, writeSet); err != nil {
 		return JournalRecord{}, err
 	}
 	if event.boundGeneration() != generation {
@@ -248,7 +197,7 @@ func parseJournalRecord(raw []byte) (JournalRecord, error) {
 	}
 	record := JournalRecord{
 		sequence: wire.Sequence, occurredAt: occurredAt.UTC(), previousHash: previousHash,
-		eventHash: eventHash, generation: generation, readSet: readSet, writeSet: writeSet, event: event,
+		eventHash: eventHash, generation: generation, event: event,
 	}
 	body, err := marshalJournalRecordBody(record)
 	if err != nil {
@@ -265,45 +214,6 @@ func parseJournalRecord(raw []byte) (JournalRecord, error) {
 		return JournalRecord{}, fmt.Errorf("journal record is not in canonical JSON form")
 	}
 	return record, nil
-}
-
-func parseJournalReadSet(values []journalResourceRevisionWire) ([]JournalResourceRevision, error) {
-	result := make([]JournalResourceRevision, 0, len(values))
-	for _, value := range values {
-		resource, err := NewJournalResource(value.Resource.Kind, value.Resource.Identity)
-		if err != nil {
-			return nil, fmt.Errorf("journal read_set: %w", err)
-		}
-		revision, _ := NewJournalResourceRevision(resource, value.Revision)
-		result = append(result, revision)
-	}
-	normalized, err := normalizeJournalReadSet(result)
-	if err != nil {
-		return nil, err
-	}
-	if !equalJournalReadSets(result, normalized) {
-		return nil, fmt.Errorf("journal read_set must be unique and sorted")
-	}
-	return result, nil
-}
-
-func parseJournalWriteSet(values []journalResourceWire) ([]JournalResource, error) {
-	result := make([]JournalResource, 0, len(values))
-	for _, value := range values {
-		resource, err := NewJournalResource(value.Kind, value.Identity)
-		if err != nil {
-			return nil, fmt.Errorf("journal write_set: %w", err)
-		}
-		result = append(result, resource)
-	}
-	normalized, err := normalizeJournalWriteSet(result)
-	if err != nil {
-		return nil, err
-	}
-	if !equalJournalWriteSets(result, normalized) {
-		return nil, fmt.Errorf("journal write_set must be unique and sorted")
-	}
-	return result, nil
 }
 
 func decodeWorkspaceJournalEvent(eventType JournalEventType, payload json.RawMessage) (WorkspaceJournalEvent, error) {
@@ -536,28 +446,4 @@ func parseJSONFieldTag(field reflect.StructField) (string, map[string]bool) {
 // composition roots without exposing wire DTOs from the domain package.
 func DecodeStrictJSON(source []byte, target any) error {
 	return decodeStrictJSONRequired(source, target)
-}
-
-func equalJournalReadSets(left, right []JournalResourceRevision) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index].resource != right[index].resource || left[index].revision != right[index].revision {
-			return false
-		}
-	}
-	return true
-}
-
-func equalJournalWriteSets(left, right []JournalResource) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
 }

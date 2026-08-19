@@ -458,43 +458,6 @@ func TestIntegrationCompletionReducerRequiresExactLeaseAndSerialSegment(
 			next.attempts[1],
 		)
 	}
-	reads, writes, ok := integrationJournalEventResources(
-		exactWithLoser,
-	)
-	if !ok {
-		t.Fatal("completion resources were not recognized")
-	}
-	readSet := make(map[string]bool, len(reads))
-	writeSet := make(map[string]bool, len(writes))
-	for _, resource := range reads {
-		readSet[resource.key()] = true
-	}
-	for _, resource := range writes {
-		writeSet[resource.key()] = true
-	}
-	for _, resource := range []JournalResource{
-		AttemptJournalResource(MustID("attempt-two")),
-		MergeUnitJournalResource(loserMergeUnit),
-		LeaseJournalResource(loserLease),
-		SerialSegmentJournalResource(loserSegment),
-	} {
-		if !readSet[resource.key()] ||
-			!writeSet[resource.key()] {
-			t.Fatalf(
-				"superseded resource %s is not read and written",
-				resource.key(),
-			)
-		}
-	}
-	loserIntegration := IntegrationJournalResource(
-		MustID("attempt-two"),
-	)
-	if !readSet[loserIntegration.key()] ||
-		writeSet[loserIntegration.key()] {
-		t.Fatal(
-			"superseded integration resource must be read-only",
-		)
-	}
 }
 
 func TestIntegrationCompletionCapacityRejectsOversizedSupersededSetAndReservesJournalTail(
@@ -610,7 +573,7 @@ func TestIntegrationCompletionCapacityRejectsOversizedSupersededSetAndReservesJo
 	}
 
 	oversized := cloneWorkspaceRuntime(runtime)
-	for index := len(oversized.attempts); index < 2200; index++ {
+	for index := len(oversized.attempts); index < 6000; index++ {
 		unit, unitErr := NewMergeUnitReference(
 			MustID("alpha-plan"),
 			MustID(fmt.Sprintf("oversized-unit-%04d", index)),
