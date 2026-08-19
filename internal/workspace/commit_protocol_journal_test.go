@@ -1150,8 +1150,8 @@ func TestCommitEventsUseOrdinaryAppendConstruction(t *testing.T) {
 	}
 	if _, err := workspace.NewJournalAppend(
 		event, mustTime(t, "2026-07-21T12:08:00Z"),
-	); err != nil {
-		t.Fatalf("construct direct commit append: %v", err)
+	); err == nil || !strings.Contains(err.Error(), "Git-verified commit workflow") {
+		t.Fatalf("direct commit append error = %v", err)
 	}
 	review := configuredReviewFixProtocol(t, scenario.harness.definition)
 	reviewEvent, err := workspace.NewReviewFixReservedJournalEvent(
@@ -1163,8 +1163,8 @@ func TestCommitEventsUseOrdinaryAppendConstruction(t *testing.T) {
 	}
 	if _, err := workspace.NewJournalAppend(
 		reviewEvent, mustTime(t, "2026-07-21T12:08:01Z"),
-	); err != nil {
-		t.Fatalf("construct direct review-fix append: %v", err)
+	); err == nil || !strings.Contains(err.Error(), "Git-verified commit workflow") {
+		t.Fatalf("direct review-fix append error = %v", err)
 	}
 }
 

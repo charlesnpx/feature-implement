@@ -258,7 +258,7 @@ func localTargetJournalAppend(
 			"local target append requires a local target journal event",
 		)
 	}
-	return NewJournalAppend(event, occurredAt)
+	return newWorkflowJournalAppend(event, occurredAt)
 }
 
 func injectLocalTargetInitializationFault(

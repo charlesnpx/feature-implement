@@ -207,7 +207,7 @@ func (journal *WorkspaceJournal) completeJournalRecovery(intent journalRecoveryI
 	if err != nil {
 		return JournalRecoveryReport{}, err
 	}
-	request, err := NewJournalAppend(event, occurredAt)
+	request, err := newWorkflowJournalAppend(event, occurredAt)
 	if err != nil {
 		return JournalRecoveryReport{}, err
 	}

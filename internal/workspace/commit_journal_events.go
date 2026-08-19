@@ -324,7 +324,7 @@ func maxCommitJournalIdentifier() ID {
 }
 
 func validateCommitJournalRecordFootprint(event WorkspaceJournalEvent) error {
-	request, err := NewJournalAppend(
+	request, err := newWorkflowJournalAppend(
 		event,
 		time.Date(9999, time.December, 31, 23, 59, 59, 999999999, time.UTC),
 	)

@@ -598,7 +598,7 @@ func appendCommitProtocolEventAtSnapshot(
 	if err != nil {
 		return JournalRecord{}, err
 	}
-	appendRequest, err := NewJournalAppend(event, occurredAt)
+	appendRequest, err := newWorkflowJournalAppend(event, occurredAt)
 	if err != nil {
 		return JournalRecord{}, err
 	}

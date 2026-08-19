@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestWorkspaceCompletionJournalCodecAndProjection(t *testing.T) {
@@ -50,6 +51,14 @@ func TestWorkspaceCompletionJournalCodecAndProjection(t *testing.T) {
 		replayed.featureHead != featureHead ||
 		replayed.reportDigest != reportDigest {
 		t.Fatalf("decoded completion = %#v", decoded)
+	}
+	if _, err := NewJournalAppend(
+		event,
+		time.Date(2026, time.July, 25, 12, 0, 0, 0, time.UTC),
+	); err == nil || !strings.Contains(
+		err.Error(), "complete local verification workflow",
+	) {
+		t.Fatalf("nonprivileged completion append error = %v", err)
 	}
 
 	record := JournalRecord{

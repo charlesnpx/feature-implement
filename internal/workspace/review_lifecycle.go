@@ -1145,7 +1145,7 @@ func appendReviewJournalEvent(
 	if !isReviewJournalEvent(event) {
 		return JournalRecord{}, fmt.Errorf("unsupported review journal event %T", event)
 	}
-	appendRequest, err := NewJournalAppend(event, occurredAt)
+	appendRequest, err := newWorkflowJournalAppend(event, occurredAt)
 	if err != nil {
 		return JournalRecord{}, err
 	}

@@ -175,11 +175,74 @@ func NewJournalAppend(
 	event WorkspaceJournalEvent,
 	occurredAt time.Time,
 ) (JournalAppend, error) {
+	return newJournalAppend(event, occurredAt, false)
+}
+
+// newWorkflowJournalAppend constructs append requests for events whose
+// evidence must be established by their owning lifecycle before they can be
+// durably recorded.
+func newWorkflowJournalAppend(
+	event WorkspaceJournalEvent,
+	occurredAt time.Time,
+) (JournalAppend, error) {
+	return newJournalAppend(event, occurredAt, true)
+}
+
+func newJournalAppend(
+	event WorkspaceJournalEvent,
+	occurredAt time.Time,
+	workflow bool,
+) (JournalAppend, error) {
 	if event == nil {
 		return JournalAppend{}, fmt.Errorf("journal append requires a typed event")
 	}
 	if !supportedWorkspaceJournalEvent(event) {
 		return JournalAppend{}, fmt.Errorf("unsupported workspace journal event %T", event)
+	}
+	if !workflow {
+		switch event.(type) {
+		case JournalTailRecoveredEvent:
+			return JournalAppend{}, fmt.Errorf("journal recovery events must use the explicit recovery workflow")
+		case AttemptOrchestrationAcknowledgedJournalEvent:
+			return JournalAppend{}, fmt.Errorf("orchestration acknowledgements must use the idempotent acknowledgement workflow")
+		case AttemptNextGoalIntendedJournalEvent:
+			return JournalAppend{}, fmt.Errorf("next-goal intents must use the durable intent workflow")
+		case AttemptOwnerResponseJournalEvent:
+			return JournalAppend{}, fmt.Errorf("owner responses must use the exact-boundary response workflow")
+		case AttemptResumedJournalEvent:
+			return JournalAppend{}, fmt.Errorf("attempt resume must use the verified resume workflow")
+		case FeatureRefCreationIntendedJournalEvent, FeatureRefCreatedJournalEvent:
+			return JournalAppend{}, fmt.Errorf(
+				"feature-ref events must use the recoverable local target initialization workflow",
+			)
+		case AttemptReservedJournalEvent:
+			return JournalAppend{}, fmt.Errorf("attempt reservation must use the ref-verified reservation workflow")
+		case AttemptMaterializationIntendedJournalEvent:
+			return JournalAppend{}, fmt.Errorf("materialization intent must use the reconciled materialization workflow")
+		case AttemptStartedJournalEvent:
+			return JournalAppend{}, fmt.Errorf("attempt start must use the Git-verified materialization workflow")
+		case AttemptBoundaryReachedJournalEvent:
+			return JournalAppend{}, fmt.Errorf("attempt boundary must use the atomic boundary workflow")
+		case CommitProtocolStartedJournalEvent, CommitStepIntendedJournalEvent,
+			CommitStepRecordedJournalEvent, CommitCheckRecordedJournalEvent,
+			CommitProtocolRebasedJournalEvent, ReviewFixReservedJournalEvent,
+			ReviewFixIntendedJournalEvent, ReviewFixCommitRecordedJournalEvent,
+			ReviewFixCheckRecordedJournalEvent:
+			return JournalAppend{}, fmt.Errorf("commit protocol events must use the Git-verified commit workflow")
+		case ReviewHeadAdoptedJournalEvent, ReviewRoundStartedJournalEvent,
+			ReviewInvocationReservedJournalEvent, ReviewInvocationFailedJournalEvent,
+			ReviewResultRecordedJournalEvent, ReviewFindingFixReservedJournalEvent,
+			ReviewFixAppliedJournalEvent:
+			return JournalAppend{}, fmt.Errorf("review events must use the exact-head review workflow")
+		case MergeUnitIntegrationIntendedJournalEvent, MergeUnitIntegratedJournalEvent:
+			return JournalAppend{}, fmt.Errorf(
+				"integration events must use the ancestry-checked CAS integration workflow",
+			)
+		case WorkspaceCompletedJournalEvent:
+			return JournalAppend{}, fmt.Errorf(
+				"workspace completion events must use the complete local verification workflow",
+			)
+		}
 	}
 	if occurredAt.IsZero() {
 		return JournalAppend{}, fmt.Errorf("journal append occurrence time is required")

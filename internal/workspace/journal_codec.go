@@ -160,23 +160,14 @@ func marshalWorkspaceJournalEvent(event WorkspaceJournalEvent) (json.RawMessage,
 }
 
 func parseJournalRecord(raw []byte) (JournalRecord, error) {
-	var version struct {
-		SchemaVersion int `json:"schema_version"`
-	}
-	if err := rejectDuplicateJSONObjectKeys(raw); err != nil {
-		return JournalRecord{}, err
-	}
-	if err := json.Unmarshal(raw, &version); err != nil {
-		return JournalRecord{}, err
-	}
-	if version.SchemaVersion != journalRecordSchemaVersion {
-		return JournalRecord{}, fmt.Errorf(
-			"journal format is incompatible with this runtime; regenerate from committed sources",
-		)
-	}
 	var wire journalRecordWire
 	if err := decodeStrictJSON(raw, &wire); err != nil {
 		return JournalRecord{}, err
+	}
+	if wire.SchemaVersion != journalRecordSchemaVersion {
+		return JournalRecord{}, fmt.Errorf(
+			"journal format is incompatible with this runtime; regenerate from committed sources",
+		)
 	}
 	if wire.Sequence == 0 {
 		return JournalRecord{}, fmt.Errorf("journal sequence must be positive")

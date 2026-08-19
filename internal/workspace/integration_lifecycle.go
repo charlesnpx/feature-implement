@@ -710,7 +710,7 @@ func appendIntegrationJournalEvent(
 			"unsupported integration journal event %T", event,
 		)
 	}
-	appendRequest, err := NewJournalAppend(event, occurredAt)
+	appendRequest, err := newWorkflowJournalAppend(event, occurredAt)
 	if err != nil {
 		return JournalRecord{}, err
 	}

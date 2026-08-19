@@ -1175,7 +1175,7 @@ func appendAttemptLifecycleEvent(
 	if !isAttemptJournalEvent(event) {
 		return JournalRecord{}, fmt.Errorf("unsupported attempt lifecycle event %T", event)
 	}
-	request, err := NewJournalAppend(event, occurredAt)
+	request, err := newWorkflowJournalAppend(event, occurredAt)
 	if err != nil {
 		return JournalRecord{}, err
 	}

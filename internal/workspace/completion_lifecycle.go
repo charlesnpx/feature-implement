@@ -232,7 +232,7 @@ func completionJournalAppend(
 	event WorkspaceCompletedJournalEvent,
 	occurredAt time.Time,
 ) (JournalAppend, error) {
-	return NewJournalAppend(event, occurredAt)
+	return newWorkflowJournalAppend(event, occurredAt)
 }
 
 func verifyRecordedWorkspaceCompletion(

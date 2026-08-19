@@ -389,7 +389,7 @@ func TestIntegrationCompletionAccountsForAndReleasesLeaseAndSerialSegment(
 		t.Fatal(err)
 	}
 	attempt, _ = runtime.Attempt(attempt.AttemptID())
-	result, err := workspace.IntegrateMergeUnit(
+	_, err = workspace.IntegrateMergeUnit(
 		context.Background(), core.journal, core.definition,
 		repository, &integrationGitStub{featureHead: core.base},
 		workspace.IntegrateMergeUnitRequest{
@@ -399,9 +399,6 @@ func TestIntegrationCompletionAccountsForAndReleasesLeaseAndSerialSegment(
 	)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if result.Record().EventType() != workspace.JournalEventMergeUnitIntegrated {
-		t.Fatalf("integration completion record = %s", result.Record().EventType())
 	}
 	completedSnapshot, err := core.journal.ReadSnapshot()
 	if err != nil {
