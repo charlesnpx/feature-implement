@@ -161,15 +161,6 @@ func digestFeatureRefCreationIntent(
 	return DigestBytes(content), nil
 }
 
-func isLocalTargetJournalEvent(event WorkspaceJournalEvent) bool {
-	switch event.(type) {
-	case FeatureRefCreationIntendedJournalEvent, FeatureRefCreatedJournalEvent:
-		return true
-	default:
-		return false
-	}
-}
-
 func cloneLocalTargetJournalEvent(
 	event WorkspaceJournalEvent,
 ) WorkspaceJournalEvent {

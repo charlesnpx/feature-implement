@@ -591,9 +591,6 @@ func appendCommitProtocolEventAtSnapshot(
 	event WorkspaceJournalEvent,
 	occurredAt time.Time,
 ) (JournalRecord, error) {
-	if !isCommitJournalEvent(event) {
-		return JournalRecord{}, fmt.Errorf("unsupported commit protocol event %T", event)
-	}
 	runtime, err := RebuildWorkspaceRuntime(snapshot)
 	if err != nil {
 		return JournalRecord{}, err

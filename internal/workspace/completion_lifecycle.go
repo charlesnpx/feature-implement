@@ -108,7 +108,7 @@ func CompleteWorkspace(
 	if err != nil {
 		return WorkspaceCompletionResult{}, err
 	}
-	appendRequest, err := completionJournalAppend(
+	appendRequest, err := newWorkflowJournalAppend(
 		event, request.OccurredAt,
 	)
 	if err != nil {
@@ -228,13 +228,6 @@ func readCompletionRuntime(
 	return snapshot, reviews, runtime, nil
 }
 
-func completionJournalAppend(
-	event WorkspaceCompletedJournalEvent,
-	occurredAt time.Time,
-) (JournalAppend, error) {
-	return newWorkflowJournalAppend(event, occurredAt)
-}
-
 func verifyRecordedWorkspaceCompletion(
 	snapshot JournalSnapshot,
 	definition EffectiveWorkspaceDefinition,
@@ -278,9 +271,7 @@ func preCompletionReportDigest(
 		[]JournalRecord(nil),
 		snapshot.records[:completionIndex]...,
 	)
-	for _, record := range prefix.records {
-		prefix.head = record.eventHash
-	}
+	prefix.head = snapshot.records[completionIndex].previousHash
 	report, err := RebuildWorkspaceReport(prefix, definition)
 	if err != nil {
 		return Digest{}, fmt.Errorf(

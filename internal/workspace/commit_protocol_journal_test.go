@@ -1132,7 +1132,7 @@ func TestReviewFixJournalCodecRejectsUnknownPayloadFields(t *testing.T) {
 	}
 }
 
-func TestCommitEventsUseOrdinaryAppendConstruction(t *testing.T) {
+func TestCommitEventsRejectDirectNonPrivilegedAppend(t *testing.T) {
 	t.Parallel()
 
 	scenario := newJournalCommitScenario(t)

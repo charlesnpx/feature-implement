@@ -31,13 +31,7 @@ const (
 type JournalFaultPoint string
 
 const (
-	JournalFaultBeforeAppend        JournalFaultPoint = "before_append"
-	JournalFaultAfterAppendPrefix   JournalFaultPoint = "after_append_prefix"
-	JournalFaultAfterAppend         JournalFaultPoint = "after_append"
-	JournalFaultBeforeFileSync      JournalFaultPoint = "before_file_sync"
-	JournalFaultAfterFileSync       JournalFaultPoint = "after_file_sync"
-	JournalFaultBeforeDirectorySync JournalFaultPoint = "before_directory_sync"
-	JournalFaultAfterDirectorySync  JournalFaultPoint = "after_directory_sync"
+	JournalFaultAfterAppendPrefix JournalFaultPoint = "after_append_prefix"
 )
 
 type JournalFaultInjector func(JournalFaultPoint) error
@@ -387,9 +381,6 @@ func (journal *WorkspaceJournal) appendToSnapshot(snapshot JournalSnapshot, requ
 		}
 		return closeErr
 	}
-	if err := journal.inject(JournalFaultBeforeAppend); err != nil {
-		return JournalRecord{}, closeWith(err)
-	}
 	prefix := len(encoded) / 2
 	if prefix == 0 {
 		prefix = 1
@@ -403,31 +394,16 @@ func (journal *WorkspaceJournal) appendToSnapshot(snapshot JournalSnapshot, requ
 	if err := writeAll(file, encoded[prefix:]); err != nil {
 		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: closeWith(err)}
 	}
-	if err := journal.inject(JournalFaultAfterAppend); err != nil {
-		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: closeWith(err)}
-	}
-	if err := journal.inject(JournalFaultBeforeFileSync); err != nil {
-		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: closeWith(err)}
-	}
 	if err := file.Sync(); err != nil {
 		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: closeWith(err)}
 	}
 	if err := journal.runtime.state.verifyOwnedRegularFile(WorkspaceJournalFileName, file); err != nil {
 		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: closeWith(err)}
 	}
-	if err := journal.inject(JournalFaultAfterFileSync); err != nil {
-		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: closeWith(err)}
-	}
 	if err := closeWith(nil); err != nil {
 		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: err}
 	}
-	if err := journal.inject(JournalFaultBeforeDirectorySync); err != nil {
-		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: err}
-	}
 	if err := journal.runtime.state.Sync(); err != nil {
-		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: err}
-	}
-	if err := journal.inject(JournalFaultAfterDirectorySync); err != nil {
 		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: err}
 	}
 	if err := journal.requireOpen(); err != nil {
