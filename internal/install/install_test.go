@@ -182,10 +182,10 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"primary checkout may be dirty",
 			"feature workspace schema requests --json",
 			"feature workspace recover",
-			"`scheduler`",
+			"merge unit whose status is `ready`",
 			"attempt reserve",
 			"attempt materialize",
-			"journal-derived report",
+			"journal-derived workspace view",
 			"feature workspace commit next",
 			"review start",
 			"review reserve",
@@ -201,7 +201,7 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"complete_goal_and_wait",
 			"owner_gate",
 			"create_next_goal",
-			"`status`, `scheduler`, `gates`, and `report`",
+			"Run `status` again.",
 		})
 		assertNotContainsAny(t, path, content, []string{
 			"feature status <plan-dir>",

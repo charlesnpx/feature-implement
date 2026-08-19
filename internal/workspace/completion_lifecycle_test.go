@@ -27,7 +27,7 @@ func TestWorkspaceCompletionAppendsOnceAndBindsCanonicalLocalReport(
 	if err != nil {
 		t.Fatal(err)
 	}
-	before, err := workspace.RebuildWorkspaceReport(
+	before, err := workspace.RebuildWorkspaceView(
 		snapshot, harness.core.definition,
 	)
 	if err != nil {
@@ -84,7 +84,7 @@ func TestWorkspaceCompletionAppendsOnceAndBindsCanonicalLocalReport(
 			len(completedSnapshot.Records()), beforeRecords+1,
 		)
 	}
-	report, err := workspace.RebuildWorkspaceReport(
+	report, err := workspace.RebuildWorkspaceView(
 		completedSnapshot, harness.core.definition,
 	)
 	if err != nil {
@@ -163,7 +163,7 @@ func TestWorkspaceCompletionExposesEveryCurrentLocalBlocker(
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
-	report, reportErr := workspace.RebuildWorkspaceReport(
+	report, reportErr := workspace.RebuildWorkspaceView(
 		snapshot, harness.definition,
 	)
 	if reportErr != nil {
@@ -704,7 +704,7 @@ func TestIncompleteFeatureRefCreationIsReportedAndRecovered(
 	if err != nil {
 		t.Fatal(err)
 	}
-	report, err := workspace.RebuildWorkspaceReport(
+	report, err := workspace.RebuildWorkspaceView(
 		snapshot, definition,
 	)
 	if err != nil {
@@ -758,7 +758,7 @@ func TestIncompleteFeatureRefCreationIsReportedAndRecovered(
 	if err != nil {
 		t.Fatal(err)
 	}
-	recoveredReport, err := workspace.RebuildWorkspaceReport(
+	recoveredReport, err := workspace.RebuildWorkspaceView(
 		recoveredSnapshot, definition,
 	)
 	if err != nil {

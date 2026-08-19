@@ -675,11 +675,11 @@ func requireIntegrationGateReady(
 	definition EffectiveWorkspaceDefinition,
 	attempt RuntimeAttemptProjection,
 ) error {
-	gates, err := RebuildGateView(snapshot, definition)
+	view, err := RebuildWorkspaceView(snapshot, definition)
 	if err != nil {
 		return err
 	}
-	for _, unit := range gates.Units {
+	for _, unit := range view.Gates.Units {
 		if unit.PlanID == attempt.mergeUnit.planID.String() &&
 			unit.MergeUnitID == attempt.mergeUnit.mergeUnitID.String() {
 			if unit.AttemptID != attempt.attemptID.String() ||

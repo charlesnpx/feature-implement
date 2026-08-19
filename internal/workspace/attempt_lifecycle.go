@@ -124,16 +124,17 @@ func ReserveAttempt(
 			request.AttemptNumber, request.MergeUnit, nextAttemptNumber,
 		)
 	}
-	scheduler, err := RebuildSchedulerView(snapshot, definition)
+	view, err := RebuildWorkspaceView(snapshot, definition)
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
 	ready := false
 	status := SchedulerUnitStatus("")
 	var blockers []string
-	for _, unit := range scheduler.Units {
+	for _, unit := range view.Scheduler.Units {
 		if unit.PlanID == request.MergeUnit.planID.String() && unit.MergeUnitID == request.MergeUnit.mergeUnitID.String() {
-			status, blockers = unit.Status, append([]string(nil), unit.Blockers...)
+			status = unit.Status
+			blockers = workspaceUnitBlockerReasons(unit.Blockers)
 			ready = unit.Status == SchedulerUnitReady
 			break
 		}

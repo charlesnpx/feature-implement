@@ -630,7 +630,7 @@ func TestLocalTargetInitializationReadinessBarrierAtEveryFault(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			report, err := workspace.RebuildWorkspaceReport(
+			report, err := workspace.RebuildWorkspaceView(
 				snapshot, definition,
 			)
 			if err != nil {

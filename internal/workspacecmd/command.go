@@ -41,23 +41,23 @@ type ValidationResult struct {
 }
 
 type InitializationResult struct {
-	SchemaVersion    int                       `json:"schema_version"`
-	Status           string                    `json:"status"`
-	WorkspaceDir     string                    `json:"workspace_dir"`
-	WorkspaceID      string                    `json:"workspace_id"`
-	Generation       string                    `json:"generation"`
-	PlanCheckpoint   string                    `json:"plan_checkpoint"`
-	JournalHead      string                    `json:"journal_head"`
-	ProjectionDigest string                    `json:"projection_digest"`
-	Report           workspace.WorkspaceReport `json:"report"`
+	SchemaVersion    int                     `json:"schema_version"`
+	Status           string                  `json:"status"`
+	WorkspaceDir     string                  `json:"workspace_dir"`
+	WorkspaceID      string                  `json:"workspace_id"`
+	Generation       string                  `json:"generation"`
+	PlanCheckpoint   string                  `json:"plan_checkpoint"`
+	JournalHead      string                  `json:"journal_head"`
+	ProjectionDigest string                  `json:"projection_digest"`
+	Report           workspace.WorkspaceView `json:"report"`
 }
 
 type MutationResult struct {
-	SchemaVersion int                       `json:"schema_version"`
-	Status        string                    `json:"status"`
-	Action        string                    `json:"action"`
-	Directives    []BoundaryDirectiveView   `json:"directives,omitempty"`
-	Report        workspace.WorkspaceReport `json:"report"`
+	SchemaVersion int                     `json:"schema_version"`
+	Status        string                  `json:"status"`
+	Action        string                  `json:"action"`
+	Directives    []BoundaryDirectiveView `json:"directives,omitempty"`
+	Report        workspace.WorkspaceView `json:"report"`
 }
 
 type BoundaryDirectiveView struct {
@@ -87,13 +87,13 @@ func Execute(ctx context.Context, options Options) (any, error) {
 		case "requests":
 			return RequestSchemas(), nil
 		case "reports":
-			return ReportSchemas(), nil
+			return WorkspaceViewSchema(), nil
 		default:
 			return nil, fmt.Errorf("unsupported workspace schema %q", options.Subaction)
 		}
 	case "queue", "receipts", "reconcile", "control", "provider":
 		return nil, removedWorkspaceCommand(action)
-	case "validate", "init", "status", "recover", "scheduler", "gates", "report":
+	case "validate", "init", "status", "recover":
 		// handled below
 	case "attempt", "commit", "review", "integrate", "complete":
 		// handled below
@@ -123,24 +123,8 @@ func Execute(ctx context.Context, options Options) (any, error) {
 		return validateBundle(ctx, bundle, options)
 	case "init":
 		return initializeWorkspace(ctx, bundle, options)
-	case "status", "report":
-		return readReport(ctx, bundle, options.WorkspaceDir)
-	case "scheduler":
-		report, err := readReport(
-			ctx, bundle, options.WorkspaceDir,
-		)
-		if err != nil {
-			return nil, err
-		}
-		return report.Scheduler, nil
-	case "gates":
-		report, err := readReport(
-			ctx, bundle, options.WorkspaceDir,
-		)
-		if err != nil {
-			return nil, err
-		}
-		return report.Gates, nil
+	case "status":
+		return readWorkspaceView(ctx, bundle, options.WorkspaceDir)
 	case "recover":
 		return recoverWorkspace(ctx, bundle, options)
 	case "attempt":
@@ -507,7 +491,7 @@ func initializeWorkspace(
 	if err := bundle.VerifyRoot(); err != nil {
 		return InitializationResult{}, err
 	}
-	report, err := workspace.RebuildWorkspaceReport(initialized.Snapshot(), definition)
+	report, err := workspace.RebuildWorkspaceView(initialized.Snapshot(), definition)
 	if err != nil {
 		return InitializationResult{}, err
 	}
@@ -520,25 +504,29 @@ func initializeWorkspace(
 	return result, nil
 }
 
-func readReport(
+func readWorkspaceView(
 	ctx context.Context,
 	bundle workspace.WorkspaceBundle,
 	workspaceDir string,
-) (workspace.WorkspaceReport, error) {
+) (workspace.WorkspaceView, error) {
 	directory, err := absoluteDirectory(workspaceDir, "workspace")
 	if err != nil {
-		return workspace.WorkspaceReport{}, err
+		return workspace.WorkspaceView{}, err
 	}
 	snapshot, err := workspace.ReadWorkspaceJournalSnapshot(directory)
 	if err != nil {
-		return workspace.WorkspaceReport{}, err
+		return workspace.WorkspaceView{}, err
 	}
-	return workspace.RebuildWorkspaceReportWithGit(
-		ctx,
-		snapshot,
-		bundle.Definition(),
-		workspace.DefaultLocalIntegrationGitAdapter(),
-	)
+	view, err := workspace.RebuildWorkspaceView(snapshot, bundle.Definition())
+	if err != nil {
+		return workspace.WorkspaceView{}, err
+	}
+	if err := workspace.ApplyWorkspaceIntegrationDrift(
+		ctx, &view, bundle.Definition(), workspace.DefaultLocalIntegrationGitAdapter(),
+	); err != nil {
+		return workspace.WorkspaceView{}, err
+	}
+	return view, nil
 }
 
 type recoverRequest struct {
@@ -601,13 +589,14 @@ func mutationResult(
 	if err != nil {
 		return MutationResult{}, err
 	}
-	report, err := workspace.RebuildWorkspaceReportWithGit(
-		context.Background(),
-		snapshot,
-		definition,
-		workspace.DefaultLocalIntegrationGitAdapter(),
-	)
+	report, err := workspace.RebuildWorkspaceView(snapshot, definition)
 	if err != nil {
+		return MutationResult{}, err
+	}
+	if err := workspace.ApplyWorkspaceIntegrationDrift(
+		context.Background(), &report, definition,
+		workspace.DefaultLocalIntegrationGitAdapter(),
+	); err != nil {
 		return MutationResult{}, err
 	}
 	return MutationResult{

@@ -899,12 +899,13 @@ func TestConcurrentIntegrationsPublishExactlyOneIntent(t *testing.T) {
 			superseded, exists,
 		)
 	}
-	scheduler, err := workspace.RebuildSchedulerView(
+	view, err := workspace.RebuildWorkspaceView(
 		snapshot, firstCore.definition,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	scheduler := view.Scheduler
 	loserReady := false
 	for _, unit := range scheduler.Units {
 		if unit.PlanID == loser.MergeUnit().PlanID().String() &&
@@ -1076,12 +1077,13 @@ func TestIntegrationMakesReviewExhaustedLoserRetryableAtNewFrontier(
 	if err != nil {
 		t.Fatal(err)
 	}
-	scheduler, err := workspace.RebuildSchedulerView(
+	view, err := workspace.RebuildWorkspaceView(
 		snapshot, loserCore.definition,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	scheduler := view.Scheduler
 	loserUnit := schedulerUnitByID(
 		t, scheduler, "unit-one",
 	)
@@ -1092,12 +1094,7 @@ func TestIntegrationMakesReviewExhaustedLoserRetryableAtNewFrontier(
 			loserUnit,
 		)
 	}
-	gates, err := workspace.RebuildGateView(
-		snapshot, loserCore.definition,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	gates := view.Gates
 	loserGate := gateUnitByID(t, gates, "unit-one")
 	if loserGate.AttemptID != "" ||
 		gateCheckByName(
@@ -1392,13 +1389,14 @@ func TestCompletedIntegrationUnblocksDependentSchedulerUnit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	scheduler, err := workspace.RebuildSchedulerView(
+	view, err := workspace.RebuildWorkspaceView(
 		snapshot, harness.definition,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var first, second workspace.SchedulerUnitView
+	scheduler := view.Scheduler
+	var first, second workspace.WorkspaceUnitState
 	for _, unit := range scheduler.Units {
 		switch unit.MergeUnitID {
 		case "unit-one":
@@ -1415,12 +1413,7 @@ func TestCompletedIntegrationUnblocksDependentSchedulerUnit(t *testing.T) {
 			first, second,
 		)
 	}
-	report, err := workspace.RebuildWorkspaceReport(
-		snapshot, harness.definition,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	report := view
 	if report.Target.FeatureHead != result.MergeCommit().String() {
 		t.Fatalf(
 			"reported feature frontier = %s, want %s",

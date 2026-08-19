@@ -88,7 +88,7 @@ func CompleteWorkspace(
 		}, nil
 	}
 
-	report, err := RebuildWorkspaceReport(snapshot, definition)
+	report, err := RebuildWorkspaceView(snapshot, definition)
 	if err != nil {
 		return WorkspaceCompletionResult{}, err
 	}
@@ -272,7 +272,7 @@ func preCompletionReportDigest(
 		snapshot.records[:completionIndex]...,
 	)
 	prefix.head = snapshot.records[completionIndex].previousHash
-	report, err := RebuildWorkspaceReport(prefix, definition)
+	report, err := RebuildWorkspaceView(prefix, definition)
 	if err != nil {
 		return Digest{}, fmt.Errorf(
 			"rebuild canonical pre-completion report: %w", err,
