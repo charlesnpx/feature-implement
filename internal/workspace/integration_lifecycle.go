@@ -705,22 +705,12 @@ func appendIntegrationJournalEvent(
 	event WorkspaceJournalEvent,
 	occurredAt time.Time,
 ) (JournalRecord, error) {
-	reads, writes, ok := integrationJournalEventResources(event)
-	if !ok {
+	if !isIntegrationJournalEvent(event) {
 		return JournalRecord{}, fmt.Errorf(
 			"unsupported integration journal event %T", event,
 		)
 	}
-	readSet := make([]JournalResourceRevision, 0, len(reads))
-	for _, resource := range reads {
-		revision, _ := NewJournalResourceRevision(
-			resource, snapshot.Revision(resource),
-		)
-		readSet = append(readSet, revision)
-	}
-	appendRequest, err := newPrivilegedJournalAppend(
-		event, occurredAt, readSet, writes,
-	)
+	appendRequest, err := NewJournalAppend(event, occurredAt)
 	if err != nil {
 		return JournalRecord{}, err
 	}

@@ -389,12 +389,6 @@ func TestIntegrationCompletionAccountsForAndReleasesLeaseAndSerialSegment(
 		t.Fatal(err)
 	}
 	attempt, _ = runtime.Attempt(attempt.AttemptID())
-	leaseResource := workspace.LeaseJournalResource(attempt.LeaseID())
-	segmentResource := workspace.SerialSegmentJournalResource(
-		attempt.SerialSegment(),
-	)
-	leaseRevision := snapshot.Revision(leaseResource)
-	segmentRevision := snapshot.Revision(segmentResource)
 	result, err := workspace.IntegrateMergeUnit(
 		context.Background(), core.journal, core.definition,
 		repository, &integrationGitStub{featureHead: core.base},
@@ -406,45 +400,12 @@ func TestIntegrationCompletionAccountsForAndReleasesLeaseAndSerialSegment(
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertResourceRevision := func(
-		resource workspace.JournalResource,
-		revision uint64,
-	) {
-		t.Helper()
-		foundRead, foundWrite := false, false
-		for _, binding := range result.Record().ReadSet() {
-			if binding.Resource() == resource &&
-				binding.Revision() == revision {
-				foundRead = true
-			}
-		}
-		for _, written := range result.Record().WriteSet() {
-			if written == resource {
-				foundWrite = true
-			}
-		}
-		if !foundRead || !foundWrite {
-			t.Fatalf(
-				"integration completion resource %s/%s read=%t write=%t",
-				resource.Kind(), resource.Identity(),
-				foundRead, foundWrite,
-			)
-		}
+	if result.Record().EventType() != workspace.JournalEventMergeUnitIntegrated {
+		t.Fatalf("integration completion record = %s", result.Record().EventType())
 	}
-	assertResourceRevision(leaseResource, leaseRevision)
-	assertResourceRevision(segmentResource, segmentRevision)
 	completedSnapshot, err := core.journal.ReadSnapshot()
 	if err != nil {
 		t.Fatal(err)
-	}
-	if completedSnapshot.Revision(leaseResource) != leaseRevision+1 ||
-		completedSnapshot.Revision(segmentResource) !=
-			segmentRevision+1 {
-		t.Fatalf(
-			"integration completion revisions: lease=%d segment=%d",
-			completedSnapshot.Revision(leaseResource),
-			completedSnapshot.Revision(segmentResource),
-		)
 	}
 	completedRuntime, err := workspace.RebuildWorkspaceRuntime(
 		completedSnapshot,
@@ -940,11 +901,6 @@ func TestConcurrentIntegrationsPublishExactlyOneIntent(t *testing.T) {
 			"concurrent loser was not terminalized exactly: %#v exists=%t",
 			superseded, exists,
 		)
-	}
-	if revision := snapshot.Revision(
-		workspace.LeaseJournalResource(loser.LeaseID()),
-	); revision == 0 {
-		t.Fatal("concurrent loser lease resource was not released")
 	}
 	scheduler, err := workspace.RebuildSchedulerView(
 		snapshot, firstCore.definition,

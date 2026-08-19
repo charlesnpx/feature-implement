@@ -4,10 +4,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 )
 
-func TestWorkspaceCompletionJournalCodecResourcesAndProjection(t *testing.T) {
+func TestWorkspaceCompletionJournalCodecAndProjection(t *testing.T) {
 	workspaceID := MustID("completion-workspace")
 	generation := DigestBytes([]byte("completion-generation"))
 	featureHead, err := ParseGitObjectID(
@@ -51,27 +50,6 @@ func TestWorkspaceCompletionJournalCodecResourcesAndProjection(t *testing.T) {
 		replayed.featureHead != featureHead ||
 		replayed.reportDigest != reportDigest {
 		t.Fatalf("decoded completion = %#v", decoded)
-	}
-
-	reads, writes, supported :=
-		completionJournalEventResources(event)
-	if !supported || len(reads) != 4 || len(writes) != 1 ||
-		writes[0] != CompletionJournalResource(workspaceID) {
-		t.Fatalf(
-			"completion resources reads=%#v writes=%#v supported=%t",
-			reads, writes, supported,
-		)
-	}
-	if _, err := NewJournalAppend(
-		event,
-		time.Date(2026, time.July, 25, 12, 0, 0, 0, time.UTC),
-		nil,
-		nil,
-	); err == nil ||
-		!strings.Contains(
-			err.Error(), "complete local verification workflow",
-		) {
-		t.Fatalf("nonprivileged completion append error = %v", err)
 	}
 
 	record := JournalRecord{

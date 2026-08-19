@@ -324,22 +324,9 @@ func maxCommitJournalIdentifier() ID {
 }
 
 func validateCommitJournalRecordFootprint(event WorkspaceJournalEvent) error {
-	reads, writes, ok := commitJournalEventResources(event)
-	if !ok {
-		return fmt.Errorf("unsupported commit journal footprint event %T", event)
-	}
-	reads, _ = normalizeJournalWriteSet(reads)
-	writes, _ = normalizeJournalWriteSet(writes)
-	readSet := make([]JournalResourceRevision, 0, len(reads))
-	for _, resource := range reads {
-		revision, _ := NewJournalResourceRevision(resource, ^uint64(0))
-		readSet = append(readSet, revision)
-	}
-	request, err := newPrivilegedJournalAppend(
+	request, err := NewJournalAppend(
 		event,
 		time.Date(9999, time.December, 31, 23, 59, 59, 999999999, time.UTC),
-		readSet,
-		writes,
 	)
 	if err != nil {
 		return err
@@ -445,23 +432,6 @@ func digestCommitRebaseMapping(event CommitProtocolRebasedJournalEvent) (Digest,
 	return DigestBytes(bindings), nil
 }
 
-func CommitProtocolJournalResource(attemptID ID) JournalResource {
-	resource, _ := NewJournalResource(JournalResourceCommitProtocol, attemptID.String()+"/implementation")
-	return resource
-}
-
-func CommitStepJournalResource(attemptID, stepID ID, ordinal uint16) JournalResource {
-	identity := fmt.Sprintf("%s/%d/%s", attemptID, ordinal, stepID)
-	resource, _ := NewJournalResource(JournalResourceCommitStep, identity)
-	return resource
-}
-
-func CommitCheckJournalResource(attemptID, stepID, checkID ID, stepOrdinal, checkOrdinal uint16) JournalResource {
-	identity := fmt.Sprintf("%s/%d/%s/%d/%s", attemptID, stepOrdinal, stepID, checkOrdinal, checkID)
-	resource, _ := NewJournalResource(JournalResourceCheck, identity)
-	return resource
-}
-
 func isCommitJournalEvent(event WorkspaceJournalEvent) bool {
 	switch event.(type) {
 	case CommitProtocolStartedJournalEvent, CommitStepIntendedJournalEvent,
@@ -471,73 +441,6 @@ func isCommitJournalEvent(event WorkspaceJournalEvent) bool {
 	default:
 		return isReviewFixJournalEvent(event)
 	}
-}
-
-func commitJournalEventResources(event WorkspaceJournalEvent) ([]JournalResource, []JournalResource, bool) {
-	var workspaceID, attemptID ID
-	var generation Digest
-	var reads, writes []JournalResource
-	switch event := event.(type) {
-	case CommitProtocolStartedJournalEvent:
-		workspaceID, generation, attemptID = event.workspaceID, event.generation, event.attemptID
-		protocol := CommitProtocolJournalResource(attemptID)
-		reads = []JournalResource{AttemptJournalResource(attemptID), protocol}
-		writes = append([]JournalResource(nil), reads...)
-	case CommitStepIntendedJournalEvent:
-		workspaceID, generation, attemptID = event.workspaceID, event.generation, event.attemptID
-		step := CommitStepJournalResource(attemptID, event.stepID, event.ordinal)
-		reads = []JournalResource{AttemptJournalResource(attemptID), CommitProtocolJournalResource(attemptID), step}
-		writes = append([]JournalResource(nil), reads...)
-	case CommitStepRecordedJournalEvent:
-		workspaceID, generation, attemptID = event.workspaceID, event.generation, event.attemptID
-		step := CommitStepJournalResource(attemptID, event.evidence.stepID, event.evidence.ordinal)
-		evidence := EvidenceJournalResource(event.evidence.evidence)
-		reads = []JournalResource{AttemptJournalResource(attemptID), CommitProtocolJournalResource(attemptID), step, evidence}
-		writes = append([]JournalResource(nil), reads...)
-	case CommitCheckRecordedJournalEvent:
-		workspaceID, generation, attemptID = event.workspaceID, event.generation, event.attemptID
-		check := CommitCheckJournalResource(
-			attemptID, event.evidence.stepID, event.evidence.checkID, event.stepOrdinal, event.checkOrdinal,
-		)
-		evidence := EvidenceJournalResource(event.evidence.evidence)
-		reads = []JournalResource{AttemptJournalResource(attemptID), CommitProtocolJournalResource(attemptID), check, evidence}
-		writes = append([]JournalResource(nil), reads...)
-	case CommitProtocolRebasedJournalEvent:
-		workspaceID, generation, attemptID = event.workspaceID, event.generation, event.attemptID
-		reads = []JournalResource{AttemptJournalResource(attemptID)}
-		if !event.protocolDigest.IsZero() {
-			reads = append(reads, CommitProtocolJournalResource(attemptID))
-		}
-		for _, commit := range event.commits {
-			reads = append(
-				reads,
-				CommitStepJournalResource(attemptID, commit.stepID, commit.ordinal),
-				EvidenceJournalResource(commit.evidence),
-			)
-		}
-		if len(event.reviewCommits) != 0 {
-			reads = append(reads, ReviewFixJournalResource(attemptID))
-		}
-		for _, commit := range event.reviewCommits {
-			reads = append(
-				reads,
-				ReviewFixStepJournalResource(attemptID, commit.stepID, commit.ordinal),
-				EvidenceJournalResource(commit.evidence),
-			)
-		}
-		writes = append([]JournalResource(nil), reads...)
-		// Rebase admission depends on the review loop being quiescent and
-		// having confirmation budget remaining. Keep that exact review state
-		// in the event's read footprint without claiming to mutate it.
-		reads = append(reads, ReviewJournalResource(attemptID))
-		if len(event.reviewCommits) != 0 {
-			reads = append(reads, ReviewFixBudgetJournalResource(attemptID))
-		}
-	default:
-		return reviewFixJournalEventResources(event)
-	}
-	reads = append(reads, WorkspaceJournalResource(workspaceID), GenerationJournalResource(generation))
-	return reads, writes, true
 }
 
 func cloneCommitJournalEvent(event WorkspaceJournalEvent) WorkspaceJournalEvent {

@@ -109,7 +109,7 @@ func CompleteWorkspace(
 		return WorkspaceCompletionResult{}, err
 	}
 	appendRequest, err := completionJournalAppend(
-		event, request.OccurredAt, snapshot,
+		event, request.OccurredAt,
 	)
 	if err != nil {
 		return WorkspaceCompletionResult{}, err
@@ -231,26 +231,8 @@ func readCompletionRuntime(
 func completionJournalAppend(
 	event WorkspaceCompletedJournalEvent,
 	occurredAt time.Time,
-	snapshot JournalSnapshot,
 ) (JournalAppend, error) {
-	reads, writes, ok := completionJournalEventResources(event)
-	if !ok {
-		return JournalAppend{}, fmt.Errorf(
-			"completion append requires a workspace completion event",
-		)
-	}
-	readSet := make(
-		[]JournalResourceRevision, 0, len(reads),
-	)
-	for _, resource := range reads {
-		revision, _ := NewJournalResourceRevision(
-			resource, snapshot.Revision(resource),
-		)
-		readSet = append(readSet, revision)
-	}
-	return newPrivilegedJournalAppend(
-		event, occurredAt, readSet, writes,
-	)
+	return NewJournalAppend(event, occurredAt)
 }
 
 func verifyRecordedWorkspaceCompletion(
@@ -298,9 +280,6 @@ func preCompletionReportDigest(
 	)
 	for _, record := range prefix.records {
 		prefix.head = record.eventHash
-		prefix.revisions = applyJournalWrites(
-			prefix.revisions, record.writeSet,
-		)
 	}
 	report, err := RebuildWorkspaceReport(prefix, definition)
 	if err != nil {

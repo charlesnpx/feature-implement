@@ -62,7 +62,7 @@ func initializeLocalTarget(
 			return JournalSnapshot{}, err
 		}
 		appendRequest, err := localTargetJournalAppend(
-			intent, occurredAt, snapshot,
+			intent, occurredAt,
 		)
 		if err != nil {
 			return JournalSnapshot{}, err
@@ -185,7 +185,7 @@ func initializeLocalTarget(
 		return JournalSnapshot{}, err
 	}
 	appendRequest, err := localTargetJournalAppend(
-		completion, occurredAt, snapshot,
+		completion, occurredAt,
 	)
 	if err != nil {
 		return JournalSnapshot{}, err
@@ -252,24 +252,13 @@ func expectedLocalTargetReflogMarker(
 func localTargetJournalAppend(
 	event WorkspaceJournalEvent,
 	occurredAt time.Time,
-	snapshot JournalSnapshot,
 ) (JournalAppend, error) {
-	reads, writes, ok := localTargetJournalEventResources(event)
-	if !ok {
+	if !isLocalTargetJournalEvent(event) {
 		return JournalAppend{}, fmt.Errorf(
 			"local target append requires a local target journal event",
 		)
 	}
-	revisions := make([]JournalResourceRevision, 0, len(reads))
-	for _, resource := range reads {
-		revision, _ := NewJournalResourceRevision(
-			resource, snapshot.Revision(resource),
-		)
-		revisions = append(revisions, revision)
-	}
-	return newPrivilegedJournalAppend(
-		event, occurredAt, revisions, writes,
-	)
+	return NewJournalAppend(event, occurredAt)
 }
 
 func injectLocalTargetInitializationFault(

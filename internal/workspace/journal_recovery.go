@@ -207,15 +207,7 @@ func (journal *WorkspaceJournal) completeJournalRecovery(intent journalRecoveryI
 	if err != nil {
 		return JournalRecoveryReport{}, err
 	}
-	workspaceResource := WorkspaceJournalResource(intent.workspaceID)
-	recoveryResource := RecoveryJournalResource(intent.workspaceID)
-	workspaceRevision, _ := NewJournalResourceRevision(workspaceResource, snapshot.Revision(workspaceResource))
-	recoveryRevision, _ := NewJournalResourceRevision(recoveryResource, snapshot.Revision(recoveryResource))
-	request, err := newPrivilegedJournalAppend(
-		event, occurredAt,
-		[]JournalResourceRevision{workspaceRevision, recoveryRevision},
-		[]JournalResource{workspaceResource, recoveryResource},
-	)
+	request, err := NewJournalAppend(event, occurredAt)
 	if err != nil {
 		return JournalRecoveryReport{}, err
 	}

@@ -640,12 +640,6 @@ func TestJournaledReviewFixReplayBudgetExactHeadAndBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if revision := snapshot.Revision(workspace.ReviewFixBudgetJournalResource(scenario.attempt.AttemptID())); revision != 2 {
-		t.Fatalf("durable review-fix budget revision = %d, want 2", revision)
-	}
-	if revision := snapshot.Revision(workspace.ReviewFixJournalResource(scenario.attempt.AttemptID())); revision != 8 {
-		t.Fatalf("durable review-fix state revision = %d, want 8", revision)
-	}
 	replayed, err := workspace.RebuildWorkspaceRuntime(snapshot)
 	if err != nil {
 		t.Fatal(err)
@@ -811,12 +805,6 @@ func TestJournaledCommitRebaseRetryIsIdempotentAndRerunsChecks(t *testing.T) {
 	}
 	state, _ := result.Protocol()
 	step := state.Protocol().Steps()[0]
-	beforeRebase, err := scenario.harness.journal.ReadSnapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stepResource := workspace.CommitStepJournalResource(scenario.attempt.AttemptID(), step.ID(), 1)
-	stepRevision := beforeRebase.Revision(stepResource)
 	newBase, newTree, newCommit := mustGitObject(t, '5'), mustGitObject(t, '6'), mustGitObject(t, '7')
 	rebased, err := workspace.NewGitCommitInspection(
 		newCommit, []workspace.GitObjectID{newBase}, newTree,
@@ -843,13 +831,10 @@ func TestJournaledCommitRebaseRetryIsIdempotentAndRerunsChecks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	newEvidence := state.CompletedSteps()[0].Commit().EvidenceDigest()
-	if afterRebase.Revision(stepResource) != stepRevision+1 ||
-		afterRebase.Revision(workspace.EvidenceJournalResource(newEvidence)) != 1 {
-		t.Fatalf(
-			"rebase resources: step=%d evidence=%d",
-			afterRebase.Revision(stepResource), afterRebase.Revision(workspace.EvidenceJournalResource(newEvidence)),
-		)
+	records := afterRebase.Records()
+	if len(records) == 0 ||
+		records[len(records)-1].EventType() != workspace.JournalEventCommitProtocolRebased {
+		t.Fatalf("rebase journal tail = %#v", records)
 	}
 
 	scenario.git.head = newBase
@@ -1147,7 +1132,7 @@ func TestReviewFixJournalCodecRejectsUnknownPayloadFields(t *testing.T) {
 	}
 }
 
-func TestCommitEventsRejectDirectNonPrivilegedAppend(t *testing.T) {
+func TestCommitEventsUseOrdinaryAppendConstruction(t *testing.T) {
 	t.Parallel()
 
 	scenario := newJournalCommitScenario(t)
@@ -1164,9 +1149,9 @@ func TestCommitEventsRejectDirectNonPrivilegedAppend(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := workspace.NewJournalAppend(
-		event, mustTime(t, "2026-07-21T12:08:00Z"), nil, nil,
-	); err == nil || !strings.Contains(err.Error(), "Git-verified commit workflow") {
-		t.Fatalf("direct commit append error = %v", err)
+		event, mustTime(t, "2026-07-21T12:08:00Z"),
+	); err != nil {
+		t.Fatalf("construct direct commit append: %v", err)
 	}
 	review := configuredReviewFixProtocol(t, scenario.harness.definition)
 	reviewEvent, err := workspace.NewReviewFixReservedJournalEvent(
@@ -1177,9 +1162,9 @@ func TestCommitEventsRejectDirectNonPrivilegedAppend(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := workspace.NewJournalAppend(
-		reviewEvent, mustTime(t, "2026-07-21T12:08:01Z"), nil, nil,
-	); err == nil || !strings.Contains(err.Error(), "Git-verified commit workflow") {
-		t.Fatalf("direct review-fix append error = %v", err)
+		reviewEvent, mustTime(t, "2026-07-21T12:08:01Z"),
+	); err != nil {
+		t.Fatalf("construct direct review-fix append: %v", err)
 	}
 }
 

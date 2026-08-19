@@ -161,37 +161,6 @@ func digestFeatureRefCreationIntent(
 	return DigestBytes(content), nil
 }
 
-func featureRefJournalResource(
-	workspaceID ID,
-	featureRef string,
-) JournalResource {
-	resource, _ := NewJournalResource(
-		JournalResourceFeatureRef,
-		workspaceID.String()+":"+featureRef,
-	)
-	return resource
-}
-
-func localTargetJournalEventResources(
-	event WorkspaceJournalEvent,
-) ([]JournalResource, []JournalResource, bool) {
-	var workspaceID ID
-	var featureRef string
-	switch event := event.(type) {
-	case FeatureRefCreationIntendedJournalEvent:
-		workspaceID, featureRef = event.workspaceID, event.binding.featureRef
-	case FeatureRefCreatedJournalEvent:
-		workspaceID, featureRef = event.workspaceID, event.featureRef
-	default:
-		return nil, nil, false
-	}
-	resources := []JournalResource{
-		WorkspaceJournalResource(workspaceID),
-		featureRefJournalResource(workspaceID, featureRef),
-	}
-	return resources, append([]JournalResource(nil), resources...), true
-}
-
 func isLocalTargetJournalEvent(event WorkspaceJournalEvent) bool {
 	switch event.(type) {
 	case FeatureRefCreationIntendedJournalEvent, FeatureRefCreatedJournalEvent:

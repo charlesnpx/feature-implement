@@ -603,57 +603,6 @@ func (event AttemptResumedJournalEvent) LeaseID() ID               { return even
 func (event AttemptResumedJournalEvent) Goal() GoalBinding         { return event.goal }
 func (event AttemptResumedJournalEvent) SerialSegment() ID         { return event.serialSegment }
 
-func AttemptJournalResource(attemptID ID) JournalResource {
-	resource, _ := NewJournalResource(JournalResourceAttempt, attemptID.String())
-	return resource
-}
-
-func MergeUnitJournalResource(reference MergeUnitReference) JournalResource {
-	resource, _ := NewJournalResource(JournalResourceMergeUnit, reference.String())
-	return resource
-}
-
-func LeaseJournalResource(leaseID ID) JournalResource {
-	resource, _ := NewJournalResource(JournalResourceLease, leaseID.String())
-	return resource
-}
-
-func OrchestrationJournalResource(boundaryID ID, kind OrchestrationAcknowledgementKind) JournalResource {
-	identity := boundaryID.String() + "/" + string(kind)
-	resource, _ := NewJournalResource(JournalResourceOrchestration, identity)
-	return resource
-}
-
-func BoundaryDirectiveJournalResource(boundaryID ID) JournalResource {
-	resource, _ := NewJournalResource(JournalResourceOrchestration, boundaryID.String()+"/directive")
-	return resource
-}
-
-func NextGoalIntentJournalResource(boundaryID ID) JournalResource {
-	resource, _ := NewJournalResource(JournalResourceOrchestration, boundaryID.String()+"/next-goal-intent")
-	return resource
-}
-
-func GoalJournalResource(goal GoalBinding) JournalResource {
-	resource, _ := NewJournalResource(JournalResourceGoal, string(goal.scope)+"/"+goal.id.String())
-	return resource
-}
-
-func EvidenceJournalResource(digest Digest) JournalResource {
-	resource, _ := NewJournalResource(JournalResourceEvidence, digest.String())
-	return resource
-}
-
-func SerialSegmentJournalResource(segment ID) JournalResource {
-	resource, _ := NewJournalResource(JournalResourceSerialSegment, segment.String())
-	return resource
-}
-
-func OwnerResponseJournalResource(boundaryID ID) JournalResource {
-	resource, _ := NewJournalResource(JournalResourceApproval, boundaryID.String()+"/owner-response")
-	return resource
-}
-
 func isAttemptJournalEvent(event WorkspaceJournalEvent) bool {
 	switch event.(type) {
 	case AttemptReservedJournalEvent, AttemptMaterializationIntendedJournalEvent,
@@ -666,88 +615,6 @@ func isAttemptJournalEvent(event WorkspaceJournalEvent) bool {
 	default:
 		return false
 	}
-}
-
-func attemptJournalEventResources(event WorkspaceJournalEvent) ([]JournalResource, []JournalResource, bool) {
-	var workspaceID ID
-	var generation Digest
-	var reads, writes []JournalResource
-	switch event := event.(type) {
-	case AttemptReservedJournalEvent:
-		workspaceID, generation = event.workspaceID, event.generation
-		reads = []JournalResource{
-			MergeUnitJournalResource(event.mergeUnit), AttemptJournalResource(event.attemptID),
-			GoalJournalResource(event.goal),
-		}
-		writes = append([]JournalResource(nil), reads...)
-		if !event.serialSegment.IsZero() {
-			segment := SerialSegmentJournalResource(event.serialSegment)
-			reads, writes = append(reads, segment), append(writes, segment)
-		}
-	case AttemptMaterializationIntendedJournalEvent:
-		workspaceID, generation = event.workspaceID, event.generation
-		reads = []JournalResource{AttemptJournalResource(event.attemptID)}
-		writes = append([]JournalResource(nil), reads...)
-	case AttemptStartedJournalEvent:
-		workspaceID, generation = event.workspaceID, event.generation
-		reads = []JournalResource{
-			AttemptJournalResource(event.attemptID), LeaseJournalResource(event.leaseID),
-			GoalJournalResource(event.goal),
-		}
-		writes = append([]JournalResource(nil), reads...)
-	case AttemptBoundaryReachedJournalEvent:
-		workspaceID, generation = event.workspaceID, event.generation
-		reads = []JournalResource{
-			AttemptJournalResource(event.attemptID), LeaseJournalResource(event.leaseID),
-			GoalJournalResource(event.goal),
-			EvidenceJournalResource(event.evidenceDigest),
-		}
-		writes = append([]JournalResource(nil), reads...)
-		if event.checkpoint == AttemptCheckpointCompleteGoalAndWait {
-			directive := BoundaryDirectiveJournalResource(event.boundaryID)
-			reads, writes = append(reads, directive), append(writes, directive)
-		}
-		if !event.serialSegment.IsZero() {
-			segment := SerialSegmentJournalResource(event.serialSegment)
-			reads, writes = append(reads, segment), append(writes, segment)
-		}
-	case AttemptNextGoalIntendedJournalEvent:
-		workspaceID, generation = event.workspaceID, event.generation
-		intent := NextGoalIntentJournalResource(event.boundaryID)
-		reads = []JournalResource{AttemptJournalResource(event.attemptID), intent, GoalJournalResource(event.goal)}
-		writes = append([]JournalResource(nil), reads...)
-	case AttemptOrchestrationAcknowledgedJournalEvent:
-		workspaceID, generation = event.workspaceID, event.generation
-		orchestration := OrchestrationJournalResource(event.boundaryID, event.kind)
-		reads = []JournalResource{AttemptJournalResource(event.attemptID), orchestration, GoalJournalResource(event.goal)}
-		if event.kind == AcknowledgementNextGoalCreated {
-			reads = append(reads, NextGoalIntentJournalResource(event.boundaryID))
-		}
-		writes = append([]JournalResource(nil), reads...)
-	case AttemptOwnerResponseJournalEvent:
-		workspaceID, generation = event.workspaceID, event.generation
-		approval := OwnerResponseJournalResource(event.boundaryID)
-		reads = []JournalResource{
-			AttemptJournalResource(event.attemptID), approval,
-			GoalJournalResource(event.goal),
-		}
-		writes = append([]JournalResource(nil), reads...)
-	case AttemptResumedJournalEvent:
-		workspaceID, generation = event.workspaceID, event.generation
-		reads = []JournalResource{
-			AttemptJournalResource(event.attemptID), LeaseJournalResource(event.leaseID),
-			GoalJournalResource(event.goal),
-		}
-		writes = append([]JournalResource(nil), reads...)
-		if !event.serialSegment.IsZero() {
-			segment := SerialSegmentJournalResource(event.serialSegment)
-			reads, writes = append(reads, segment), append(writes, segment)
-		}
-	default:
-		return nil, nil, false
-	}
-	reads = append(reads, WorkspaceJournalResource(workspaceID), GenerationJournalResource(generation))
-	return reads, writes, true
 }
 
 func cloneAttemptJournalEvent(event WorkspaceJournalEvent) WorkspaceJournalEvent {
@@ -973,11 +840,6 @@ func deriveOrchestrationAcknowledgementRequestDigest(
 		return Digest{}, err
 	}
 	return DigestBytes(content), nil
-}
-
-func normalizedAttemptEventResources(resources []JournalResource) []JournalResource {
-	result, _ := normalizeJournalWriteSet(resources)
-	return result
 }
 
 func sortedEvidenceForProjection(values []Evidence) []Evidence {

@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
 	"syscall"
 )
@@ -47,12 +46,6 @@ type JournalOptions struct {
 	FaultInjector JournalFaultInjector
 }
 
-type StaleJournalResourceError struct {
-	Resource JournalResource
-	Expected uint64
-	Observed uint64
-}
-
 type JournalAppendAmbiguousError struct {
 	EventHash Digest
 	Cause     error
@@ -63,13 +56,6 @@ func (err JournalAppendAmbiguousError) Error() string {
 }
 
 func (err JournalAppendAmbiguousError) Unwrap() error { return err.Cause }
-
-func (err StaleJournalResourceError) Error() string {
-	return fmt.Sprintf(
-		"stale journal resource %s/%s: expected revision %d, observed %d",
-		err.Resource.kind, err.Resource.identity, err.Expected, err.Observed,
-	)
-}
 
 type IncompleteJournalTailError struct {
 	offset        int64
@@ -91,7 +77,6 @@ type JournalSnapshot struct {
 	records    []JournalRecord
 	head       Digest
 	byteLength int64
-	revisions  []JournalResourceRevision
 }
 
 func (snapshot JournalSnapshot) Records() []JournalRecord {
@@ -99,17 +84,6 @@ func (snapshot JournalSnapshot) Records() []JournalRecord {
 }
 func (snapshot JournalSnapshot) Head() Digest      { return snapshot.head }
 func (snapshot JournalSnapshot) ByteLength() int64 { return snapshot.byteLength }
-func (snapshot JournalSnapshot) ResourceRevisions() []JournalResourceRevision {
-	return append([]JournalResourceRevision(nil), snapshot.revisions...)
-}
-func (snapshot JournalSnapshot) Revision(resource JournalResource) uint64 {
-	for _, revision := range snapshot.revisions {
-		if revision.resource == resource {
-			return revision.revision
-		}
-	}
-	return 0
-}
 
 type WorkspaceJournal struct {
 	workspaceDir string
@@ -361,9 +335,6 @@ func (journal *WorkspaceJournal) appendToSnapshot(snapshot JournalSnapshot, requ
 	if request.event == nil {
 		return JournalRecord{}, fmt.Errorf("journal append requires a typed event")
 	}
-	if err := validateJournalCAS(snapshot, request.readSet); err != nil {
-		return JournalRecord{}, err
-	}
 	record, err := buildJournalRecord(snapshot, request)
 	if err != nil {
 		return JournalRecord{}, err
@@ -534,9 +505,6 @@ func parseJournalBytes(content []byte) (JournalSnapshot, *IncompleteJournalTailE
 		if record.previousHash != snapshot.head {
 			return JournalSnapshot{}, nil, fmt.Errorf("journal record %d previous hash mismatch", record.sequence)
 		}
-		if err := validateJournalCAS(snapshot, record.readSet); err != nil {
-			return JournalSnapshot{}, nil, fmt.Errorf("journal record %d: %w", record.sequence, err)
-		}
 		nextRuntime, err := reduceWorkspaceRuntime(runtime, record)
 		if err != nil {
 			return JournalSnapshot{}, nil, fmt.Errorf("journal record %d violates runtime invariants: %w", record.sequence, err)
@@ -544,7 +512,6 @@ func parseJournalBytes(content []byte) (JournalSnapshot, *IncompleteJournalTailE
 		runtime = nextRuntime
 		snapshot.records = append(snapshot.records, record)
 		snapshot.head = record.eventHash
-		snapshot.revisions = applyJournalWrites(snapshot.revisions, record.writeSet)
 		lineStart = lineEnd + 1
 		snapshot.byteLength = int64(lineStart)
 	}
@@ -552,36 +519,7 @@ func parseJournalBytes(content []byte) (JournalSnapshot, *IncompleteJournalTailE
 }
 
 func emptyJournalSnapshot() JournalSnapshot {
-	return JournalSnapshot{head: JournalGenesisHash(), revisions: []JournalResourceRevision{}}
-}
-
-func validateJournalCAS(snapshot JournalSnapshot, reads []JournalResourceRevision) error {
-	for _, expected := range reads {
-		observed := snapshot.Revision(expected.resource)
-		if observed != expected.revision {
-			return StaleJournalResourceError{Resource: expected.resource, Expected: expected.revision, Observed: observed}
-		}
-	}
-	return nil
-}
-
-func applyJournalWrites(revisions []JournalResourceRevision, writes []JournalResource) []JournalResourceRevision {
-	byKey := make(map[string]JournalResourceRevision, len(revisions)+len(writes))
-	for _, revision := range revisions {
-		byKey[revision.resource.key()] = revision
-	}
-	for _, resource := range writes {
-		current := byKey[resource.key()]
-		current.resource = resource
-		current.revision++
-		byKey[resource.key()] = current
-	}
-	result := make([]JournalResourceRevision, 0, len(byKey))
-	for _, revision := range byKey {
-		result = append(result, revision)
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].resource.key() < result[j].resource.key() })
-	return result
+	return JournalSnapshot{head: JournalGenesisHash()}
 }
 
 func (journal *WorkspaceJournal) requireOpen() error {

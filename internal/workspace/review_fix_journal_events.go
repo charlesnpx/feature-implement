@@ -285,31 +285,6 @@ func (event ReviewFixCheckRecordedJournalEvent) Evidence() CommitCheckEvidence {
 	return cloneOneCommitCheckEvidence(event.evidence)
 }
 
-func ReviewFixJournalResource(attemptID ID) JournalResource {
-	resource, _ := NewJournalResource(JournalResourceReviewFix, attemptID.String()+"/protocol")
-	return resource
-}
-
-func ReviewFixBudgetJournalResource(attemptID ID) JournalResource {
-	resource, _ := NewJournalResource(JournalResourceBudget, attemptID.String()+"/review-fixes")
-	return resource
-}
-
-func ReviewFixStepJournalResource(attemptID, stepID ID, ordinal uint16) JournalResource {
-	identity := fmt.Sprintf("%s/review-fix/%d/%s", attemptID, ordinal, stepID)
-	resource, _ := NewJournalResource(JournalResourceCommitStep, identity)
-	return resource
-}
-
-func ReviewFixCheckJournalResource(
-	attemptID, stepID, checkID ID,
-	ordinal, checkOrdinal uint16,
-) JournalResource {
-	identity := fmt.Sprintf("%s/review-fix/%d/%s/%d/%s", attemptID, ordinal, stepID, checkOrdinal, checkID)
-	resource, _ := NewJournalResource(JournalResourceCheck, identity)
-	return resource
-}
-
 func isReviewFixJournalEvent(event WorkspaceJournalEvent) bool {
 	switch event.(type) {
 	case ReviewFixReservedJournalEvent, ReviewFixIntendedJournalEvent,
@@ -318,59 +293,6 @@ func isReviewFixJournalEvent(event WorkspaceJournalEvent) bool {
 	default:
 		return false
 	}
-}
-
-func reviewFixJournalEventResources(event WorkspaceJournalEvent) ([]JournalResource, []JournalResource, bool) {
-	var workspaceID, attemptID, stepID ID
-	var generation Digest
-	var ordinal uint16
-	var reads []JournalResource
-	switch event := event.(type) {
-	case ReviewFixReservedJournalEvent:
-		workspaceID, generation, attemptID, ordinal = event.workspaceID, event.generation, event.attemptID, event.ordinal
-		step, err := event.protocol.Step(event.ordinal)
-		if err != nil {
-			return nil, nil, false
-		}
-		stepID = step.id
-		reads = []JournalResource{
-			AttemptJournalResource(attemptID), ReviewFixJournalResource(attemptID),
-			ReviewFixBudgetJournalResource(attemptID), ReviewFixStepJournalResource(attemptID, stepID, ordinal),
-			ReviewJournalResource(attemptID), ReviewFixReservationJournalResource(attemptID, ordinal),
-		}
-	case ReviewFixIntendedJournalEvent:
-		workspaceID, generation, attemptID, ordinal, stepID =
-			event.workspaceID, event.generation, event.attemptID, event.ordinal, event.stepID
-		reads = []JournalResource{
-			AttemptJournalResource(attemptID), ReviewFixJournalResource(attemptID),
-			ReviewFixStepJournalResource(attemptID, stepID, ordinal),
-			ReviewJournalResource(attemptID), ReviewFixReservationJournalResource(attemptID, ordinal),
-		}
-	case ReviewFixCommitRecordedJournalEvent:
-		workspaceID, generation, attemptID, ordinal, stepID =
-			event.workspaceID, event.generation, event.attemptID, event.ordinal, event.evidence.stepID
-		reads = []JournalResource{
-			AttemptJournalResource(attemptID), ReviewFixJournalResource(attemptID),
-			ReviewFixStepJournalResource(attemptID, stepID, ordinal),
-			EvidenceJournalResource(event.evidence.evidence),
-			ReviewJournalResource(attemptID), ReviewFixReservationJournalResource(attemptID, ordinal),
-		}
-	case ReviewFixCheckRecordedJournalEvent:
-		workspaceID, generation, attemptID, ordinal, stepID =
-			event.workspaceID, event.generation, event.attemptID, event.ordinal, event.evidence.stepID
-		reads = []JournalResource{
-			AttemptJournalResource(attemptID), ReviewFixJournalResource(attemptID),
-			ReviewFixCheckJournalResource(
-				attemptID, stepID, event.evidence.checkID, ordinal, event.checkOrdinal,
-			),
-			EvidenceJournalResource(event.evidence.evidence),
-			ReviewJournalResource(attemptID), ReviewFixReservationJournalResource(attemptID, ordinal),
-		}
-	default:
-		return nil, nil, false
-	}
-	reads = append(reads, WorkspaceJournalResource(workspaceID), GenerationJournalResource(generation))
-	return reads, append([]JournalResource(nil), reads...), true
 }
 
 func cloneReviewFixJournalEvent(event WorkspaceJournalEvent) WorkspaceJournalEvent {

@@ -258,14 +258,8 @@ func InitializeWorkspaceV2WithOptions(
 		if err != nil {
 			return WorkspaceInitializationResult{}, err
 		}
-		workspaceResource := WorkspaceJournalResource(definition.workspace.id)
-		generationResource := GenerationJournalResource(definition.generation)
-		workspaceRevision, _ := NewJournalResourceRevision(workspaceResource, snapshot.Revision(workspaceResource))
-		generationRevision, _ := NewJournalResourceRevision(generationResource, snapshot.Revision(generationResource))
 		appendRequest, err := NewJournalAppend(
 			event, occurredAt,
-			[]JournalResourceRevision{workspaceRevision, generationRevision},
-			[]JournalResource{workspaceResource, generationResource},
 		)
 		if err != nil {
 			return WorkspaceInitializationResult{}, err

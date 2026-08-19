@@ -2,118 +2,13 @@ package workspace
 
 import (
 	"fmt"
-	"sort"
-	"strings"
 	"time"
 )
 
-const JournalSchemaVersion = 2
-
-type JournalResourceKind string
-
 const (
-	JournalResourceWorkspace      JournalResourceKind = "workspace"
-	JournalResourceGeneration     JournalResourceKind = "generation"
-	JournalResourceRecovery       JournalResourceKind = "recovery"
-	JournalResourceAttempt        JournalResourceKind = "attempt"
-	JournalResourceMergeUnit      JournalResourceKind = "merge_unit"
-	JournalResourceLease          JournalResourceKind = "lease"
-	JournalResourceOrchestration  JournalResourceKind = "orchestration"
-	JournalResourceGoal           JournalResourceKind = "goal"
-	JournalResourceSerialSegment  JournalResourceKind = "serial_segment"
-	JournalResourceBudget         JournalResourceKind = "budget"
-	JournalResourceApproval       JournalResourceKind = "approval"
-	JournalResourceEvidence       JournalResourceKind = "evidence"
-	JournalResourceCommitProtocol JournalResourceKind = "commit_protocol"
-	JournalResourceReviewFix      JournalResourceKind = "review_fix"
-	JournalResourceReview         JournalResourceKind = "review"
-	JournalResourceReviewProfile  JournalResourceKind = "review_profile"
-	JournalResourceCommitStep     JournalResourceKind = "commit_step"
-	JournalResourceCheck          JournalResourceKind = "check"
-	JournalResourceFeatureRef     JournalResourceKind = "feature_ref"
-	JournalResourceIntegration    JournalResourceKind = "integration"
-	JournalResourceCompletion     JournalResourceKind = "completion"
+	JournalSchemaVersion       = 2
+	journalRecordSchemaVersion = 3
 )
-
-func (kind JournalResourceKind) valid() bool {
-	switch kind {
-	case JournalResourceWorkspace, JournalResourceGeneration, JournalResourceRecovery,
-		JournalResourceAttempt, JournalResourceMergeUnit, JournalResourceLease,
-		JournalResourceOrchestration, JournalResourceGoal, JournalResourceSerialSegment,
-		JournalResourceBudget, JournalResourceApproval, JournalResourceEvidence,
-		JournalResourceCommitProtocol, JournalResourceReviewFix, JournalResourceCommitStep,
-		JournalResourceReview, JournalResourceReviewProfile, JournalResourceCheck,
-		JournalResourceFeatureRef, JournalResourceIntegration,
-		JournalResourceCompletion:
-		return true
-	default:
-		return false
-	}
-}
-
-// JournalResource is an immutable typed CAS resource. Identity is deliberately
-// opaque to the journal; domain reducers own its meaning.
-type JournalResource struct {
-	kind     JournalResourceKind
-	identity string
-}
-
-func NewJournalResource(kind JournalResourceKind, identity string) (JournalResource, error) {
-	if !kind.valid() {
-		return JournalResource{}, fmt.Errorf("unsupported journal resource kind %q", kind)
-	}
-	identity = strings.TrimSpace(identity)
-	if err := validateBoundedText("journal resource identity", identity, 2048); err != nil {
-		return JournalResource{}, err
-	}
-	return JournalResource{kind: kind, identity: identity}, nil
-}
-
-func WorkspaceJournalResource(workspaceID ID) JournalResource {
-	resource, _ := NewJournalResource(JournalResourceWorkspace, workspaceID.String())
-	return resource
-}
-
-func GenerationJournalResource(generation Digest) JournalResource {
-	resource, _ := NewJournalResource(JournalResourceGeneration, generation.String())
-	return resource
-}
-
-func RecoveryJournalResource(workspaceID ID) JournalResource {
-	resource, _ := NewJournalResource(JournalResourceRecovery, workspaceID.String())
-	return resource
-}
-
-func CompletionJournalResource(workspaceID ID) JournalResource {
-	resource, _ := NewJournalResource(
-		JournalResourceCompletion, workspaceID.String(),
-	)
-	return resource
-}
-
-func (resource JournalResource) Kind() JournalResourceKind { return resource.kind }
-func (resource JournalResource) Identity() string          { return resource.identity }
-func (resource JournalResource) IsZero() bool {
-	return !resource.kind.valid() || resource.identity == ""
-}
-func (resource JournalResource) key() string {
-	return string(resource.kind) + "\x00" + resource.identity
-}
-
-type JournalResourceRevision struct {
-	resource JournalResource
-	revision uint64
-}
-
-func NewJournalResourceRevision(resource JournalResource, revision uint64) (JournalResourceRevision, error) {
-	if resource.IsZero() {
-		return JournalResourceRevision{}, fmt.Errorf("journal resource revision requires a resource")
-	}
-	return JournalResourceRevision{resource: resource, revision: revision}, nil
-}
-
-func (revision JournalResourceRevision) Resource() JournalResource { return revision.resource }
-func (revision JournalResourceRevision) Revision() uint64          { return revision.revision }
 
 type JournalEventType string
 
@@ -274,85 +169,17 @@ func (event JournalTailRecoveredEvent) ResultingHead() Digest { return event.res
 type JournalAppend struct {
 	event      WorkspaceJournalEvent
 	occurredAt time.Time
-	readSet    []JournalResourceRevision
-	writeSet   []JournalResource
 }
 
 func NewJournalAppend(
 	event WorkspaceJournalEvent,
 	occurredAt time.Time,
-	readSet []JournalResourceRevision,
-	writeSet []JournalResource,
-) (JournalAppend, error) {
-	return newJournalAppend(event, occurredAt, readSet, writeSet, false)
-}
-
-func newPrivilegedJournalAppend(
-	event WorkspaceJournalEvent,
-	occurredAt time.Time,
-	readSet []JournalResourceRevision,
-	writeSet []JournalResource,
-) (JournalAppend, error) {
-	return newJournalAppend(event, occurredAt, readSet, writeSet, true)
-}
-
-func newJournalAppend(
-	event WorkspaceJournalEvent,
-	occurredAt time.Time,
-	readSet []JournalResourceRevision,
-	writeSet []JournalResource,
-	privileged bool,
 ) (JournalAppend, error) {
 	if event == nil {
 		return JournalAppend{}, fmt.Errorf("journal append requires a typed event")
 	}
 	if !supportedWorkspaceJournalEvent(event) {
 		return JournalAppend{}, fmt.Errorf("unsupported workspace journal event %T", event)
-	}
-	if !privileged {
-		switch event.(type) {
-		case JournalTailRecoveredEvent:
-			return JournalAppend{}, fmt.Errorf("journal recovery events must use the explicit recovery workflow")
-		case AttemptOrchestrationAcknowledgedJournalEvent:
-			return JournalAppend{}, fmt.Errorf("orchestration acknowledgements must use the idempotent acknowledgement workflow")
-		case AttemptNextGoalIntendedJournalEvent:
-			return JournalAppend{}, fmt.Errorf("next-goal intents must use the durable intent workflow")
-		case AttemptOwnerResponseJournalEvent:
-			return JournalAppend{}, fmt.Errorf("owner responses must use the exact-boundary response workflow")
-		case AttemptResumedJournalEvent:
-			return JournalAppend{}, fmt.Errorf("attempt resume must use the verified resume workflow")
-		case FeatureRefCreationIntendedJournalEvent, FeatureRefCreatedJournalEvent:
-			return JournalAppend{}, fmt.Errorf(
-				"feature-ref events must use the recoverable local target initialization workflow",
-			)
-		case AttemptReservedJournalEvent:
-			return JournalAppend{}, fmt.Errorf("attempt reservation must use the ref-verified reservation workflow")
-		case AttemptMaterializationIntendedJournalEvent:
-			return JournalAppend{}, fmt.Errorf("materialization intent must use the reconciled materialization workflow")
-		case AttemptStartedJournalEvent:
-			return JournalAppend{}, fmt.Errorf("attempt start must use the Git-verified materialization workflow")
-		case AttemptBoundaryReachedJournalEvent:
-			return JournalAppend{}, fmt.Errorf("attempt boundary must use the atomic boundary workflow")
-		case CommitProtocolStartedJournalEvent, CommitStepIntendedJournalEvent,
-			CommitStepRecordedJournalEvent, CommitCheckRecordedJournalEvent,
-			CommitProtocolRebasedJournalEvent, ReviewFixReservedJournalEvent,
-			ReviewFixIntendedJournalEvent, ReviewFixCommitRecordedJournalEvent,
-			ReviewFixCheckRecordedJournalEvent:
-			return JournalAppend{}, fmt.Errorf("commit protocol events must use the Git-verified commit workflow")
-		case ReviewHeadAdoptedJournalEvent, ReviewRoundStartedJournalEvent, ReviewInvocationReservedJournalEvent,
-			ReviewInvocationFailedJournalEvent, ReviewResultRecordedJournalEvent,
-			ReviewFindingFixReservedJournalEvent, ReviewFixAppliedJournalEvent:
-			return JournalAppend{}, fmt.Errorf("review events must use the exact-head review workflow")
-		case MergeUnitIntegrationIntendedJournalEvent,
-			MergeUnitIntegratedJournalEvent:
-			return JournalAppend{}, fmt.Errorf(
-				"integration events must use the ancestry-checked CAS integration workflow",
-			)
-		case WorkspaceCompletedJournalEvent:
-			return JournalAppend{}, fmt.Errorf(
-				"workspace completion events must use the complete local verification workflow",
-			)
-		}
 	}
 	if occurredAt.IsZero() {
 		return JournalAppend{}, fmt.Errorf("journal append occurrence time is required")
@@ -363,23 +190,8 @@ func newJournalAppend(
 	if event.boundGeneration().IsZero() {
 		return JournalAppend{}, fmt.Errorf("journal event generation binding is required")
 	}
-	reads, err := normalizeJournalReadSet(readSet)
-	if err != nil {
-		return JournalAppend{}, err
-	}
-	writes, err := normalizeJournalWriteSet(writeSet)
-	if err != nil {
-		return JournalAppend{}, err
-	}
-	if len(writes) == 0 {
-		return JournalAppend{}, fmt.Errorf("journal append requires at least one written resource")
-	}
-	if err := validateJournalEventResources(event, reads, writes); err != nil {
-		return JournalAppend{}, err
-	}
 	return JournalAppend{
 		event: cloneWorkspaceJournalEvent(event), occurredAt: occurredAt.UTC(),
-		readSet: reads, writeSet: writes,
 	}, nil
 }
 
@@ -395,75 +207,10 @@ func supportedWorkspaceJournalEvent(event WorkspaceJournalEvent) bool {
 	}
 }
 
-func validateJournalEventResources(
-	event WorkspaceJournalEvent,
-	reads []JournalResourceRevision,
-	writes []JournalResource,
-) error {
-	var expectedReads, expectedWrites []JournalResource
-	switch event := event.(type) {
-	case WorkspaceInitializedJournalEvent:
-		expectedReads = []JournalResource{
-			WorkspaceJournalResource(event.workspaceID),
-			GenerationJournalResource(event.generation),
-		}
-		expectedWrites = append([]JournalResource(nil), expectedReads...)
-	case JournalTailRecoveredEvent:
-		expectedReads = []JournalResource{
-			WorkspaceJournalResource(event.workspaceID),
-			RecoveryJournalResource(event.workspaceID),
-		}
-		expectedWrites = append([]JournalResource(nil), expectedReads...)
-	default:
-		var ok bool
-		expectedReads, expectedWrites, ok = localTargetJournalEventResources(event)
-		if !ok {
-			expectedReads, expectedWrites, ok = attemptJournalEventResources(event)
-		}
-		if !ok {
-			expectedReads, expectedWrites, ok = commitJournalEventResources(event)
-		}
-		if !ok {
-			expectedReads, expectedWrites, ok = reviewJournalEventResources(event)
-		}
-		if !ok {
-			expectedReads, expectedWrites, ok =
-				integrationJournalEventResources(event)
-		}
-		if !ok {
-			expectedReads, expectedWrites, ok =
-				completionJournalEventResources(event)
-		}
-		if !ok {
-			return fmt.Errorf("unsupported workspace journal event %T", event)
-		}
-	}
-	expectedWrites, _ = normalizeJournalWriteSet(expectedWrites)
-	if len(reads) != len(expectedReads) || len(writes) != len(expectedWrites) {
-		return fmt.Errorf("journal event %s has an invalid CAS resource set", event.eventType())
-	}
-	expectedReads, _ = normalizeJournalWriteSet(expectedReads)
-	for index := range expectedReads {
-		if reads[index].resource != expectedReads[index] {
-			return fmt.Errorf("journal event %s has an invalid CAS read set", event.eventType())
-		}
-	}
-	if !equalJournalWriteSets(writes, expectedWrites) {
-		return fmt.Errorf("journal event %s has an invalid CAS write set", event.eventType())
-	}
-	return nil
-}
-
 func (appendRequest JournalAppend) Event() WorkspaceJournalEvent {
 	return cloneWorkspaceJournalEvent(appendRequest.event)
 }
 func (appendRequest JournalAppend) OccurredAt() time.Time { return appendRequest.occurredAt }
-func (appendRequest JournalAppend) ReadSet() []JournalResourceRevision {
-	return append([]JournalResourceRevision(nil), appendRequest.readSet...)
-}
-func (appendRequest JournalAppend) WriteSet() []JournalResource {
-	return append([]JournalResource(nil), appendRequest.writeSet...)
-}
 
 type JournalRecord struct {
 	sequence     uint64
@@ -471,8 +218,6 @@ type JournalRecord struct {
 	previousHash Digest
 	eventHash    Digest
 	generation   Digest
-	readSet      []JournalResourceRevision
-	writeSet     []JournalResource
 	event        WorkspaceJournalEvent
 }
 
@@ -484,46 +229,6 @@ func (record JournalRecord) Generation() Digest          { return record.generat
 func (record JournalRecord) EventType() JournalEventType { return record.event.eventType() }
 func (record JournalRecord) Event() WorkspaceJournalEvent {
 	return cloneWorkspaceJournalEvent(record.event)
-}
-func (record JournalRecord) ReadSet() []JournalResourceRevision {
-	return append([]JournalResourceRevision(nil), record.readSet...)
-}
-func (record JournalRecord) WriteSet() []JournalResource {
-	return append([]JournalResource(nil), record.writeSet...)
-}
-
-func normalizeJournalReadSet(values []JournalResourceRevision) ([]JournalResourceRevision, error) {
-	result := append([]JournalResourceRevision(nil), values...)
-	seen := make(map[string]struct{}, len(result))
-	for _, revision := range result {
-		if revision.resource.IsZero() {
-			return nil, fmt.Errorf("journal read set contains an invalid resource")
-		}
-		key := revision.resource.key()
-		if _, exists := seen[key]; exists {
-			return nil, fmt.Errorf("journal read set contains duplicate resource %s/%s", revision.resource.kind, revision.resource.identity)
-		}
-		seen[key] = struct{}{}
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].resource.key() < result[j].resource.key() })
-	return result, nil
-}
-
-func normalizeJournalWriteSet(values []JournalResource) ([]JournalResource, error) {
-	result := append([]JournalResource(nil), values...)
-	seen := make(map[string]struct{}, len(result))
-	for _, resource := range result {
-		if resource.IsZero() {
-			return nil, fmt.Errorf("journal write set contains an invalid resource")
-		}
-		key := resource.key()
-		if _, exists := seen[key]; exists {
-			return nil, fmt.Errorf("journal write set contains duplicate resource %s/%s", resource.kind, resource.identity)
-		}
-		seen[key] = struct{}{}
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].key() < result[j].key() })
-	return result, nil
 }
 
 func cloneWorkspaceJournalEvent(event WorkspaceJournalEvent) WorkspaceJournalEvent {

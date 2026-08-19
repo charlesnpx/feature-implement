@@ -13,9 +13,9 @@ import (
 )
 
 const (
-	RuntimeFormatSchemaVersion    = 5
-	RuntimeFormatFileName         = "feature.runtime.v5.json"
-	RuntimeInitializationLockName = "runtime-initialize.v5.lock"
+	RuntimeFormatSchemaVersion    = 6
+	RuntimeFormatFileName         = "feature.runtime.v6.json"
+	RuntimeInitializationLockName = "runtime-initialize.v6.lock"
 	MaxRuntimeFormatMarkerBytes   = 16 * 1024
 )
 
@@ -268,7 +268,7 @@ func runtimeStateRootInitializable(state *VerifiedRoot) (bool, error) {
 
 func incompatibleRuntimeFormatError(string) error {
 	return fmt.Errorf(
-		"Runtime format predates the debloated local contract; regenerate from the committed plan and current lock.",
+		"runtime format is incompatible; regenerate from committed sources",
 	)
 }
 
