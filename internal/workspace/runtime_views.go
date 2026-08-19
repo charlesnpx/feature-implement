@@ -200,10 +200,11 @@ type WorkspaceView struct {
 }
 
 func RebuildWorkspaceView(snapshot JournalSnapshot, definition EffectiveWorkspaceDefinition) (WorkspaceView, error) {
-	core, reviews, err := rebuildViewProjections(snapshot, definition)
+	reviews, err := RebuildReviewRuntime(snapshot, definition)
 	if err != nil {
 		return WorkspaceView{}, err
 	}
+	core := reviews.core
 	coreDigest, reviewDigest, err := verifyWorkspaceViewProjectionConformance(
 		snapshot, definition, core, reviews,
 	)
@@ -650,25 +651,6 @@ func attemptBoundaryStatus(
 		}
 	}
 	return false, "", directives
-}
-
-func rebuildViewProjections(
-	snapshot JournalSnapshot,
-	definition EffectiveWorkspaceDefinition,
-) (WorkspaceRuntimeProjection, ReviewRuntimeProjection, error) {
-	core, err := RebuildWorkspaceRuntime(snapshot)
-	if err != nil {
-		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, err
-	}
-	if core.workspaceID != definition.workspace.id || core.activeGeneration != definition.generation {
-		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{},
-			fmt.Errorf("workspace view definition does not match active journal generation")
-	}
-	reviews, err := RebuildReviewRuntime(snapshot, definition)
-	if err != nil {
-		return WorkspaceRuntimeProjection{}, ReviewRuntimeProjection{}, err
-	}
-	return core, reviews, nil
 }
 
 func verifyWorkspaceViewProjectionConformance(
