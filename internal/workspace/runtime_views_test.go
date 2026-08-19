@@ -154,6 +154,91 @@ func TestWorkspaceRuntimeViewsExposeOnlyLocalStateAndReplayDeterministically(
 	}
 }
 
+func TestWorkspaceRuntimeViewsExposeReviewExhaustionDirective(t *testing.T) {
+	t.Parallel()
+
+	harness := newReviewHarness(t)
+	start, err := workspace.StartAttemptReviewRound(
+		context.Background(),
+		harness.journal,
+		harness.definition,
+		harness.repository,
+		workspace.StartAttemptReviewRoundRequest{
+			AttemptID:  harness.attempt.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-21T18:10:00Z"),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := start.Request()
+	for index, occurredAt := range []string{
+		"2026-07-21T18:10:01Z",
+		"2026-07-21T18:10:02Z",
+		"2026-07-21T18:10:03Z",
+	} {
+		harness.record(
+			t,
+			request,
+			reviewSubmission(
+				t,
+				request,
+				workspace.MustID("security-one"),
+				workspace.ReviewResultInfrastructureFailure,
+				nil,
+				workspace.DigestBytes([]byte("runtime-view-infrastructure-"+occurredAt)),
+			),
+			occurredAt,
+		)
+		if index == 2 {
+			continue
+		}
+		state := mustReviewState(
+			t, harness.journal, harness.definition, harness.attempt.AttemptID(),
+		)
+		var ok bool
+		request, ok, err = state.NextRequest()
+		if err != nil || !ok {
+			t.Fatalf("next infrastructure retry = %#v ok=%v err=%v", request, ok, err)
+		}
+	}
+	snapshot, err := harness.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := workspace.RebuildWorkspaceReport(snapshot, harness.definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Reviews) != 1 {
+		t.Fatalf("review views = %+v", report.Reviews)
+	}
+	review := report.Reviews[0]
+	if review.Status != "exhausted" || review.Exhaustion == nil {
+		t.Fatalf("exhausted review view = %+v", review)
+	}
+	exhaustion := review.Exhaustion
+	if exhaustion.Reason != workspace.ReviewExhaustedInfrastructure ||
+		exhaustion.RoundsUsed != 1 || exhaustion.FixesUsed != 0 ||
+		exhaustion.InfrastructureRetries != 2 ||
+		exhaustion.Head != start.Request().Head().String() ||
+		exhaustion.Tree != start.Request().Tree().String() ||
+		len(exhaustion.Choices) != 1 ||
+		exhaustion.Choices[0] != workspace.ReviewExhaustionStop {
+		t.Fatalf("review exhaustion view = %+v", exhaustion)
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(
+		string(encoded),
+		`"exhaustion":{"reason":"infrastructure_budget"`,
+	) {
+		t.Fatalf("report JSON omits exhaustion directive: %s", encoded)
+	}
+}
+
 func TestWorkspaceRuntimeViewsDistinguishPausedBoundaryKinds(
 	t *testing.T,
 ) {

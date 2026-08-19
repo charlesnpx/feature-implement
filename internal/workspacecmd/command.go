@@ -227,8 +227,13 @@ func RequestSchemas() map[string]any {
 	integerProperty := func(minimum int) map[string]any { return map[string]any{"type": "integer", "minimum": minimum} }
 	booleanProperty := func() map[string]any { return map[string]any{"type": "boolean"} }
 	enumProperty := func(values ...string) map[string]any { return map[string]any{"enum": values} }
-	arrayOfStrings := func() map[string]any {
-		return map[string]any{"type": "array", "uniqueItems": true, "items": stringProperty()}
+	sha256Digest := map[string]any{
+		"type":    "string",
+		"pattern": "^sha256:[0-9a-f]{64}$",
+		"example": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+	}
+	arrayOfDigests := func() map[string]any {
+		return map[string]any{"type": "array", "uniqueItems": true, "items": sha256Digest}
 	}
 	request := func(required []string, properties map[string]any) map[string]any {
 		properties["schema_version"] = map[string]any{"const": requestSchemaVersion}
@@ -248,7 +253,7 @@ func RequestSchemas() map[string]any {
 	evidence := map[string]any{
 		"type": "object", "additionalProperties": false, "required": []string{"kind", "digest", "items"},
 		"properties": map[string]any{
-			"kind": stringProperty(), "digest": stringProperty(),
+			"kind": stringProperty(), "digest": sha256Digest,
 			"items": map[string]any{"type": "array", "items": evidenceItem},
 		},
 	}
@@ -258,7 +263,7 @@ func RequestSchemas() map[string]any {
 		"properties": map[string]any{
 			"severity": enumProperty("critical", "high", "medium", "low"), "category": stringProperty(),
 			"path": map[string]any{"type": "string"}, "line": integerProperty(0),
-			"summary": stringProperty(), "evidence_digest": stringProperty(),
+			"summary": stringProperty(), "evidence_digest": sha256Digest,
 		},
 	}
 	isolation := map[string]any{
@@ -299,13 +304,13 @@ func RequestSchemas() map[string]any {
 			"occurred_at", "attempt_id", "kind", "directive_digest", "goal", "idempotency_key",
 		}, occurred(map[string]any{
 			"attempt_id": stringProperty(), "kind": enumProperty("goal_completed", "next_goal_created"),
-			"directive_digest": stringProperty(), "goal": goal, "idempotency_key": stringProperty(),
+			"directive_digest": sha256Digest, "goal": goal, "idempotency_key": sha256Digest,
 		})),
 		"attempt.owner-response": request([]string{
 			"occurred_at", "attempt_id", "boundary_id", "directive_digest", "goal", "expected_head", "response",
 		}, occurred(map[string]any{
 			"attempt_id": stringProperty(), "boundary_id": stringProperty(),
-			"directive_digest": stringProperty(), "goal": goal,
+			"directive_digest": sha256Digest, "goal": goal,
 			"expected_head": stringProperty(), "response": enumProperty("continue"),
 		})),
 		"attempt.resume": request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
@@ -319,29 +324,29 @@ func RequestSchemas() map[string]any {
 				"type": "string", "minLength": 1,
 				"description": "Descriptive local reviewer label; not an authenticated identity.",
 			},
-			"idempotency_key": stringProperty(),
+			"idempotency_key": sha256Digest,
 		})),
 		"review.record": request([]string{
 			"occurred_at", "attempt_id", "reservation_digest", "request_digest",
 			"reviewer_instance", "status", "findings", "isolation",
 		}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "reservation_digest": stringProperty(), "request_digest": stringProperty(),
+			"attempt_id": stringProperty(), "reservation_digest": sha256Digest, "request_digest": sha256Digest,
 			"reviewer_instance": map[string]any{
 				"type": "string", "minLength": 1,
 				"description": "Descriptive local reviewer label; not an authenticated identity.",
 			},
 			"status":                 enumProperty("completed", "infrastructure_failure"),
 			"findings":               map[string]any{"type": "array", "items": reviewFinding},
-			"infrastructure_failure": optionalString(), "isolation": isolation,
+			"infrastructure_failure": sha256Digest, "isolation": isolation,
 		})),
 		"review.reserve-fix": request([]string{"occurred_at", "attempt_id", "ordinal", "accepted_finding_ids"}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "ordinal": integerProperty(1), "accepted_finding_ids": arrayOfStrings(),
+			"attempt_id": stringProperty(), "ordinal": integerProperty(1), "accepted_finding_ids": arrayOfDigests(),
 		})),
 		"review.apply-fix": request([]string{"occurred_at", "attempt_id", "ordinal", "accepted_finding_ids"}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "ordinal": integerProperty(1), "accepted_finding_ids": arrayOfStrings(), "body": optionalString(),
+			"attempt_id": stringProperty(), "ordinal": integerProperty(1), "accepted_finding_ids": arrayOfDigests(), "body": optionalString(),
 		})),
 		"review.record-fix": request([]string{"occurred_at", "attempt_id", "ordinal", "accepted_finding_ids"}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "ordinal": integerProperty(1), "accepted_finding_ids": arrayOfStrings(),
+			"attempt_id": stringProperty(), "ordinal": integerProperty(1), "accepted_finding_ids": arrayOfDigests(),
 		})),
 		"review.ready": request([]string{"attempt_id"}, map[string]any{"attempt_id": stringProperty()}),
 		"integrate.merge-unit": request([]string{"occurred_at", "attempt_id"}, occurred(map[string]any{

@@ -504,7 +504,7 @@ func ReserveAttemptReviewInvocation(
 	latestRound := state.rounds[len(state.rounds)-1]
 	if existing, reserved := pendingReviewInvocation(latestRound); reserved {
 		if existing.digest != reservation.digest {
-			return ReviewInvocationReservationResult{}, fmt.Errorf("review request is already reserved by a different invocation")
+			return ReviewInvocationReservationResult{}, fmt.Errorf("pending profile invocation is already reserved by a different invocation")
 		}
 		return ReviewInvocationReservationResult{state: state, reservation: existing}, nil
 	}

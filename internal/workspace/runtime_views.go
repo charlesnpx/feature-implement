@@ -138,17 +138,28 @@ type WorkspaceAttemptView struct {
 }
 
 type WorkspaceReviewView struct {
-	AttemptID             string `json:"attempt_id"`
-	PlanID                string `json:"plan_id"`
-	MergeUnitID           string `json:"merge_unit_id"`
-	Generation            string `json:"generation"`
-	Head                  string `json:"head"`
-	Tree                  string `json:"tree"`
-	Status                string `json:"status"`
-	RoundsUsed            uint16 `json:"rounds_used"`
-	FixesUsed             uint16 `json:"fixes_used"`
-	InfrastructureRetries uint16 `json:"infrastructure_retries"`
-	MergeReady            bool   `json:"merge_ready"`
+	AttemptID             string                `json:"attempt_id"`
+	PlanID                string                `json:"plan_id"`
+	MergeUnitID           string                `json:"merge_unit_id"`
+	Generation            string                `json:"generation"`
+	Head                  string                `json:"head"`
+	Tree                  string                `json:"tree"`
+	Status                string                `json:"status"`
+	RoundsUsed            uint16                `json:"rounds_used"`
+	FixesUsed             uint16                `json:"fixes_used"`
+	InfrastructureRetries uint16                `json:"infrastructure_retries"`
+	MergeReady            bool                  `json:"merge_ready"`
+	Exhaustion            *ReviewExhaustionView `json:"exhaustion,omitempty"`
+}
+
+type ReviewExhaustionView struct {
+	Reason                ReviewExhaustionReason        `json:"reason"`
+	RoundsUsed            uint16                        `json:"rounds_used"`
+	FixesUsed             uint16                        `json:"fixes_used"`
+	InfrastructureRetries uint16                        `json:"infrastructure_retries"`
+	Head                  string                        `json:"head"`
+	Tree                  string                        `json:"tree"`
+	Choices               []ReviewExhaustionOwnerChoice `json:"choices"`
 }
 
 type IntegrationUnitView struct {
@@ -645,7 +656,7 @@ func workspaceReviewViews(
 		} else if _, pending := state.PendingFix(); pending {
 			status = "fix_pending"
 		}
-		result = append(result, WorkspaceReviewView{
+		view := WorkspaceReviewView{
 			AttemptID:             state.AttemptID().String(),
 			PlanID:                state.MergeUnit().PlanID().String(),
 			MergeUnitID:           state.MergeUnit().MergeUnitID().String(),
@@ -657,7 +668,19 @@ func workspaceReviewViews(
 			FixesUsed:             state.FixesUsed(),
 			InfrastructureRetries: state.InfrastructureRetriesUsed(),
 			MergeReady:            state.MergeReady(),
-		})
+		}
+		if exhaustion, exhausted := state.Exhaustion(); exhausted {
+			view.Exhaustion = &ReviewExhaustionView{
+				Reason:                exhaustion.Reason(),
+				RoundsUsed:            exhaustion.RoundsUsed(),
+				FixesUsed:             exhaustion.FixesUsed(),
+				InfrastructureRetries: exhaustion.InfrastructureRetriesUsed(),
+				Head:                  exhaustion.Head().String(),
+				Tree:                  exhaustion.Tree().String(),
+				Choices:               exhaustion.Choices(),
+			}
+		}
+		result = append(result, view)
 	}
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].AttemptID < result[j].AttemptID

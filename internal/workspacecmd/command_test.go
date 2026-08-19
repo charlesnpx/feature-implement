@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -239,6 +240,43 @@ func TestRequestSchemasExposeOnlySupportedLocalMutations(t *testing.T) {
 	}
 }
 
+func TestRequestSchemasDescribeSHA256DigestValues(t *testing.T) {
+	schemas := RequestSchemas()["requests"].(map[string]any)
+	properties := func(action string) map[string]any {
+		return schemas[action].(map[string]any)["properties"].(map[string]any)
+	}
+	digestItems := func(action string) map[string]any {
+		return properties(action)["accepted_finding_ids"].(map[string]any)["items"].(map[string]any)
+	}
+	boundaryEvidence := properties("attempt.boundary")["evidence"].(map[string]any)
+	evidenceProperties := boundaryEvidence["items"].(map[string]any)["properties"].(map[string]any)
+	reviewProperties := properties("review.record")
+	findingProperties := reviewProperties["findings"].(map[string]any)["items"].(map[string]any)["properties"].(map[string]any)
+	want := map[string]any{
+		"type":    "string",
+		"pattern": "^sha256:[0-9a-f]{64}$",
+		"example": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+	}
+	for index, actual := range []map[string]any{
+		evidenceProperties["digest"].(map[string]any),
+		properties("attempt.acknowledge")["directive_digest"].(map[string]any),
+		properties("attempt.acknowledge")["idempotency_key"].(map[string]any),
+		properties("attempt.owner-response")["directive_digest"].(map[string]any),
+		properties("review.reserve")["idempotency_key"].(map[string]any),
+		reviewProperties["reservation_digest"].(map[string]any),
+		reviewProperties["request_digest"].(map[string]any),
+		reviewProperties["infrastructure_failure"].(map[string]any),
+		findingProperties["evidence_digest"].(map[string]any),
+		digestItems("review.reserve-fix"),
+		digestItems("review.apply-fix"),
+		digestItems("review.record-fix"),
+	} {
+		if !reflect.DeepEqual(actual, want) {
+			t.Fatalf("digest schema %d = %+v, want %+v", index, actual, want)
+		}
+	}
+}
+
 func TestDecodeRequestKeepsSchemaOptionalFieldsOptional(t *testing.T) {
 	var input commitNextInput
 	if err := decodeRequest([]byte(`{
@@ -296,6 +334,21 @@ func TestReportDirectiveSchemaKeepsChoicesOptional(t *testing.T) {
 	}
 	if _, exists := directiveProperties["boundary_kind"]; !exists || !boundaryKindRequired {
 		t.Fatalf("directive schema does not require boundary kind: %+v / %+v", required, directiveProperties)
+	}
+	reviews := reportProperties["reviews"].(map[string]any)
+	review := reviews["items"].(map[string]any)
+	reviewProperties := review["properties"].(map[string]any)
+	exhaustion, exists := reviewProperties["exhaustion"]
+	if !exists {
+		t.Fatalf("review schema omits exhaustion: %+v", reviewProperties)
+	}
+	exhaustionProperties := exhaustion.(map[string]any)["properties"].(map[string]any)
+	for _, name := range []string{
+		"reason", "rounds_used", "fixes_used", "infrastructure_retries", "head", "tree", "choices",
+	} {
+		if _, exists := exhaustionProperties[name]; !exists {
+			t.Fatalf("exhaustion schema omits %s: %+v", name, exhaustionProperties)
+		}
 	}
 }
 

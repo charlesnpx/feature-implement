@@ -17,6 +17,8 @@ import (
 	"unicode/utf8"
 )
 
+const maxDirtyWorktreePaths = 20
+
 func gitBlobObjectID(algorithm GitHashAlgorithm, content []byte) (GitObjectID, error) {
 	digest, err := newGitBlobHasher(algorithm, int64(len(content)))
 	if err != nil {
@@ -591,7 +593,7 @@ func (adapter LocalCommitGitAdapter) VerifyCleanWorktree(
 		return gitExitError("verify clean worktree", exitCode, err)
 	}
 	if len(status) != 0 {
-		return fmt.Errorf("worktree is dirty after configured transaction")
+		return dirtyWorktreeStatusError(status)
 	}
 	indexTree, err := adapter.writeTree(ctx, worktree, algorithm)
 	if err != nil {
@@ -1552,6 +1554,82 @@ func parsePorcelainV2Status(content []byte) (unstaged, untracked, conflicted []s
 		}
 	}
 	return unstaged, untracked, conflicted, nil
+}
+
+func dirtyWorktreeStatusError(status []byte) error {
+	paths, err := porcelainV2StatusPaths(status)
+	if err != nil {
+		return fmt.Errorf("parse dirty worktree status: %w", err)
+	}
+	if len(paths) == 0 {
+		return fmt.Errorf("worktree is dirty after configured transaction")
+	}
+	maximum := len(paths)
+	if maximum > maxDirtyWorktreePaths {
+		maximum = maxDirtyWorktreePaths
+	}
+	shown := make([]string, 0, maximum)
+	for _, path := range paths[:maximum] {
+		shown = append(shown, fmt.Sprintf("%q", path))
+	}
+	if remaining := len(paths) - maximum; remaining > 0 {
+		return fmt.Errorf(
+			"worktree is dirty after configured transaction; offending paths: %s (and %d more)",
+			strings.Join(shown, ", "), remaining,
+		)
+	}
+	return fmt.Errorf(
+		"worktree is dirty after configured transaction; offending paths: %s",
+		strings.Join(shown, ", "),
+	)
+}
+
+func porcelainV2StatusPaths(content []byte) ([]string, error) {
+	if len(content) == 0 {
+		return nil, nil
+	}
+	tokens := bytes.Split(content, []byte{0})
+	if len(tokens[len(tokens)-1]) != 0 {
+		return nil, fmt.Errorf("Git status is not NUL terminated")
+	}
+	tokens = tokens[:len(tokens)-1]
+	paths := make([]string, 0, len(tokens))
+	for index := 0; index < len(tokens); index++ {
+		record := string(tokens[index])
+		if record == "" {
+			return nil, fmt.Errorf("Git status contains an empty record")
+		}
+		switch record[0] {
+		case '1':
+			fields := strings.SplitN(record, " ", 9)
+			if len(fields) != 9 || len(fields[1]) != 2 {
+				return nil, fmt.Errorf("ordinary Git status record is malformed")
+			}
+			paths = append(paths, fields[8])
+		case '2':
+			fields := strings.SplitN(record, " ", 10)
+			if len(fields) != 10 || len(fields[1]) != 2 || index+1 >= len(tokens) {
+				return nil, fmt.Errorf("renamed Git status record is malformed")
+			}
+			paths = append(paths, fields[9], string(tokens[index+1]))
+			index++ // porcelain v2 -z carries the original path as the next token.
+		case 'u':
+			fields := strings.SplitN(record, " ", 11)
+			if len(fields) != 11 {
+				return nil, fmt.Errorf("unmerged Git status record is malformed")
+			}
+			paths = append(paths, fields[10])
+		case '?', '!':
+			if len(record) < 3 || record[1] != ' ' {
+				return nil, fmt.Errorf("untracked Git status record is malformed")
+			}
+			paths = append(paths, record[2:])
+		case '#':
+		default:
+			return nil, fmt.Errorf("unsupported Git status record %q", record)
+		}
+	}
+	return paths, nil
 }
 
 func dirtySubmoduleStatus(value string) (bool, error) {

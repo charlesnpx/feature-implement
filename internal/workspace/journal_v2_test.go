@@ -132,6 +132,33 @@ func TestInitializeWorkspaceV2RequiresExplicitWorktreeRoot(
 	}
 }
 
+func TestInitializeWorkspaceV2RequiresExistingWorktreeRoot(t *testing.T) {
+	t.Parallel()
+
+	definition := mustDefinition(t, newDefinitionFixture(t).sources)
+	workspaceDir := t.TempDir()
+	missingWorktreeRoot := filepath.Join(t.TempDir(), "missing")
+	if _, err := workspace.InitializeWorkspaceV2WithOptions(
+		context.Background(),
+		workspaceDir,
+		definition,
+		mustTime(t, "2026-07-21T00:59:00Z"),
+		workspace.WorkspaceInitializationOptions{
+			WorktreeRoot: missingWorktreeRoot,
+		},
+	); err == nil || !errors.Is(err, os.ErrNotExist) || !strings.Contains(
+		err.Error(),
+		"worktree_root must already exist as an owner-controlled, non-group-writable directory",
+	) {
+		t.Fatalf("missing worktree root error = %v", err)
+	}
+	if _, err := os.Lstat(
+		workspace.WorkspaceRuntimeProjectionPath(workspaceDir),
+	); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing worktree root created runtime projection: %v", err)
+	}
+}
+
 func TestInitializeWorkspaceV2RejectsRuntimeTargetOverlapBeforeMutation(t *testing.T) {
 	t.Parallel()
 

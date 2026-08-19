@@ -202,6 +202,21 @@ func ReportSchemas() map[string]any {
 			"pending_directives": array(directive),
 		},
 	)
+	exhaustion := object(
+		[]string{
+			"reason", "rounds_used", "fixes_used", "infrastructure_retries",
+			"head", "tree", "choices",
+		},
+		map[string]any{
+			"reason":                 enum("round_budget", "fix_budget", "infrastructure_budget"),
+			"rounds_used":            integer(0),
+			"fixes_used":             integer(0),
+			"infrastructure_retries": integer(0),
+			"head":                   nonEmptyText(),
+			"tree":                   nonEmptyText(),
+			"choices":                array(enum("stop")),
+		},
+	)
 	review := object(
 		[]string{
 			"attempt_id", "plan_id", "merge_unit_id", "generation",
@@ -220,6 +235,7 @@ func ReportSchemas() map[string]any {
 			"fixes_used":             integer(0),
 			"infrastructure_retries": integer(0),
 			"merge_ready":            boolean(),
+			"exhaustion":             exhaustion,
 		},
 	)
 	integrationUnit := object(

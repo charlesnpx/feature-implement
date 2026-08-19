@@ -545,6 +545,28 @@ func TestLocalCommitAdapterDoesNotTrustFsmonitorOrIgnoredInputs(t *testing.T) {
 	})
 }
 
+func TestLocalCommitAdapterReportsBoundedDirtyWorktreePaths(t *testing.T) {
+	t.Parallel()
+
+	repository, branch, head := newProtocolRepository(t)
+	for index := 0; index < 21; index++ {
+		name := "dirty-" + string(rune('a'+index))
+		if err := os.WriteFile(filepath.Join(repository, name), []byte("dirty\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := workspace.DefaultLocalCommitGitAdapter().VerifyCleanWorktree(
+		context.Background(), repository, branch, head,
+	)
+	if err == nil {
+		t.Fatal("dirty worktree passed clean verification")
+	}
+	if !strings.Contains(err.Error(), `"dirty-a"`) ||
+		!strings.Contains(err.Error(), "and 1 more") {
+		t.Fatalf("dirty worktree paths = %v", err)
+	}
+}
+
 func TestLocalCommitAdapterVerifiesRawBytesTypesAndModes(t *testing.T) {
 	t.Parallel()
 	requireFullSuite(t, "Git byte-type-mode matrix")

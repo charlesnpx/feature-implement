@@ -78,6 +78,12 @@ func OpenWorkspaceInitializationRootGuard(
 		RootRoleWorktree, worktreePath, false,
 	)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf(
+				"worktree_root must already exist as an owner-controlled, non-group-writable directory: %w",
+				err,
+			)
+		}
 		return nil, fmt.Errorf(
 			"open workspace initialization worktree root: %w", err,
 		)

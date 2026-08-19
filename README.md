@@ -206,6 +206,9 @@ After a review with no Critical or High findings, apply worthwhile Medium and
 Low fixes once, perform targeted confirmation, and stop the broad-review loop.
 `max_review_rounds` must be at least 2 for a fix budget to be usable, because a
 fix is reconfirmed by a following review round.
+A bounded review budget buys a fixed number of repair opportunities, not
+review-until-clean. Declare a larger budget before generation begins when
+another repair and reconfirmation cycle is needed.
 
 ## Locks and runtime state
 
@@ -237,6 +240,9 @@ derived plan checkpoint:
   "worktree_root": "/absolute/path/to/attempt-worktrees"
 }
 ```
+
+`worktree_root` must already exist as an owner-controlled, non-group-writable
+directory. It need not be empty; a verified storage root may be shared.
 
 Runtime state is append-only under `<runtime-root>/state/`. A runtime without
 the local v5 format marker is rejected with a regeneration diagnostic; it is

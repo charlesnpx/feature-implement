@@ -714,7 +714,7 @@ func TestReviewInvocationReservationSerializesRunnerAndCountsRawFailureIdentity(
 				IdempotencyKey: workspace.DigestBytes([]byte("serialized-review-two")),
 				OccurredAt:     mustTime(t, "2026-07-21T11:15:02Z"),
 			},
-		); err == nil || !strings.Contains(err.Error(), "already reserved") {
+		); err == nil || !strings.Contains(err.Error(), "pending profile invocation") {
 			t.Fatalf("competing review invocation error = %v", err)
 		}
 		close(release)
