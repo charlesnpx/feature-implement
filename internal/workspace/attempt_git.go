@@ -420,21 +420,6 @@ func canonicalWorktreePath(path string) string {
 	}
 }
 
-func parseLocalHeadRefs(content []byte) ([]string, error) {
-	var result []string
-	for _, line := range strings.Split(strings.TrimSpace(string(content)), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if !strings.HasPrefix(line, "refs/heads/") {
-			return nil, fmt.Errorf("Git returned non-head local ref %q", line)
-		}
-		result = append(result, strings.TrimPrefix(line, "refs/heads/"))
-	}
-	return result, nil
-}
-
 func qualifyGitObjectID(algorithm GitHashAlgorithm, raw string) (GitObjectID, error) {
 	return ParseGitObjectID(string(algorithm) + ":" + strings.TrimSpace(raw))
 }

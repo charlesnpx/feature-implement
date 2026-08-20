@@ -42,28 +42,31 @@ func (rollback *attemptWorktreeRollback) record(relative string) error {
 	return nil
 }
 
-func (rollback *attemptWorktreeRollback) recordInitializedRepository() error {
+func (rollback *attemptWorktreeRollback) recordInitializedRepository() (bool, error) {
 	if rollback == nil || rollback.root == nil || rollback.root.adapter == nil {
-		return fmt.Errorf("attempt worktree rollback root is unavailable")
+		return false, fmt.Errorf("attempt worktree rollback root is unavailable")
 	}
 	if rollback.initializedRepository != nil {
-		return fmt.Errorf("created detached attempt repository is already bound for rollback")
+		return false, fmt.Errorf("created detached attempt repository is already bound for rollback")
 	}
 	info, exists, err := rollback.root.adapter.inspectEntryIncludingSymlinkExact(".git")
 	if err != nil {
-		return err
+		return false, err
 	}
-	if !exists || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return fmt.Errorf("created detached attempt Git directory changed before rollback binding")
+	if !exists {
+		return false, nil
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return false, fmt.Errorf("created detached attempt Git directory changed before rollback binding")
 	}
 	identity, err := platformFileIdentity(info)
 	if err != nil {
-		return fmt.Errorf("identify created detached attempt Git directory: %w", err)
+		return false, fmt.Errorf("identify created detached attempt Git directory: %w", err)
 	}
 	rollback.initializedRepository = &initializedAttemptRepositoryRollback{
 		gitDirectory: identity,
 	}
-	return nil
+	return true, nil
 }
 
 func (rollback *attemptWorktreeRollback) removeCreated() error {
@@ -202,9 +205,24 @@ func (adapter LocalAttemptGitAdapter) MaterializeAttemptTree(
 		return AttemptGitInspection{}, fmt.Errorf("attempt worktree parent is unavailable")
 	}
 	name := filepath.Base(worktree)
-	created, err := parent.adapter.makeDirectory(name, 0o700)
-	if err != nil {
-		return AttemptGitInspection{}, fmt.Errorf("create attempt worktree directory: %w", err)
+	created, makeDirectoryErr := parent.adapter.makeDirectory(name, 0o700)
+	if created {
+		createdInfo, exists, inspectErr := parent.adapter.inspectExact(name)
+		if inspectErr != nil {
+			return AttemptGitInspection{}, fmt.Errorf("identify new attempt worktree directory: %w", inspectErr)
+		}
+		if !exists || createdInfo.Mode()&os.ModeSymlink != 0 || !createdInfo.IsDir() {
+			return AttemptGitInspection{}, fmt.Errorf("new attempt worktree directory changed before materialization")
+		}
+		identity, identityErr := platformFileIdentity(createdInfo)
+		if identityErr != nil {
+			return AttemptGitInspection{}, fmt.Errorf("identify new attempt worktree directory: %w", identityErr)
+		}
+		rollbackIdentity = identity
+		rollbackParent, rollbackName, rollbackCreated = parent, name, true
+	}
+	if makeDirectoryErr != nil {
+		return AttemptGitInspection{}, fmt.Errorf("create attempt worktree directory: %w", makeDirectoryErr)
 	}
 	if !created {
 		return AttemptGitInspection{}, fmt.Errorf(
@@ -212,18 +230,6 @@ func (adapter LocalAttemptGitAdapter) MaterializeAttemptTree(
 			worktree,
 		)
 	}
-	createdInfo, exists, err := parent.adapter.inspectExact(name)
-	if err != nil {
-		return AttemptGitInspection{}, fmt.Errorf("identify new attempt worktree directory: %w", err)
-	}
-	if !exists || createdInfo.Mode()&os.ModeSymlink != 0 || !createdInfo.IsDir() {
-		return AttemptGitInspection{}, fmt.Errorf("new attempt worktree directory changed before materialization")
-	}
-	rollbackIdentity, err = platformFileIdentity(createdInfo)
-	if err != nil {
-		return AttemptGitInspection{}, fmt.Errorf("identify new attempt worktree directory: %w", err)
-	}
-	rollbackParent, rollbackName, rollbackCreated = parent, name, true
 	if err := injectAttemptWorktreeMaterializationFault(
 		adapter.worktreeMaterializeFault, AttemptMaterializationFaultAfterDirectoryBinding,
 	); err != nil {
@@ -384,24 +390,29 @@ func materializeExactAttemptTree(
 		return fmt.Errorf("new attempt directory is unexpectedly nonempty")
 	}
 	for _, directory := range directories {
-		created, err := root.adapter.makeDirectory(directory, 0o755)
-		if err != nil {
-			return fmt.Errorf("create attempt tree directory %s: %w", directory, err)
+		created, makeDirectoryErr := root.adapter.makeDirectory(directory, 0o755)
+		if created {
+			if err := rollback.record(directory); err != nil {
+				return fmt.Errorf("record created attempt tree directory %s: %w", directory, err)
+			}
+		}
+		if makeDirectoryErr != nil {
+			return fmt.Errorf("create attempt tree directory %s: %w", directory, makeDirectoryErr)
 		}
 		if !created {
 			return fmt.Errorf("attempt tree directory %s appeared during materialization", directory)
 		}
-		if err := rollback.record(directory); err != nil {
-			return fmt.Errorf("record created attempt tree directory %s: %w", directory, err)
-		}
 	}
 	target := LocalTargetGitAdapter{git: adapter}
 	for _, entry := range entries {
+		created := false
 		switch entry.mode {
 		case GitModeRegular:
 			err = adapter.materializeAttemptBlob(ctx, source.root, root.adapter, entry, algorithm, 0o644)
+			created = err == nil
 		case GitModeExecutable:
 			err = adapter.materializeAttemptBlob(ctx, source.root, root.adapter, entry, algorithm, 0o755)
+			created = err == nil
 		case GitModeSymlink:
 			var content []byte
 			content, err = target.readBlob(ctx, source.root, entry.object)
@@ -417,10 +428,9 @@ func materializeExactAttemptTree(
 				err = validateRepositorySymlink(entry.path, content)
 			}
 			if err == nil {
-				err = root.adapter.writeSymlinkExclusive(entry.path, string(content))
+				created, err = root.adapter.writeSymlinkExclusive(entry.path, string(content))
 			}
 		case GitModeSubmodule:
-			var created bool
 			created, err = root.adapter.makeDirectory(entry.path, 0o755)
 			if err == nil && !created {
 				err = fmt.Errorf("attempt tree directory appeared during materialization")
@@ -428,11 +438,13 @@ func materializeExactAttemptTree(
 		default:
 			err = fmt.Errorf("unsupported attempt tree mode %s", entry.mode)
 		}
+		if created {
+			if err := rollback.record(entry.path); err != nil {
+				return fmt.Errorf("record created attempt tree path %s: %w", entry.path, err)
+			}
+		}
 		if err != nil {
 			return fmt.Errorf("materialize attempt tree path %s: %w", entry.path, err)
-		}
-		if err := rollback.record(entry.path); err != nil {
-			return fmt.Errorf("record created attempt tree path %s: %w", entry.path, err)
 		}
 		if err := injectAttemptWorktreeMaterializationFault(
 			adapter.worktreeMaterializeFault, AttemptMaterializationFaultAfterPath,
@@ -461,14 +473,32 @@ func initializeDetachedAttemptRepository(
 	if rollback == nil || rollback.root != root || rollback.root.adapter == nil {
 		return fmt.Errorf("attempt tree rollback is unavailable")
 	}
-	if _, exitCode, err := adapter.run(ctx, root.Path(), "init", "--quiet", "--object-format="+string(algorithm)); err != nil || exitCode != 0 {
-		if err == nil {
-			err = fmt.Errorf("Git exited with status %d", exitCode)
-		}
-		return fmt.Errorf("initialize detached attempt repository: %w", err)
+	if _, exists, err := root.adapter.inspectEntryIncludingSymlinkExact(".git"); err != nil {
+		return fmt.Errorf("inspect detached attempt Git directory before initialization: %w", err)
+	} else if exists {
+		return fmt.Errorf("detached attempt Git directory appeared before initialization")
 	}
-	if err := rollback.recordInitializedRepository(); err != nil {
-		return fmt.Errorf("record created detached attempt repository: %w", err)
+	_, exitCode, initErr := adapter.run(
+		ctx, root.Path(), "init", "--quiet", "--object-format="+string(algorithm),
+	)
+	if initErr == nil && exitCode != 0 {
+		initErr = fmt.Errorf("Git exited with status %d", exitCode)
+	}
+	initialized, recordErr := rollback.recordInitializedRepository()
+	if initErr != nil {
+		if recordErr != nil {
+			return errors.Join(
+				fmt.Errorf("initialize detached attempt repository: %w", initErr),
+				fmt.Errorf("record created detached attempt repository: %w", recordErr),
+			)
+		}
+		return fmt.Errorf("initialize detached attempt repository: %w", initErr)
+	}
+	if recordErr != nil {
+		return fmt.Errorf("record created detached attempt repository: %w", recordErr)
+	}
+	if !initialized {
+		return fmt.Errorf("initialize detached attempt repository: Git did not create its Git directory")
 	}
 	if err := injectAttemptWorktreeMaterializationFault(
 		adapter.worktreeMaterializeFault, AttemptMaterializationFaultAfterGitInit,

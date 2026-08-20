@@ -15,7 +15,6 @@ import (
 )
 
 type fakeAttemptGit struct {
-	local       []string
 	inspections map[string]workspace.AttemptGitInspection
 	createCalls int
 	validateErr error
@@ -349,34 +348,6 @@ func TestExecutionConfigValidatesBoundaryAgainstOptionalProfileBoundary(t *testi
 	)
 	if _, err := workspace.DecodeExecutionConfig([]byte(strengthened)); err != nil {
 		t.Fatalf("profile boundary escalation strengthening decode: %v", err)
-	}
-}
-
-func TestStartAttemptIgnoresLocalRefs(t *testing.T) {
-	t.Parallel()
-
-	for _, test := range []struct {
-		name  string
-		local []string
-	}{
-		{"exact", []string{"mu/attempt"}},
-		{"ancestor", []string{"mu"}},
-		{"descendant", []string{"mu/attempt/child"}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			harness := newAttemptHarness(t, "unit-one")
-			harness.git.local = append([]string(nil), test.local...)
-			attempt, err := workspace.StartAttempt(
-				context.Background(), harness.journal, harness.definition, harness.git,
-				workspace.StartAttemptRequest{
-					MergeUnit: harness.unit, AttemptNumber: 1, Goal: harness.goal,
-					OccurredAt: mustTime(t, "2026-07-21T09:00:00Z"),
-				},
-			)
-			if err != nil || harness.git.createCalls != 1 {
-				t.Fatalf("scratch start with %q refs = %#v, err=%v", test.local, attempt, err)
-			}
-		})
 	}
 }
 

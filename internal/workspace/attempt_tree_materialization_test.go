@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -237,6 +238,68 @@ func TestDetachedAttemptTreeMaterializationRollsBackInitializedGitDirectory(t *t
 	)
 	if retryErr != nil {
 		t.Errorf("retry after initialized Git directory rollback = %v", retryErr)
+	} else if !inspection.Clean() || inspection.WorktreeHead() != base {
+		t.Errorf("retry inspection = %#v", inspection)
+	}
+}
+
+func TestDetachedAttemptTreeMaterializationRollsBackGitInitThatCreatesThenFails(t *testing.T) {
+	t.Parallel()
+
+	repositoryRoot, base := newRawAttemptTreeRepository(t)
+	worktree := filepath.Join(t.TempDir(), "attempt")
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper := filepath.Join(t.TempDir(), "git-init-fails-after-create")
+	script := `#!/bin/sh
+worktree=""
+next_is_worktree=false
+is_init=false
+for argument in "$@"; do
+  if [ "$next_is_worktree" = "true" ]; then
+    worktree="$argument"
+    next_is_worktree=false
+    continue
+  fi
+  if [ "$argument" = "-C" ]; then
+    next_is_worktree=true
+  fi
+  if [ "$argument" = "init" ]; then
+    is_init=true
+  fi
+done
+` + shellSingleQuote(realGit) + ` "$@"
+status=$?
+if [ "$is_init" = "true" ] && [ "$status" -eq 0 ]; then
+  if [ ! -d "$worktree/.git" ]; then
+    exit 87
+  fi
+  exit 86
+fi
+exit "$status"
+`
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	adapter, err := workspace.NewLocalAttemptGitAdapter(wrapper, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = adapter.MaterializeAttemptTree(context.Background(), repositoryRoot, base, worktree)
+	if err == nil || !strings.Contains(err.Error(), "status 86") {
+		t.Fatalf("Git init that created then failed error = %v", err)
+	}
+	if _, statErr := os.Lstat(worktree); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Git init that created then failed left its worktree behind: %v", statErr)
+	}
+	inspection, retryErr := workspace.DefaultLocalAttemptGitAdapter().MaterializeAttemptTree(
+		context.Background(), repositoryRoot, base, worktree,
+	)
+	if retryErr != nil {
+		t.Errorf("retry after Git init that created then failed = %v", retryErr)
 	} else if !inspection.Clean() || inspection.WorktreeHead() != base {
 		t.Errorf("retry inspection = %#v", inspection)
 	}

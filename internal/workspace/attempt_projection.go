@@ -39,48 +39,6 @@ func (phase AttemptRuntimePhase) retryableTerminal() bool {
 		phase == AttemptAbandoned
 }
 
-type AttemptGenerationBinding struct {
-	attemptID  ID
-	mergeUnit  MergeUnitReference
-	generation Digest
-	phase      AttemptRuntimePhase
-}
-
-func NewAttemptGenerationBinding(
-	attemptID ID,
-	mergeUnit MergeUnitReference,
-	generation Digest,
-	phase AttemptRuntimePhase,
-) (AttemptGenerationBinding, error) {
-	if attemptID.IsZero() || mergeUnit.planID.IsZero() ||
-		mergeUnit.mergeUnitID.IsZero() || generation.IsZero() ||
-		!phase.valid() {
-		return AttemptGenerationBinding{}, fmt.Errorf(
-			"attempt requires identity, merge unit, exact generation, and valid phase",
-		)
-	}
-	return AttemptGenerationBinding{
-		attemptID: attemptID, mergeUnit: mergeUnit,
-		generation: generation, phase: phase,
-	}, nil
-}
-
-func (attempt AttemptGenerationBinding) AttemptID() ID {
-	return attempt.attemptID
-}
-
-func (attempt AttemptGenerationBinding) MergeUnit() MergeUnitReference {
-	return attempt.mergeUnit
-}
-
-func (attempt AttemptGenerationBinding) Generation() Digest {
-	return attempt.generation
-}
-
-func (attempt AttemptGenerationBinding) Phase() AttemptRuntimePhase {
-	return attempt.phase
-}
-
 type RuntimeBoundaryProjection struct {
 	boundaryID     ID
 	ordinal        uint64
@@ -206,17 +164,6 @@ func (projection WorkspaceRuntimeProjection) Attempt(attemptID ID) (RuntimeAttem
 		}
 	}
 	return RuntimeAttemptProjection{}, false
-}
-
-func (projection WorkspaceRuntimeProjection) AttemptGenerationBindings() []AttemptGenerationBinding {
-	result := make([]AttemptGenerationBinding, 0, len(projection.attempts))
-	for _, attempt := range projection.attempts {
-		result = append(result, AttemptGenerationBinding{
-			attemptID: attempt.attemptID, mergeUnit: attempt.mergeUnit,
-			generation: attempt.generation, phase: attempt.phase,
-		})
-	}
-	return result
 }
 
 func reduceAttemptRuntime(
