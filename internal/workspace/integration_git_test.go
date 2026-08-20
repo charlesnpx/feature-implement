@@ -613,7 +613,7 @@ func TestLocalGitCompletedIntegrationRetryFollowsLaterDurableFrontier(
 	if err != nil {
 		t.Fatal(err)
 	}
-	second := secondCore.reserve(t, "2026-07-25T16:25:01Z")
+	second := secondCore.reserveWithLocalGit(t, "2026-07-25T16:25:01Z")
 	if second.Base() != firstMerge {
 		t.Fatalf(
 			"second real integration base = %s, want %s",
@@ -1799,7 +1799,7 @@ func newRealIntegrationScenario(
 	t.Helper()
 	fixture := newDefinitionFixtureForHash(t, algorithm)
 	core := newAttemptHarnessFromFixture(t, fixture, "unit-one")
-	attempt := core.reserve(t, "2026-07-25T14:30:00Z")
+	attempt := core.reserveWithLocalGit(t, "2026-07-25T14:30:00Z")
 	repositoryRoot := core.definition.Workspace().RepositoryRoot()
 	treeText := strings.TrimSpace(runTargetGitTest(
 		t, repositoryRoot, "rev-parse",

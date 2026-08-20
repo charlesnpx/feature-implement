@@ -147,8 +147,22 @@ func newAttemptHarnessFromFixture(t *testing.T, fixture definitionFixture, unitI
 
 func (h attemptHarness) reserve(t *testing.T, at string) workspace.RuntimeAttemptProjection {
 	t.Helper()
+	return h.reserveWithGit(t, h.git, at)
+}
+
+func (h attemptHarness) reserveWithLocalGit(t *testing.T, at string) workspace.RuntimeAttemptProjection {
+	t.Helper()
+	return h.reserveWithGit(t, workspace.DefaultLocalAttemptGitAdapter(), at)
+}
+
+func (h attemptHarness) reserveWithGit(
+	t *testing.T,
+	git workspace.AttemptGitPort,
+	at string,
+) workspace.RuntimeAttemptProjection {
+	t.Helper()
 	attempt, err := workspace.StartAttempt(
-		context.Background(), h.journal, h.definition, h.git,
+		context.Background(), h.journal, h.definition, git,
 		workspace.StartAttemptRequest{
 			MergeUnit: h.unit, AttemptNumber: 1,
 			Goal: h.goal, OccurredAt: mustTime(t, at),

@@ -16,10 +16,8 @@ import (
 func TestAttemptMaterializationLeavesDirtyPrimaryByteIdentical(t *testing.T) {
 	t.Parallel()
 
-	fixture := reserveSafetyNetMaterializationAttempt(
-		t, mustDefinition(t, newDefinitionFixture(t).sources),
-	)
-	primary := fixture.definition.Workspace().RepositoryRoot()
+	definition := mustDefinition(t, newDefinitionFixture(t).sources)
+	primary := definition.Workspace().RepositoryRoot()
 	seed := filepath.Join(primary, "seed.txt")
 	if err := os.WriteFile(seed, []byte("staged primary change\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -53,6 +51,7 @@ func TestAttemptMaterializationLeavesDirtyPrimaryByteIdentical(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	reserveSafetyNetMaterializationAttempt(t, definition)
 
 	indexAfter, err := os.ReadFile(filepath.Join(gitDir, "index"))
 	if err != nil {
