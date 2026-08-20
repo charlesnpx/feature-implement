@@ -9,6 +9,72 @@ import (
 	"strings"
 )
 
+type attemptWorktreeRollbackEntry struct {
+	relative string
+	info     os.FileInfo
+}
+
+type attemptWorktreeRollback struct {
+	root    *VerifiedRoot
+	entries []attemptWorktreeRollbackEntry
+}
+
+func (rollback *attemptWorktreeRollback) record(relative string) error {
+	if rollback == nil || rollback.root == nil || rollback.root.adapter == nil {
+		return fmt.Errorf("attempt worktree rollback root is unavailable")
+	}
+	info, exists, err := rollback.root.adapter.inspectEntryIncludingSymlinkExact(relative)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("created attempt tree path %s disappeared before rollback binding", relative)
+	}
+	rollback.entries = append(rollback.entries, attemptWorktreeRollbackEntry{
+		relative: relative,
+		info:     info,
+	})
+	return nil
+}
+
+func (rollback *attemptWorktreeRollback) removeCreated() error {
+	if rollback == nil || rollback.root == nil || rollback.root.adapter == nil {
+		return nil
+	}
+	var cleanupErrors []error
+	for index := len(rollback.entries) - 1; index >= 0; index-- {
+		entry := rollback.entries[index]
+		if _, err := rollback.root.adapter.removeEntryIdentityExact(entry.relative, entry.info); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf(
+				"remove created attempt tree path %s: %w", entry.relative, err,
+			))
+		}
+	}
+	return errors.Join(cleanupErrors...)
+}
+
+func rollbackCreatedAttemptWorktree(
+	parent *VerifiedRoot,
+	name string,
+	identity PlatformFileIdentity,
+) error {
+	removed, err := parent.adapter.removeEmptyDirectoryIdentityExact(name, identity, nil)
+	if err != nil {
+		return err
+	}
+	if removed {
+		return nil
+	}
+	_, exists, err := parent.adapter.inspectExact(name)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	return fmt.Errorf("new attempt worktree directory contains unowned entries and will be preserved")
+}
+
 // MaterializeAttemptTree materialises base into an independently administered,
 // detached attempt directory. The directory is never passed to git worktree
 // add: its Git administration is local to the attempt and its object lookup
@@ -40,14 +106,23 @@ func (adapter LocalAttemptGitAdapter) MaterializeAttemptTree(
 		rollbackName     string
 		rollbackIdentity PlatformFileIdentity
 		rollbackCreated  bool
+		rollback         *attemptWorktreeRollback
 	)
 	defer func() {
+		rollbackNeeded := resultErr != nil
+		if rollbackNeeded && rollback != nil {
+			if err := rollback.removeCreated(); err != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf(
+					"rollback newly created attempt worktree entries: %w", err,
+				))
+			}
+		}
 		if root != nil {
 			resultErr = errors.Join(resultErr, root.Close())
 		}
-		if resultErr != nil && rollbackCreated {
-			if err := rollbackParent.adapter.removeDirectoryTreeIdentityExact(
-				rollbackName, rollbackIdentity,
+		if rollbackNeeded && rollbackCreated {
+			if err := rollbackCreatedAttemptWorktree(
+				rollbackParent, rollbackName, rollbackIdentity,
 			); err != nil {
 				resultErr = errors.Join(resultErr, fmt.Errorf(
 					"rollback newly created attempt worktree directory: %w", err,
@@ -87,19 +162,6 @@ func (adapter LocalAttemptGitAdapter) MaterializeAttemptTree(
 		return AttemptGitInspection{}, fmt.Errorf("attempt worktree parent is unavailable")
 	}
 	name := filepath.Base(worktree)
-	canonicalWorktree, err := canonicalizeTrustedRootPath(worktree)
-	if err != nil {
-		return AttemptGitInspection{}, err
-	}
-	canonicalParentWorktree, err := canonicalizeTrustedRootPath(
-		filepath.Join(parent.Path(), name),
-	)
-	if err != nil {
-		return AttemptGitInspection{}, err
-	}
-	if canonicalWorktree != canonicalParentWorktree {
-		return AttemptGitInspection{}, fmt.Errorf("attempt worktree path does not match its verified parent")
-	}
 	created, err := parent.adapter.makeDirectory(name, 0o700)
 	if err != nil {
 		return AttemptGitInspection{}, fmt.Errorf("create attempt worktree directory: %w", err)
@@ -127,11 +189,12 @@ func (adapter LocalAttemptGitAdapter) MaterializeAttemptTree(
 	); err != nil {
 		return AttemptGitInspection{}, err
 	}
-	root, err = OpenVerifiedRoot(RootRoleWorktree, canonicalWorktree, false)
+	root, err = OpenVerifiedRoot(RootRoleWorktree, filepath.Join(parent.Path(), name), false)
 	if err != nil {
 		return AttemptGitInspection{}, fmt.Errorf("open new attempt worktree: %w", err)
 	}
-	if err := materializeExactAttemptTree(ctx, adapter, source, root, base, algorithm); err != nil {
+	rollback = &attemptWorktreeRollback{root: root}
+	if err := materializeExactAttemptTree(ctx, adapter, source, root, base, algorithm, rollback); err != nil {
 		return AttemptGitInspection{}, err
 	}
 	if err := initializeDetachedAttemptRepository(ctx, adapter, source, root, base, algorithm); err != nil {
@@ -253,6 +316,7 @@ func materializeExactAttemptTree(
 	root *VerifiedRoot,
 	base GitObjectID,
 	algorithm GitHashAlgorithm,
+	rollback *attemptWorktreeRollback,
 ) error {
 	if root == nil || root.adapter == nil {
 		return fmt.Errorf("attempt tree destination is closed")
@@ -280,8 +344,15 @@ func materializeExactAttemptTree(
 		return fmt.Errorf("new attempt directory is unexpectedly nonempty")
 	}
 	for _, directory := range directories {
-		if _, err := root.adapter.makeDirectory(directory, 0o755); err != nil {
+		created, err := root.adapter.makeDirectory(directory, 0o755)
+		if err != nil {
 			return fmt.Errorf("create attempt tree directory %s: %w", directory, err)
+		}
+		if !created {
+			return fmt.Errorf("attempt tree directory %s appeared during materialization", directory)
+		}
+		if err := rollback.record(directory); err != nil {
+			return fmt.Errorf("record created attempt tree directory %s: %w", directory, err)
 		}
 	}
 	target := LocalTargetGitAdapter{git: adapter}
@@ -309,12 +380,19 @@ func materializeExactAttemptTree(
 				err = root.adapter.writeSymlinkExclusive(entry.path, string(content))
 			}
 		case GitModeSubmodule:
-			_, err = root.adapter.makeDirectory(entry.path, 0o755)
+			var created bool
+			created, err = root.adapter.makeDirectory(entry.path, 0o755)
+			if err == nil && !created {
+				err = fmt.Errorf("attempt tree directory appeared during materialization")
+			}
 		default:
 			err = fmt.Errorf("unsupported attempt tree mode %s", entry.mode)
 		}
 		if err != nil {
 			return fmt.Errorf("materialize attempt tree path %s: %w", entry.path, err)
+		}
+		if err := rollback.record(entry.path); err != nil {
+			return fmt.Errorf("record created attempt tree path %s: %w", entry.path, err)
 		}
 		if err := injectAttemptWorktreeMaterializationFault(
 			adapter.worktreeMaterializeFault, AttemptMaterializationFaultAfterPath,

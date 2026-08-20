@@ -260,16 +260,6 @@ merge_units:
 	if err != nil {
 		t.Fatal(err)
 	}
-	attempt, err = workspace.MaterializeAttempt(
-		context.Background(), journal, bundle.Definition(), attemptGit,
-		workspace.MaterializeAttemptRequest{
-			AttemptID:  attempt.AttemptID(),
-			OccurredAt: time.Date(2026, time.July, 25, 18, 0, 2, 0, time.UTC),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
 	return attemptBoundaryCommandFixture{
 		bundleRoot: bundleRoot, workspaceDir: workspaceDir, attemptID: attempt.AttemptID(),
 	}

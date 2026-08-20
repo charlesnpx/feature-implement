@@ -139,6 +139,68 @@ func TestDetachedAttemptTreeMaterializationUnderTemporaryAlias(t *testing.T) {
 	}
 }
 
+func TestDetachedAttemptTreeMaterializationRejectsCallerControlledSymlinkComponent(t *testing.T) {
+	t.Parallel()
+
+	repositoryRoot, base := newRawAttemptTreeRepository(t)
+	parent, outside := t.TempDir(), t.TempDir()
+	controlled := filepath.Join(parent, "caller-controlled")
+	if err := os.Symlink(outside, controlled); err != nil {
+		t.Fatal(err)
+	}
+	worktree := filepath.Join(controlled, "attempt")
+
+	_, err := workspace.DefaultLocalAttemptGitAdapter().MaterializeAttemptTree(
+		context.Background(), repositoryRoot, base, worktree,
+	)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("caller-controlled symlink component error = %v", err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(outside, "attempt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("caller-controlled symlink component was followed: %v", statErr)
+	}
+}
+
+func TestDetachedAttemptTreeMaterializationRollbackPreservesForeignChild(t *testing.T) {
+	t.Parallel()
+
+	repositoryRoot, base := newRawAttemptTreeRepository(t)
+	worktree := filepath.Join(t.TempDir(), "attempt")
+	foreign := filepath.Join(worktree, "operator-note.txt")
+	failure := errors.New("injected materialization failure")
+	injected := false
+	adapter := workspace.DefaultLocalAttemptGitAdapter().
+		WithAttemptWorktreeMaterializationFaultInjector(
+			func(point workspace.AttemptWorktreeMaterializationFaultPoint) error {
+				if point != workspace.AttemptMaterializationFaultAfterDirectoryBinding || injected {
+					return nil
+				}
+				if err := os.WriteFile(foreign, []byte("leave this alone"), 0o600); err != nil {
+					return err
+				}
+				injected = true
+				return failure
+			},
+		)
+
+	_, err := adapter.MaterializeAttemptTree(context.Background(), repositoryRoot, base, worktree)
+	if !errors.Is(err, failure) {
+		t.Fatalf("injected materialization failure = %v", err)
+	}
+	if !injected {
+		t.Fatal("foreign child was not injected")
+	}
+	if content, readErr := os.ReadFile(foreign); readErr != nil || string(content) != "leave this alone" {
+		t.Fatalf("foreign child was not preserved: %q, %v", content, readErr)
+	}
+	if info, statErr := os.Stat(worktree); statErr != nil || !info.IsDir() {
+		t.Fatalf("foreign-child worktree was not preserved: %v, %v", info, statErr)
+	}
+	if !strings.Contains(err.Error(), "contains unowned entries") {
+		t.Fatalf("foreign-child rollback explanation = %v", err)
+	}
+}
+
 func TestDetachedAttemptTreeMaterializationRejectsUnsafeSymlink(t *testing.T) {
 	t.Parallel()
 

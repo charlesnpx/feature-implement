@@ -13,8 +13,6 @@ type SchedulerUnitStatus string
 const (
 	SchedulerUnitBlocked         SchedulerUnitStatus = "blocked"
 	SchedulerUnitReady           SchedulerUnitStatus = "ready"
-	SchedulerUnitReserved        SchedulerUnitStatus = "reserved"
-	SchedulerUnitMaterializing   SchedulerUnitStatus = "materializing"
 	SchedulerUnitActive          SchedulerUnitStatus = "active"
 	SchedulerUnitPaused          SchedulerUnitStatus = "paused"
 	SchedulerUnitReviewExhausted SchedulerUnitStatus = "review_exhausted"

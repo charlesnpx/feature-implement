@@ -280,9 +280,6 @@ func TestNoReviewIntegrationRequiresDurableSameHeadAdoption(t *testing.T) {
 
 	harness := newAttemptHarness(t, "unit-one")
 	attempt := harness.reserve(t, "2026-07-25T10:00:00Z")
-	attempt = harness.materialize(
-		t, attempt.AttemptID(), "2026-07-25T10:00:01Z",
-	)
 	tree := mustGitObject(t, 'b')
 	repositorySnapshot, err := workspace.NewReviewRepositorySnapshot(
 		attempt.VerifiedHead(), tree, true,
@@ -366,9 +363,6 @@ func TestIntegrationCompletionAccountsForAndReleasesLeaseAndSerialSegment(
 	))
 	core := newAttemptHarnessFromFixture(t, fixture, "unit-one")
 	attempt := core.reserve(t, "2026-07-25T10:10:00Z")
-	attempt = core.materialize(
-		t, attempt.AttemptID(), "2026-07-25T10:10:01Z",
-	)
 	head, tree := mustGitObject(t, 'c'), mustGitObject(t, 'd')
 	repository := adoptedIntegrationRepository(
 		t, core, attempt, head, tree, "2026-07-25T10:10:02Z",
@@ -650,17 +644,11 @@ func TestPendingIntegrationIntentSerializesOtherMergeUnits(t *testing.T) {
 
 	firstCore := newIndependentAttemptHarness(t, "unit-one")
 	first := firstCore.reserve(t, "2026-07-25T12:30:00Z")
-	first = firstCore.materialize(
-		t, first.AttemptID(), "2026-07-25T12:30:01Z",
-	)
 	secondCore := firstCore
 	secondCore.unit = mustMergeUnitReference(
 		t, "alpha-plan", "unit-two",
 	)
 	second := secondCore.reserve(t, "2026-07-25T12:30:02Z")
-	second = secondCore.materialize(
-		t, second.AttemptID(), "2026-07-25T12:30:03Z",
-	)
 	firstRepository := adoptedIntegrationRepository(
 		t, firstCore, first, mustGitObject(t, 'c'),
 		mustGitObject(t, 'd'), "2026-07-25T12:30:04Z",
@@ -770,17 +758,11 @@ func TestConcurrentIntegrationsPublishExactlyOneIntent(t *testing.T) {
 
 	firstCore := newIndependentAttemptHarness(t, "unit-one")
 	first := firstCore.reserve(t, "2026-07-25T12:45:00Z")
-	first = firstCore.materialize(
-		t, first.AttemptID(), "2026-07-25T12:45:01Z",
-	)
 	secondCore := firstCore
 	secondCore.unit = mustMergeUnitReference(
 		t, "alpha-plan", "unit-two",
 	)
 	second := secondCore.reserve(t, "2026-07-25T12:45:02Z")
-	second = secondCore.materialize(
-		t, second.AttemptID(), "2026-07-25T12:45:03Z",
-	)
 	firstRepository := adoptedIntegrationRepository(
 		t, firstCore, first, mustGitObject(t, 'c'),
 		mustGitObject(t, 'd'), "2026-07-25T12:45:04Z",
@@ -949,9 +931,6 @@ func TestIntegrationMakesReviewExhaustedLoserRetryableAtNewFrontier(
 		t, fixture, "unit-one",
 	)
 	loser := loserCore.reserve(t, "2026-07-25T12:50:00Z")
-	loser = loserCore.materialize(
-		t, loser.AttemptID(), "2026-07-25T12:50:01Z",
-	)
 	loserTree := mustGitObject(t, 'b')
 	loserSnapshot, err := workspace.NewReviewRepositorySnapshot(
 		loser.VerifiedHead(), loserTree, true,
@@ -1031,9 +1010,6 @@ func TestIntegrationMakesReviewExhaustedLoserRetryableAtNewFrontier(
 		workspace.GoalScopeMergeUnit,
 	)
 	winner := winnerCore.reserve(t, "2026-07-25T12:50:06Z")
-	winner = winnerCore.materialize(
-		t, winner.AttemptID(), "2026-07-25T12:50:07Z",
-	)
 	winnerRepository := adoptedIntegrationRepository(
 		t, winnerCore, winner, mustGitObject(t, 'c'),
 		mustGitObject(t, 'd'), "2026-07-25T12:50:08Z",
@@ -1124,9 +1100,6 @@ func TestCompletedIntegrationRetryFollowsLaterDurableFrontier(
 
 	firstCore := newIndependentAttemptHarness(t, "unit-one")
 	first := firstCore.reserve(t, "2026-07-25T12:55:00Z")
-	first = firstCore.materialize(
-		t, first.AttemptID(), "2026-07-25T12:55:01Z",
-	)
 	firstRepository := adoptedIntegrationRepository(
 		t, firstCore, first, mustGitObject(t, 'c'),
 		mustGitObject(t, 'd'), "2026-07-25T12:55:02Z",
@@ -1161,9 +1134,6 @@ func TestCompletedIntegrationRetryFollowsLaterDurableFrontier(
 		workspace.GoalScopeMergeUnit,
 	)
 	second := secondCore.reserve(t, "2026-07-25T12:55:04Z")
-	second = secondCore.materialize(
-		t, second.AttemptID(), "2026-07-25T12:55:05Z",
-	)
 	secondRepository := adoptedIntegrationRepository(
 		t, secondCore, second, mustGitObject(t, 'e'),
 		mustGitObject(t, 'f'), "2026-07-25T12:55:06Z",
@@ -1446,9 +1416,6 @@ func newNoReviewIntegrationHarness(
 	t.Helper()
 	core := newAttemptHarness(t, "unit-one")
 	attempt := core.reserve(t, "2026-07-25T09:00:00Z")
-	attempt = core.materialize(
-		t, attempt.AttemptID(), "2026-07-25T09:00:01Z",
-	)
 	head := mustGitObject(t, 'c')
 	if sameHead {
 		head = attempt.VerifiedHead()

@@ -287,10 +287,6 @@ func TestWorkspaceCompletionSupportsConfiguredReviewAndAdoptHead(
 	second := secondCore.reserve(
 		t, "2026-07-25T20:20:04Z",
 	)
-	second = secondCore.materialize(
-		t, second.AttemptID(),
-		"2026-07-25T20:20:05Z",
-	)
 	secondRepository := adoptedIntegrationRepository(
 		t, secondCore, second,
 		mustGitObject(t, 'e'),
@@ -843,10 +839,6 @@ func newCompletedWorkspaceHarness(
 	}
 	second := secondCore.reserve(
 		t, "2026-07-25T19:00:01Z",
-	)
-	second = secondCore.materialize(
-		t, second.AttemptID(),
-		"2026-07-25T19:00:02Z",
 	)
 	secondRepository := adoptedIntegrationRepository(
 		t, secondCore, second,

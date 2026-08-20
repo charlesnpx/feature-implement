@@ -203,33 +203,6 @@ func reconcileStartedAttempt(
 	return loadRuntimeAttempt(journal, attempt.attemptID)
 }
 
-type MaterializeAttemptRequest struct {
-	AttemptID  ID
-	OccurredAt time.Time
-	Fault      AttemptLifecycleFaultInjector
-}
-
-func MaterializeAttempt(
-	ctx context.Context,
-	journal *WorkspaceJournal,
-	definition EffectiveWorkspaceDefinition,
-	git AttemptGitPort,
-	request MaterializeAttemptRequest,
-) (RuntimeAttemptProjection, error) {
-	if journal == nil || git == nil || request.AttemptID.IsZero() || request.OccurredAt.IsZero() {
-		return RuntimeAttemptProjection{}, fmt.Errorf("attempt materialization requires journal, Git adapter, attempt, and occurrence time")
-	}
-	_, runtime, err := readAttemptRuntime(journal, definition)
-	if err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	attempt, exists := runtime.Attempt(request.AttemptID)
-	if !exists {
-		return RuntimeAttemptProjection{}, fmt.Errorf("attempt %s is not started", request.AttemptID)
-	}
-	return reconcileStartedAttempt(ctx, journal, definition, git, attempt, request.Fault)
-}
-
 type AdoptAttemptHeadRequest struct {
 	AttemptID  ID
 	OccurredAt time.Time

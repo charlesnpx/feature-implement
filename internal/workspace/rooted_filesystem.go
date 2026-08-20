@@ -379,6 +379,24 @@ func (adapter *RootedFilesystemAdapter) inspectExact(relative string) (os.FileIn
 	return info, true, nil
 }
 
+func (adapter *RootedFilesystemAdapter) inspectEntryIncludingSymlinkExact(
+	relative string,
+) (os.FileInfo, bool, error) {
+	rooted, err := NewRootedPath(adapter.rootPath, relative)
+	if err != nil {
+		return nil, false, err
+	}
+	directory, err := adapter.openDirectoryExact(path.Dir(rooted.Relative()))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	defer directory.Close()
+	return inspectRootEntryExact(directory, path.Base(rooted.Relative()))
+}
+
 func (adapter *RootedFilesystemAdapter) readBounded(relative string, maximum int64) ([]byte, error) {
 	rooted, err := NewRootedPath(adapter.rootPath, relative)
 	if err != nil {
@@ -1044,6 +1062,78 @@ func (adapter *RootedFilesystemAdapter) removeFileIdentityExact(
 		}
 		return nil
 	}, beforeUnlink)
+}
+
+func (adapter *RootedFilesystemAdapter) removeEntryIdentityExact(
+	relative string,
+	expected os.FileInfo,
+) (bool, error) {
+	if expected == nil {
+		return false, fmt.Errorf("rooted removal identity is required")
+	}
+	switch {
+	case expected.Mode()&os.ModeSymlink != 0:
+		return adapter.removeSymlinkIdentityExact(relative, expected)
+	case expected.Mode().IsRegular():
+		return adapter.removeFileIdentityExact(relative, expected, nil)
+	case expected.IsDir():
+		identity, err := platformFileIdentity(expected)
+		if err != nil {
+			return false, fmt.Errorf("identify rooted directory removal target %s: %w", relative, err)
+		}
+		return adapter.removeEmptyDirectoryIdentityExact(relative, identity, nil)
+	default:
+		return false, fmt.Errorf("rooted path %s has unsupported removal type %s", relative, expected.Mode())
+	}
+}
+
+func (adapter *RootedFilesystemAdapter) removeSymlinkIdentityExact(
+	relative string,
+	expected os.FileInfo,
+) (bool, error) {
+	rooted, err := NewRootedPath(adapter.rootPath, relative)
+	if err != nil {
+		return false, err
+	}
+	directory, err := adapter.openDirectoryExact(path.Dir(rooted.Relative()))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer directory.Close()
+	base := path.Base(rooted.Relative())
+	info, exists, err := inspectRootEntryExact(directory, base)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, nil
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return false, fmt.Errorf("rooted path %s cannot be removed because it is not a symbolic link", relative)
+	}
+	if !os.SameFile(expected, info) {
+		return false, fmt.Errorf("rooted symbolic-link removal target %s was replaced and will be preserved", relative)
+	}
+	if err := adapter.verifyPath(); err != nil {
+		return false, err
+	}
+	current, currentExists, err := inspectRootEntryExact(directory, base)
+	if err != nil || !currentExists || !os.SameFile(info, current) {
+		if err == nil {
+			err = fmt.Errorf("symbolic-link removal target was replaced and will be preserved")
+		}
+		return false, fmt.Errorf("revalidate rooted symbolic-link removal target %s: %w", relative, err)
+	}
+	if err := directory.Remove(base); err != nil {
+		return false, fmt.Errorf("remove rooted symbolic link %s: %w", relative, err)
+	}
+	if err := syncRootHandle(directory); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (adapter *RootedFilesystemAdapter) removeFileContentExact(

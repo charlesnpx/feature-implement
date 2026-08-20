@@ -1007,7 +1007,6 @@ func TestProtocolFreeAttemptAdoptsOrdinaryHeadWithoutReviewLoop(t *testing.T) {
 
 	harness := newAttemptHarness(t, "unit-one")
 	attempt := harness.reserve(t, "2026-07-21T11:18:00Z")
-	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T11:18:01Z")
 	implementationHead, implementationTree := mustGitObject(t, 'c'), mustGitObject(t, 'd')
 	repositorySnapshot, err := workspace.NewReviewRepositorySnapshot(implementationHead, implementationTree, true)
 	if err != nil {
@@ -1526,7 +1525,6 @@ func newReviewHarness(t *testing.T) *reviewHarness {
 		unit: mustMergeUnitReference(t, "alpha-plan", "unit-one"), goal: goal, worktrees: t.TempDir(),
 	}
 	attempt := core.reserve(t, "2026-07-21T10:01:00Z")
-	attempt = core.materialize(t, attempt.AttemptID(), "2026-07-21T10:02:00Z")
 	tree := mustGitObject(t, 'b')
 	repositorySnapshot, err := workspace.NewReviewRepositorySnapshot(base, tree, true)
 	if err != nil {

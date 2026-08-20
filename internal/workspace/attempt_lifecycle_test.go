@@ -160,18 +160,6 @@ func (h attemptHarness) reserve(t *testing.T, at string) workspace.RuntimeAttemp
 	return attempt
 }
 
-func (h attemptHarness) materialize(t *testing.T, attemptID workspace.ID, at string) workspace.RuntimeAttemptProjection {
-	t.Helper()
-	attempt, err := workspace.MaterializeAttempt(
-		context.Background(), h.journal, h.definition, h.git,
-		workspace.MaterializeAttemptRequest{AttemptID: attemptID, OccurredAt: mustTime(t, at)},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return attempt
-}
-
 func TestAttemptIdentityIsDigestBacked(t *testing.T) {
 	t.Parallel()
 
@@ -618,7 +606,6 @@ func TestPauseOnlyBoundaryAtomicallyPausesAndResumesSameGoal(t *testing.T) {
 
 	harness := newAttemptHarness(t, "unit-one")
 	attempt := harness.reserve(t, "2026-07-21T11:01:00Z")
-	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T11:02:00Z")
 	unconstrainedHead := mustGitObject(t, 'b')
 	harness.git.setHead(
 		t, attempt.Worktree(), unconstrainedHead, true,
@@ -711,7 +698,6 @@ func TestAttemptBoundaryRejectsDisallowedKindsBeforeAppend(t *testing.T) {
 			fixture.sources.ExecutionConfig.Bytes = []byte(updated)
 			harness := newAttemptHarnessFromFixture(t, fixture, "unit-one")
 			attempt := harness.reserve(t, "2026-07-21T11:01:00Z")
-			attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T11:02:00Z")
 			before := journalRecordCount(t, harness.journal)
 			_, err := workspace.RecordAttemptBoundary(
 				context.Background(), harness.journal, harness.definition, harness.git,
@@ -767,7 +753,6 @@ func TestAttemptBoundaryRejectsDifferentKindSameEvidenceOnPausedRetry(t *testing
 			fixture.sources.ExecutionConfig.Bytes = []byte(updated)
 			harness := newAttemptHarnessFromFixture(t, fixture, "unit-one")
 			attempt := harness.reserve(t, "2026-07-21T11:01:00Z")
-			attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T11:02:00Z")
 			evidence := boundaryEvidence(t, test.name)
 			if _, err := workspace.RecordAttemptBoundary(
 				context.Background(), harness.journal, harness.definition, harness.git,
@@ -803,7 +788,6 @@ func TestAttemptBoundaryRequiresSupportedKind(t *testing.T) {
 
 	harness := newAttemptHarness(t, "unit-one")
 	attempt := harness.reserve(t, "2026-07-21T11:01:00Z")
-	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T11:02:00Z")
 	before := journalRecordCount(t, harness.journal)
 	for _, kind := range []workspace.AttemptBoundaryKind{"", "unsupported"} {
 		_, err := workspace.RecordAttemptBoundary(
@@ -828,7 +812,6 @@ func TestEscalationUsesPauseOnlyShape(t *testing.T) {
 
 	harness := newIndependentAttemptHarness(t, "unit-two")
 	attempt := harness.reserve(t, "2026-07-21T12:01:00Z")
-	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T12:02:00Z")
 	result, err := workspace.RecordAttemptBoundary(
 		context.Background(), harness.journal, harness.definition, harness.git,
 		workspace.RecordAttemptBoundaryRequest{
@@ -884,7 +867,6 @@ func TestPauseAttemptPreservesPlannedAndExceptionStops(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			harness := test.harness(t)
 			attempt := harness.reserve(t, "2026-07-21T12:10:00Z")
-			attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T12:11:00Z")
 			harness.git.setHead(
 				t, attempt.Worktree(), mustGitObject(t, 'c'), true,
 			)
@@ -1009,7 +991,6 @@ func TestCheckpointBoundaryRecoversIdempotentlyAndRejectsStaleHead(t *testing.T)
 
 	harness := newIndependentAttemptHarness(t, "unit-two")
 	attempt := harness.reserve(t, "2026-07-21T12:01:00Z")
-	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T12:02:00Z")
 	crash := errors.New("simulated crash")
 	evidence := boundaryEvidence(t, "checkpoint")
 	_, err := workspace.RecordAttemptBoundary(

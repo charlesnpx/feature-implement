@@ -28,7 +28,6 @@ func TestJournaledCommitProtocolStartsFromRealStagedWorktree(t *testing.T) {
 
 	harness := newConfiguredAttemptHarness(t)
 	attempt := harness.reserve(t, "2026-07-21T10:55:00Z")
-	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T10:56:00Z")
 
 	runGitSetup(
 		t, "", "clone", "--no-local",
@@ -169,7 +168,6 @@ func TestJournaledCommitProtocolRecoversCommitAndCheckCrashWindows(t *testing.T)
 
 	harness := newConfiguredAttemptHarness(t)
 	attempt := harness.reserve(t, "2026-07-21T11:00:00Z")
-	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T11:01:00Z")
 
 	if _, err := workspace.RecordAttemptBoundary(
 		context.Background(), harness.journal, harness.definition, harness.git,
@@ -722,7 +720,6 @@ func TestReviewFixCanFollowUnconstrainedImplementationHistory(t *testing.T) {
 
 	harness := newReviewOnlyAttemptHarness(t)
 	attempt := harness.reserve(t, "2026-07-21T12:20:00Z")
-	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T12:21:00Z")
 	review := configuredReviewFixProtocol(t, harness.definition)
 	step, err := review.Step(1)
 	if err != nil {
@@ -1244,7 +1241,6 @@ func newJournalCommitScenario(t *testing.T) journalCommitScenario {
 	t.Helper()
 	harness := newConfiguredAttemptHarness(t)
 	attempt := harness.reserve(t, "2026-07-21T12:00:00Z")
-	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T12:01:00Z")
 	step := configuredProtocolStep(t, harness.definition)
 	tree, commitObject, changedObject := mustGitObject(t, 'b'), mustGitObject(t, 'c'), mustGitObject(t, 'd')
 	diff := addedDiff(t, "src/protocol.go", changedObject)

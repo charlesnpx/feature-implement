@@ -190,18 +190,6 @@ func TestLocalGitIntegrationUsesExactDetachedAttemptTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attempt, err = workspace.MaterializeAttempt(
-		context.Background(), journal, definition, attemptGit,
-		workspace.MaterializeAttemptRequest{
-			AttemptID: attempt.AttemptID(),
-			OccurredAt: mustTime(
-				t, "2026-07-25T15:30:02Z",
-			),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if err := os.WriteFile(
 		filepath.Join(attempt.Worktree(), "integration.txt"),
 		[]byte("accepted implementation\n"),
@@ -626,19 +614,6 @@ func TestLocalGitCompletedIntegrationRetryFollowsLaterDurableFrontier(
 		t.Fatal(err)
 	}
 	second := secondCore.reserve(t, "2026-07-25T16:25:01Z")
-	second, err = workspace.MaterializeAttempt(
-		context.Background(),
-		secondCore.journal,
-		secondCore.definition,
-		workspace.DefaultLocalAttemptGitAdapter(),
-		workspace.MaterializeAttemptRequest{
-			AttemptID:  second.AttemptID(),
-			OccurredAt: mustTime(t, "2026-07-25T16:25:02Z"),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if second.Base() != firstMerge {
 		t.Fatalf(
 			"second real integration base = %s, want %s",
@@ -1825,17 +1800,6 @@ func newRealIntegrationScenario(
 	fixture := newDefinitionFixtureForHash(t, algorithm)
 	core := newAttemptHarnessFromFixture(t, fixture, "unit-one")
 	attempt := core.reserve(t, "2026-07-25T14:30:00Z")
-	attempt, err := workspace.MaterializeAttempt(
-		context.Background(), core.journal, core.definition,
-		workspace.DefaultLocalAttemptGitAdapter(),
-		workspace.MaterializeAttemptRequest{
-			AttemptID:  attempt.AttemptID(),
-			OccurredAt: mustTime(t, "2026-07-25T14:30:01Z"),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
 	repositoryRoot := core.definition.Workspace().RepositoryRoot()
 	treeText := strings.TrimSpace(runTargetGitTest(
 		t, repositoryRoot, "rev-parse",

@@ -231,7 +231,6 @@ func TestWorkspaceRuntimeViewsProjectPausedBoundaryKinds(
 		t.Run(test.name, func(t *testing.T) {
 			harness := newAttemptHarness(t, "unit-one")
 			attempt := harness.reserve(t, "2026-07-21T11:01:00Z")
-			attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T11:02:00Z")
 			snapshot, err := harness.journal.ReadSnapshot()
 			if err != nil {
 				t.Fatal(err)

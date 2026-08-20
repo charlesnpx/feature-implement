@@ -63,7 +63,7 @@ func WorkspaceViewSchema() map[string]any {
 			"plan_id":       nonEmptyText(),
 			"merge_unit_id": nonEmptyText(),
 			"status": enum(
-				"blocked", "ready", "reserved", "materializing",
+				"blocked", "ready",
 				"active", "paused", "review_exhausted", "completed",
 			),
 			"generation":         nonEmptyText(),
@@ -185,7 +185,7 @@ func WorkspaceViewSchema() map[string]any {
 			"base":           nonEmptyText(),
 			"worktree":       nonEmptyText(),
 			"phase": enum(
-				"reserved", "materializing", "active", "paused",
+				"active", "paused",
 				"review_exhausted", "completed", "failed", "abandoned",
 			),
 			"head":               nonEmptyText(),
