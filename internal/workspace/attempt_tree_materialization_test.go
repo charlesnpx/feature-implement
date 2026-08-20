@@ -201,6 +201,47 @@ func TestDetachedAttemptTreeMaterializationRollbackPreservesForeignChild(t *test
 	}
 }
 
+func TestDetachedAttemptTreeMaterializationRollsBackInitializedGitDirectory(t *testing.T) {
+	t.Parallel()
+
+	repositoryRoot, base := newRawAttemptTreeRepository(t)
+	worktree := filepath.Join(t.TempDir(), "attempt")
+	failure := errors.New("injected failure after Git initialization")
+	injected := false
+	adapter := workspace.DefaultLocalAttemptGitAdapter().
+		WithAttemptWorktreeMaterializationFaultInjector(
+			func(point workspace.AttemptWorktreeMaterializationFaultPoint) error {
+				if point != workspace.AttemptMaterializationFaultAfterGitInit || injected {
+					return nil
+				}
+				if _, err := os.Lstat(filepath.Join(worktree, ".git")); err != nil {
+					return err
+				}
+				injected = true
+				return failure
+			},
+		)
+
+	_, err := adapter.MaterializeAttemptTree(context.Background(), repositoryRoot, base, worktree)
+	if !errors.Is(err, failure) {
+		t.Fatalf("injected Git initialization failure = %v", err)
+	}
+	if !injected {
+		t.Fatal("Git initialization fault was not injected")
+	}
+	if _, statErr := os.Lstat(worktree); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("initialized Git directory left its worktree behind: %v", statErr)
+	}
+	inspection, retryErr := workspace.DefaultLocalAttemptGitAdapter().MaterializeAttemptTree(
+		context.Background(), repositoryRoot, base, worktree,
+	)
+	if retryErr != nil {
+		t.Errorf("retry after initialized Git directory rollback = %v", retryErr)
+	} else if !inspection.Clean() || inspection.WorktreeHead() != base {
+		t.Errorf("retry inspection = %#v", inspection)
+	}
+}
+
 func TestDetachedAttemptTreeMaterializationRejectsUnsafeSymlink(t *testing.T) {
 	t.Parallel()
 

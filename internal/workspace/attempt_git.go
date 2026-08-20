@@ -95,6 +95,7 @@ type AttemptWorktreeMaterializationFaultPoint string
 const (
 	AttemptMaterializationFaultAfterDirectoryBinding AttemptWorktreeMaterializationFaultPoint = "after_directory_binding"
 	AttemptMaterializationFaultAfterPath             AttemptWorktreeMaterializationFaultPoint = "after_path"
+	AttemptMaterializationFaultAfterGitInit          AttemptWorktreeMaterializationFaultPoint = "after_git_init"
 )
 
 type AttemptWorktreeMaterializationFaultInjector func(

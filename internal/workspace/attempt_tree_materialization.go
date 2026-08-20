@@ -14,9 +14,14 @@ type attemptWorktreeRollbackEntry struct {
 	info     os.FileInfo
 }
 
+type initializedAttemptRepositoryRollback struct {
+	gitDirectory PlatformFileIdentity
+}
+
 type attemptWorktreeRollback struct {
-	root    *VerifiedRoot
-	entries []attemptWorktreeRollbackEntry
+	root                  *VerifiedRoot
+	entries               []attemptWorktreeRollbackEntry
+	initializedRepository *initializedAttemptRepositoryRollback
 }
 
 func (rollback *attemptWorktreeRollback) record(relative string) error {
@@ -37,11 +42,46 @@ func (rollback *attemptWorktreeRollback) record(relative string) error {
 	return nil
 }
 
+func (rollback *attemptWorktreeRollback) recordInitializedRepository() error {
+	if rollback == nil || rollback.root == nil || rollback.root.adapter == nil {
+		return fmt.Errorf("attempt worktree rollback root is unavailable")
+	}
+	if rollback.initializedRepository != nil {
+		return fmt.Errorf("created detached attempt repository is already bound for rollback")
+	}
+	info, exists, err := rollback.root.adapter.inspectEntryIncludingSymlinkExact(".git")
+	if err != nil {
+		return err
+	}
+	if !exists || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("created detached attempt Git directory changed before rollback binding")
+	}
+	identity, err := platformFileIdentity(info)
+	if err != nil {
+		return fmt.Errorf("identify created detached attempt Git directory: %w", err)
+	}
+	rollback.initializedRepository = &initializedAttemptRepositoryRollback{
+		gitDirectory: identity,
+	}
+	return nil
+}
+
 func (rollback *attemptWorktreeRollback) removeCreated() error {
 	if rollback == nil || rollback.root == nil || rollback.root.adapter == nil {
 		return nil
 	}
 	var cleanupErrors []error
+	if rollback.initializedRepository != nil {
+		// Git init created this one subtree in the verified new worktree. All
+		// materialized tree entries remain non-recursive, identity-checked removals.
+		if err := rollback.root.adapter.removeDirectoryTreeIdentityExact(
+			".git", rollback.initializedRepository.gitDirectory,
+		); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf(
+				"remove created detached attempt Git directory: %w", err,
+			))
+		}
+	}
 	for index := len(rollback.entries) - 1; index >= 0; index-- {
 		entry := rollback.entries[index]
 		if _, err := rollback.root.adapter.removeEntryIdentityExact(entry.relative, entry.info); err != nil {
@@ -197,7 +237,7 @@ func (adapter LocalAttemptGitAdapter) MaterializeAttemptTree(
 	if err := materializeExactAttemptTree(ctx, adapter, source, root, base, algorithm, rollback); err != nil {
 		return AttemptGitInspection{}, err
 	}
-	if err := initializeDetachedAttemptRepository(ctx, adapter, source, root, base, algorithm); err != nil {
+	if err := initializeDetachedAttemptRepository(ctx, adapter, source, root, base, algorithm, rollback); err != nil {
 		return AttemptGitInspection{}, err
 	}
 	if err := guard.Verify(ctx, adapter); err != nil {
@@ -413,15 +453,27 @@ func initializeDetachedAttemptRepository(
 	root *VerifiedRoot,
 	base GitObjectID,
 	algorithm GitHashAlgorithm,
+	rollback *attemptWorktreeRollback,
 ) (resultErr error) {
 	if root == nil {
 		return fmt.Errorf("attempt tree destination is closed")
+	}
+	if rollback == nil || rollback.root != root || rollback.root.adapter == nil {
+		return fmt.Errorf("attempt tree rollback is unavailable")
 	}
 	if _, exitCode, err := adapter.run(ctx, root.Path(), "init", "--quiet", "--object-format="+string(algorithm)); err != nil || exitCode != 0 {
 		if err == nil {
 			err = fmt.Errorf("Git exited with status %d", exitCode)
 		}
 		return fmt.Errorf("initialize detached attempt repository: %w", err)
+	}
+	if err := rollback.recordInitializedRepository(); err != nil {
+		return fmt.Errorf("record created detached attempt repository: %w", err)
+	}
+	if err := injectAttemptWorktreeMaterializationFault(
+		adapter.worktreeMaterializeFault, AttemptMaterializationFaultAfterGitInit,
+	); err != nil {
+		return err
 	}
 	commit := LocalCommitGitAdapter{git: adapter}
 	binding, err := commit.captureTrustedWorktreeBinding(ctx, root.Path())
