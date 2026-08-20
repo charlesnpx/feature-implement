@@ -308,7 +308,7 @@ func TestExecutionConfigRequiresExplicitSupportedBoundaryPolicy(t *testing.T) {
 		{
 			name:    "complete-goal checkpoint",
 			source:  strings.Replace(valid, "checkpoint: pause_only", "checkpoint: complete_goal_and_wait", 1),
-			wantErr: `"complete_goal_and_wait" is no longer supported; use "pause_only" instead`,
+			wantErr: `boundary checkpoint "complete_goal_and_wait" is unsupported`,
 		},
 		{
 			name:    "unknown escalation",
@@ -443,7 +443,7 @@ func TestStartAttemptReconcilesEveryPostAppendCrashPoint(t *testing.T) {
 	}
 }
 
-func TestStartAttemptReportsAnInterruptedScratchDirectory(t *testing.T) {
+func TestStartAttemptRollsBackAnInterruptedScratchDirectory(t *testing.T) {
 	t.Parallel()
 
 	definition := mustDefinition(t, newDefinitionFixture(t).sources)
@@ -484,21 +484,28 @@ func TestStartAttemptReportsAnInterruptedScratchDirectory(t *testing.T) {
 	if attempt.Phase() != workspace.AttemptActive {
 		t.Fatalf("interrupted scratch projection = %#v", attempt)
 	}
-	if _, err := os.Lstat(attempt.Worktree()); err != nil {
-		t.Fatalf("interrupted scratch directory = %v", err)
+	if _, err := os.Lstat(attempt.Worktree()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("interrupted scratch directory remains: %v", err)
 	}
 	if _, err := os.Lstat(attempt.Worktree() + ".feature-attempt-claim"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("scratch materialization wrote a claim marker: %v", err)
 	}
 	before := journalRecordCount(t, journal)
 	request.OccurredAt = mustTime(t, "2026-07-21T10:12:00Z")
-	if _, err := workspace.StartAttempt(
+	recovered, err := workspace.StartAttempt(
 		context.Background(), journal, definition, workspace.DefaultLocalAttemptGitAdapter(), request,
-	); err == nil || !strings.Contains(err.Error(), "not the exact clean detached base") {
-		t.Fatalf("reopened interrupted scratch directory = %v", err)
+	)
+	if err != nil {
+		t.Fatalf("recovered interrupted scratch directory = %v", err)
+	}
+	if recovered.AttemptID() != attempt.AttemptID() || recovered.Phase() != workspace.AttemptActive {
+		t.Fatalf("recovered interrupted scratch projection = %#v", recovered)
+	}
+	if _, err := os.Lstat(attempt.Worktree()); err != nil {
+		t.Fatalf("recovered scratch directory = %v", err)
 	}
 	if after := journalRecordCount(t, journal); after != before {
-		t.Fatalf("reported interrupted scratch directory appended records: before=%d after=%d", before, after)
+		t.Fatalf("recovered interrupted scratch directory appended records: before=%d after=%d", before, after)
 	}
 }
 

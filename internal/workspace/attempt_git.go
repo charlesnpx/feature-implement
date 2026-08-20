@@ -259,6 +259,13 @@ func validateAttemptTreeEntries(entries []rawGitTreeEntry) ([]string, error) {
 	for _, entry := range entries {
 		switch entry.mode {
 		case GitModeRegular, GitModeExecutable, GitModeSymlink:
+		case GitModeSubmodule:
+			if entry.kind != "commit" {
+				return nil, fmt.Errorf(
+					"attempt tree path %s has inconsistent gitlink type %s",
+					entry.path, entry.kind,
+				)
+			}
 		default:
 			return nil, fmt.Errorf(
 				"attempt tree path %s has unsupported mode %s",

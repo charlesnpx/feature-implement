@@ -748,13 +748,28 @@ func (adapter LocalCommitGitAdapter) verifyRawTreeMaterialization(
 	worktree string,
 	tree GitObjectID,
 ) error {
-	return adapter.verifyRawTreeMaterializationAtDepth(ctx, worktree, tree, 0, make(map[string]struct{}))
+	return adapter.verifyRawTreeMaterializationAtDepth(
+		ctx, worktree, tree, false, 0, make(map[string]struct{}),
+	)
+}
+
+// verifyDetachedAttemptRawTreeMaterialization treats each gitlink as the
+// empty directory checkout leaves behind when submodules are not initialized.
+func (adapter LocalCommitGitAdapter) verifyDetachedAttemptRawTreeMaterialization(
+	ctx context.Context,
+	worktree string,
+	tree GitObjectID,
+) error {
+	return adapter.verifyRawTreeMaterializationAtDepth(
+		ctx, worktree, tree, true, 0, make(map[string]struct{}),
+	)
 }
 
 func (adapter LocalCommitGitAdapter) verifyRawTreeMaterializationAtDepth(
 	ctx context.Context,
 	worktree string,
 	tree GitObjectID,
+	emptyGitlinks bool,
 	depth int,
 	visited map[string]struct{},
 ) error {
@@ -859,6 +874,16 @@ func (adapter LocalCommitGitAdapter) verifyRawTreeMaterializationAtDepth(
 			if !info.IsDir() {
 				return rawTreeMismatchf("raw worktree submodule %s is not a directory", entry.path)
 			}
+			if emptyGitlinks {
+				contents, err := os.ReadDir(absolute)
+				if err != nil {
+					return fmt.Errorf("inspect raw worktree gitlink %s: %w", entry.path, err)
+				}
+				if len(contents) != 0 {
+					return rawTreeMismatchf("raw worktree gitlink %s is not an empty directory", entry.path)
+				}
+				break
+			}
 			submoduleRoot := absolute
 			submoduleAlgorithm, err := adapter.git.objectFormat(ctx, submoduleRoot)
 			if err != nil {
@@ -881,7 +906,7 @@ func (adapter LocalCommitGitAdapter) verifyRawTreeMaterializationAtDepth(
 				return fmt.Errorf("inspect raw submodule %s tree: %w", entry.path, err)
 			}
 			if err := adapter.verifyRawTreeMaterializationAtDepth(
-				ctx, submoduleRoot, submoduleTree, depth+1, visited,
+				ctx, submoduleRoot, submoduleTree, false, depth+1, visited,
 			); err != nil {
 				return fmt.Errorf("verify raw submodule %s: %w", entry.path, err)
 			}

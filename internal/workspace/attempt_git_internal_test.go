@@ -11,11 +11,12 @@ func TestValidateAttemptTreeEntriesAcceptsSupportedModes(t *testing.T) {
 		{path: "README.md", mode: GitModeRegular},
 		{path: "bin/run", mode: GitModeExecutable},
 		{path: "links/run", mode: GitModeSymlink},
+		{path: "modules/tool", mode: GitModeSubmodule, kind: "commit"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"bin", "links"}; !slices.Equal(directories, want) {
+	if want := []string{"bin", "links", "modules"}; !slices.Equal(directories, want) {
 		t.Fatalf("attempt tree directories = %q, want %q", directories, want)
 	}
 }
@@ -27,11 +28,11 @@ func TestValidateAttemptTreeEntriesRejectsUnsupportedAndCollidingPaths(t *testin
 		want    string
 	}{
 		{
-			name: "submodule",
+			name: "gitlink with blob type",
 			entries: []rawGitTreeEntry{
-				{path: "modules/tool", mode: GitModeSubmodule},
+				{path: "modules/tool", mode: GitModeSubmodule, kind: "blob"},
 			},
-			want: "unsupported mode",
+			want: "inconsistent gitlink type",
 		},
 		{
 			name: "Git administration",

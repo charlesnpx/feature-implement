@@ -9,15 +9,13 @@ import (
 type AttemptCheckpointMode string
 
 const (
-	AttemptCheckpointNone                AttemptCheckpointMode = "none"
-	AttemptCheckpointPauseOnly           AttemptCheckpointMode = "pause_only"
-	AttemptCheckpointCompleteGoalAndWait AttemptCheckpointMode = "complete_goal_and_wait"
+	AttemptCheckpointNone      AttemptCheckpointMode = "none"
+	AttemptCheckpointPauseOnly AttemptCheckpointMode = "pause_only"
 )
 
 func (mode AttemptCheckpointMode) valid() bool {
 	return mode == AttemptCheckpointNone ||
-		mode == AttemptCheckpointPauseOnly ||
-		mode == AttemptCheckpointCompleteGoalAndWait
+		mode == AttemptCheckpointPauseOnly
 }
 
 type AttemptEscalationPolicy string
@@ -47,12 +45,6 @@ func newAttemptBoundaryPolicy(wire *attemptBoundaryPolicyWire, location string) 
 		)
 	}
 	checkpoint := AttemptCheckpointMode(wire.Checkpoint)
-	if checkpoint == AttemptCheckpointCompleteGoalAndWait {
-		return AttemptBoundaryPolicy{}, fmt.Errorf(
-			"%s boundary checkpoint %q is no longer supported; use %q instead",
-			location, wire.Checkpoint, AttemptCheckpointPauseOnly,
-		)
-	}
 	if !checkpoint.valid() {
 		return AttemptBoundaryPolicy{}, fmt.Errorf(
 			"%s boundary checkpoint %q is unsupported", location, wire.Checkpoint,

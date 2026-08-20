@@ -70,6 +70,50 @@ func TestDetachedAttemptTreeMaterializationPreservesPrimaryAndExactTree(t *testi
 	}
 }
 
+func TestDetachedAttemptTreeMaterializationCreatesEmptyGitlinkDirectory(t *testing.T) {
+	t.Parallel()
+
+	repositoryRoot, _ := newRawAttemptTreeRepository(t)
+	gitlink := strings.TrimSpace(string(runGitSetup(t, repositoryRoot, "rev-parse", "HEAD")))
+	runGitSetup(
+		t, repositoryRoot, "update-index", "--add", "--cacheinfo",
+		"160000,"+gitlink+",modules/tool",
+	)
+	runGitSetup(
+		t, repositoryRoot,
+		"-c", "user.name=Attempt Test",
+		"-c", "user.email=attempt@example.invalid",
+		"commit", "-m", "add gitlink",
+	)
+	baseText := strings.TrimSpace(string(runGitSetup(t, repositoryRoot, "rev-parse", "HEAD")))
+	base, err := workspace.ParseGitObjectID("sha1:" + baseText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree := filepath.Join(t.TempDir(), "attempt")
+
+	if _, err := workspace.DefaultLocalAttemptGitAdapter().MaterializeAttemptTree(
+		context.Background(), repositoryRoot, base, worktree,
+	); err != nil {
+		t.Fatal(err)
+	}
+	gitlinkDirectory := filepath.Join(worktree, "modules", "tool")
+	info, err := os.Lstat(gitlinkDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("gitlink materialization mode = %s", info.Mode())
+	}
+	entries, err := os.ReadDir(gitlinkDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("gitlink materialization contains %d entries", len(entries))
+	}
+}
+
 func TestDetachedAttemptTreeMaterializationUnderTemporaryAlias(t *testing.T) {
 	t.Parallel()
 

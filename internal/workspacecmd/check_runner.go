@@ -97,10 +97,6 @@ func (runner isolatedCheckRunner) materializeExactCommit(
 	}
 	commands := [][]string{
 		{"clone", "--no-checkout", "--no-hardlinks", "--config", "core.hooksPath=" + os.DevNull, "--", invocation.Worktree(), destination},
-		// clone installs the source's default branch as a symbolic HEAD even
-		// when the attempt source is detached. Preserve the attempt shape
-		// before checking out the exact recorded tree.
-		{"-C", destination, "update-ref", "--no-deref", "HEAD", gitObjectHex(invocation.Commit())},
 		{"-C", destination, "-c", "core.hooksPath=" + os.DevNull, "checkout", "--detach", gitObjectHex(invocation.Commit())},
 		{"-C", destination, "remote", "remove", "origin"},
 	}

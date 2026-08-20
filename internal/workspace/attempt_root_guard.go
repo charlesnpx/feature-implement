@@ -34,9 +34,6 @@ func (adapter LocalAttemptGitAdapter) ValidateAttemptWorktreeRoot(
 		return err
 	}
 	defer guard.Close()
-	if err := guard.Verify(ctx, adapter); err != nil {
-		return fmt.Errorf("verify attempt worktree root admission: %w", err)
-	}
 	return nil
 }
 
