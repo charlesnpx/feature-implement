@@ -662,12 +662,12 @@ func TestLocalTargetInitializationReadinessBarrierAtEveryFault(t *testing.T) {
 				t.Fatal(err)
 			}
 			fakeGit := &fakeAttemptGit{}
-			if _, err := workspace.ReserveAttempt(
+			if _, err := workspace.StartAttempt(
 				context.Background(),
 				journal,
 				definition,
 				fakeGit,
-				workspace.ReserveAttemptRequest{
+				workspace.StartAttemptRequest{
 					MergeUnit: mustMergeUnitReference(
 						t, "alpha-plan", "unit-one",
 					),

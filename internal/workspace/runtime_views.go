@@ -714,7 +714,7 @@ func latestAttemptsByMergeUnit(core WorkspaceRuntimeProjection) map[string]Runti
 		key := attempt.mergeUnit.key()
 		current, exists := result[key]
 		if !exists || attempt.attemptNumber > current.attemptNumber ||
-			(attempt.attemptNumber == current.attemptNumber && attempt.reservationRecord > current.reservationRecord) {
+			(attempt.attemptNumber == current.attemptNumber && attempt.startRecord > current.startRecord) {
 			result[key] = cloneRuntimeAttempt(attempt)
 		}
 	}
@@ -723,10 +723,6 @@ func latestAttemptsByMergeUnit(core WorkspaceRuntimeProjection) map[string]Runti
 
 func schedulerStatusForAttempt(attempt RuntimeAttemptProjection) SchedulerUnitStatus {
 	switch attempt.phase {
-	case AttemptReserved:
-		return SchedulerUnitReserved
-	case AttemptMaterializing:
-		return SchedulerUnitMaterializing
 	case AttemptPaused:
 		return SchedulerUnitPaused
 	case AttemptReviewExhausted:

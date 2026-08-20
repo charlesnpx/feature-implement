@@ -174,9 +174,9 @@ func TestLocalGitIntegrationUsesExactDetachedAttemptTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	attemptGit := workspace.DefaultLocalAttemptGitAdapter()
-	attempt, err := workspace.ReserveAttempt(
+	attempt, err := workspace.StartAttempt(
 		context.Background(), journal, definition, attemptGit,
-		workspace.ReserveAttemptRequest{
+		workspace.StartAttemptRequest{
 			MergeUnit: mustMergeUnitReference(
 				t, "alpha-plan", "unit-one",
 			),

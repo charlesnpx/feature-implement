@@ -10,15 +10,14 @@ import (
 type AttemptLifecycleFaultPoint string
 
 const (
-	AttemptFaultAfterReservation           AttemptLifecycleFaultPoint = "after_reservation"
-	AttemptFaultAfterMaterializationIntent AttemptLifecycleFaultPoint = "after_materialization_intent"
-	AttemptFaultAfterWorktreeCreation      AttemptLifecycleFaultPoint = "after_worktree_creation"
-	AttemptFaultAfterGitVerification       AttemptLifecycleFaultPoint = "after_git_verification"
-	AttemptFaultAfterStart                 AttemptLifecycleFaultPoint = "after_start"
-	AttemptFaultAfterBoundary              AttemptLifecycleFaultPoint = "after_boundary"
-	AttemptFaultBeforeLeaseBinding         AttemptLifecycleFaultPoint = "before_lease_binding"
-	AttemptFaultAfterResume                AttemptLifecycleFaultPoint = "after_resume"
-	AttemptFaultAfterAbandon               AttemptLifecycleFaultPoint = "after_abandon"
+	AttemptFaultAfterReservation      AttemptLifecycleFaultPoint = "after_reservation"
+	AttemptFaultAfterWorktreeCreation AttemptLifecycleFaultPoint = "after_worktree_creation"
+	AttemptFaultAfterGitVerification  AttemptLifecycleFaultPoint = "after_git_verification"
+	AttemptFaultAfterStart            AttemptLifecycleFaultPoint = "after_start"
+	AttemptFaultAfterBoundary         AttemptLifecycleFaultPoint = "after_boundary"
+	AttemptFaultBeforeLeaseBinding    AttemptLifecycleFaultPoint = "before_lease_binding"
+	AttemptFaultAfterResume           AttemptLifecycleFaultPoint = "after_resume"
+	AttemptFaultAfterAbandon          AttemptLifecycleFaultPoint = "after_abandon"
 )
 
 type AttemptLifecycleFaultInjector func(AttemptLifecycleFaultPoint) error
@@ -204,156 +203,6 @@ func reconcileStartedAttempt(
 	return loadRuntimeAttempt(journal, attempt.attemptID)
 }
 
-type ReserveAttemptRequest struct {
-	MergeUnit     MergeUnitReference
-	AttemptNumber uint64
-	Goal          GoalBinding
-	OccurredAt    time.Time
-	Fault         AttemptLifecycleFaultInjector
-}
-
-func ReserveAttempt(
-	ctx context.Context,
-	journal *WorkspaceJournal,
-	definition EffectiveWorkspaceDefinition,
-	git AttemptGitPort,
-	request ReserveAttemptRequest,
-) (RuntimeAttemptProjection, error) {
-	return StartAttempt(ctx, journal, definition, git, StartAttemptRequest{
-		MergeUnit: request.MergeUnit, AttemptNumber: request.AttemptNumber,
-		Goal: request.Goal, OccurredAt: request.OccurredAt, Fault: request.Fault,
-	})
-}
-
-func reserveAttemptLegacy(
-	ctx context.Context,
-	journal *WorkspaceJournal,
-	definition EffectiveWorkspaceDefinition,
-	git AttemptGitPort,
-	request ReserveAttemptRequest,
-) (RuntimeAttemptProjection, error) {
-	if journal == nil || git == nil || request.OccurredAt.IsZero() {
-		return RuntimeAttemptProjection{}, fmt.Errorf("attempt reservation requires journal, Git adapter, and occurrence time")
-	}
-	if request.MergeUnit.planID.IsZero() || request.MergeUnit.mergeUnitID.IsZero() ||
-		request.AttemptNumber == 0 || request.Goal.IsZero() {
-		return RuntimeAttemptProjection{}, fmt.Errorf(
-			"attempt reservation requires merge unit, attempt number, and goal",
-		)
-	}
-	manifest := definition.workspace
-	if manifest.id.IsZero() || definition.generation.IsZero() {
-		return RuntimeAttemptProjection{}, fmt.Errorf("attempt reservation requires an effective workspace definition")
-	}
-	unitExecution, err := executionForMergeUnit(definition.execution, request.MergeUnit)
-	if err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	if request.AttemptNumber > uint64(unitExecution.policy.maxAttempts) {
-		return RuntimeAttemptProjection{}, fmt.Errorf(
-			"attempt number %d exceeds max_attempts %d for merge unit %s",
-			request.AttemptNumber, unitExecution.policy.maxAttempts, request.MergeUnit,
-		)
-	}
-	snapshot, runtime, err := readAttemptRuntime(journal, definition)
-	if err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	target, ok := runtime.LocalTarget()
-	if !ok || !target.Created() || target.CreatedHead().IsZero() {
-		return RuntimeAttemptProjection{}, fmt.Errorf(
-			"attempt reservation requires a durable local feature head",
-		)
-	}
-	base := target.CreatedHead()
-	identity, err := DeriveAttemptIdentity(
-		manifest.id, definition.generation,
-		request.MergeUnit, request.AttemptNumber, base,
-	)
-	if err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	worktree, err := AttemptWorktreePath(
-		runtime.worktreeRoot.Path(), identity,
-		request.MergeUnit, request.AttemptNumber,
-	)
-	if err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	if err := git.ValidateAttemptWorktreeRoot(ctx, manifest.target.root, worktree); err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	if existing, exists := runtime.Attempt(identity.attemptID); exists {
-		if existing.mergeUnit != request.MergeUnit || existing.attemptNumber != request.AttemptNumber ||
-			existing.base != base || existing.worktree != worktree || existing.goal != request.Goal {
-			return RuntimeAttemptProjection{}, fmt.Errorf("attempt %s was reserved with different immutable bindings", identity.attemptID)
-		}
-		return existing, nil
-	}
-	for _, attempt := range runtime.attempts {
-		if attempt.integration != nil &&
-			!attempt.integration.Integrated() {
-			return RuntimeAttemptProjection{}, fmt.Errorf(
-				"attempt reservation conflicts with pending integration attempt %s",
-				attempt.attemptID,
-			)
-		}
-	}
-	for _, attempt := range runtime.attempts {
-		if attempt.mergeUnit == request.MergeUnit && attempt.attemptNumber == request.AttemptNumber {
-			return RuntimeAttemptProjection{}, fmt.Errorf("attempt number %d is already bound to %s", request.AttemptNumber, attempt.attemptID)
-		}
-	}
-	nextAttemptNumber := uint64(1)
-	for _, attempt := range runtime.attempts {
-		if attempt.mergeUnit == request.MergeUnit && attempt.attemptNumber >= nextAttemptNumber {
-			nextAttemptNumber = attempt.attemptNumber + 1
-		}
-	}
-	if request.AttemptNumber != nextAttemptNumber {
-		return RuntimeAttemptProjection{}, fmt.Errorf(
-			"attempt number %d is out of sequence for merge unit %s; next attempt is %d",
-			request.AttemptNumber, request.MergeUnit, nextAttemptNumber,
-		)
-	}
-	view, err := RebuildWorkspaceView(snapshot, definition)
-	if err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	ready := false
-	status := SchedulerUnitStatus("")
-	var blockers []string
-	for _, unit := range view.Scheduler.Units {
-		if unit.PlanID == request.MergeUnit.planID.String() && unit.MergeUnitID == request.MergeUnit.mergeUnitID.String() {
-			status = unit.Status
-			blockers = unit.Blockers
-			ready = unit.Status == SchedulerUnitReady
-			break
-		}
-	}
-	if !ready {
-		return RuntimeAttemptProjection{}, fmt.Errorf(
-			"merge unit %s is not scheduler-ready (status=%s blockers=%v)", request.MergeUnit, status, blockers,
-		)
-	}
-	event, err := NewAttemptReservedJournalEvent(
-		manifest.id, definition.generation, identity.attemptID,
-		request.MergeUnit, request.AttemptNumber, base, worktree,
-		unitExecution.boundary.checkpoint, unitExecution.boundary.escalation,
-		unitExecution.boundary.serialSegment, request.Goal,
-	)
-	if err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	if _, err := appendAttemptLifecycleEvent(journal, snapshot, runtime, event, request.OccurredAt); err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	if err := injectAttemptLifecycleFault(request.Fault, AttemptFaultAfterReservation); err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	return loadRuntimeAttempt(journal, identity.attemptID)
-}
-
 type MaterializeAttemptRequest struct {
 	AttemptID  ID
 	OccurredAt time.Time
@@ -378,97 +227,7 @@ func MaterializeAttempt(
 	if !exists {
 		return RuntimeAttemptProjection{}, fmt.Errorf("attempt %s is not started", request.AttemptID)
 	}
-	if attempt.phase == AttemptReserved || attempt.phase == AttemptMaterializing {
-		return materializeAttemptLegacy(ctx, journal, definition, git, request)
-	}
 	return reconcileStartedAttempt(ctx, journal, definition, git, attempt, request.Fault)
-}
-
-func materializeAttemptLegacy(
-	ctx context.Context,
-	journal *WorkspaceJournal,
-	definition EffectiveWorkspaceDefinition,
-	git AttemptGitPort,
-	request MaterializeAttemptRequest,
-) (RuntimeAttemptProjection, error) {
-	if journal == nil || git == nil || request.AttemptID.IsZero() || request.OccurredAt.IsZero() {
-		return RuntimeAttemptProjection{}, fmt.Errorf("attempt materialization requires journal, Git adapter, attempt, and occurrence time")
-	}
-	snapshot, runtime, err := readAttemptRuntime(journal, definition)
-	if err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	attempt, exists := runtime.Attempt(request.AttemptID)
-	if !exists {
-		return RuntimeAttemptProjection{}, fmt.Errorf("attempt %s is not reserved", request.AttemptID)
-	}
-	if attempt.phase != AttemptReserved && attempt.phase != AttemptMaterializing {
-		return attempt, nil
-	}
-	if attempt.phase == AttemptReserved {
-		event, err := NewAttemptMaterializationIntendedJournalEvent(
-			runtime.workspaceID, attempt.attemptID, attempt.generation,
-			attempt.base, attempt.worktree,
-		)
-		if err != nil {
-			return RuntimeAttemptProjection{}, err
-		}
-		if _, err := appendAttemptLifecycleEvent(journal, snapshot, runtime, event, request.OccurredAt); err != nil {
-			return RuntimeAttemptProjection{}, err
-		}
-		if err := injectAttemptLifecycleFault(request.Fault, AttemptFaultAfterMaterializationIntent); err != nil {
-			return RuntimeAttemptProjection{}, err
-		}
-		snapshot, runtime, err = readAttemptRuntime(journal, definition)
-		if err != nil {
-			return RuntimeAttemptProjection{}, err
-		}
-		attempt, _ = runtime.Attempt(request.AttemptID)
-	}
-	manifest := definition.workspace
-	inspection, err := git.MaterializeAttemptTree(
-		ctx, manifest.target.root, attempt.base, attempt.worktree,
-	)
-	if err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	if err := injectAttemptLifecycleFault(request.Fault, AttemptFaultAfterWorktreeCreation); err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	if err := verifyAttemptGitInspection(attempt, inspection, attempt.base); err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	if err := injectAttemptLifecycleFault(request.Fault, AttemptFaultAfterGitVerification); err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	confirmed, err := git.InspectAttemptWorktree(ctx, manifest.target.root, attempt.worktree)
-	if err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	if err := verifyAttemptGitInspection(attempt, confirmed, attempt.base); err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	if confirmed.digest != inspection.digest {
-		return RuntimeAttemptProjection{}, fmt.Errorf("attempt Git state changed during start verification")
-	}
-	leaseID, err := deriveAttemptEpochBinding(attempt.attemptID, 1)
-	if err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	event, err := NewAttemptStartedJournalEvent(
-		runtime.workspaceID, attempt.attemptID, attempt.generation,
-		confirmed.worktreeHead, confirmed.digest, leaseID, attempt.goal,
-	)
-	if err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	if _, err := appendAttemptLifecycleEvent(journal, snapshot, runtime, event, request.OccurredAt); err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	if err := injectAttemptLifecycleFault(request.Fault, AttemptFaultAfterStart); err != nil {
-		return RuntimeAttemptProjection{}, err
-	}
-	return loadRuntimeAttempt(journal, attempt.attemptID)
 }
 
 type AdoptAttemptHeadRequest struct {
@@ -1001,8 +760,7 @@ func verifyAttemptGitInspection(
 	inspection AttemptGitInspection,
 	expectedHead GitObjectID,
 ) error {
-	if !inspection.worktreeExists || inspection.worktreeRegistered ||
-		!inspection.clean || inspection.worktreeHead != expectedHead {
+	if !inspection.worktreeExists || !inspection.clean || inspection.worktreeHead != expectedHead {
 		return fmt.Errorf(
 			"attempt Git verification failed for detached scratch worktree %s at %s",
 			attempt.worktree, expectedHead,

@@ -205,12 +205,12 @@ func TestJournalWriterLockAllowsOneAppendWithoutPartialRecord(t *testing.T) {
 				results <- err
 				return
 			}
-			_, err = workspace.ReserveAttempt(
+			_, err = workspace.StartAttempt(
 				context.Background(),
 				journal,
 				fixture.definition,
 				&fakeAttemptGit{},
-				workspace.ReserveAttemptRequest{
+				workspace.StartAttemptRequest{
 					MergeUnit:     mustMergeUnitReference(t, "alpha-plan", "unit-one"),
 					AttemptNumber: 1,
 					Goal:          goal,

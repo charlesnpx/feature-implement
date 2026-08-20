@@ -700,12 +700,12 @@ func TestPendingIntegrationIntentSerializesOtherMergeUnits(t *testing.T) {
 	if journalRecordCount(t, firstCore.journal) != before {
 		t.Fatal("rejected concurrent integration appended journal state")
 	}
-	replayedReservation, err := workspace.ReserveAttempt(
+	replayedReservation, err := workspace.StartAttempt(
 		context.Background(),
 		firstCore.journal,
 		firstCore.definition,
 		secondCore.git,
-		workspace.ReserveAttemptRequest{
+		workspace.StartAttemptRequest{
 			MergeUnit:     second.MergeUnit(),
 			AttemptNumber: second.AttemptNumber(),
 			Goal:          second.Goal(),
@@ -728,12 +728,12 @@ func TestPendingIntegrationIntentSerializesOtherMergeUnits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := workspace.ReserveAttempt(
+	if _, err := workspace.StartAttempt(
 		context.Background(),
 		firstCore.journal,
 		firstCore.definition,
 		secondCore.git,
-		workspace.ReserveAttemptRequest{
+		workspace.StartAttemptRequest{
 			MergeUnit:     second.MergeUnit(),
 			AttemptNumber: 2,
 			Goal:          replacementGoal,
@@ -909,12 +909,12 @@ func TestConcurrentIntegrationsPublishExactlyOneIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	replacement, err := workspace.ReserveAttempt(
+	replacement, err := workspace.StartAttempt(
 		context.Background(),
 		firstCore.journal,
 		firstCore.definition,
 		loserCore.git,
-		workspace.ReserveAttemptRequest{
+		workspace.StartAttemptRequest{
 			MergeUnit:     loser.MergeUnit(),
 			AttemptNumber: 2,
 			Goal:          replacementGoal,
@@ -1093,12 +1093,12 @@ func TestIntegrationMakesReviewExhaustedLoserRetryableAtNewFrontier(
 		workspace.MustID("exhausted-loser-replacement"),
 		workspace.GoalScopeMergeUnit,
 	)
-	replacement, err := workspace.ReserveAttempt(
+	replacement, err := workspace.StartAttempt(
 		context.Background(),
 		loserCore.journal,
 		loserCore.definition,
 		loserCore.git,
-		workspace.ReserveAttemptRequest{
+		workspace.StartAttemptRequest{
 			MergeUnit:     loser.MergeUnit(),
 			AttemptNumber: 2,
 			Goal:          replacementGoal,

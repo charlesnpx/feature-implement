@@ -35,183 +35,6 @@ func (goal GoalBinding) ID() ID           { return goal.id }
 func (goal GoalBinding) Scope() GoalScope { return goal.scope }
 func (goal GoalBinding) IsZero() bool     { return goal.id.IsZero() || !goal.scope.valid() }
 
-type AttemptReservedJournalEvent struct {
-	workspaceID   ID
-	generation    Digest
-	attemptID     ID
-	mergeUnit     MergeUnitReference
-	attemptNumber uint64
-	base          GitObjectID
-	worktree      string
-	checkpoint    AttemptCheckpointMode
-	escalation    AttemptEscalationPolicy
-	serialSegment ID
-	goal          GoalBinding
-}
-
-func NewAttemptReservedJournalEvent(
-	workspaceID ID,
-	generation Digest,
-	attemptID ID,
-	mergeUnit MergeUnitReference,
-	attemptNumber uint64,
-	base GitObjectID,
-	worktree string,
-	checkpoint AttemptCheckpointMode,
-	escalation AttemptEscalationPolicy,
-	serialSegment ID,
-	goal GoalBinding,
-) (AttemptReservedJournalEvent, error) {
-	event := AttemptReservedJournalEvent{
-		workspaceID: workspaceID, generation: generation,
-		attemptID: attemptID, mergeUnit: mergeUnit, attemptNumber: attemptNumber,
-		base: base, worktree: filepath.Clean(worktree),
-		checkpoint: checkpoint, escalation: escalation, serialSegment: serialSegment, goal: goal,
-	}
-	if err := event.validate(); err != nil {
-		return AttemptReservedJournalEvent{}, err
-	}
-	return event, nil
-}
-
-func (AttemptReservedJournalEvent) isWorkspaceJournalEvent()    {}
-func (AttemptReservedJournalEvent) eventType() JournalEventType { return JournalEventAttemptReserved }
-func (event AttemptReservedJournalEvent) boundGeneration() Digest {
-	return event.generation
-}
-func (event AttemptReservedJournalEvent) validate() error {
-	if event.workspaceID.IsZero() || event.generation.IsZero() ||
-		event.attemptID.IsZero() || event.mergeUnit.planID.IsZero() || event.mergeUnit.mergeUnitID.IsZero() ||
-		event.attemptNumber == 0 || event.base.IsZero() || !event.checkpoint.valid() ||
-		!event.escalation.valid() || event.goal.IsZero() {
-		return fmt.Errorf("attempt reservation requires immutable workspace, generation, unit, attempt, base, and boundary bindings")
-	}
-	if !filepath.IsAbs(event.worktree) || filepath.Clean(event.worktree) != event.worktree {
-		return fmt.Errorf("attempt worktree must be a clean absolute path")
-	}
-	if err := validateBoundedText("attempt worktree", event.worktree, 4096); err != nil {
-		return err
-	}
-	expectedID, err := deriveAttemptIdentity(
-		event.workspaceID, event.generation,
-		event.mergeUnit, event.attemptNumber, event.base,
-	)
-	if err != nil {
-		return err
-	}
-	if event.attemptID != expectedID {
-		return fmt.Errorf("attempt identity is invalid")
-	}
-	return nil
-}
-func (event AttemptReservedJournalEvent) WorkspaceID() ID                   { return event.workspaceID }
-func (event AttemptReservedJournalEvent) Generation() Digest                { return event.generation }
-func (event AttemptReservedJournalEvent) AttemptID() ID                     { return event.attemptID }
-func (event AttemptReservedJournalEvent) MergeUnit() MergeUnitReference     { return event.mergeUnit }
-func (event AttemptReservedJournalEvent) AttemptNumber() uint64             { return event.attemptNumber }
-func (event AttemptReservedJournalEvent) Base() GitObjectID                 { return event.base }
-func (event AttemptReservedJournalEvent) Worktree() string                  { return event.worktree }
-func (event AttemptReservedJournalEvent) Checkpoint() AttemptCheckpointMode { return event.checkpoint }
-func (event AttemptReservedJournalEvent) Escalation() AttemptEscalationPolicy {
-	return event.escalation
-}
-func (event AttemptReservedJournalEvent) SerialSegment() ID { return event.serialSegment }
-func (event AttemptReservedJournalEvent) Goal() GoalBinding { return event.goal }
-
-type AttemptMaterializationIntendedJournalEvent struct {
-	workspaceID ID
-	generation  Digest
-	attemptID   ID
-	base        GitObjectID
-	worktree    string
-}
-
-func NewAttemptMaterializationIntendedJournalEvent(
-	workspaceID, attemptID ID,
-	generation Digest,
-	base GitObjectID,
-	worktree string,
-) (AttemptMaterializationIntendedJournalEvent, error) {
-	event := AttemptMaterializationIntendedJournalEvent{
-		workspaceID: workspaceID, generation: generation, attemptID: attemptID,
-		base: base, worktree: filepath.Clean(worktree),
-	}
-	if err := event.validate(); err != nil {
-		return AttemptMaterializationIntendedJournalEvent{}, err
-	}
-	return event, nil
-}
-
-func (AttemptMaterializationIntendedJournalEvent) isWorkspaceJournalEvent() {}
-func (AttemptMaterializationIntendedJournalEvent) eventType() JournalEventType {
-	return JournalEventAttemptMaterializationIntended
-}
-func (event AttemptMaterializationIntendedJournalEvent) boundGeneration() Digest {
-	return event.generation
-}
-func (event AttemptMaterializationIntendedJournalEvent) validate() error {
-	if event.workspaceID.IsZero() || event.generation.IsZero() || event.attemptID.IsZero() || event.base.IsZero() ||
-		!filepath.IsAbs(event.worktree) || filepath.Clean(event.worktree) != event.worktree {
-		return fmt.Errorf("materialization intent requires attempt, base, and absolute worktree")
-	}
-	return validateBoundedText("attempt worktree", event.worktree, 4096)
-}
-func (event AttemptMaterializationIntendedJournalEvent) WorkspaceID() ID    { return event.workspaceID }
-func (event AttemptMaterializationIntendedJournalEvent) Generation() Digest { return event.generation }
-func (event AttemptMaterializationIntendedJournalEvent) AttemptID() ID      { return event.attemptID }
-func (event AttemptMaterializationIntendedJournalEvent) Base() GitObjectID  { return event.base }
-func (event AttemptMaterializationIntendedJournalEvent) Worktree() string   { return event.worktree }
-
-type AttemptStartedJournalEvent struct {
-	workspaceID      ID
-	generation       Digest
-	attemptID        ID
-	verifiedHead     GitObjectID
-	inspectionDigest Digest
-	leaseID          ID
-	goal             GoalBinding
-}
-
-func NewAttemptStartedJournalEvent(
-	workspaceID, attemptID ID,
-	generation Digest,
-	verifiedHead GitObjectID,
-	inspectionDigest Digest,
-	leaseID ID,
-	goal GoalBinding,
-) (AttemptStartedJournalEvent, error) {
-	event := AttemptStartedJournalEvent{
-		workspaceID: workspaceID, generation: generation, attemptID: attemptID,
-		verifiedHead: verifiedHead, inspectionDigest: inspectionDigest,
-		leaseID: leaseID, goal: goal,
-	}
-	if err := event.validate(); err != nil {
-		return AttemptStartedJournalEvent{}, err
-	}
-	return event, nil
-}
-
-func (AttemptStartedJournalEvent) isWorkspaceJournalEvent()    {}
-func (AttemptStartedJournalEvent) eventType() JournalEventType { return JournalEventAttemptStarted }
-func (event AttemptStartedJournalEvent) boundGeneration() Digest {
-	return event.generation
-}
-func (event AttemptStartedJournalEvent) validate() error {
-	if event.workspaceID.IsZero() || event.generation.IsZero() || event.attemptID.IsZero() ||
-		event.verifiedHead.IsZero() || event.inspectionDigest.IsZero() || event.leaseID.IsZero() ||
-		event.goal.IsZero() {
-		return fmt.Errorf("attempt start requires verified Git, lease, and goal bindings")
-	}
-	return nil
-}
-func (event AttemptStartedJournalEvent) WorkspaceID() ID           { return event.workspaceID }
-func (event AttemptStartedJournalEvent) Generation() Digest        { return event.generation }
-func (event AttemptStartedJournalEvent) AttemptID() ID             { return event.attemptID }
-func (event AttemptStartedJournalEvent) VerifiedHead() GitObjectID { return event.verifiedHead }
-func (event AttemptStartedJournalEvent) InspectionDigest() Digest  { return event.inspectionDigest }
-func (event AttemptStartedJournalEvent) LeaseID() ID               { return event.leaseID }
-func (event AttemptStartedJournalEvent) Goal() GoalBinding         { return event.goal }
-
 // AttemptStartJournalEvent is the single durable attempt-start boundary. It
 // deliberately records the immutable attempt bindings before the detached
 // worktree is materialized, so retrying start reconciles the same directory
@@ -493,8 +316,7 @@ func (event AttemptAbandonedJournalEvent) AttemptID() ID      { return event.att
 
 func isAttemptJournalEvent(event WorkspaceJournalEvent) bool {
 	switch event.(type) {
-	case AttemptReservedJournalEvent, AttemptMaterializationIntendedJournalEvent,
-		AttemptStartedJournalEvent, AttemptStartJournalEvent,
+	case AttemptStartJournalEvent,
 		AttemptBoundaryReachedJournalEvent,
 		AttemptResumedJournalEvent, AttemptAbandonedJournalEvent:
 		return true
@@ -505,12 +327,6 @@ func isAttemptJournalEvent(event WorkspaceJournalEvent) bool {
 
 func cloneAttemptJournalEvent(event WorkspaceJournalEvent) WorkspaceJournalEvent {
 	switch value := event.(type) {
-	case AttemptReservedJournalEvent:
-		return value
-	case AttemptMaterializationIntendedJournalEvent:
-		return value
-	case AttemptStartedJournalEvent:
-		return value
 	case AttemptStartJournalEvent:
 		return value
 	case AttemptBoundaryReachedJournalEvent:

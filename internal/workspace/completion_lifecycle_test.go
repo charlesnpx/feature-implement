@@ -431,12 +431,12 @@ func TestLocalRecoveryResumesPendingMaterializationAndIntegration(
 		core := newAttemptHarness(t, "unit-one")
 		beforeStart := journalRecordCount(t, core.journal)
 		crash := errors.New("materialization crash")
-		if _, err := workspace.ReserveAttempt(
+		if _, err := workspace.StartAttempt(
 			context.Background(),
 			core.journal,
 			core.definition,
 			core.git,
-			workspace.ReserveAttemptRequest{
+			workspace.StartAttemptRequest{
 				MergeUnit:     core.unit,
 				AttemptNumber: 1,
 				Goal:          core.goal,

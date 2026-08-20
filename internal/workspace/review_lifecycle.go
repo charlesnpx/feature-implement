@@ -25,7 +25,6 @@ func NewReviewRepositoryRequest(
 }
 
 func (request ReviewRepositoryRequest) Worktree() string  { return request.worktree }
-func (ReviewRepositoryRequest) Branch() string            { return "" }
 func (request ReviewRepositoryRequest) Head() GitObjectID { return request.head }
 
 type ReviewRepositorySnapshot struct {
@@ -88,7 +87,6 @@ func (invocation ReviewInvocation) ReviewerInstance() ID {
 	return invocation.reservation.reviewerInstance
 }
 func (invocation ReviewInvocation) Worktree() string { return invocation.worktree }
-func (ReviewInvocation) Branch() string              { return "" }
 
 type ReviewRunnerOutput struct {
 	submission ReviewResultSubmission

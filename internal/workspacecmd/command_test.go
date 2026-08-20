@@ -459,9 +459,9 @@ merge_units:
 	if err != nil {
 		t.Fatal(err)
 	}
-	attempt, err := workspace.ReserveAttempt(
+	attempt, err := workspace.StartAttempt(
 		context.Background(), journal, bundle.Definition(), attemptGit,
-		workspace.ReserveAttemptRequest{
+		workspace.StartAttemptRequest{
 			MergeUnit: mergeUnit, AttemptNumber: 1, Goal: goal,
 			OccurredAt: time.Date(
 				2026, time.July, 25, 18, 0, 1, 0, time.UTC,

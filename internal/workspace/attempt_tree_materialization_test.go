@@ -37,7 +37,7 @@ func TestDetachedAttemptTreeMaterializationPreservesPrimaryAndExactTree(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !inspection.Clean() || inspection.WorktreeHead() != base || inspection.WorktreeRegistered() {
+	if !inspection.Clean() || inspection.WorktreeHead() != base {
 		t.Fatalf("detached attempt inspection = %#v", inspection)
 	}
 	if statusAfter := runGitSetup(t, repositoryRoot, "status", "--porcelain=v1", "-z", "--untracked-files=all"); !bytes.Equal(statusBefore, statusAfter) {
@@ -90,7 +90,7 @@ func TestDetachedAttemptTreeMaterializationUnderTemporaryAlias(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !inspection.Clean() || inspection.WorktreeHead() != base || inspection.WorktreeRegistered() {
+	if !inspection.Clean() || inspection.WorktreeHead() != base {
 		t.Fatalf("detached attempt inspection = %#v", inspection)
 	}
 }

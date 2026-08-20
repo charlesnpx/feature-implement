@@ -61,18 +61,6 @@ func TestAttemptCodecsRejectRemovedRemoteBindings(t *testing.T) {
 		field     string
 	}{
 		{
-			name:      "reservation repository identity",
-			eventType: JournalEventAttemptReserved,
-			payload:   json.RawMessage(`{"repository":"removed"}`),
-			field:     "repository",
-		},
-		{
-			name:      "start authorization identity",
-			eventType: JournalEventAttemptStarted,
-			payload:   json.RawMessage(`{"authorization_id":"removed"}`),
-			field:     "authorization_id",
-		},
-		{
 			name:      "boundary authorization identity",
 			eventType: JournalEventAttemptBoundary,
 			payload:   json.RawMessage(`{"authorization_id":"removed"}`),
@@ -106,6 +94,9 @@ func TestAttemptCodecsRejectRemovedRemoteBindings(t *testing.T) {
 
 func TestRemovedProviderJournalEventsAreUnsupported(t *testing.T) {
 	for _, eventType := range []JournalEventType{
+		"attempt.reserved.v2",
+		"attempt.materialization_intended.v2",
+		"attempt.started.v2",
 		"authorization.grant_recorded.v2",
 		"provider.intent_reserved.v2",
 		"provider.completion_verified.v2",

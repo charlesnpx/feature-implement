@@ -106,14 +106,8 @@ func RecoverWorkspaceLocalEffects(
 		if err != nil {
 			return WorkspaceLocalRecoveryResult{}, err
 		}
-		materializing := make([]ID, 0)
+		pending := make([]ID, 0)
 		for _, attempt := range runtime.attempts {
-			if attempt.phase == AttemptMaterializing {
-				materializing = append(
-					materializing, attempt.attemptID,
-				)
-				continue
-			}
 			if attempt.phase != AttemptActive {
 				continue
 			}
@@ -126,7 +120,7 @@ func RecoverWorkspaceLocalEffects(
 				)
 			}
 			if !inspection.WorktreeExists() {
-				materializing = append(materializing, attempt.attemptID)
+				pending = append(pending, attempt.attemptID)
 				continue
 			}
 			if inspection.WorktreeHead().IsZero() {
@@ -136,7 +130,7 @@ func RecoverWorkspaceLocalEffects(
 				)
 			}
 		}
-		for _, attemptID := range materializing {
+		for _, attemptID := range pending {
 			if _, err := MaterializeAttempt(
 				ctx, journal, definition, attemptGit,
 				MaterializeAttemptRequest{

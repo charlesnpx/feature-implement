@@ -577,7 +577,7 @@ func TestReviewRunnerRejectsRepositoryMutationAndWeakIsolation(t *testing.T) {
 	)
 	runner := reviewRunnerStub{run: func(invocation workspace.ReviewInvocation) (workspace.ReviewRunnerOutput, error) {
 		if invocation.Request().Digest() != request.Digest() ||
-			invocation.Worktree() != harness.attempt.Worktree() || invocation.Branch() != harness.attempt.Branch() {
+			invocation.Worktree() != harness.attempt.Worktree() {
 			t.Fatalf("review invocation changed immutable inputs: %#v", invocation)
 		}
 		return workspace.NewReviewRunnerOutput(submission)
@@ -855,7 +855,7 @@ func TestReviewFixExecutionRequiresACompletedReviewRoundBeforeGitMutation(t *tes
 	); err != nil {
 		t.Fatal(err)
 	}
-	git := &journalCommitGit{branch: harness.attempt.Branch(), head: harness.attempt.VerifiedHead()}
+	git := &journalCommitGit{head: harness.attempt.VerifiedHead()}
 	shell, err := workspace.NewCommitProtocolShell(git, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1101,7 +1101,7 @@ func TestReviewFixCommitInvalidatesReadinessUntilAllProfilesReconfirm(t *testing
 		t.Fatal(err)
 	}
 	commitGit := &journalCommitGit{
-		branch: harness.attempt.Branch(), head: harness.attempt.VerifiedHead(), staged: staged, commit: commit,
+		head: harness.attempt.VerifiedHead(), staged: staged, commit: commit,
 	}
 	checkRunner := &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())}
 	shell, err := workspace.NewCommitProtocolShell(commitGit, checkRunner)
@@ -1120,7 +1120,7 @@ func TestReviewFixCommitInvalidatesReadinessUntilAllProfilesReconfirm(t *testing
 		t.Fatalf("durable review-fix commit = %#v error=%v", fixResult, err)
 	}
 	harness.git.setHead(
-		t, harness.attempt.Worktree(), harness.attempt.Branch(), newHead, true,
+		t, harness.attempt.Worktree(), newHead, true,
 	)
 	harness.repository.snapshot, _ = workspace.NewReviewRepositorySnapshot(newHead, newTree, true)
 	if _, err := workspace.RecordAttemptReviewFixRebase(
@@ -1244,7 +1244,7 @@ func TestReviewFixCommitInvalidatesReadinessUntilAllProfilesReconfirm(t *testing
 		t.Fatalf("review-fix rebase journal tail = %#v", records)
 	}
 	harness.git.setHead(
-		t, harness.attempt.Worktree(), harness.attempt.Branch(), rebasedHead, true,
+		t, harness.attempt.Worktree(), rebasedHead, true,
 	)
 	harness.repository.snapshot, _ = workspace.NewReviewRepositorySnapshot(rebasedHead, rebasedTree, true)
 	if _, record, err := workspace.RecordReviewFixApplication(
@@ -1348,7 +1348,7 @@ func TestReviewRebaseRejectsConcurrentFindingFixReservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	commitGit := &journalCommitGit{
-		branch: harness.attempt.Branch(), head: harness.attempt.VerifiedHead(), staged: staged, commit: fixCommit,
+		head: harness.attempt.VerifiedHead(), staged: staged, commit: fixCommit,
 	}
 	shell, err := workspace.NewCommitProtocolShell(
 		commitGit, &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())},
@@ -1377,7 +1377,7 @@ func TestReviewRebaseRejectsConcurrentFindingFixReservation(t *testing.T) {
 		t.Fatalf("apply first review fix: %v", err)
 	}
 	harness.git.setHead(
-		t, harness.attempt.Worktree(), harness.attempt.Branch(), fixHead, true,
+		t, harness.attempt.Worktree(), fixHead, true,
 	)
 	harness.repository.snapshot, _ = workspace.NewReviewRepositorySnapshot(fixHead, fixTree, true)
 

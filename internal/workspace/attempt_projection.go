@@ -8,8 +8,6 @@ import (
 type AttemptRuntimePhase string
 
 const (
-	AttemptReserved        AttemptRuntimePhase = "reserved"
-	AttemptMaterializing   AttemptRuntimePhase = "materializing"
 	AttemptActive          AttemptRuntimePhase = "active"
 	AttemptPaused          AttemptRuntimePhase = "paused"
 	AttemptReviewExhausted AttemptRuntimePhase = "review_exhausted"
@@ -21,7 +19,7 @@ const (
 
 func (phase AttemptRuntimePhase) valid() bool {
 	switch phase {
-	case AttemptReserved, AttemptMaterializing, AttemptActive, AttemptPaused,
+	case AttemptActive, AttemptPaused,
 		AttemptReviewExhausted, AttemptSuperseded, AttemptCompleted,
 		AttemptFailed, AttemptAbandoned:
 		return true
@@ -31,8 +29,7 @@ func (phase AttemptRuntimePhase) valid() bool {
 }
 
 func (phase AttemptRuntimePhase) nonterminal() bool {
-	return phase == AttemptReserved || phase == AttemptMaterializing ||
-		phase == AttemptActive || phase == AttemptPaused ||
+	return phase == AttemptActive || phase == AttemptPaused ||
 		phase == AttemptReviewExhausted
 }
 
@@ -122,28 +119,26 @@ func (boundary RuntimeBoundaryProjection) Evidence() []Evidence {
 func (boundary RuntimeBoundaryProjection) EvidenceDigest() Digest { return boundary.evidenceDigest }
 
 type RuntimeAttemptProjection struct {
-	attemptID             ID
-	mergeUnit             MergeUnitReference
-	generation            Digest
-	attemptNumber         uint64
-	base                  GitObjectID
-	worktree              string
-	checkpoint            AttemptCheckpointMode
-	escalation            AttemptEscalationPolicy
-	serialSegment         ID
-	serialSegmentHeld     bool
-	phase                 AttemptRuntimePhase
-	reservationRecord     uint64
-	materializationRecord uint64
-	startRecord           uint64
-	verifiedHead          GitObjectID
-	inspectionDigest      Digest
-	leaseID               ID
-	goal                  GoalBinding
-	boundaries            []RuntimeBoundaryProjection
-	commitProtocol        *CommitProtocolState
-	reviewFixes           *ReviewFixState
-	integration           *RuntimeIntegrationProjection
+	attemptID         ID
+	mergeUnit         MergeUnitReference
+	generation        Digest
+	attemptNumber     uint64
+	base              GitObjectID
+	worktree          string
+	checkpoint        AttemptCheckpointMode
+	escalation        AttemptEscalationPolicy
+	serialSegment     ID
+	serialSegmentHeld bool
+	phase             AttemptRuntimePhase
+	startRecord       uint64
+	verifiedHead      GitObjectID
+	inspectionDigest  Digest
+	leaseID           ID
+	goal              GoalBinding
+	boundaries        []RuntimeBoundaryProjection
+	commitProtocol    *CommitProtocolState
+	reviewFixes       *ReviewFixState
+	integration       *RuntimeIntegrationProjection
 }
 
 func (attempt RuntimeAttemptProjection) AttemptID() ID                 { return attempt.attemptID }
@@ -151,11 +146,6 @@ func (attempt RuntimeAttemptProjection) MergeUnit() MergeUnitReference { return 
 func (attempt RuntimeAttemptProjection) Generation() Digest            { return attempt.generation }
 func (attempt RuntimeAttemptProjection) AttemptNumber() uint64         { return attempt.attemptNumber }
 func (attempt RuntimeAttemptProjection) Base() GitObjectID             { return attempt.base }
-
-// Branch is retained only as a source-compatible empty display value for
-// callers that assert scratch attempts never have a branch. Attempts do not
-// store or accept a branch binding.
-func (RuntimeAttemptProjection) Branch() string { return "" }
 
 func (attempt RuntimeAttemptProjection) Worktree() string                  { return attempt.worktree }
 func (attempt RuntimeAttemptProjection) Checkpoint() AttemptCheckpointMode { return attempt.checkpoint }
@@ -165,15 +155,11 @@ func (attempt RuntimeAttemptProjection) Escalation() AttemptEscalationPolicy {
 func (attempt RuntimeAttemptProjection) SerialSegment() ID          { return attempt.serialSegment }
 func (attempt RuntimeAttemptProjection) SerialSegmentHeld() bool    { return attempt.serialSegmentHeld }
 func (attempt RuntimeAttemptProjection) Phase() AttemptRuntimePhase { return attempt.phase }
-func (attempt RuntimeAttemptProjection) ReservationRecord() uint64  { return attempt.reservationRecord }
-func (attempt RuntimeAttemptProjection) MaterializationRecord() uint64 {
-	return attempt.materializationRecord
-}
-func (attempt RuntimeAttemptProjection) StartRecord() uint64       { return attempt.startRecord }
-func (attempt RuntimeAttemptProjection) VerifiedHead() GitObjectID { return attempt.verifiedHead }
-func (attempt RuntimeAttemptProjection) InspectionDigest() Digest  { return attempt.inspectionDigest }
-func (attempt RuntimeAttemptProjection) LeaseID() ID               { return attempt.leaseID }
-func (attempt RuntimeAttemptProjection) Goal() GoalBinding         { return attempt.goal }
+func (attempt RuntimeAttemptProjection) StartRecord() uint64        { return attempt.startRecord }
+func (attempt RuntimeAttemptProjection) VerifiedHead() GitObjectID  { return attempt.verifiedHead }
+func (attempt RuntimeAttemptProjection) InspectionDigest() Digest   { return attempt.inspectionDigest }
+func (attempt RuntimeAttemptProjection) LeaseID() ID                { return attempt.leaseID }
+func (attempt RuntimeAttemptProjection) Goal() GoalBinding          { return attempt.goal }
 func (attempt RuntimeAttemptProjection) Boundaries() []RuntimeBoundaryProjection {
 	return cloneRuntimeBoundaries(attempt.boundaries)
 }
@@ -278,65 +264,6 @@ func reduceAttemptRuntime(
 			phase: AttemptActive, startRecord: record.sequence, verifiedHead: event.base,
 			leaseID: event.leaseID, goal: event.goal,
 		})
-		return nil
-	case AttemptReservedJournalEvent:
-		if event.workspaceID != current.workspaceID || event.generation != current.activeGeneration {
-			return fmt.Errorf("attempt reservation does not match the active workspace generation")
-		}
-		for _, attempt := range current.attempts {
-			if attempt.integration != nil &&
-				!attempt.integration.Integrated() {
-				return fmt.Errorf(
-					"attempt reservation conflicts with pending integration attempt %s",
-					attempt.attemptID,
-				)
-			}
-		}
-		if _, exists := findRuntimeAttempt(current.attempts, event.attemptID); exists {
-			return fmt.Errorf("attempt %s is already reserved", event.attemptID)
-		}
-		for _, attempt := range current.attempts {
-			if attempt.mergeUnit == event.mergeUnit && attempt.phase.nonterminal() {
-				return fmt.Errorf("merge unit %s already has nonterminal attempt %s", event.mergeUnit, attempt.attemptID)
-			}
-			if !event.serialSegment.IsZero() && attempt.serialSegmentHeld && attempt.serialSegment == event.serialSegment {
-				return fmt.Errorf("serial segment %s is held by attempt %s", event.serialSegment, attempt.attemptID)
-			}
-		}
-		next.attempts = append(next.attempts, RuntimeAttemptProjection{
-			attemptID: event.attemptID, mergeUnit: event.mergeUnit, generation: event.generation,
-			attemptNumber: event.attemptNumber, base: event.base, worktree: event.worktree,
-			checkpoint: event.checkpoint, escalation: event.escalation,
-			serialSegment: event.serialSegment, serialSegmentHeld: !event.serialSegment.IsZero(),
-			goal: event.goal, phase: AttemptReserved, reservationRecord: record.sequence,
-		})
-		return nil
-	case AttemptMaterializationIntendedJournalEvent:
-		index, attempt, err := requireRuntimeAttempt(current, event.attemptID, event.workspaceID, event.generation)
-		if err != nil {
-			return err
-		}
-		if attempt.phase != AttemptReserved || attempt.base != event.base || attempt.worktree != event.worktree {
-			return fmt.Errorf("attempt materialization intent does not match a reserved attempt")
-		}
-		next.attempts[index].phase = AttemptMaterializing
-		next.attempts[index].materializationRecord = record.sequence
-		return nil
-	case AttemptStartedJournalEvent:
-		index, attempt, err := requireRuntimeAttempt(current, event.attemptID, event.workspaceID, event.generation)
-		if err != nil {
-			return err
-		}
-		if attempt.phase != AttemptMaterializing || attempt.base != event.verifiedHead || attempt.goal != event.goal {
-			return fmt.Errorf("attempt start requires materializing state at the reserved base")
-		}
-		if err := ensureRuntimeLeaseAvailable(current.attempts, attempt.attemptID, event.leaseID); err != nil {
-			return err
-		}
-		updated := &next.attempts[index]
-		updated.phase, updated.startRecord = AttemptActive, record.sequence
-		updated.verifiedHead, updated.inspectionDigest = event.verifiedHead, event.inspectionDigest
-		updated.leaseID, updated.goal = event.leaseID, event.goal
 		return nil
 	case AttemptBoundaryReachedJournalEvent:
 		index, attempt, err := requireRuntimeAttempt(current, event.attemptID, event.workspaceID, event.generation)
@@ -542,30 +469,28 @@ func canonicalAttemptRuntime(attempt RuntimeAttemptProjection) (json.RawMessage,
 		AcceptanceMode   string `json:"acceptance_mode"`
 	}
 	type attemptJSON struct {
-		AttemptID             string                  `json:"attempt_id"`
-		PlanID                string                  `json:"plan_id"`
-		MergeUnitID           string                  `json:"merge_unit_id"`
-		Generation            string                  `json:"generation"`
-		AttemptNumber         uint64                  `json:"attempt_number"`
-		Base                  string                  `json:"base"`
-		Worktree              string                  `json:"worktree"`
-		Checkpoint            AttemptCheckpointMode   `json:"checkpoint"`
-		Escalation            AttemptEscalationPolicy `json:"escalation"`
-		SerialSegment         string                  `json:"serial_segment,omitempty"`
-		SerialSegmentHeld     bool                    `json:"serial_segment_held"`
-		Phase                 AttemptRuntimePhase     `json:"phase"`
-		ReservationRecord     uint64                  `json:"reservation_record"`
-		MaterializationRecord uint64                  `json:"materialization_record"`
-		StartRecord           uint64                  `json:"start_record"`
-		VerifiedHead          string                  `json:"verified_head,omitempty"`
-		InspectionDigest      string                  `json:"inspection_digest,omitempty"`
-		LeaseID               string                  `json:"lease_id,omitempty"`
-		GoalID                string                  `json:"goal_id,omitempty"`
-		GoalScope             GoalScope               `json:"goal_scope,omitempty"`
-		Boundaries            []boundaryJSON          `json:"boundaries"`
-		CommitProtocol        json.RawMessage         `json:"commit_protocol,omitempty"`
-		ReviewFixes           json.RawMessage         `json:"review_fixes,omitempty"`
-		Integration           *integrationJSON        `json:"integration,omitempty"`
+		AttemptID         string                  `json:"attempt_id"`
+		PlanID            string                  `json:"plan_id"`
+		MergeUnitID       string                  `json:"merge_unit_id"`
+		Generation        string                  `json:"generation"`
+		AttemptNumber     uint64                  `json:"attempt_number"`
+		Base              string                  `json:"base"`
+		Worktree          string                  `json:"worktree"`
+		Checkpoint        AttemptCheckpointMode   `json:"checkpoint"`
+		Escalation        AttemptEscalationPolicy `json:"escalation"`
+		SerialSegment     string                  `json:"serial_segment,omitempty"`
+		SerialSegmentHeld bool                    `json:"serial_segment_held"`
+		Phase             AttemptRuntimePhase     `json:"phase"`
+		StartRecord       uint64                  `json:"start_record"`
+		VerifiedHead      string                  `json:"verified_head,omitempty"`
+		InspectionDigest  string                  `json:"inspection_digest,omitempty"`
+		LeaseID           string                  `json:"lease_id,omitempty"`
+		GoalID            string                  `json:"goal_id,omitempty"`
+		GoalScope         GoalScope               `json:"goal_scope,omitempty"`
+		Boundaries        []boundaryJSON          `json:"boundaries"`
+		CommitProtocol    json.RawMessage         `json:"commit_protocol,omitempty"`
+		ReviewFixes       json.RawMessage         `json:"review_fixes,omitempty"`
+		Integration       *integrationJSON        `json:"integration,omitempty"`
 	}
 	value := attemptJSON{
 		AttemptID: attempt.attemptID.String(), PlanID: attempt.mergeUnit.planID.String(),
@@ -574,8 +499,7 @@ func canonicalAttemptRuntime(attempt RuntimeAttemptProjection) (json.RawMessage,
 		Worktree:   attempt.worktree,
 		Checkpoint: attempt.checkpoint, Escalation: attempt.escalation,
 		SerialSegment: attempt.serialSegment.String(), SerialSegmentHeld: attempt.serialSegmentHeld,
-		Phase: attempt.phase, ReservationRecord: attempt.reservationRecord,
-		MaterializationRecord: attempt.materializationRecord, StartRecord: attempt.startRecord,
+		Phase: attempt.phase, StartRecord: attempt.startRecord,
 		VerifiedHead: attempt.verifiedHead.String(), InspectionDigest: attempt.inspectionDigest.String(),
 		LeaseID: attempt.leaseID.String(),
 		GoalID:  attempt.goal.id.String(), GoalScope: attempt.goal.scope,

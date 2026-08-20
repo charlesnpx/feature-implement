@@ -13,36 +13,33 @@ const (
 type JournalEventType string
 
 const (
-	JournalEventWorkspaceInitialized           JournalEventType = "workspace.initialized.v2"
-	JournalEventFeatureRefCreationIntended     JournalEventType = "feature_ref_creation_intended"
-	JournalEventFeatureRefCreated              JournalEventType = "feature_ref_created"
-	JournalEventTailRecovered                  JournalEventType = "journal.tail_recovered.v2"
-	JournalEventAttemptReserved                JournalEventType = "attempt.reserved.v2"
-	JournalEventAttemptMaterializationIntended JournalEventType = "attempt.materialization_intended.v2"
-	JournalEventAttemptStarted                 JournalEventType = "attempt.started.v2"
-	JournalEventAttemptStart                   JournalEventType = "attempt.start.v3"
-	JournalEventAttemptBoundary                JournalEventType = "attempt.paused.v3"
-	JournalEventAttemptResumed                 JournalEventType = "attempt.resumed.v3"
-	JournalEventAttemptAbandoned               JournalEventType = "attempt.abandoned.v3"
-	JournalEventCommitProtocolStarted          JournalEventType = "commit.protocol_started.v2"
-	JournalEventCommitStepIntended             JournalEventType = "commit.step_intended.v2"
-	JournalEventCommitStepRecorded             JournalEventType = "commit.step_recorded.v2"
-	JournalEventCommitCheckRecorded            JournalEventType = "commit.check_recorded.v2"
-	JournalEventCommitProtocolRebased          JournalEventType = "commit.protocol_rebased.v2"
-	JournalEventReviewFixReserved              JournalEventType = "review_fix.reserved.v2"
-	JournalEventReviewFixIntended              JournalEventType = "review_fix.intended.v2"
-	JournalEventReviewFixCommitRecorded        JournalEventType = "review_fix.commit_recorded.v2"
-	JournalEventReviewFixCheckRecorded         JournalEventType = "review_fix.check_recorded.v2"
-	JournalEventReviewRoundStarted             JournalEventType = "review.round_started.v2"
-	JournalEventReviewHeadAdopted              JournalEventType = "review.head_adopted.v2"
-	JournalEventReviewInvocationReserved       JournalEventType = "review.invocation_reserved.v2"
-	JournalEventReviewInvocationFailed         JournalEventType = "review.invocation_failed.v2"
-	JournalEventReviewResultRecorded           JournalEventType = "review.result_recorded.v2"
-	JournalEventReviewFindingFixReserved       JournalEventType = "review.finding_fix_reserved.v2"
-	JournalEventReviewFixApplied               JournalEventType = "review.fix_applied.v2"
-	JournalEventMergeUnitIntegrationIntended   JournalEventType = "merge_unit_integration_intended"
-	JournalEventMergeUnitIntegrated            JournalEventType = "merge_unit_integrated"
-	JournalEventWorkspaceCompleted             JournalEventType = "workspace_completed"
+	JournalEventWorkspaceInitialized         JournalEventType = "workspace.initialized.v2"
+	JournalEventFeatureRefCreationIntended   JournalEventType = "feature_ref_creation_intended"
+	JournalEventFeatureRefCreated            JournalEventType = "feature_ref_created"
+	JournalEventTailRecovered                JournalEventType = "journal.tail_recovered.v2"
+	JournalEventAttemptStart                 JournalEventType = "attempt.start.v3"
+	JournalEventAttemptBoundary              JournalEventType = "attempt.paused.v3"
+	JournalEventAttemptResumed               JournalEventType = "attempt.resumed.v3"
+	JournalEventAttemptAbandoned             JournalEventType = "attempt.abandoned.v3"
+	JournalEventCommitProtocolStarted        JournalEventType = "commit.protocol_started.v2"
+	JournalEventCommitStepIntended           JournalEventType = "commit.step_intended.v2"
+	JournalEventCommitStepRecorded           JournalEventType = "commit.step_recorded.v2"
+	JournalEventCommitCheckRecorded          JournalEventType = "commit.check_recorded.v2"
+	JournalEventCommitProtocolRebased        JournalEventType = "commit.protocol_rebased.v2"
+	JournalEventReviewFixReserved            JournalEventType = "review_fix.reserved.v2"
+	JournalEventReviewFixIntended            JournalEventType = "review_fix.intended.v2"
+	JournalEventReviewFixCommitRecorded      JournalEventType = "review_fix.commit_recorded.v2"
+	JournalEventReviewFixCheckRecorded       JournalEventType = "review_fix.check_recorded.v2"
+	JournalEventReviewRoundStarted           JournalEventType = "review.round_started.v2"
+	JournalEventReviewHeadAdopted            JournalEventType = "review.head_adopted.v2"
+	JournalEventReviewInvocationReserved     JournalEventType = "review.invocation_reserved.v2"
+	JournalEventReviewInvocationFailed       JournalEventType = "review.invocation_failed.v2"
+	JournalEventReviewResultRecorded         JournalEventType = "review.result_recorded.v2"
+	JournalEventReviewFindingFixReserved     JournalEventType = "review.finding_fix_reserved.v2"
+	JournalEventReviewFixApplied             JournalEventType = "review.fix_applied.v2"
+	JournalEventMergeUnitIntegrationIntended JournalEventType = "merge_unit_integration_intended"
+	JournalEventMergeUnitIntegrated          JournalEventType = "merge_unit_integrated"
+	JournalEventWorkspaceCompleted           JournalEventType = "workspace_completed"
 )
 
 type WorkspaceJournalEvent interface {
@@ -208,12 +205,6 @@ func newJournalAppend(
 			return JournalAppend{}, fmt.Errorf(
 				"feature-ref events must use the recoverable local target initialization workflow",
 			)
-		case AttemptReservedJournalEvent:
-			return JournalAppend{}, fmt.Errorf("attempt reservation must use the ref-verified reservation workflow")
-		case AttemptMaterializationIntendedJournalEvent:
-			return JournalAppend{}, fmt.Errorf("materialization intent must use the reconciled materialization workflow")
-		case AttemptStartedJournalEvent:
-			return JournalAppend{}, fmt.Errorf("attempt start must use the Git-verified materialization workflow")
 		case AttemptStartJournalEvent:
 			return JournalAppend{}, fmt.Errorf("attempt start must use the detached-worktree workflow")
 		case AttemptBoundaryReachedJournalEvent:

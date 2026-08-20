@@ -536,12 +536,12 @@ func reserveSafetyNetMaterializationAttempt(
 	if err != nil {
 		t.Fatal(err)
 	}
-	attempt, err := workspace.ReserveAttempt(
+	attempt, err := workspace.StartAttempt(
 		context.Background(),
 		journal,
 		definition,
 		workspace.DefaultLocalAttemptGitAdapter(),
-		workspace.ReserveAttemptRequest{
+		workspace.StartAttemptRequest{
 			MergeUnit:     mustMergeUnitReference(t, "alpha-plan", "unit-one"),
 			AttemptNumber: 1,
 			Goal:          goal,
@@ -596,12 +596,12 @@ func newIndependentIntegrationConstruction(
 		t.Fatal(err)
 	}
 	mergeUnit := mustMergeUnitReference(t, "alpha-plan", "unit-one")
-	attempt, err := workspace.ReserveAttempt(
+	attempt, err := workspace.StartAttempt(
 		context.Background(),
 		journal,
 		definition,
 		workspace.DefaultLocalAttemptGitAdapter(),
-		workspace.ReserveAttemptRequest{
+		workspace.StartAttemptRequest{
 			MergeUnit:     mergeUnit,
 			AttemptNumber: 1,
 			Goal:          goal,

@@ -52,8 +52,7 @@ func (adapter LocalAttemptGitAdapter) MaterializeAttemptTree(
 		return AttemptGitInspection{}, err
 	}
 	if inspection.WorktreeExists() {
-		if inspection.WorktreeRegistered() || !inspection.Clean() ||
-			inspection.WorktreeHead() != base {
+		if !inspection.Clean() || inspection.WorktreeHead() != base {
 			return AttemptGitInspection{}, fmt.Errorf(
 				"attempt worktree %s already exists but is not the exact clean detached base",
 				worktree,
@@ -106,7 +105,7 @@ func (adapter LocalAttemptGitAdapter) MaterializeAttemptTree(
 	if err != nil {
 		return AttemptGitInspection{}, err
 	}
-	if !inspection.Clean() || inspection.WorktreeHead() != base || inspection.WorktreeRegistered() {
+	if !inspection.Clean() || inspection.WorktreeHead() != base {
 		return AttemptGitInspection{}, fmt.Errorf("new attempt worktree is not the exact clean detached base")
 	}
 	return inspection, nil
@@ -124,7 +123,7 @@ func (adapter LocalAttemptGitAdapter) inspectScratchAttemptWorktree(
 	}
 	info, err := os.Lstat(worktree)
 	if errors.Is(err, os.ErrNotExist) {
-		return NewAttemptGitInspection(false, GitObjectID{}, false, false, "", GitObjectID{}, false)
+		return newAttemptGitInspection(AttemptGitInspection{})
 	}
 	if err != nil {
 		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree path: %w", err)
@@ -140,7 +139,7 @@ func (adapter LocalAttemptGitAdapter) inspectScratchAttemptWorktree(
 		return AttemptGitInspection{}, fmt.Errorf("attempt worktree %s is registered with the target repository", worktree)
 	}
 	if _, err := os.Lstat(filepath.Join(worktree, ".git")); errors.Is(err, os.ErrNotExist) {
-		return NewAttemptGitInspection(false, GitObjectID{}, true, false, "", GitObjectID{}, false)
+		return newAttemptGitInspection(AttemptGitInspection{worktreeExists: true})
 	} else if err != nil {
 		return AttemptGitInspection{}, fmt.Errorf("inspect detached attempt Git directory: %w", err)
 	}

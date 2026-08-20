@@ -510,8 +510,7 @@ func verifyIntegrationAttemptInspection(
 	expectedHead, expectedTree GitObjectID,
 	inspection AttemptGitInspection,
 ) error {
-	if inspection.branchExists || !inspection.worktreeExists || inspection.worktreeRegistered ||
-		!inspection.clean || inspection.worktreeHead != expectedHead ||
+	if !inspection.worktreeExists || !inspection.clean || inspection.worktreeHead != expectedHead ||
 		inspection.worktreeTree != expectedTree ||
 		inspection.worktreeBinding.IsZero() {
 		return fmt.Errorf("integration requires an exact clean detached attempt worktree at its accepted head and tree")

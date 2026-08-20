@@ -5,41 +5,6 @@ import (
 	"fmt"
 )
 
-type attemptReservedPayloadWire struct {
-	WorkspaceID   string                  `json:"workspace_id"`
-	Generation    string                  `json:"generation"`
-	AttemptID     string                  `json:"attempt_id"`
-	PlanID        string                  `json:"plan_id"`
-	MergeUnitID   string                  `json:"merge_unit_id"`
-	AttemptNumber uint64                  `json:"attempt_number"`
-	Base          string                  `json:"base"`
-	Worktree      string                  `json:"worktree"`
-	Checkpoint    AttemptCheckpointMode   `json:"checkpoint"`
-	Escalation    AttemptEscalationPolicy `json:"escalation"`
-	SerialSegment string                  `json:"serial_segment,omitempty"`
-	GoalID        string                  `json:"goal_id"`
-	GoalScope     GoalScope               `json:"goal_scope"`
-}
-
-type attemptMaterializationPayloadWire struct {
-	WorkspaceID string `json:"workspace_id"`
-	Generation  string `json:"generation"`
-	AttemptID   string `json:"attempt_id"`
-	Base        string `json:"base"`
-	Worktree    string `json:"worktree"`
-}
-
-type attemptStartedPayloadWire struct {
-	WorkspaceID      string    `json:"workspace_id"`
-	Generation       string    `json:"generation"`
-	AttemptID        string    `json:"attempt_id"`
-	VerifiedHead     string    `json:"verified_head"`
-	InspectionDigest string    `json:"inspection_digest"`
-	LeaseID          string    `json:"lease_id"`
-	GoalID           string    `json:"goal_id"`
-	GoalScope        GoalScope `json:"goal_scope"`
-}
-
 type attemptStartPayloadWire struct {
 	WorkspaceID   string                  `json:"workspace_id"`
 	Generation    string                  `json:"generation"`
@@ -107,28 +72,6 @@ type attemptAbandonedPayloadWire struct {
 func marshalAttemptJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, bool, error) {
 	var value any
 	switch event := event.(type) {
-	case AttemptReservedJournalEvent:
-		value = attemptReservedPayloadWire{
-			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
-			AttemptID: event.attemptID.String(),
-			PlanID:    event.mergeUnit.planID.String(), MergeUnitID: event.mergeUnit.mergeUnitID.String(),
-			AttemptNumber: event.attemptNumber, Base: event.base.String(),
-			Worktree: event.worktree, Checkpoint: event.checkpoint, Escalation: event.escalation,
-			SerialSegment: event.serialSegment.String(),
-			GoalID:        event.goal.id.String(), GoalScope: event.goal.scope,
-		}
-	case AttemptMaterializationIntendedJournalEvent:
-		value = attemptMaterializationPayloadWire{
-			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
-			AttemptID: event.attemptID.String(), Base: event.base.String(), Worktree: event.worktree,
-		}
-	case AttemptStartedJournalEvent:
-		value = attemptStartedPayloadWire{
-			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(), AttemptID: event.attemptID.String(),
-			VerifiedHead: event.verifiedHead.String(), InspectionDigest: event.inspectionDigest.String(),
-			LeaseID: event.leaseID.String(),
-			GoalID:  event.goal.id.String(), GoalScope: event.goal.scope,
-		}
 	case AttemptStartJournalEvent:
 		value = attemptStartPayloadWire{
 			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
@@ -173,72 +116,6 @@ func decodeAttemptJournalEvent(
 	payload json.RawMessage,
 ) (WorkspaceJournalEvent, bool, error) {
 	switch eventType {
-	case JournalEventAttemptReserved:
-		var wire attemptReservedPayloadWire
-		if err := decodeStrictJSON(payload, &wire); err != nil {
-			return nil, true, fmt.Errorf("decode attempt reservation: %w", err)
-		}
-		workspaceID, generation, attemptID, err := parseAttemptEnvelope(wire.WorkspaceID, wire.Generation, wire.AttemptID)
-		if err != nil {
-			return nil, true, err
-		}
-		mergeUnit, err := parseMergeUnitReference(wire.PlanID, wire.MergeUnitID)
-		if err != nil {
-			return nil, true, err
-		}
-		base, err := ParseGitObjectID(wire.Base)
-		if err != nil {
-			return nil, true, err
-		}
-		segment, err := parseOptionalID(wire.SerialSegment)
-		if err != nil {
-			return nil, true, err
-		}
-		goal, err := parseGoalBinding(wire.GoalID, wire.GoalScope)
-		if err != nil {
-			return nil, true, err
-		}
-		event, err := NewAttemptReservedJournalEvent(
-			workspaceID, generation, attemptID, mergeUnit, wire.AttemptNumber,
-			base, wire.Worktree, wire.Checkpoint, wire.Escalation, segment, goal,
-		)
-		return event, true, err
-	case JournalEventAttemptMaterializationIntended:
-		var wire attemptMaterializationPayloadWire
-		if err := decodeStrictJSON(payload, &wire); err != nil {
-			return nil, true, fmt.Errorf("decode materialization intent: %w", err)
-		}
-		workspaceID, generation, attemptID, err := parseAttemptEnvelope(wire.WorkspaceID, wire.Generation, wire.AttemptID)
-		if err != nil {
-			return nil, true, err
-		}
-		base, err := ParseGitObjectID(wire.Base)
-		if err != nil {
-			return nil, true, err
-		}
-		event, err := NewAttemptMaterializationIntendedJournalEvent(
-			workspaceID, attemptID, generation, base, wire.Worktree,
-		)
-		return event, true, err
-	case JournalEventAttemptStarted:
-		var wire attemptStartedPayloadWire
-		if err := decodeStrictJSON(payload, &wire); err != nil {
-			return nil, true, fmt.Errorf("decode attempt start: %w", err)
-		}
-		workspaceID, generation, attemptID, err := parseAttemptEnvelope(wire.WorkspaceID, wire.Generation, wire.AttemptID)
-		if err != nil {
-			return nil, true, err
-		}
-		head, inspection, leaseID, goal, err := parseAttemptActivationBindings(
-			wire.VerifiedHead, wire.InspectionDigest, wire.LeaseID, wire.GoalID, wire.GoalScope,
-		)
-		if err != nil {
-			return nil, true, err
-		}
-		event, err := NewAttemptStartedJournalEvent(
-			workspaceID, attemptID, generation, head, inspection, leaseID, goal,
-		)
-		return event, true, err
 	case JournalEventAttemptStart:
 		var wire attemptStartPayloadWire
 		if err := decodeStrictJSON(payload, &wire); err != nil {

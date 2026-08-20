@@ -72,8 +72,6 @@ func integrationCompletionReservationBytes(
 func longestIntegrationNonterminalPhase() AttemptRuntimePhase {
 	longest := AttemptRuntimePhase("")
 	for _, phase := range []AttemptRuntimePhase{
-		AttemptReserved,
-		AttemptMaterializing,
 		AttemptActive,
 		AttemptPaused,
 		AttemptReviewExhausted,

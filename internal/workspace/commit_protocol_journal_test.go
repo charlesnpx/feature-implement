@@ -13,7 +13,6 @@ import (
 )
 
 type journalCommitGit struct {
-	branch       string
 	head         workspace.GitObjectID
 	staged       workspace.StagedCommitInspection
 	commit       workspace.GitCommitInspection
@@ -206,7 +205,7 @@ func TestJournaledCommitProtocolRecoversCommitAndCheckCrashWindows(t *testing.T)
 	}
 	_ = commitEvidence
 	git := &journalCommitGit{
-		branch: attempt.Branch(), head: harness.base, staged: staged, commit: commitInspection,
+		head: harness.base, staged: staged, commit: commitInspection,
 	}
 	runner := &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())}
 	shell, _ := workspace.NewCommitProtocolShell(git, runner)
@@ -276,7 +275,7 @@ func TestJournaledCommitProtocolRecoversCommitAndCheckCrashWindows(t *testing.T)
 	}
 
 	harness.git.setHead(
-		t, attempt.Worktree(), attempt.Branch(), mustGitObject(t, 'e'), true,
+		t, attempt.Worktree(), mustGitObject(t, 'e'), true,
 	)
 	if _, err := workspace.RecordAttemptBoundary(
 		context.Background(), harness.journal, harness.definition, harness.git,
@@ -290,7 +289,7 @@ func TestJournaledCommitProtocolRecoversCommitAndCheckCrashWindows(t *testing.T)
 	}
 
 	harness.git.setHead(
-		t, attempt.Worktree(), attempt.Branch(), commitObject, true,
+		t, attempt.Worktree(), commitObject, true,
 	)
 	boundary, err := workspace.RecordAttemptBoundary(
 		context.Background(), harness.journal, harness.definition, harness.git,
@@ -663,7 +662,6 @@ func TestJournaledReviewFixReplayBudgetExactHeadAndBoundary(t *testing.T) {
 	scenario.harness.git.setHead(
 		t,
 		scenario.attempt.Worktree(),
-		scenario.attempt.Branch(),
 		secondCommit,
 		true,
 	)
@@ -704,7 +702,6 @@ func TestAttemptBoundaryRejectsInFlightReviewFix(t *testing.T) {
 	scenario.harness.git.setHead(
 		t,
 		scenario.attempt.Worktree(),
-		scenario.attempt.Branch(),
 		scenario.implementation,
 		true,
 	)
@@ -746,7 +743,7 @@ func TestReviewFixCanFollowUnconstrainedImplementationHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	git := &journalCommitGit{
-		branch: attempt.Branch(), head: implementationHead, staged: staged, commit: commit,
+		head: implementationHead, staged: staged, commit: commit,
 	}
 	runner := &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())}
 	shell, err := workspace.NewCommitProtocolShell(git, runner)
@@ -1262,7 +1259,7 @@ func newJournalCommitScenario(t *testing.T) journalCommitScenario {
 	if err != nil {
 		t.Fatal(err)
 	}
-	git := &journalCommitGit{branch: attempt.Branch(), head: harness.base, staged: staged, commit: commit}
+	git := &journalCommitGit{head: harness.base, staged: staged, commit: commit}
 	runner := &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())}
 	shell, err := workspace.NewCommitProtocolShell(git, runner)
 	if err != nil {

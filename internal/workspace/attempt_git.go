@@ -21,65 +21,17 @@ const maxAttemptGitOutputBytes = 8 * 1024 * 1024
 const maxAttemptGitRecordBytes = 1024 * 1024
 
 type AttemptGitInspection struct {
-	branchExists       bool
-	branchHead         GitObjectID
-	worktreeExists     bool
-	worktreeRegistered bool
-	worktreeBranch     string
-	worktreeHead       GitObjectID
-	worktreeTree       GitObjectID
-	worktreeBinding    AttemptWorktreeGitBinding
-	clean              bool
-	digest             Digest
-}
-
-func NewAttemptGitInspection(
-	branchExists bool,
-	branchHead GitObjectID,
-	worktreeExists, worktreeRegistered bool,
-	worktreeBranch string,
-	worktreeHead GitObjectID,
-	clean bool,
-) (AttemptGitInspection, error) {
-	inspection := AttemptGitInspection{
-		branchExists: branchExists, branchHead: branchHead,
-		worktreeExists: worktreeExists, worktreeRegistered: worktreeRegistered,
-		worktreeBranch: worktreeBranch, worktreeHead: worktreeHead, clean: clean,
-	}
-	return newAttemptGitInspection(inspection)
-}
-
-func NewBoundAttemptGitInspection(
-	branchHead GitObjectID,
-	worktreeBranch string,
-	worktreeHead GitObjectID,
-	worktreeTree GitObjectID,
-	worktreeBinding AttemptWorktreeGitBinding,
-	clean bool,
-) (AttemptGitInspection, error) {
-	return newAttemptGitInspection(AttemptGitInspection{
-		branchExists: true, branchHead: branchHead,
-		worktreeExists: true, worktreeRegistered: true,
-		worktreeBranch: worktreeBranch, worktreeHead: worktreeHead,
-		worktreeTree: worktreeTree, worktreeBinding: worktreeBinding,
-		clean: clean,
-	})
+	worktreeExists  bool
+	worktreeHead    GitObjectID
+	worktreeTree    GitObjectID
+	worktreeBinding AttemptWorktreeGitBinding
+	clean           bool
+	digest          Digest
 }
 
 func newAttemptGitInspection(
 	inspection AttemptGitInspection,
 ) (AttemptGitInspection, error) {
-	if inspection.branchExists != !inspection.branchHead.IsZero() {
-		return AttemptGitInspection{}, fmt.Errorf("branch existence and object identity disagree")
-	}
-	if inspection.worktreeRegistered &&
-		strings.TrimSpace(inspection.worktreeBranch) == "" {
-		return AttemptGitInspection{}, fmt.Errorf("registered worktree requires its branch")
-	}
-	if inspection.worktreeRegistered && inspection.worktreeExists &&
-		inspection.worktreeHead.IsZero() {
-		return AttemptGitInspection{}, fmt.Errorf("existing registered worktree requires its head")
-	}
 	if inspection.clean && (!inspection.worktreeExists || inspection.worktreeHead.IsZero()) {
 		return AttemptGitInspection{}, fmt.Errorf("clean state requires an existing worktree")
 	}
@@ -109,13 +61,7 @@ func newAttemptGitInspection(
 	return inspection, nil
 }
 
-func (inspection AttemptGitInspection) BranchExists() bool      { return inspection.branchExists }
-func (inspection AttemptGitInspection) BranchHead() GitObjectID { return inspection.branchHead }
-func (inspection AttemptGitInspection) WorktreeExists() bool    { return inspection.worktreeExists }
-func (inspection AttemptGitInspection) WorktreeRegistered() bool {
-	return inspection.worktreeRegistered
-}
-func (inspection AttemptGitInspection) WorktreeBranch() string    { return inspection.worktreeBranch }
+func (inspection AttemptGitInspection) WorktreeExists() bool      { return inspection.worktreeExists }
 func (inspection AttemptGitInspection) WorktreeHead() GitObjectID { return inspection.worktreeHead }
 func (inspection AttemptGitInspection) WorktreeTree() GitObjectID { return inspection.worktreeTree }
 func (inspection AttemptGitInspection) WorktreeGitBinding() AttemptWorktreeGitBinding {
@@ -125,8 +71,7 @@ func (inspection AttemptGitInspection) Clean() bool    { return inspection.clean
 func (inspection AttemptGitInspection) Digest() Digest { return inspection.digest }
 
 // NewScratchAttemptGitInspection records an independent, detached attempt
-// repository. It deliberately has neither an attempt branch nor a linked
-// worktree registration in the target repository.
+// repository.
 func NewScratchAttemptGitInspection(
 	worktreeHead, worktreeTree GitObjectID,
 	worktreeBinding AttemptWorktreeGitBinding,
@@ -836,16 +781,12 @@ func trustedGitArguments(repositoryRoot string, arguments ...string) []string {
 
 func digestAttemptGitInspection(inspection AttemptGitInspection) (Digest, error) {
 	type inspectionJSON struct {
-		SchemaVersion      int                            `json:"schema_version"`
-		BranchExists       bool                           `json:"branch_exists"`
-		BranchHead         string                         `json:"branch_head,omitempty"`
-		WorktreeExists     bool                           `json:"worktree_exists"`
-		WorktreeRegistered bool                           `json:"worktree_registered"`
-		WorktreeBranch     string                         `json:"worktree_branch,omitempty"`
-		WorktreeHead       string                         `json:"worktree_head,omitempty"`
-		WorktreeTree       string                         `json:"worktree_tree,omitempty"`
-		WorktreeBinding    *attemptWorktreeGitBindingWire `json:"worktree_binding,omitempty"`
-		Clean              bool                           `json:"clean"`
+		SchemaVersion   int                            `json:"schema_version"`
+		WorktreeExists  bool                           `json:"worktree_exists"`
+		WorktreeHead    string                         `json:"worktree_head,omitempty"`
+		WorktreeTree    string                         `json:"worktree_tree,omitempty"`
+		WorktreeBinding *attemptWorktreeGitBindingWire `json:"worktree_binding,omitempty"`
+		Clean           bool                           `json:"clean"`
 	}
 	var worktreeBinding *attemptWorktreeGitBindingWire
 	if !inspection.worktreeBinding.IsZero() {
@@ -855,10 +796,9 @@ func digestAttemptGitInspection(inspection AttemptGitInspection) (Digest, error)
 		worktreeBinding = &wire
 	}
 	content, err := json.Marshal(inspectionJSON{
-		SchemaVersion: JournalSchemaVersion,
-		BranchExists:  inspection.branchExists, BranchHead: inspection.branchHead.String(),
-		WorktreeExists: inspection.worktreeExists, WorktreeRegistered: inspection.worktreeRegistered,
-		WorktreeBranch: inspection.worktreeBranch, WorktreeHead: inspection.worktreeHead.String(),
+		SchemaVersion:   JournalSchemaVersion,
+		WorktreeExists:  inspection.worktreeExists,
+		WorktreeHead:    inspection.worktreeHead.String(),
 		WorktreeTree:    inspection.worktreeTree.String(),
 		WorktreeBinding: worktreeBinding, Clean: inspection.clean,
 	})

@@ -51,8 +51,8 @@ func (git *fakeAttemptGit) MaterializeAttemptTree(
 		return workspace.AttemptGitInspection{}, git.createErr
 	}
 	git.createCalls++
-	inspection, err := workspace.NewAttemptGitInspection(
-		false, workspace.GitObjectID{}, true, false, "", base, true,
+	inspection, err := workspace.NewScratchAttemptGitInspection(
+		base, workspace.GitObjectID{}, workspace.AttemptWorktreeGitBinding{}, true,
 	)
 	if err != nil {
 		return workspace.AttemptGitInspection{}, err
@@ -67,17 +67,12 @@ func (git *fakeAttemptGit) MaterializeAttemptTree(
 func (git *fakeAttemptGit) setHead(
 	t *testing.T,
 	worktree string,
-	branch string,
 	head workspace.GitObjectID,
 	clean bool,
 ) {
 	t.Helper()
-	branchHead := workspace.GitObjectID{}
-	if branch != "" {
-		branchHead = head
-	}
-	inspection, err := workspace.NewAttemptGitInspection(
-		branch != "", branchHead, true, branch != "", branch, head, clean,
+	inspection, err := workspace.NewScratchAttemptGitInspection(
+		head, workspace.GitObjectID{}, workspace.AttemptWorktreeGitBinding{}, clean,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -152,9 +147,9 @@ func newAttemptHarnessFromFixture(t *testing.T, fixture definitionFixture, unitI
 
 func (h attemptHarness) reserve(t *testing.T, at string) workspace.RuntimeAttemptProjection {
 	t.Helper()
-	attempt, err := workspace.ReserveAttempt(
+	attempt, err := workspace.StartAttempt(
 		context.Background(), h.journal, h.definition, h.git,
-		workspace.ReserveAttemptRequest{
+		workspace.StartAttemptRequest{
 			MergeUnit: h.unit, AttemptNumber: 1,
 			Goal: h.goal, OccurredAt: mustTime(t, at),
 		},
@@ -223,9 +218,9 @@ func TestAttemptReservationEnforcesSchedulerOrderAndEffectiveAttemptBudget(t *te
 
 	harness := newAttemptHarness(t, "unit-one")
 	blockedUnit := mustMergeUnitReference(t, "alpha-plan", "unit-two")
-	if _, err := workspace.ReserveAttempt(
+	if _, err := workspace.StartAttempt(
 		context.Background(), harness.journal, harness.definition, harness.git,
-		workspace.ReserveAttemptRequest{
+		workspace.StartAttemptRequest{
 			MergeUnit: blockedUnit, AttemptNumber: 1, Goal: harness.goal,
 			OccurredAt: mustTime(t, "2026-07-21T10:01:00Z"),
 		},
@@ -233,18 +228,18 @@ func TestAttemptReservationEnforcesSchedulerOrderAndEffectiveAttemptBudget(t *te
 		!strings.Contains(err.Error(), "unsatisfied dependency sets: [alpha-plan/unit-one]") {
 		t.Fatalf("dependency-bypassing reservation error = %v", err)
 	}
-	if _, err := workspace.ReserveAttempt(
+	if _, err := workspace.StartAttempt(
 		context.Background(), harness.journal, harness.definition, harness.git,
-		workspace.ReserveAttemptRequest{
+		workspace.StartAttemptRequest{
 			MergeUnit: harness.unit, AttemptNumber: 4, Goal: harness.goal,
 			OccurredAt: mustTime(t, "2026-07-21T10:02:00Z"),
 		},
 	); err == nil || !strings.Contains(err.Error(), "exceeds max_attempts 3") {
 		t.Fatalf("over-budget reservation error = %v", err)
 	}
-	if _, err := workspace.ReserveAttempt(
+	if _, err := workspace.StartAttempt(
 		context.Background(), harness.journal, harness.definition, harness.git,
-		workspace.ReserveAttemptRequest{
+		workspace.StartAttemptRequest{
 			MergeUnit: harness.unit, AttemptNumber: 2, Goal: harness.goal,
 			OccurredAt: mustTime(t, "2026-07-21T10:03:00Z"),
 		},
@@ -376,7 +371,7 @@ func TestStartAttemptIgnoresLocalRefs(t *testing.T) {
 					OccurredAt: mustTime(t, "2026-07-21T09:00:00Z"),
 				},
 			)
-			if err != nil || attempt.Branch() != "" || harness.git.createCalls != 1 {
+			if err != nil || harness.git.createCalls != 1 {
 				t.Fatalf("scratch start with %q refs = %#v, err=%v", test.local, attempt, err)
 			}
 		})
@@ -399,7 +394,7 @@ func TestStartAttemptReconcilesEveryPostAppendCrashPoint(t *testing.T) {
 		t.Fatalf("post-append start crash = %v", err)
 	}
 	attempt := onlyRuntimeAttempt(t, harness.journal)
-	if attempt.Phase() != workspace.AttemptActive || attempt.Branch() != "" ||
+	if attempt.Phase() != workspace.AttemptActive ||
 		attempt.StartRecord() == 0 || harness.git.createCalls != 0 {
 		t.Fatalf("post-append scratch start = %#v, creates %d", attempt, harness.git.createCalls)
 	}
@@ -486,7 +481,7 @@ func TestStartAttemptReportsAnInterruptedScratchDirectory(t *testing.T) {
 		t.Fatalf("interrupted scratch start = %v", err)
 	}
 	attempt := onlyRuntimeAttempt(t, journal)
-	if attempt.Phase() != workspace.AttemptActive || attempt.Branch() != "" {
+	if attempt.Phase() != workspace.AttemptActive {
 		t.Fatalf("interrupted scratch projection = %#v", attempt)
 	}
 	if _, err := os.Lstat(attempt.Worktree()); err != nil {
@@ -619,7 +614,7 @@ func TestPauseOnlyBoundaryAtomicallyPausesAndResumesSameGoal(t *testing.T) {
 	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T11:02:00Z")
 	unconstrainedHead := mustGitObject(t, 'b')
 	harness.git.setHead(
-		t, attempt.Worktree(), attempt.Branch(), unconstrainedHead, true,
+		t, attempt.Worktree(), unconstrainedHead, true,
 	)
 	lease := attempt.LeaseID()
 	evidence := boundaryEvidence(t, "pause-only")
@@ -884,7 +879,7 @@ func TestPauseAttemptPreservesPlannedAndExceptionStops(t *testing.T) {
 			attempt := harness.reserve(t, "2026-07-21T12:10:00Z")
 			attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T12:11:00Z")
 			harness.git.setHead(
-				t, attempt.Worktree(), attempt.Branch(), mustGitObject(t, 'c'), true,
+				t, attempt.Worktree(), mustGitObject(t, 'c'), true,
 			)
 
 			paused, err := workspace.PauseAttempt(
@@ -1062,7 +1057,7 @@ func TestCheckpointBoundaryRecoversIdempotentlyAndRejectsStaleHead(t *testing.T)
 	}
 
 	stale, _ := workspace.ParseGitObjectID("sha1:" + strings.Repeat("b", 40))
-	harness.git.setHead(t, attempt.Worktree(), attempt.Branch(), stale, true)
+	harness.git.setHead(t, attempt.Worktree(), stale, true)
 	if _, err := workspace.ResumeAttempt(
 		context.Background(), harness.journal, harness.definition, harness.git,
 		workspace.ResumeAttemptRequest{AttemptID: attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T12:07:00Z")},
@@ -1070,7 +1065,7 @@ func TestCheckpointBoundaryRecoversIdempotentlyAndRejectsStaleHead(t *testing.T)
 		t.Fatalf("stale-head resume = %v", err)
 	}
 	harness.git.setHead(
-		t, attempt.Worktree(), attempt.Branch(), boundary.Head(), true,
+		t, attempt.Worktree(), boundary.Head(), true,
 	)
 	resumeRequest := workspace.ResumeAttemptRequest{
 		AttemptID: attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T12:08:00Z"),
@@ -1106,9 +1101,9 @@ func TestSerialSegmentsFenceOnlyMatchingSegments(t *testing.T) {
 	first := harness.reserve(t, "2026-07-21T13:01:00Z")
 	otherUnit := mustMergeUnitReference(t, "alpha-plan", "unit-two")
 	otherGoal, _ := workspace.NewGoalBinding(workspace.MustID("other-goal"), workspace.GoalScopeMergeUnit)
-	other, err := workspace.ReserveAttempt(
+	other, err := workspace.StartAttempt(
 		context.Background(), harness.journal, harness.definition, harness.git,
-		workspace.ReserveAttemptRequest{
+		workspace.StartAttemptRequest{
 			MergeUnit: otherUnit, AttemptNumber: 1,
 			Goal: otherGoal, OccurredAt: mustTime(t, "2026-07-21T13:02:00Z"),
 		},
@@ -1150,9 +1145,9 @@ func TestSerialSegmentsFenceOnlyMatchingSegments(t *testing.T) {
 	defer journal.Close()
 	git := &fakeAttemptGit{}
 	for index, unitID := range []string{"unit-one", "unit-two"} {
-		_, err := workspace.ReserveAttempt(
+		_, err := workspace.StartAttempt(
 			context.Background(), journal, definition, git,
-			workspace.ReserveAttemptRequest{
+			workspace.StartAttemptRequest{
 				MergeUnit: mustMergeUnitReference(t, "alpha-plan", unitID), AttemptNumber: 1,
 				Goal:       otherGoal,
 				OccurredAt: mustTime(t, fmt.Sprintf("2026-07-21T13:1%d:00Z", index+1)),
