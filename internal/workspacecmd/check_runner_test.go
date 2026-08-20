@@ -105,6 +105,7 @@ printf '{"schema_version":1,"status":"passed","assertions":[]}\n'
 	runGitTest(t, repository, "add", "README.md", "check.sh", "network-probe", "network_probe.go")
 	runGitTest(t, repository, "commit", "-m", "Base")
 	base := parseWorkspaceCommandGitObject(t, strings.TrimSpace(runGitTest(t, repository, "rev-parse", "HEAD")))
+	runGitTest(t, repository, "switch", "--detach", "HEAD")
 
 	if err := os.WriteFile(filepath.Join(repository, "change.txt"), []byte("implementation\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -149,7 +150,7 @@ printf '{"schema_version":1,"status":"passed","assertions":[]}\n'
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err = shell.ExecuteNextCommitStep(context.Background(), state, "main", repository, "")
+	state, err = shell.ExecuteNextCommitStep(context.Background(), state, repository, "")
 	if err != nil {
 		t.Fatalf("ExecuteNextCommitStep with isolated runner: %v", err)
 	}

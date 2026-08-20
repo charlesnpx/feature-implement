@@ -39,7 +39,7 @@ func TestJournaledCommitProtocolStartsFromRealStagedWorktree(t *testing.T) {
 	runGitSetup(t, attempt.Worktree(), "config", "user.name", "Protocol Test")
 	runGitSetup(t, attempt.Worktree(), "config", "user.email", "protocol@example.test")
 	runGitSetup(
-		t, attempt.Worktree(), "switch", "-c", attempt.Branch(),
+		t, attempt.Worktree(), "switch", "--detach",
 		rawGitObject(attempt.Base()),
 	)
 	if err := os.MkdirAll(
@@ -115,7 +115,7 @@ func TestJournaledCommitProtocolStartsFromRealStagedWorktree(t *testing.T) {
 	}
 }
 
-func (git *journalCommitGit) InspectStaged(context.Context, string, string) (workspace.StagedCommitInspection, error) {
+func (git *journalCommitGit) InspectStaged(context.Context, string) (workspace.StagedCommitInspection, error) {
 	return git.staged, nil
 }
 
@@ -156,10 +156,10 @@ func (git *journalCommitGit) InspectFirstParentRange(
 
 func (git *journalCommitGit) VerifyCleanWorktree(
 	_ context.Context,
-	_, branch string,
+	_ string,
 	head workspace.GitObjectID,
 ) error {
-	if branch != git.branch || head != git.head {
+	if head != git.head {
 		return errors.New("fake commit worktree verification failed")
 	}
 	return nil
@@ -275,7 +275,9 @@ func TestJournaledCommitProtocolRecoversCommitAndCheckCrashWindows(t *testing.T)
 		t.Fatalf("replayed protocol = %#v exists=%v", replayedState, exists)
 	}
 
-	harness.git.setHead(t, attempt.Branch(), mustGitObject(t, 'e'), true)
+	harness.git.setHead(
+		t, attempt.Worktree(), attempt.Branch(), mustGitObject(t, 'e'), true,
+	)
 	if _, err := workspace.RecordAttemptBoundary(
 		context.Background(), harness.journal, harness.definition, harness.git,
 		workspace.RecordAttemptBoundaryRequest{
@@ -287,7 +289,9 @@ func TestJournaledCommitProtocolRecoversCommitAndCheckCrashWindows(t *testing.T)
 		t.Fatalf("extra commit boundary error = %v", err)
 	}
 
-	harness.git.setHead(t, attempt.Branch(), commitObject, true)
+	harness.git.setHead(
+		t, attempt.Worktree(), attempt.Branch(), commitObject, true,
+	)
 	boundary, err := workspace.RecordAttemptBoundary(
 		context.Background(), harness.journal, harness.definition, harness.git,
 		workspace.RecordAttemptBoundaryRequest{
@@ -656,7 +660,13 @@ func TestJournaledReviewFixReplayBudgetExactHeadAndBoundary(t *testing.T) {
 		t.Fatalf("replayed budget=%#v configured=%v err=%v", budget, configured, err)
 	}
 
-	scenario.harness.git.setHead(t, scenario.attempt.Branch(), secondCommit, true)
+	scenario.harness.git.setHead(
+		t,
+		scenario.attempt.Worktree(),
+		scenario.attempt.Branch(),
+		secondCommit,
+		true,
+	)
 	boundary, err := workspace.RecordAttemptBoundary(
 		context.Background(), scenario.harness.journal, scenario.harness.definition, scenario.harness.git,
 		workspace.RecordAttemptBoundaryRequest{
@@ -691,7 +701,13 @@ func TestAttemptBoundaryRejectsInFlightReviewFix(t *testing.T) {
 	); err == nil {
 		t.Fatal("review-fix reservation fault was not injected")
 	}
-	scenario.harness.git.setHead(t, scenario.attempt.Branch(), scenario.implementation, true)
+	scenario.harness.git.setHead(
+		t,
+		scenario.attempt.Worktree(),
+		scenario.attempt.Branch(),
+		scenario.implementation,
+		true,
+	)
 	if _, err := workspace.RecordAttemptBoundary(
 		context.Background(), scenario.harness.journal, scenario.harness.definition, scenario.harness.git,
 		workspace.RecordAttemptBoundaryRequest{

@@ -36,18 +36,17 @@ type concurrentIntegrationGitStub struct {
 func (git *integrationGitStub) InspectAttempt(
 	_ context.Context,
 	target workspace.LocalTargetBinding,
-	worktree, branch string,
+	worktree string,
 	expectedHead, expectedTree workspace.GitObjectID,
 ) (workspace.AttemptGitInspection, error) {
 	return stubIntegrationAttemptInspection(
-		target, worktree, branch, expectedHead, expectedTree,
+		target, worktree, expectedHead, expectedTree,
 	)
 }
 
 func (git *integrationGitStub) InspectIntegration(
 	_ context.Context,
 	_ workspace.LocalTargetBinding,
-	_ string,
 	intent workspace.MergeUnitIntegrationIntent,
 ) (workspace.IntegrationGitInspection, error) {
 	git.inspectCalls++
@@ -70,7 +69,6 @@ func (git *integrationGitStub) InspectIntegration(
 func (git *integrationGitStub) CreateIntegrationCommit(
 	_ context.Context,
 	_ workspace.LocalTargetBinding,
-	_ string,
 	intent workspace.MergeUnitIntegrationIntent,
 ) error {
 	git.createCalls++
@@ -84,7 +82,6 @@ func (git *integrationGitStub) CreateIntegrationCommit(
 func (git *integrationGitStub) PublishIntegration(
 	_ context.Context,
 	_ workspace.LocalTargetBinding,
-	_ string,
 	intent workspace.MergeUnitIntegrationIntent,
 	fault workspace.IntegrationLifecycleFaultInjector,
 ) error {
@@ -133,18 +130,17 @@ func (git *integrationGitStub) VerifyCompletedIntegration(
 func (git *concurrentIntegrationGitStub) InspectAttempt(
 	_ context.Context,
 	target workspace.LocalTargetBinding,
-	worktree, branch string,
+	worktree string,
 	expectedHead, expectedTree workspace.GitObjectID,
 ) (workspace.AttemptGitInspection, error) {
 	return stubIntegrationAttemptInspection(
-		target, worktree, branch, expectedHead, expectedTree,
+		target, worktree, expectedHead, expectedTree,
 	)
 }
 
 func (git *concurrentIntegrationGitStub) InspectIntegration(
 	_ context.Context,
 	_ workspace.LocalTargetBinding,
-	_ string,
 	intent workspace.MergeUnitIntegrationIntent,
 ) (workspace.IntegrationGitInspection, error) {
 	key := intent.AttemptID().String()
@@ -181,29 +177,28 @@ func (git *concurrentIntegrationGitStub) InspectIntegration(
 
 func stubIntegrationAttemptInspection(
 	target workspace.LocalTargetBinding,
-	worktree, branch string,
+	worktree string,
 	expectedHead, expectedTree workspace.GitObjectID,
 ) (workspace.AttemptGitInspection, error) {
+	_ = target
 	binding, err := workspace.NewAttemptWorktreeGitBinding(
 		workspace.AttemptWorktreeGitBindingOptions{
-			Worktree: worktree,
-			GitDirectory: filepath.Join(
-				target.CommonDirectory(), "worktrees", branch,
-			),
-			CommonDirectory: target.CommonDirectory(),
+			Worktree:        worktree,
+			GitDirectory:    filepath.Join(worktree, ".git"),
+			CommonDirectory: filepath.Join(worktree, ".git"),
 			AdministrationDigest: workspace.DigestBytes(
-				[]byte("stub administration " + worktree),
+				[]byte("scratch administration " + worktree),
 			),
 			ConfigurationDigest: workspace.DigestBytes(
-				[]byte("stub configuration " + worktree),
+				[]byte("scratch configuration " + worktree),
 			),
 		},
 	)
 	if err != nil {
 		return workspace.AttemptGitInspection{}, err
 	}
-	return workspace.NewBoundAttemptGitInspection(
-		expectedHead, branch, expectedHead, expectedTree,
+	return workspace.NewScratchAttemptGitInspection(
+		expectedHead, expectedTree,
 		binding, true,
 	)
 }
@@ -211,7 +206,6 @@ func stubIntegrationAttemptInspection(
 func (git *concurrentIntegrationGitStub) CreateIntegrationCommit(
 	_ context.Context,
 	_ workspace.LocalTargetBinding,
-	_ string,
 	intent workspace.MergeUnitIntegrationIntent,
 ) error {
 	git.mu.Lock()
@@ -226,7 +220,6 @@ func (git *concurrentIntegrationGitStub) CreateIntegrationCommit(
 func (git *concurrentIntegrationGitStub) PublishIntegration(
 	_ context.Context,
 	_ workspace.LocalTargetBinding,
-	_ string,
 	intent workspace.MergeUnitIntegrationIntent,
 	fault workspace.IntegrationLifecycleFaultInjector,
 ) error {
@@ -367,8 +360,8 @@ func TestIntegrationCompletionAccountsForAndReleasesLeaseAndSerialSegment(
 	))
 	fixture.sources.ExecutionConfig.Bytes = []byte(strings.Replace(
 		string(fixture.sources.ExecutionConfig.Bytes),
-		"    boundary:\n      checkpoint: complete_goal_and_wait\n      escalation: allowed",
-		"    boundary:\n      checkpoint: complete_goal_and_wait\n      escalation: allowed\n      serial_segment: serial-alpha",
+		"    boundary:\n      checkpoint: pause_only\n      escalation: allowed\n    policy:\n      require_passing_checks: true\n      allow_write_network: false\n      max_attempts: 2",
+		"    boundary:\n      checkpoint: pause_only\n      escalation: allowed\n      serial_segment: serial-alpha\n    policy:\n      require_passing_checks: true\n      allow_write_network: false\n      max_attempts: 2",
 		1,
 	))
 	core := newAttemptHarnessFromFixture(t, fixture, "unit-one")
@@ -665,10 +658,6 @@ func TestPendingIntegrationIntentSerializesOtherMergeUnits(t *testing.T) {
 		t, "alpha-plan", "unit-two",
 	)
 	second := secondCore.reserve(t, "2026-07-25T12:30:02Z")
-	secondCore.git.inspection, _ = workspace.NewAttemptGitInspection(
-		false, workspace.GitObjectID{}, false, false, "",
-		workspace.GitObjectID{}, false,
-	)
 	second = secondCore.materialize(
 		t, second.AttemptID(), "2026-07-25T12:30:03Z",
 	)
@@ -789,10 +778,6 @@ func TestConcurrentIntegrationsPublishExactlyOneIntent(t *testing.T) {
 		t, "alpha-plan", "unit-two",
 	)
 	second := secondCore.reserve(t, "2026-07-25T12:45:02Z")
-	secondCore.git.inspection, _ = workspace.NewAttemptGitInspection(
-		false, workspace.GitObjectID{}, false, false, "",
-		workspace.GitObjectID{}, false,
-	)
 	second = secondCore.materialize(
 		t, second.AttemptID(), "2026-07-25T12:45:03Z",
 	)
@@ -1046,10 +1031,6 @@ func TestIntegrationMakesReviewExhaustedLoserRetryableAtNewFrontier(
 		workspace.GoalScopeMergeUnit,
 	)
 	winner := winnerCore.reserve(t, "2026-07-25T12:50:06Z")
-	winnerCore.git.inspection, _ = workspace.NewAttemptGitInspection(
-		false, workspace.GitObjectID{}, false, false, "",
-		workspace.GitObjectID{}, false,
-	)
 	winner = winnerCore.materialize(
 		t, winner.AttemptID(), "2026-07-25T12:50:07Z",
 	)
@@ -1180,10 +1161,6 @@ func TestCompletedIntegrationRetryFollowsLaterDurableFrontier(
 		workspace.GoalScopeMergeUnit,
 	)
 	second := secondCore.reserve(t, "2026-07-25T12:55:04Z")
-	secondCore.git.inspection, _ = workspace.NewAttemptGitInspection(
-		false, workspace.GitObjectID{}, false, false, "",
-		workspace.GitObjectID{}, false,
-	)
 	second = secondCore.materialize(
 		t, second.AttemptID(), "2026-07-25T12:55:05Z",
 	)

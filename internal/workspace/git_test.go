@@ -627,9 +627,10 @@ func newIndependentIntegrationConstruction(
 	repositoryRoot := definition.Workspace().RepositoryRoot()
 	runTargetGitTest(
 		t,
-		repositoryRoot,
+		attempt.Worktree(),
 		"update-ref",
-		"refs/heads/"+attempt.Branch(),
+		"--no-deref",
+		"HEAD",
 		rawGitObject(acceptedHead),
 	)
 	runTargetGitTest(
@@ -684,21 +685,9 @@ func discardIndependentIntegrationConstruction(
 	if err := scenario.journal.Close(); err != nil {
 		t.Fatalf("close independent integration journal: %v", err)
 	}
-	runTargetGitTest(
-		t,
-		scenario.repositoryRoot,
-		"worktree",
-		"remove",
-		"--force",
-		scenario.attempt.Worktree(),
-	)
-	runTargetGitTest(
-		t,
-		scenario.repositoryRoot,
-		"update-ref",
-		"-d",
-		"refs/heads/"+scenario.attempt.Branch(),
-	)
+	if err := os.RemoveAll(scenario.attempt.Worktree()); err != nil {
+		t.Fatalf("remove detached independent integration worktree: %v", err)
+	}
 	runTargetGitTest(
 		t,
 		scenario.repositoryRoot,

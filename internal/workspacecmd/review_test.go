@@ -30,18 +30,23 @@ func TestLocalReviewRepositoryAdoptsActualCleanDescendantHead(t *testing.T) {
 	runGitTest(t, repository, "commit", "-m", "Implementation")
 	head := parseWorkspaceCommandGitObject(t, strings.TrimSpace(runGitTest(t, repository, "rev-parse", "HEAD")))
 	tree := parseWorkspaceCommandGitObject(t, strings.TrimSpace(runGitTest(t, repository, "rev-parse", "HEAD^{tree}")))
-	request, err := workspace.NewReviewRepositoryRequest(repository, "main", base)
+	request, err := workspace.NewReviewRepositoryRequest(repository, base)
 	if err != nil {
 		t.Fatal(err)
 	}
 	adapter := localReviewRepository{git: workspace.DefaultLocalCommitGitAdapter()}
+	if _, err := adapter.InspectReviewSnapshot(context.Background(), request); err == nil ||
+		!strings.Contains(err.Error(), "attempt worktree must keep HEAD detached") {
+		t.Fatalf("branch-attached attempt inspection error = %v", err)
+	}
+	runGitTest(t, repository, "switch", "--detach", gitObjectHex(head))
 	snapshot, err := adapter.InspectReviewSnapshot(context.Background(), request)
 	if err != nil || !snapshot.Clean() || snapshot.Head() != head || snapshot.Tree() != tree {
 		t.Fatalf("actual review snapshot = %#v error=%v", snapshot, err)
 	}
 
 	runGitTest(t, repository, "reset", "--hard", gitObjectHex(base))
-	staleRequest, err := workspace.NewReviewRepositoryRequest(repository, "main", head)
+	staleRequest, err := workspace.NewReviewRepositoryRequest(repository, head)
 	if err != nil {
 		t.Fatal(err)
 	}

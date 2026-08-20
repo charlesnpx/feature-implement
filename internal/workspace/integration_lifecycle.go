@@ -100,7 +100,7 @@ func IntegrateMergeUnit(
 			return MergeUnitIntegrationResult{}, err
 		}
 		attemptInspection, err := git.InspectAttempt(
-			ctx, binding, attempt.worktree, attempt.branch,
+			ctx, binding, attempt.worktree,
 			evidence.head, evidence.tree,
 		)
 		if err != nil {
@@ -133,7 +133,7 @@ func IntegrateMergeUnit(
 			return MergeUnitIntegrationResult{}, err
 		}
 		inspection, err := git.InspectIntegration(
-			ctx, binding, attempt.branch, intent,
+			ctx, binding, intent,
 		)
 		if err != nil {
 			return MergeUnitIntegrationResult{}, err
@@ -216,7 +216,7 @@ func IntegrateMergeUnit(
 		return MergeUnitIntegrationResult{}, err
 	}
 	inspection, err := git.InspectIntegration(
-		ctx, binding, attempt.branch, intent,
+		ctx, binding, intent,
 	)
 	if err != nil {
 		return MergeUnitIntegrationResult{}, err
@@ -231,7 +231,7 @@ func IntegrateMergeUnit(
 				return MergeUnitIntegrationResult{}, err
 			}
 			if err := git.CreateIntegrationCommit(
-				ctx, binding, attempt.branch, intent,
+				ctx, binding, intent,
 			); err != nil {
 				return MergeUnitIntegrationResult{}, err
 			}
@@ -277,7 +277,7 @@ func IntegrateMergeUnit(
 		}
 		attemptInspection, err := git.InspectAttempt(
 			ctx, binding, intent.attemptWorktreeBinding.worktree,
-			attempt.branch, intent.acceptedHead, intent.acceptedTree,
+			intent.acceptedHead, intent.acceptedTree,
 		)
 		if err != nil {
 			return MergeUnitIntegrationResult{}, err
@@ -289,7 +289,7 @@ func IntegrateMergeUnit(
 			)
 		}
 		if err := git.PublishIntegration(
-			ctx, binding, attempt.branch, intent, request.Fault,
+			ctx, binding, intent, request.Fault,
 		); err != nil {
 			return MergeUnitIntegrationResult{}, err
 		}
@@ -310,7 +310,7 @@ func IntegrateMergeUnit(
 	}
 
 	verified, err := git.InspectIntegration(
-		ctx, binding, attempt.branch, intent,
+		ctx, binding, intent,
 	)
 	if err != nil {
 		return MergeUnitIntegrationResult{}, err
@@ -353,7 +353,7 @@ func IntegrateMergeUnit(
 		return MergeUnitIntegrationResult{}, err
 	}
 	completionInspection, err := git.InspectIntegration(
-		ctx, binding, attempt.branch, intent,
+		ctx, binding, intent,
 	)
 	if err != nil {
 		return MergeUnitIntegrationResult{}, err
@@ -577,7 +577,7 @@ func confirmIntegrationAcceptance(
 		return integrationAcceptanceEvidence{}, err
 	}
 	repositoryRequest, err := NewReviewRepositoryRequest(
-		attempt.worktree, attempt.branch, attempt.verifiedHead,
+		attempt.worktree, attempt.verifiedHead,
 	)
 	if err != nil {
 		return integrationAcceptanceEvidence{}, err

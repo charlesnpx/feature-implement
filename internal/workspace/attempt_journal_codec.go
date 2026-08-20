@@ -13,7 +13,6 @@ type attemptReservedPayloadWire struct {
 	MergeUnitID   string                  `json:"merge_unit_id"`
 	AttemptNumber uint64                  `json:"attempt_number"`
 	Base          string                  `json:"base"`
-	Branch        string                  `json:"branch"`
 	Worktree      string                  `json:"worktree"`
 	Checkpoint    AttemptCheckpointMode   `json:"checkpoint"`
 	Escalation    AttemptEscalationPolicy `json:"escalation"`
@@ -27,7 +26,6 @@ type attemptMaterializationPayloadWire struct {
 	Generation  string `json:"generation"`
 	AttemptID   string `json:"attempt_id"`
 	Base        string `json:"base"`
-	Branch      string `json:"branch"`
 	Worktree    string `json:"worktree"`
 }
 
@@ -42,6 +40,23 @@ type attemptStartedPayloadWire struct {
 	GoalScope        GoalScope `json:"goal_scope"`
 }
 
+type attemptStartPayloadWire struct {
+	WorkspaceID   string                  `json:"workspace_id"`
+	Generation    string                  `json:"generation"`
+	AttemptID     string                  `json:"attempt_id"`
+	PlanID        string                  `json:"plan_id"`
+	MergeUnitID   string                  `json:"merge_unit_id"`
+	AttemptNumber uint64                  `json:"attempt_number"`
+	Base          string                  `json:"base"`
+	Worktree      string                  `json:"worktree"`
+	Checkpoint    AttemptCheckpointMode   `json:"checkpoint"`
+	Escalation    AttemptEscalationPolicy `json:"escalation"`
+	SerialSegment string                  `json:"serial_segment,omitempty"`
+	LeaseID       string                  `json:"lease_id"`
+	GoalID        string                  `json:"goal_id"`
+	GoalScope     GoalScope               `json:"goal_scope"`
+}
+
 type evidenceItemPayloadWire struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
@@ -54,58 +69,20 @@ type evidencePayloadWire struct {
 }
 
 type attemptBoundaryPayloadWire struct {
-	WorkspaceID     string                `json:"workspace_id"`
-	Generation      string                `json:"generation"`
-	AttemptID       string                `json:"attempt_id"`
-	BoundaryID      string                `json:"boundary_id"`
-	Ordinal         uint64                `json:"ordinal"`
-	Kind            AttemptBoundaryKind   `json:"kind"`
-	Checkpoint      AttemptCheckpointMode `json:"checkpoint"`
-	SerialSegment   string                `json:"serial_segment,omitempty"`
-	LeaseID         string                `json:"lease_id"`
-	GoalID          string                `json:"goal_id"`
-	GoalScope       GoalScope             `json:"goal_scope"`
-	Head            string                `json:"head"`
-	Evidence        []evidencePayloadWire `json:"evidence"`
-	EvidenceDigest  string                `json:"evidence_digest"`
-	DirectiveDigest string                `json:"directive_digest,omitempty"`
-	IdempotencyKey  string                `json:"idempotency_key,omitempty"`
-}
-
-type attemptOrchestrationAckPayloadWire struct {
-	WorkspaceID     string                           `json:"workspace_id"`
-	Generation      string                           `json:"generation"`
-	AttemptID       string                           `json:"attempt_id"`
-	BoundaryID      string                           `json:"boundary_id"`
-	Kind            OrchestrationAcknowledgementKind `json:"kind"`
-	DirectiveDigest string                           `json:"directive_digest"`
-	GoalID          string                           `json:"goal_id"`
-	GoalScope       GoalScope                        `json:"goal_scope"`
-	IdempotencyKey  string                           `json:"idempotency_key"`
-	RequestDigest   string                           `json:"request_digest"`
-}
-
-type attemptNextGoalIntentPayloadWire struct {
-	WorkspaceID    string    `json:"workspace_id"`
-	Generation     string    `json:"generation"`
-	AttemptID      string    `json:"attempt_id"`
-	BoundaryID     string    `json:"boundary_id"`
-	GoalID         string    `json:"goal_id"`
-	GoalScope      GoalScope `json:"goal_scope"`
-	IdempotencyKey string    `json:"idempotency_key"`
-}
-
-type attemptOwnerResponsePayloadWire struct {
-	WorkspaceID     string                `json:"workspace_id"`
-	Generation      string                `json:"generation"`
-	AttemptID       string                `json:"attempt_id"`
-	BoundaryID      string                `json:"boundary_id"`
-	DirectiveDigest string                `json:"directive_digest"`
-	GoalID          string                `json:"goal_id"`
-	GoalScope       GoalScope             `json:"goal_scope"`
-	ExpectedHead    string                `json:"expected_head"`
-	Response        OwnerBoundaryResponse `json:"response"`
-	RequestDigest   string                `json:"request_digest"`
+	WorkspaceID    string                `json:"workspace_id"`
+	Generation     string                `json:"generation"`
+	AttemptID      string                `json:"attempt_id"`
+	BoundaryID     string                `json:"boundary_id"`
+	Ordinal        uint64                `json:"ordinal"`
+	Kind           AttemptBoundaryKind   `json:"kind"`
+	Checkpoint     AttemptCheckpointMode `json:"checkpoint"`
+	SerialSegment  string                `json:"serial_segment,omitempty"`
+	LeaseID        string                `json:"lease_id"`
+	GoalID         string                `json:"goal_id"`
+	GoalScope      GoalScope             `json:"goal_scope"`
+	Head           string                `json:"head"`
+	Evidence       []evidencePayloadWire `json:"evidence"`
+	EvidenceDigest string                `json:"evidence_digest"`
 }
 
 type attemptResumedPayloadWire struct {
@@ -121,6 +98,12 @@ type attemptResumedPayloadWire struct {
 	SerialSegment    string    `json:"serial_segment,omitempty"`
 }
 
+type attemptAbandonedPayloadWire struct {
+	WorkspaceID string `json:"workspace_id"`
+	Generation  string `json:"generation"`
+	AttemptID   string `json:"attempt_id"`
+}
+
 func marshalAttemptJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, bool, error) {
 	var value any
 	switch event := event.(type) {
@@ -129,7 +112,7 @@ func marshalAttemptJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, b
 			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
 			AttemptID: event.attemptID.String(),
 			PlanID:    event.mergeUnit.planID.String(), MergeUnitID: event.mergeUnit.mergeUnitID.String(),
-			AttemptNumber: event.attemptNumber, Base: event.base.String(), Branch: event.branch,
+			AttemptNumber: event.attemptNumber, Base: event.base.String(),
 			Worktree: event.worktree, Checkpoint: event.checkpoint, Escalation: event.escalation,
 			SerialSegment: event.serialSegment.String(),
 			GoalID:        event.goal.id.String(), GoalScope: event.goal.scope,
@@ -137,7 +120,7 @@ func marshalAttemptJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, b
 	case AttemptMaterializationIntendedJournalEvent:
 		value = attemptMaterializationPayloadWire{
 			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
-			AttemptID: event.attemptID.String(), Base: event.base.String(), Branch: event.branch, Worktree: event.worktree,
+			AttemptID: event.attemptID.String(), Base: event.base.String(), Worktree: event.worktree,
 		}
 	case AttemptStartedJournalEvent:
 		value = attemptStartedPayloadWire{
@@ -146,6 +129,16 @@ func marshalAttemptJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, b
 			LeaseID: event.leaseID.String(),
 			GoalID:  event.goal.id.String(), GoalScope: event.goal.scope,
 		}
+	case AttemptStartJournalEvent:
+		value = attemptStartPayloadWire{
+			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
+			AttemptID: event.attemptID.String(), PlanID: event.mergeUnit.planID.String(),
+			MergeUnitID: event.mergeUnit.mergeUnitID.String(), AttemptNumber: event.attemptNumber,
+			Base: event.base.String(), Worktree: event.worktree,
+			Checkpoint: event.checkpoint, Escalation: event.escalation,
+			SerialSegment: event.serialSegment.String(), LeaseID: event.leaseID.String(),
+			GoalID: event.goal.id.String(), GoalScope: event.goal.scope,
+		}
 	case AttemptBoundaryReachedJournalEvent:
 		value = attemptBoundaryPayloadWire{
 			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(), AttemptID: event.attemptID.String(),
@@ -153,36 +146,7 @@ func marshalAttemptJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, b
 			SerialSegment: event.serialSegment.String(), LeaseID: event.leaseID.String(),
 			GoalID: event.goal.id.String(), GoalScope: event.goal.scope,
 			Head: event.head.String(), Evidence: evidencePayloadFromDomain(event.evidence),
-			EvidenceDigest: event.evidenceDigest.String(), DirectiveDigest: event.directiveDigest.String(),
-			IdempotencyKey: event.idempotencyKey.String(),
-		}
-	case AttemptNextGoalIntendedJournalEvent:
-		value = attemptNextGoalIntentPayloadWire{
-			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
-			AttemptID: event.attemptID.String(), BoundaryID: event.boundaryID.String(),
-			GoalID: event.goal.id.String(), GoalScope: event.goal.scope,
-			IdempotencyKey: event.idempotencyKey.String(),
-		}
-	case AttemptOrchestrationAcknowledgedJournalEvent:
-		value = attemptOrchestrationAckPayloadWire{
-			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(), AttemptID: event.attemptID.String(),
-			BoundaryID: event.boundaryID.String(), Kind: event.kind,
-			DirectiveDigest: event.directiveDigest.String(),
-			GoalID:          event.goal.id.String(), GoalScope: event.goal.scope,
-			IdempotencyKey: event.idempotencyKey.String(), RequestDigest: event.requestDigest.String(),
-		}
-	case AttemptOwnerResponseJournalEvent:
-		value = attemptOwnerResponsePayloadWire{
-			WorkspaceID:     event.workspaceID.String(),
-			Generation:      event.generation.String(),
-			AttemptID:       event.attemptID.String(),
-			BoundaryID:      event.boundaryID.String(),
-			DirectiveDigest: event.directiveDigest.String(),
-			GoalID:          event.goal.id.String(),
-			GoalScope:       event.goal.scope,
-			ExpectedHead:    event.expectedHead.String(),
-			Response:        event.response,
-			RequestDigest:   event.requestDigest.String(),
+			EvidenceDigest: event.evidenceDigest.String(),
 		}
 	case AttemptResumedJournalEvent:
 		value = attemptResumedPayloadWire{
@@ -191,6 +155,11 @@ func marshalAttemptJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, b
 			InspectionDigest: event.inspectionDigest.String(), LeaseID: event.leaseID.String(),
 			GoalID: event.goal.id.String(), GoalScope: event.goal.scope,
 			SerialSegment: event.serialSegment.String(),
+		}
+	case AttemptAbandonedJournalEvent:
+		value = attemptAbandonedPayloadWire{
+			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
+			AttemptID: event.attemptID.String(),
 		}
 	default:
 		return nil, false, nil
@@ -231,7 +200,7 @@ func decodeAttemptJournalEvent(
 		}
 		event, err := NewAttemptReservedJournalEvent(
 			workspaceID, generation, attemptID, mergeUnit, wire.AttemptNumber,
-			base, wire.Branch, wire.Worktree, wire.Checkpoint, wire.Escalation, segment, goal,
+			base, wire.Worktree, wire.Checkpoint, wire.Escalation, segment, goal,
 		)
 		return event, true, err
 	case JournalEventAttemptMaterializationIntended:
@@ -248,7 +217,7 @@ func decodeAttemptJournalEvent(
 			return nil, true, err
 		}
 		event, err := NewAttemptMaterializationIntendedJournalEvent(
-			workspaceID, attemptID, generation, base, wire.Branch, wire.Worktree,
+			workspaceID, attemptID, generation, base, wire.Worktree,
 		)
 		return event, true, err
 	case JournalEventAttemptStarted:
@@ -268,6 +237,42 @@ func decodeAttemptJournalEvent(
 		}
 		event, err := NewAttemptStartedJournalEvent(
 			workspaceID, attemptID, generation, head, inspection, leaseID, goal,
+		)
+		return event, true, err
+	case JournalEventAttemptStart:
+		var wire attemptStartPayloadWire
+		if err := decodeStrictJSON(payload, &wire); err != nil {
+			return nil, true, fmt.Errorf("decode attempt start: %w", err)
+		}
+		workspaceID, generation, attemptID, err := parseAttemptEnvelope(
+			wire.WorkspaceID, wire.Generation, wire.AttemptID,
+		)
+		if err != nil {
+			return nil, true, err
+		}
+		mergeUnit, err := parseMergeUnitReference(wire.PlanID, wire.MergeUnitID)
+		if err != nil {
+			return nil, true, err
+		}
+		base, err := ParseGitObjectID(wire.Base)
+		if err != nil {
+			return nil, true, err
+		}
+		segment, err := parseOptionalID(wire.SerialSegment)
+		if err != nil {
+			return nil, true, err
+		}
+		leaseID, err := NewID(wire.LeaseID)
+		if err != nil {
+			return nil, true, err
+		}
+		goal, err := parseGoalBinding(wire.GoalID, wire.GoalScope)
+		if err != nil {
+			return nil, true, err
+		}
+		event, err := NewAttemptStartJournalEvent(
+			workspaceID, attemptID, generation, mergeUnit, wire.AttemptNumber,
+			base, wire.Worktree, wire.Checkpoint, wire.Escalation, segment, leaseID, goal,
 		)
 		return event, true, err
 	case JournalEventAttemptBoundary:
@@ -310,104 +315,10 @@ func decodeAttemptJournalEvent(
 		if err != nil {
 			return nil, true, err
 		}
-		if event.boundaryID != boundaryID || event.evidenceDigest.String() != wire.EvidenceDigest ||
-			event.directiveDigest.String() != wire.DirectiveDigest || event.idempotencyKey.String() != wire.IdempotencyKey {
+		if event.boundaryID != boundaryID || event.evidenceDigest.String() != wire.EvidenceDigest {
 			return nil, true, fmt.Errorf("attempt boundary derived bindings do not match its payload")
 		}
 		return event, true, nil
-	case JournalEventNextGoalIntended:
-		var wire attemptNextGoalIntentPayloadWire
-		if err := decodeStrictJSON(payload, &wire); err != nil {
-			return nil, true, fmt.Errorf("decode next-goal intent: %w", err)
-		}
-		workspaceID, generation, attemptID, err := parseAttemptEnvelope(wire.WorkspaceID, wire.Generation, wire.AttemptID)
-		if err != nil {
-			return nil, true, err
-		}
-		boundaryID, err := NewID(wire.BoundaryID)
-		if err != nil {
-			return nil, true, err
-		}
-		goal, err := parseGoalBinding(wire.GoalID, wire.GoalScope)
-		if err != nil {
-			return nil, true, err
-		}
-		key, err := ParseDigest(wire.IdempotencyKey)
-		if err != nil {
-			return nil, true, err
-		}
-		event, err := NewAttemptNextGoalIntendedJournalEvent(
-			workspaceID, attemptID, boundaryID, generation, goal, key,
-		)
-		return event, true, err
-	case JournalEventOrchestrationAck:
-		var wire attemptOrchestrationAckPayloadWire
-		if err := decodeStrictJSON(payload, &wire); err != nil {
-			return nil, true, fmt.Errorf("decode acknowledgement: %w", err)
-		}
-		workspaceID, generation, attemptID, err := parseAttemptEnvelope(wire.WorkspaceID, wire.Generation, wire.AttemptID)
-		if err != nil {
-			return nil, true, err
-		}
-		boundaryID, err := NewID(wire.BoundaryID)
-		if err != nil {
-			return nil, true, err
-		}
-		directive, err := ParseDigest(wire.DirectiveDigest)
-		if err != nil {
-			return nil, true, err
-		}
-		goal, err := parseGoalBinding(wire.GoalID, wire.GoalScope)
-		if err != nil {
-			return nil, true, err
-		}
-		key, err := ParseDigest(wire.IdempotencyKey)
-		if err != nil {
-			return nil, true, err
-		}
-		request, err := ParseDigest(wire.RequestDigest)
-		if err != nil {
-			return nil, true, err
-		}
-		event, err := NewAttemptOrchestrationAcknowledgedJournalEvent(
-			workspaceID, attemptID, boundaryID, generation, wire.Kind,
-			directive, goal, key, request,
-		)
-		return event, true, err
-	case JournalEventOwnerResponse:
-		var wire attemptOwnerResponsePayloadWire
-		if err := decodeStrictJSON(payload, &wire); err != nil {
-			return nil, true, fmt.Errorf("decode owner response: %w", err)
-		}
-		workspaceID, generation, attemptID, err := parseAttemptEnvelope(wire.WorkspaceID, wire.Generation, wire.AttemptID)
-		if err != nil {
-			return nil, true, err
-		}
-		boundaryID, err := NewID(wire.BoundaryID)
-		if err != nil {
-			return nil, true, err
-		}
-		directive, err := ParseDigest(wire.DirectiveDigest)
-		if err != nil {
-			return nil, true, err
-		}
-		goal, err := parseGoalBinding(wire.GoalID, wire.GoalScope)
-		if err != nil {
-			return nil, true, err
-		}
-		head, err := ParseGitObjectID(wire.ExpectedHead)
-		if err != nil {
-			return nil, true, err
-		}
-		request, err := ParseDigest(wire.RequestDigest)
-		if err != nil {
-			return nil, true, err
-		}
-		event, err := NewAttemptOwnerResponseJournalEvent(
-			workspaceID, attemptID, boundaryID, generation, directive,
-			goal, head, wire.Response, request,
-		)
-		return event, true, err
 	case JournalEventAttemptResumed:
 		var wire attemptResumedPayloadWire
 		if err := decodeStrictJSON(payload, &wire); err != nil {
@@ -435,6 +346,19 @@ func decodeAttemptJournalEvent(
 			workspaceID, attemptID, boundaryID, generation, head, inspection,
 			leaseID, goal, segment,
 		)
+		return event, true, err
+	case JournalEventAttemptAbandoned:
+		var wire attemptAbandonedPayloadWire
+		if err := decodeStrictJSON(payload, &wire); err != nil {
+			return nil, true, fmt.Errorf("decode attempt abandonment: %w", err)
+		}
+		workspaceID, generation, attemptID, err := parseAttemptEnvelope(
+			wire.WorkspaceID, wire.Generation, wire.AttemptID,
+		)
+		if err != nil {
+			return nil, true, err
+		}
+		event, err := NewAttemptAbandonedJournalEvent(workspaceID, attemptID, generation)
 		return event, true, err
 	default:
 		return nil, false, nil

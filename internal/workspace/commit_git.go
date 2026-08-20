@@ -163,7 +163,6 @@ func (inspection GitCommitInspection) Evidence(
 }
 
 type CreateGitCommitRequest struct {
-	branch     string
 	worktree   string
 	parent     GitObjectID
 	step       CommitStep
@@ -173,7 +172,7 @@ type CreateGitCommitRequest struct {
 }
 
 func NewCreateGitCommitRequest(
-	branch, worktree string,
+	worktree string,
 	parent GitObjectID,
 	step CommitStep,
 	ordinal uint16,
@@ -181,11 +180,8 @@ func NewCreateGitCommitRequest(
 	inspection StagedCommitInspection,
 ) (CreateGitCommitRequest, error) {
 	worktree = filepath.Clean(strings.TrimSpace(worktree))
-	if err := validateAttemptBranchSyntax(branch); err != nil {
-		return CreateGitCommitRequest{}, err
-	}
 	if !filepath.IsAbs(worktree) || parent.IsZero() || step.id.IsZero() || ordinal == 0 {
-		return CreateGitCommitRequest{}, fmt.Errorf("commit creation request requires branch, absolute worktree, parent, step, and ordinal")
+		return CreateGitCommitRequest{}, fmt.Errorf("commit creation request requires absolute worktree, parent, step, and ordinal")
 	}
 	if err := inspection.Validate(step, parent); err != nil {
 		return CreateGitCommitRequest{}, err
@@ -195,13 +191,12 @@ func NewCreateGitCommitRequest(
 		return CreateGitCommitRequest{}, err
 	}
 	return CreateGitCommitRequest{
-		branch: branch, worktree: worktree, parent: parent,
+		worktree: worktree, parent: parent,
 		step: cloneCommitSteps([]CommitStep{step})[0], ordinal: ordinal,
 		body: resolvedBody, inspection: cloneStagedCommitInspection(inspection),
 	}, nil
 }
 
-func (request CreateGitCommitRequest) Branch() string      { return request.branch }
 func (request CreateGitCommitRequest) Worktree() string    { return request.worktree }
 func (request CreateGitCommitRequest) Parent() GitObjectID { return request.parent }
 func (request CreateGitCommitRequest) Step() CommitStep {
@@ -214,11 +209,11 @@ func (request CreateGitCommitRequest) Inspection() StagedCommitInspection {
 }
 
 type CommitGitPort interface {
-	InspectStaged(context.Context, string, string) (StagedCommitInspection, error)
+	InspectStaged(context.Context, string) (StagedCommitInspection, error)
 	CreateConfiguredCommit(context.Context, CreateGitCommitRequest) (GitCommitInspection, error)
 	InspectCommit(context.Context, string, GitObjectID) (GitCommitInspection, error)
 	InspectFirstParentRange(context.Context, string, GitObjectID, GitObjectID) ([]GitCommitInspection, error)
-	VerifyCleanWorktree(context.Context, string, string, GitObjectID) error
+	VerifyCleanWorktree(context.Context, string, GitObjectID) error
 }
 
 type LocalCommitGitAdapter struct {
@@ -238,22 +233,33 @@ func DefaultLocalCommitGitAdapter() LocalCommitGitAdapter {
 	return adapter
 }
 
+func (adapter LocalCommitGitAdapter) verifyAttemptWorktreeBranch(
+	ctx context.Context,
+	worktree string,
+) error {
+	_, exitCode, err := adapter.git.run(ctx, worktree, "symbolic-ref", "--quiet", "--short", "HEAD")
+	if err != nil {
+		return err
+	}
+	if exitCode != 1 {
+		return fmt.Errorf("attempt worktree must keep HEAD detached")
+	}
+	return nil
+}
+
 func (adapter LocalCommitGitAdapter) InspectStaged(
 	ctx context.Context,
-	worktree, branch string,
+	worktree string,
 ) (StagedCommitInspection, error) {
-	if err := validateAttemptBranchSyntax(branch); err != nil {
-		return StagedCommitInspection{}, err
-	}
 	worktree = filepath.Clean(strings.TrimSpace(worktree))
 	if !filepath.IsAbs(worktree) {
 		return StagedCommitInspection{}, fmt.Errorf("commit worktree must be absolute")
 	}
-	first, err := adapter.inspectStagedOnce(ctx, worktree, branch)
+	first, err := adapter.inspectStagedOnce(ctx, worktree)
 	if err != nil {
 		return StagedCommitInspection{}, err
 	}
-	second, err := adapter.inspectStagedOnce(ctx, worktree, branch)
+	second, err := adapter.inspectStagedOnce(ctx, worktree)
 	if err != nil {
 		return StagedCommitInspection{}, err
 	}
@@ -265,7 +271,7 @@ func (adapter LocalCommitGitAdapter) InspectStaged(
 
 func (adapter LocalCommitGitAdapter) inspectStagedOnce(
 	ctx context.Context,
-	worktree, branch string,
+	worktree string,
 ) (StagedCommitInspection, error) {
 	binding, err := adapter.captureTrustedWorktreeBinding(ctx, worktree)
 	if err != nil {
@@ -276,12 +282,8 @@ func (adapter LocalCommitGitAdapter) inspectStagedOnce(
 	if err != nil {
 		return StagedCommitInspection{}, err
 	}
-	actualBranch, err := adapter.symbolicBranch(ctx, worktree)
-	if err != nil {
-		return StagedCommitInspection{}, err
-	}
-	if actualBranch != branch {
-		return StagedCommitInspection{}, fmt.Errorf("commit worktree branch %q does not match %q", actualBranch, branch)
+	if err := adapter.verifyAttemptWorktreeBranch(ctx, worktree); err != nil {
+		return StagedCommitInspection{}, fmt.Errorf("inspect commit worktree branch: %w", err)
 	}
 	head, err := adapter.resolveObject(ctx, worktree, algorithm, "HEAD")
 	if err != nil {
@@ -325,7 +327,7 @@ func (adapter LocalCommitGitAdapter) inspectStagedOnce(
 			return StagedCommitInspection{}, fmt.Errorf("verify staged raw worktree: %w", err)
 		}
 	}
-	if err := adapter.confirmTrustedCommitState(ctx, binding, branch, head, tree); err != nil {
+	if err := adapter.confirmTrustedCommitState(ctx, binding, head, tree); err != nil {
 		return StagedCommitInspection{}, fmt.Errorf("confirm staged Git state: %w", err)
 	}
 	return inspection, nil
@@ -335,19 +337,12 @@ func (adapter LocalCommitGitAdapter) CreateConfiguredCommit(
 	ctx context.Context,
 	request CreateGitCommitRequest,
 ) (GitCommitInspection, error) {
-	if err := validateAttemptBranchSyntax(request.branch); err != nil {
-		return GitCommitInspection{}, err
-	}
 	if !filepath.IsAbs(request.worktree) || request.parent.IsZero() || request.step.id.IsZero() ||
 		request.ordinal == 0 || request.inspection.stateDigest.IsZero() {
 		return GitCommitInspection{}, fmt.Errorf("configured commit request is incomplete")
 	}
-	actualBranch, err := adapter.symbolicBranch(ctx, request.worktree)
-	if err != nil {
-		return GitCommitInspection{}, err
-	}
-	if actualBranch != request.branch {
-		return GitCommitInspection{}, fmt.Errorf("configured commit branch changed from %q to %q", request.branch, actualBranch)
+	if err := adapter.verifyAttemptWorktreeBranch(ctx, request.worktree); err != nil {
+		return GitCommitInspection{}, fmt.Errorf("configured commit branch changed: %w", err)
 	}
 	algorithm, err := adapter.git.objectFormat(ctx, request.worktree)
 	if err != nil {
@@ -365,12 +360,12 @@ func (adapter LocalCommitGitAdapter) CreateConfiguredCommit(
 		if err := existingMatchesCreateRequest(existing, request); err != nil {
 			return GitCommitInspection{}, fmt.Errorf("configured commit head already advanced: %w", err)
 		}
-		if err := adapter.VerifyCleanWorktree(ctx, request.worktree, request.branch, existing.commit); err != nil {
+		if err := adapter.VerifyCleanWorktree(ctx, request.worktree, existing.commit); err != nil {
 			return GitCommitInspection{}, err
 		}
 		return existing, nil
 	}
-	confirmed, err := adapter.InspectStaged(ctx, request.worktree, request.branch)
+	confirmed, err := adapter.InspectStaged(ctx, request.worktree)
 	if err != nil {
 		return GitCommitInspection{}, err
 	}
@@ -393,7 +388,7 @@ func (adapter LocalCommitGitAdapter) CreateConfiguredCommit(
 	}
 	_, exitCode, err = adapter.git.run(
 		ctx, request.worktree, "update-ref", "--no-deref", "-m", "feature commit protocol",
-		"refs/heads/"+request.branch, objectHex(commit), objectHex(request.parent),
+		"HEAD", objectHex(commit), objectHex(request.parent),
 	)
 	if err != nil || exitCode != 0 {
 		return GitCommitInspection{}, gitExitError("atomically publish configured commit", exitCode, err)
@@ -405,7 +400,7 @@ func (adapter LocalCommitGitAdapter) CreateConfiguredCommit(
 	if err := existingMatchesCreateRequest(inspection, request); err != nil {
 		return GitCommitInspection{}, err
 	}
-	if err := adapter.VerifyCleanWorktree(ctx, request.worktree, request.branch, commit); err != nil {
+	if err := adapter.VerifyCleanWorktree(ctx, request.worktree, commit); err != nil {
 		return GitCommitInspection{}, fmt.Errorf("configured commit left dirty state: %w", err)
 	}
 	return inspection, nil
@@ -458,26 +453,19 @@ func (adapter LocalCommitGitAdapter) InspectCommit(
 // replace the durable attempt frontier.
 func (adapter LocalCommitGitAdapter) InspectCleanWorktreeHead(
 	ctx context.Context,
-	worktree, branch string,
+	worktree string,
 	priorHead GitObjectID,
 ) (GitCommitInspection, error) {
 	if priorHead.IsZero() {
 		return GitCommitInspection{}, fmt.Errorf("clean worktree head inspection requires a prior head")
-	}
-	if err := validateAttemptBranchSyntax(branch); err != nil {
-		return GitCommitInspection{}, err
 	}
 	binding, err := adapter.captureTrustedWorktreeBinding(ctx, worktree)
 	if err != nil {
 		return GitCommitInspection{}, err
 	}
 	worktree = binding.root
-	actualBranch, err := adapter.symbolicBranch(ctx, worktree)
-	if err != nil {
+	if err := adapter.verifyAttemptWorktreeBranch(ctx, worktree); err != nil {
 		return GitCommitInspection{}, err
-	}
-	if actualBranch != branch {
-		return GitCommitInspection{}, fmt.Errorf("worktree branch %q does not match %q", actualBranch, branch)
 	}
 	algorithm, err := adapter.git.objectFormat(ctx, worktree)
 	if err != nil {
@@ -490,7 +478,7 @@ func (adapter LocalCommitGitAdapter) InspectCleanWorktreeHead(
 	if err != nil {
 		return GitCommitInspection{}, err
 	}
-	if err := adapter.VerifyCleanWorktree(ctx, worktree, branch, head); err != nil {
+	if err := adapter.VerifyCleanWorktree(ctx, worktree, head); err != nil {
 		return GitCommitInspection{}, err
 	}
 	if head != priorHead {
@@ -502,7 +490,7 @@ func (adapter LocalCommitGitAdapter) InspectCleanWorktreeHead(
 	if err != nil {
 		return GitCommitInspection{}, err
 	}
-	if err := adapter.VerifyCleanWorktree(ctx, worktree, branch, head); err != nil {
+	if err := adapter.VerifyCleanWorktree(ctx, worktree, head); err != nil {
 		return GitCommitInspection{}, fmt.Errorf("confirm clean worktree head: %w", err)
 	}
 	return inspection, nil
@@ -551,23 +539,16 @@ func (adapter LocalCommitGitAdapter) InspectFirstParentRange(
 
 func (adapter LocalCommitGitAdapter) VerifyCleanWorktree(
 	ctx context.Context,
-	worktree, branch string,
+	worktree string,
 	expectedHead GitObjectID,
 ) error {
-	if err := validateAttemptBranchSyntax(branch); err != nil {
-		return err
-	}
 	binding, err := adapter.captureTrustedWorktreeBinding(ctx, worktree)
 	if err != nil {
 		return err
 	}
 	worktree = binding.root
-	actualBranch, err := adapter.symbolicBranch(ctx, worktree)
-	if err != nil {
+	if err := adapter.verifyAttemptWorktreeBranch(ctx, worktree); err != nil {
 		return err
-	}
-	if actualBranch != branch {
-		return fmt.Errorf("worktree branch %q does not match %q", actualBranch, branch)
 	}
 	algorithm, err := adapter.git.objectFormat(ctx, worktree)
 	if err != nil {
@@ -607,7 +588,7 @@ func (adapter LocalCommitGitAdapter) VerifyCleanWorktree(
 	if err := adapter.verifyRawTreeMaterialization(ctx, worktree, commitTree); err != nil {
 		return fmt.Errorf("verify committed raw worktree: %w", err)
 	}
-	if err := adapter.confirmTrustedCommitState(ctx, binding, branch, head, commitTree); err != nil {
+	if err := adapter.confirmTrustedCommitState(ctx, binding, head, commitTree); err != nil {
 		return fmt.Errorf("confirm committed Git state: %w", err)
 	}
 	return nil
@@ -616,7 +597,6 @@ func (adapter LocalCommitGitAdapter) VerifyCleanWorktree(
 func (adapter LocalCommitGitAdapter) confirmTrustedCommitState(
 	ctx context.Context,
 	binding trustedWorktreeBinding,
-	branch string,
 	head, tree GitObjectID,
 ) error {
 	confirmed, err := adapter.captureTrustedWorktreeBinding(ctx, binding.root)
@@ -626,12 +606,8 @@ func (adapter LocalCommitGitAdapter) confirmTrustedCommitState(
 	if confirmed != binding {
 		return fmt.Errorf("Git worktree administration changed during verification")
 	}
-	actualBranch, err := adapter.symbolicBranch(ctx, binding.root)
-	if err != nil {
-		return err
-	}
-	if actualBranch != branch {
-		return fmt.Errorf("worktree branch changed from %q to %q during verification", branch, actualBranch)
+	if err := adapter.verifyAttemptWorktreeBranch(ctx, binding.root); err != nil {
+		return fmt.Errorf("worktree branch changed during verification: %w", err)
 	}
 	algorithm, err := adapter.git.objectFormat(ctx, binding.root)
 	if err != nil {
@@ -1342,7 +1318,7 @@ func (adapter LocalCommitGitAdapter) symbolicBranch(ctx context.Context, worktre
 		return "", gitExitError("inspect commit worktree branch", exitCode, err)
 	}
 	branch := strings.TrimSpace(string(output))
-	if err := validateAttemptBranchSyntax(branch); err != nil {
+	if err := validateGitBranchSyntax(branch); err != nil {
 		return "", err
 	}
 	return branch, nil

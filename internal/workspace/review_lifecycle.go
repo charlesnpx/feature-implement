@@ -11,25 +11,21 @@ import (
 
 type ReviewRepositoryRequest struct {
 	worktree string
-	branch   string
 	head     GitObjectID
 }
 
 func NewReviewRepositoryRequest(
-	worktree, branch string, head GitObjectID,
+	worktree string, head GitObjectID,
 ) (ReviewRepositoryRequest, error) {
 	worktree = filepath.Clean(strings.TrimSpace(worktree))
 	if !filepath.IsAbs(worktree) || head.IsZero() {
 		return ReviewRepositoryRequest{}, fmt.Errorf("review repository request requires absolute worktree and head")
 	}
-	if err := validateAttemptBranchSyntax(branch); err != nil {
-		return ReviewRepositoryRequest{}, err
-	}
-	return ReviewRepositoryRequest{worktree: worktree, branch: branch, head: head}, nil
+	return ReviewRepositoryRequest{worktree: worktree, head: head}, nil
 }
 
 func (request ReviewRepositoryRequest) Worktree() string  { return request.worktree }
-func (request ReviewRepositoryRequest) Branch() string    { return request.branch }
+func (ReviewRepositoryRequest) Branch() string            { return "" }
 func (request ReviewRepositoryRequest) Head() GitObjectID { return request.head }
 
 type ReviewRepositorySnapshot struct {
@@ -67,14 +63,13 @@ type ReviewRepositoryPort interface {
 type ReviewInvocation struct {
 	reservation ReviewInvocationReservation
 	worktree    string
-	branch      string
 }
 
 func newReviewInvocation(
-	reservation ReviewInvocationReservation, worktree, branch string,
+	reservation ReviewInvocationReservation, worktree string,
 ) (ReviewInvocation, error) {
 	request := reservation.request
-	repositoryRequest, err := NewReviewRepositoryRequest(worktree, branch, request.head)
+	repositoryRequest, err := NewReviewRepositoryRequest(worktree, request.head)
 	canonical, reservationErr := canonicalReviewInvocationReservation(reservation)
 	if err != nil || reservationErr != nil || reservation.digest != DigestBytes(canonical) ||
 		request.digest.IsZero() || !request.isolationRequired.Strict() {
@@ -82,7 +77,6 @@ func newReviewInvocation(
 	}
 	return ReviewInvocation{
 		reservation: reservation, worktree: repositoryRequest.worktree,
-		branch: repositoryRequest.branch,
 	}, nil
 }
 
@@ -94,7 +88,7 @@ func (invocation ReviewInvocation) ReviewerInstance() ID {
 	return invocation.reservation.reviewerInstance
 }
 func (invocation ReviewInvocation) Worktree() string { return invocation.worktree }
-func (invocation ReviewInvocation) Branch() string   { return invocation.branch }
+func (ReviewInvocation) Branch() string              { return "" }
 
 type ReviewRunnerOutput struct {
 	submission ReviewResultSubmission
@@ -171,7 +165,7 @@ func StartAttemptReviewRound(
 		return ReviewRoundStartResult{}, err
 	}
 	repositoryRequest, err := NewReviewRepositoryRequest(
-		attempt.worktree, attempt.branch, attempt.verifiedHead,
+		attempt.worktree, attempt.verifiedHead,
 	)
 	if err != nil {
 		return ReviewRoundStartResult{}, err
@@ -461,7 +455,7 @@ func RecordAttemptReviewResult(
 	if err := validateAttemptReviewProtocolState(definition, unit, attempt, state, true, false); err != nil {
 		return VerifiedReviewResult{}, JournalRecord{}, err
 	}
-	repositoryRequest, err := NewReviewRepositoryRequest(attempt.worktree, attempt.branch, pending.head)
+	repositoryRequest, err := NewReviewRepositoryRequest(attempt.worktree, pending.head)
 	if err != nil {
 		return VerifiedReviewResult{}, JournalRecord{}, err
 	}
@@ -643,7 +637,7 @@ func ExecuteNextReviewProfile(
 	if err := validateAttemptReviewProtocolState(definition, unit, attempt, state, true, false); err != nil {
 		return VerifiedReviewResult{}, JournalRecord{}, err
 	}
-	repositoryRequest, err := NewReviewRepositoryRequest(attempt.worktree, attempt.branch, pending.head)
+	repositoryRequest, err := NewReviewRepositoryRequest(attempt.worktree, pending.head)
 	if err != nil {
 		return VerifiedReviewResult{}, JournalRecord{}, err
 	}
@@ -655,7 +649,7 @@ func ExecuteNextReviewProfile(
 		}
 		return VerifiedReviewResult{}, JournalRecord{}, failure
 	}
-	invocation, err := newReviewInvocation(reserved.reservation, attempt.worktree, attempt.branch)
+	invocation, err := newReviewInvocation(reserved.reservation, attempt.worktree)
 	if err != nil {
 		if recordErr := recordReviewRunnerFailure(journal, definition, request, reserved.reservation.digest, err); recordErr != nil {
 			return VerifiedReviewResult{}, JournalRecord{}, recordErr
@@ -968,7 +962,7 @@ func ConfirmReviewMergeReadiness(
 	if err := validateAttemptReviewProtocolState(definition, unit, attempt, state, true, false); err != nil {
 		return ReviewReadiness{}, err
 	}
-	repositoryRequest, err := NewReviewRepositoryRequest(attempt.worktree, attempt.branch, state.head)
+	repositoryRequest, err := NewReviewRepositoryRequest(attempt.worktree, state.head)
 	if err != nil {
 		return ReviewReadiness{}, err
 	}

@@ -1119,7 +1119,9 @@ func TestReviewFixCommitInvalidatesReadinessUntilAllProfilesReconfirm(t *testing
 	if err != nil || fixResult.Attempt().VerifiedHead() != newHead {
 		t.Fatalf("durable review-fix commit = %#v error=%v", fixResult, err)
 	}
-	harness.git.setHead(t, harness.attempt.Branch(), newHead, true)
+	harness.git.setHead(
+		t, harness.attempt.Worktree(), harness.attempt.Branch(), newHead, true,
+	)
 	harness.repository.snapshot, _ = workspace.NewReviewRepositorySnapshot(newHead, newTree, true)
 	if _, err := workspace.RecordAttemptReviewFixRebase(
 		context.Background(), harness.journal, harness.definition, shell, harness.attempt.AttemptID(),
@@ -1241,7 +1243,9 @@ func TestReviewFixCommitInvalidatesReadinessUntilAllProfilesReconfirm(t *testing
 	if len(records) == 0 || records[len(records)-1].EventType() != workspace.JournalEventCommitProtocolRebased {
 		t.Fatalf("review-fix rebase journal tail = %#v", records)
 	}
-	harness.git.setHead(t, harness.attempt.Branch(), rebasedHead, true)
+	harness.git.setHead(
+		t, harness.attempt.Worktree(), harness.attempt.Branch(), rebasedHead, true,
+	)
 	harness.repository.snapshot, _ = workspace.NewReviewRepositorySnapshot(rebasedHead, rebasedTree, true)
 	if _, record, err := workspace.RecordReviewFixApplication(
 		harness.journal, harness.definition,
@@ -1372,7 +1376,9 @@ func TestReviewRebaseRejectsConcurrentFindingFixReservation(t *testing.T) {
 	); err != nil {
 		t.Fatalf("apply first review fix: %v", err)
 	}
-	harness.git.setHead(t, harness.attempt.Branch(), fixHead, true)
+	harness.git.setHead(
+		t, harness.attempt.Worktree(), harness.attempt.Branch(), fixHead, true,
+	)
 	harness.repository.snapshot, _ = workspace.NewReviewRepositorySnapshot(fixHead, fixTree, true)
 
 	confirmation, err := workspace.StartAttemptReviewRound(

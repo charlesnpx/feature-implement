@@ -67,7 +67,7 @@ func ExecuteAttemptCommitStep(
 		return result, nil
 	}
 	if state.phase == CommitProtocolReady {
-		inspection, err := shell.git.InspectStaged(ctx, result.attempt.worktree, result.attempt.branch)
+		inspection, err := shell.git.InspectStaged(ctx, result.attempt.worktree)
 		if err != nil {
 			return result, err
 		}
@@ -115,7 +115,7 @@ func ExecuteAttemptCommitStep(
 		switch effect := effects[0].(type) {
 		case CreateConfiguredCommitEffect:
 			create, err := NewCreateGitCommitRequest(
-				result.attempt.branch, result.attempt.worktree, effect.parent,
+				result.attempt.worktree, effect.parent,
 				effect.step, effect.ordinal, effect.body, effect.inspection,
 			)
 			if err != nil {
@@ -130,7 +130,7 @@ func ExecuteAttemptCommitStep(
 				return result, err
 			}
 			if err := shell.git.VerifyCleanWorktree(
-				ctx, result.attempt.worktree, result.attempt.branch, evidence.commit,
+				ctx, result.attempt.worktree, evidence.commit,
 			); err != nil {
 				return result, err
 			}
@@ -155,7 +155,7 @@ func ExecuteAttemptCommitStep(
 				return result, fmt.Errorf("configured check %s requires an isolated runner", effect.check.id)
 			}
 			if err := shell.git.VerifyCleanWorktree(
-				ctx, result.attempt.worktree, result.attempt.branch, result.attempt.verifiedHead,
+				ctx, result.attempt.worktree, result.attempt.verifiedHead,
 			); err != nil {
 				return result, err
 			}
@@ -182,7 +182,7 @@ func ExecuteAttemptCommitStep(
 				)
 			}
 			if err := shell.git.VerifyCleanWorktree(
-				ctx, result.attempt.worktree, result.attempt.branch, result.attempt.verifiedHead,
+				ctx, result.attempt.worktree, result.attempt.verifiedHead,
 			); err != nil {
 				return result, fmt.Errorf("configured check %s changed Git state: %w", effect.check.id, err)
 			}
@@ -324,7 +324,7 @@ func recordAttemptProtocolChainRebase(
 		}
 		return attempt, nil
 	}
-	if err := shell.git.VerifyCleanWorktree(ctx, attempt.worktree, attempt.branch, newHead); err != nil {
+	if err := shell.git.VerifyCleanWorktree(ctx, attempt.worktree, newHead); err != nil {
 		return attempt, err
 	}
 	implementationCount, reviewCount := 0, 0
@@ -434,7 +434,7 @@ func verifyRecordedAttemptProtocolRebase(
 	newBase, newHead GitObjectID,
 ) error {
 	if err := shell.git.VerifyCleanWorktree(
-		ctx, attempt.worktree, attempt.branch, newHead,
+		ctx, attempt.worktree, newHead,
 	); err != nil {
 		return fmt.Errorf("verify recorded commit rebase worktree: %w", err)
 	}
@@ -543,7 +543,7 @@ func ensureAttemptCommitProtocolStarted(
 			configured: true, attempt: attempt, protocol: cloneCommitProtocolState(*attempt.commitProtocol),
 		}, nil
 	}
-	inspection, err := shell.git.InspectStaged(ctx, attempt.worktree, attempt.branch)
+	inspection, err := shell.git.InspectStaged(ctx, attempt.worktree)
 	if err != nil {
 		return AttemptCommitProtocolResult{}, fmt.Errorf("inspect attempt before commit protocol start: %w", err)
 	}

@@ -56,18 +56,18 @@ func TestHelpCommandsExitSuccessfully(t *testing.T) {
 	}
 }
 
-func TestWorkspaceAttemptBoundaryHelpStatesRequiredKinds(t *testing.T) {
-	stdout, stderr, err := runFeature(t, "workspace", "attempt", "boundary", "--help")
+func TestWorkspaceAttemptPauseHelpStatesRequiredKinds(t *testing.T) {
+	stdout, stderr, err := runFeature(t, "workspace", "attempt", "pause", "--help")
 	if err != nil {
-		t.Fatalf("workspace attempt boundary help failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+		t.Fatalf("workspace attempt pause help failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
 	}
 	for _, text := range []string{
-		"attempt boundary request requires kind",
+		"attempt pause request requires kind",
 		"checkpoint",
 		"escalation",
 	} {
 		if !strings.Contains(stdout, text) {
-			t.Fatalf("workspace attempt boundary help missing %q:\n%s", text, stdout)
+			t.Fatalf("workspace attempt pause help missing %q:\n%s", text, stdout)
 		}
 	}
 }
@@ -235,7 +235,7 @@ func TestWorkspaceSchemaExampleAndJournalBackedStatus(t *testing.T) {
 		t.Fatalf("request schema is invalid: err=%v output=%s", err, stdout)
 	}
 	for _, name := range []string{
-		"init", "attempt.reserve", "attempt.adopt-head",
+		"init", "attempt.start", "attempt.adopt-head",
 		"review.record", "integrate.merge-unit", "complete.verify",
 	} {
 		if _, exists := requestSchema.Requests[name]; !exists {

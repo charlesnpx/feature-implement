@@ -138,7 +138,7 @@ func ReviewFixBudgetForAttempt(
 func (shell CommitProtocolShell) ExecuteNextCommitStep(
 	ctx context.Context,
 	state CommitProtocolState,
-	branch, worktree, body string,
+	worktree, body string,
 ) (CommitProtocolState, error) {
 	if shell.git == nil {
 		return CommitProtocolState{}, fmt.Errorf("commit protocol shell has no Git adapter")
@@ -146,14 +146,11 @@ func (shell CommitProtocolShell) ExecuteNextCommitStep(
 	if state.phase != CommitProtocolReady {
 		return CommitProtocolState{}, fmt.Errorf("next commit step requires ready protocol state")
 	}
-	if err := validateAttemptBranchSyntax(branch); err != nil {
-		return CommitProtocolState{}, err
-	}
 	worktree = filepath.Clean(strings.TrimSpace(worktree))
 	if !filepath.IsAbs(worktree) {
 		return CommitProtocolState{}, fmt.Errorf("commit protocol worktree must be absolute")
 	}
-	inspection, err := shell.git.InspectStaged(ctx, worktree, branch)
+	inspection, err := shell.git.InspectStaged(ctx, worktree)
 	if err != nil {
 		return CommitProtocolState{}, err
 	}
@@ -165,13 +162,13 @@ func (shell CommitProtocolShell) ExecuteNextCommitStep(
 	if err != nil {
 		return CommitProtocolState{}, err
 	}
-	return shell.drive(ctx, reduction.State(), branch, worktree)
+	return shell.drive(ctx, reduction.State(), worktree)
 }
 
 func (shell CommitProtocolShell) Resume(
 	ctx context.Context,
 	state CommitProtocolState,
-	branch, worktree string,
+	worktree string,
 ) (CommitProtocolState, error) {
 	if shell.git == nil {
 		return CommitProtocolState{}, fmt.Errorf("commit protocol shell has no Git adapter")
@@ -179,13 +176,13 @@ func (shell CommitProtocolShell) Resume(
 	if state.phase != CommitProtocolAwaitingCommit && state.phase != CommitProtocolAwaitingChecks {
 		return cloneCommitProtocolState(state), nil
 	}
-	return shell.drive(ctx, state, branch, filepath.Clean(strings.TrimSpace(worktree)))
+	return shell.drive(ctx, state, filepath.Clean(strings.TrimSpace(worktree)))
 }
 
 func (shell CommitProtocolShell) RemapAfterRebase(
 	ctx context.Context,
 	state CommitProtocolState,
-	branch, worktree string,
+	worktree string,
 	newBase, newHead GitObjectID,
 ) (CommitProtocolState, error) {
 	if shell.git == nil {
@@ -194,7 +191,7 @@ func (shell CommitProtocolShell) RemapAfterRebase(
 	if state.phase != CommitProtocolReady && state.phase != CommitProtocolComplete {
 		return CommitProtocolState{}, fmt.Errorf("rebase remapping requires quiescent commit protocol state")
 	}
-	if err := shell.git.VerifyCleanWorktree(ctx, worktree, branch, newHead); err != nil {
+	if err := shell.git.VerifyCleanWorktree(ctx, worktree, newHead); err != nil {
 		return CommitProtocolState{}, fmt.Errorf("verify rebased worktree: %w", err)
 	}
 	var inspections []GitCommitInspection
@@ -229,7 +226,7 @@ func (shell CommitProtocolShell) RemapAfterRebase(
 		return CommitProtocolState{}, err
 	}
 	if reduction.State().phase == CommitProtocolAwaitingChecks {
-		return shell.drive(ctx, reduction.State(), branch, worktree)
+		return shell.drive(ctx, reduction.State(), worktree)
 	}
 	return reduction.State(), nil
 }
@@ -281,7 +278,7 @@ func (shell CommitProtocolShell) VerifySequence(
 func (shell CommitProtocolShell) drive(
 	ctx context.Context,
 	state CommitProtocolState,
-	branch, worktree string,
+	worktree string,
 ) (CommitProtocolState, error) {
 	fail := func(err error) (CommitProtocolState, error) {
 		return cloneCommitProtocolState(state), err
@@ -297,7 +294,7 @@ func (shell CommitProtocolShell) drive(
 		switch effect := effects[0].(type) {
 		case CreateConfiguredCommitEffect:
 			request, err := NewCreateGitCommitRequest(
-				branch, worktree, effect.parent, effect.step, effect.ordinal,
+				worktree, effect.parent, effect.step, effect.ordinal,
 				effect.body, effect.inspection,
 			)
 			if err != nil {
@@ -311,7 +308,7 @@ func (shell CommitProtocolShell) drive(
 			if err != nil {
 				return fail(err)
 			}
-			if err := shell.git.VerifyCleanWorktree(ctx, worktree, branch, evidence.commit); err != nil {
+			if err := shell.git.VerifyCleanWorktree(ctx, worktree, evidence.commit); err != nil {
 				return fail(err)
 			}
 			event, err := NewRecordCommitStep(evidence)
@@ -327,7 +324,7 @@ func (shell CommitProtocolShell) drive(
 			if shell.checks == nil {
 				return fail(fmt.Errorf("configured commit check %s requires an isolated runner", effect.check.id))
 			}
-			if err := shell.git.VerifyCleanWorktree(ctx, worktree, branch, state.Head()); err != nil {
+			if err := shell.git.VerifyCleanWorktree(ctx, worktree, state.Head()); err != nil {
 				return fail(fmt.Errorf("verify worktree before check %s: %w", effect.check.id, err))
 			}
 			invocation, err := NewCommitCheckInvocation(effect, worktree)
@@ -352,7 +349,7 @@ func (shell CommitProtocolShell) drive(
 					effect.check.expectation.kind, effect.check.expectation.failureIDs,
 				))
 			}
-			if err := shell.git.VerifyCleanWorktree(ctx, worktree, branch, state.Head()); err != nil {
+			if err := shell.git.VerifyCleanWorktree(ctx, worktree, state.Head()); err != nil {
 				return fail(fmt.Errorf("configured check %s changed Git state: %w", effect.check.id, err))
 			}
 			evidence, err := NewCommitCheckEvidence(

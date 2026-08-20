@@ -37,16 +37,16 @@ If the journal, active generation, target binding, committed plan `HEAD`, or Git
 topology is missing, contradictory, or ambiguous, stop for operator direction.
 Never edit `generated/`, `<runtime-dir>/state/`, or journal records by hand.
 
-## Select and materialize a merge unit
+## Start a merge unit
 
 1. Run `feature workspace recover`, then `status`.
 2. Select only a merge unit whose status is `ready`. Respect dependency
    order and the attempt budget.
-3. Submit `attempt reserve` with the plan ID, merge-unit ID, next attempt
+3. Submit `attempt start` with the plan ID, merge-unit ID, next attempt
    number, and a stable merge-unit goal. The CLI derives the exact base,
-   attempt identity, branch, and worktree from locked runtime state.
-4. Submit `attempt materialize` for the returned attempt ID.
-5. Verify the returned worktree and branch. Work only there.
+   attempt identity, and detached worktree from locked runtime state.
+4. Verify the returned detached worktree. Work only there; its history is
+   scratch until an exact clean head is selected for integration.
 
 Every successful mutation returns a fresh journal-derived workspace view. Use it as the
 source of truth.
@@ -91,28 +91,19 @@ Run a broad read-only review loop for every merge unit.
 Do not invent findings, reviewer identity claims, isolation state, or
 readiness.
 
-## Integrate, resolve boundaries, and complete
+## Integrate, pause when needed, and complete
 
-1. Before integration, submit `attempt boundary` with exact local evidence only
+1. Before integration, submit `attempt pause` with exact local evidence only
    when the merge unit configures a checkpoint other than `none`, or when the
    agent genuinely needs an allowed escalation. The request requires `kind`:
    use `checkpoint` for the configured gate and `escalation` for a genuine
    agent-raised stop. Record it while the attempt is active, before
    `integrate merge-unit`.
-2. Treat every returned directive as authoritative workflow state:
-
-   - `complete_goal_and_wait`: complete the exact goal and submit
-     `attempt acknowledge` with the returned directive and idempotency values.
-   - `owner_gate`: obtain the listed owner choice and submit
-     `attempt owner-response` with the exact boundary, directive, goal, and
-     expected head.
-   - `create_next_goal`: create exactly the returned goal, then submit its
-     matching acknowledgement.
-
-3. When a boundary was recorded, call `attempt resume` only after every required
-   acknowledgement and owner response is recorded. Do not resume a completed
-   merge unit.
-4. After any required boundary is resolved and the attempt is active again, or
+2. When a pause was recorded, call `attempt resume` once the same clean head is
+   ready to continue. Do not resume a completed merge unit.
+3. Use `attempt abandon` only to terminally exit a non-integrated attempt. It
+   leaves the detached scratch directory intact for inspection.
+4. After any required pause is resolved and the attempt is active again, or
    immediately when no boundary is needed, submit `integrate merge-unit` only
    for the exact accepted head and tree. Configured review requires matching
    `review ready`; review-optional work requires matching `attempt adopt-head`.
@@ -120,8 +111,8 @@ readiness.
    the expected feature head, second parent is the accepted attempt head, and
    tree is the accepted attempt tree. It compare-and-swap updates only the
    workspace-owned feature ref. The completed attempt cannot reach another
-   `attempt boundary`.
-6. After all merge units are integrated, all boundaries are resolved, and no
+   `attempt pause`.
+6. After all merge units are integrated, all pauses are resolved, and no
    attempt or local effect remains active, run `complete verify`.
 
 ## Finish

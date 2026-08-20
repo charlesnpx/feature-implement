@@ -283,11 +283,6 @@ func (adapter LocalTargetGitAdapter) inspect(
 	if err != nil {
 		return LocalTargetInspection{}, err
 	}
-	if err := adapter.validateFeatureNamespace(
-		ctx, target.root, target.featureBranch, true,
-	); err != nil {
-		return LocalTargetInspection{}, err
-	}
 	registeredWorktrees, err := adapter.rejectCheckedOutFeatureBranch(
 		ctx, target.root, target.FeatureRef(),
 	)
@@ -1192,30 +1187,6 @@ func (adapter LocalTargetGitAdapter) validateFeatureRefSyntax(
 		return fmt.Errorf("Git rejected feature branch %q", branch)
 	}
 	return nil
-}
-
-func (adapter LocalTargetGitAdapter) validateFeatureNamespace(
-	ctx context.Context,
-	root, branch string,
-	allowExact bool,
-) error {
-	output, exitCode, err := adapter.git.run(
-		ctx, root, "for-each-ref", "--format=%(refname)", "refs/heads",
-	)
-	if err != nil {
-		return err
-	}
-	if exitCode != 0 {
-		return fmt.Errorf(
-			"inspect local feature-ref namespace: Git exited with status %d",
-			exitCode,
-		)
-	}
-	refs, err := parseLocalHeadRefs(output)
-	if err != nil {
-		return err
-	}
-	return CheckAttemptRefConflicts(branch, refs, allowExact)
 }
 
 func (adapter LocalTargetGitAdapter) rejectCheckedOutFeatureBranch(

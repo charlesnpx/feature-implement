@@ -112,6 +112,28 @@ func RecoverWorkspaceLocalEffects(
 				materializing = append(
 					materializing, attempt.attemptID,
 				)
+				continue
+			}
+			if attempt.phase != AttemptActive {
+				continue
+			}
+			inspection, inspectErr := attemptGit.InspectAttemptWorktree(
+				ctx, definition.workspace.target.root, attempt.worktree,
+			)
+			if inspectErr != nil {
+				return WorkspaceLocalRecoveryResult{}, fmt.Errorf(
+					"inspect started scratch attempt %s: %w", attempt.attemptID, inspectErr,
+				)
+			}
+			if !inspection.WorktreeExists() {
+				materializing = append(materializing, attempt.attemptID)
+				continue
+			}
+			if inspection.WorktreeHead().IsZero() {
+				return WorkspaceLocalRecoveryResult{}, fmt.Errorf(
+					"started scratch attempt %s has an incomplete worktree; rerun attempt start to inspect or repair it",
+					attempt.attemptID,
+				)
 			}
 		}
 		for _, attemptID := range materializing {

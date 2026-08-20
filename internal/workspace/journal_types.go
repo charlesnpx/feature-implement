@@ -7,7 +7,7 @@ import (
 
 const (
 	JournalSchemaVersion       = 2
-	journalRecordSchemaVersion = 3
+	journalRecordSchemaVersion = 4
 )
 
 type JournalEventType string
@@ -20,11 +20,10 @@ const (
 	JournalEventAttemptReserved                JournalEventType = "attempt.reserved.v2"
 	JournalEventAttemptMaterializationIntended JournalEventType = "attempt.materialization_intended.v2"
 	JournalEventAttemptStarted                 JournalEventType = "attempt.started.v2"
-	JournalEventAttemptBoundary                JournalEventType = "attempt.boundary_reached.v2"
-	JournalEventNextGoalIntended               JournalEventType = "attempt.next_goal_intended.v2"
-	JournalEventOrchestrationAck               JournalEventType = "attempt.orchestration_acknowledged.v2"
-	JournalEventOwnerResponse                  JournalEventType = "attempt.owner_response_recorded.v2"
-	JournalEventAttemptResumed                 JournalEventType = "attempt.resumed.v2"
+	JournalEventAttemptStart                   JournalEventType = "attempt.start.v3"
+	JournalEventAttemptBoundary                JournalEventType = "attempt.paused.v3"
+	JournalEventAttemptResumed                 JournalEventType = "attempt.resumed.v3"
+	JournalEventAttemptAbandoned               JournalEventType = "attempt.abandoned.v3"
 	JournalEventCommitProtocolStarted          JournalEventType = "commit.protocol_started.v2"
 	JournalEventCommitStepIntended             JournalEventType = "commit.step_intended.v2"
 	JournalEventCommitStepRecorded             JournalEventType = "commit.step_recorded.v2"
@@ -203,12 +202,6 @@ func newJournalAppend(
 		switch event.(type) {
 		case JournalTailRecoveredEvent:
 			return JournalAppend{}, fmt.Errorf("journal recovery events must use the explicit recovery workflow")
-		case AttemptOrchestrationAcknowledgedJournalEvent:
-			return JournalAppend{}, fmt.Errorf("orchestration acknowledgements must use the idempotent acknowledgement workflow")
-		case AttemptNextGoalIntendedJournalEvent:
-			return JournalAppend{}, fmt.Errorf("next-goal intents must use the durable intent workflow")
-		case AttemptOwnerResponseJournalEvent:
-			return JournalAppend{}, fmt.Errorf("owner responses must use the exact-boundary response workflow")
 		case AttemptResumedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("attempt resume must use the verified resume workflow")
 		case FeatureRefCreationIntendedJournalEvent, FeatureRefCreatedJournalEvent:
@@ -221,8 +214,12 @@ func newJournalAppend(
 			return JournalAppend{}, fmt.Errorf("materialization intent must use the reconciled materialization workflow")
 		case AttemptStartedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("attempt start must use the Git-verified materialization workflow")
+		case AttemptStartJournalEvent:
+			return JournalAppend{}, fmt.Errorf("attempt start must use the detached-worktree workflow")
 		case AttemptBoundaryReachedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("attempt boundary must use the atomic boundary workflow")
+		case AttemptAbandonedJournalEvent:
+			return JournalAppend{}, fmt.Errorf("attempt abandonment must use the attempt lifecycle workflow")
 		case CommitProtocolStartedJournalEvent, CommitStepIntendedJournalEvent,
 			CommitStepRecordedJournalEvent, CommitCheckRecordedJournalEvent,
 			CommitProtocolRebasedJournalEvent, ReviewFixReservedJournalEvent,

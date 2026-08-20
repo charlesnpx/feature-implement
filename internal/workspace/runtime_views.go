@@ -30,7 +30,6 @@ type WorkspaceUnitState struct {
 	Blockers          []string                     `json:"blockers"`
 	AttemptID         string                       `json:"attempt_id,omitempty"`
 	AttemptNumber     uint64                       `json:"attempt_number,omitempty"`
-	Branch            string                       `json:"branch,omitempty"`
 	Worktree          string                       `json:"worktree,omitempty"`
 	Head              string                       `json:"head,omitempty"`
 	BoundaryPending   bool                         `json:"boundary_pending"`
@@ -39,18 +38,15 @@ type WorkspaceUnitState struct {
 }
 
 type WorkspaceBoundaryDirective struct {
-	Kind            string   `json:"kind"`
-	BoundaryKind    string   `json:"boundary_kind"`
-	WorkspaceID     string   `json:"workspace_id"`
-	Generation      string   `json:"generation"`
-	AttemptID       string   `json:"attempt_id"`
-	BoundaryID      string   `json:"boundary_id"`
-	GoalID          string   `json:"goal_id"`
-	GoalScope       string   `json:"goal_scope"`
-	Head            string   `json:"head"`
-	DirectiveDigest string   `json:"directive_digest"`
-	IdempotencyKey  string   `json:"idempotency_key,omitempty"`
-	Choices         []string `json:"choices,omitempty"`
+	Kind         string `json:"kind"`
+	BoundaryKind string `json:"boundary_kind"`
+	WorkspaceID  string `json:"workspace_id"`
+	Generation   string `json:"generation"`
+	AttemptID    string `json:"attempt_id"`
+	BoundaryID   string `json:"boundary_id"`
+	GoalID       string `json:"goal_id"`
+	GoalScope    string `json:"goal_scope"`
+	Head         string `json:"head"`
 }
 
 type WorkspaceSchedule struct {
@@ -127,7 +123,6 @@ type WorkspaceAttempt struct {
 	Generation        string                       `json:"generation"`
 	AttemptNumber     uint64                       `json:"attempt_number"`
 	Base              string                       `json:"base"`
-	Branch            string                       `json:"branch"`
 	Worktree          string                       `json:"worktree"`
 	Phase             AttemptRuntimePhase          `json:"phase"`
 	Head              string                       `json:"head,omitempty"`
@@ -266,10 +261,10 @@ func RebuildWorkspaceView(snapshot JournalSnapshot, definition EffectiveWorkspac
 			unit.Status = schedulerStatusForAttempt(attempt)
 			unit.AttemptID = attempt.attemptID.String()
 			unit.AttemptNumber = attempt.attemptNumber
-			unit.Branch = attempt.branch
 			unit.Worktree = attempt.worktree
 			unit.Head = attempt.verifiedHead.String()
-			unit.BoundaryPending, unit.BoundaryReason, unit.PendingDirectives = attemptBoundaryStatus(core, attempt)
+			unit.BoundaryPending, unit.BoundaryReason, unit.PendingDirectives =
+				attemptBoundaryStatus(core, attempt)
 			if attempt.phase == AttemptActive {
 				if state, exists := reviews.State(attempt.attemptID); exists {
 					if _, exhausted := state.Exhaustion(); exhausted {
@@ -553,7 +548,6 @@ func workspaceAttemptViews(
 			Generation:        attempt.generation.String(),
 			AttemptNumber:     attempt.attemptNumber,
 			Base:              attempt.base.String(),
-			Branch:            attempt.branch,
 			Worktree:          attempt.worktree,
 			Phase:             attempt.phase,
 			Head:              attempt.verifiedHead.String(),
@@ -561,7 +555,7 @@ func workspaceAttemptViews(
 			GoalScope:         attempt.goal.scope,
 			BoundaryPending:   unit.BoundaryPending,
 			BoundaryReason:    unit.BoundaryReason,
-			PendingDirectives: append([]WorkspaceBoundaryDirective(nil), unit.PendingDirectives...),
+			PendingDirectives: append([]WorkspaceBoundaryDirective{}, unit.PendingDirectives...),
 		})
 	}
 	sort.Slice(result, func(i, j int) bool {
@@ -621,36 +615,17 @@ func attemptBoundaryStatus(
 	if !exists {
 		return false, "", directives
 	}
-	view := func(kind string, goal GoalBinding, idempotency Digest, choices []string) WorkspaceBoundaryDirective {
-		return WorkspaceBoundaryDirective{
-			Kind: kind, BoundaryKind: string(boundary.kind), WorkspaceID: core.workspaceID.String(), Generation: attempt.generation.String(),
-			AttemptID: attempt.attemptID.String(), BoundaryID: boundary.boundaryID.String(),
-			GoalID: goal.id.String(), GoalScope: string(goal.scope), Head: boundary.head.String(),
-			DirectiveDigest: boundary.directiveDigest.String(), IdempotencyKey: idempotency.String(),
-			Choices: append([]string{}, choices...),
-		}
-	}
-	if boundary.checkpoint == AttemptCheckpointCompleteGoalAndWait && !boundary.goalCompletedOK {
-		return true, "complete_goal_and_wait", []WorkspaceBoundaryDirective{
-			view("complete_goal_and_wait", boundary.goal, boundary.idempotencyKey, nil),
-		}
-	}
-	if !boundary.ownerResponseOK {
-		return true, "owner_gate", []WorkspaceBoundaryDirective{
-			view("owner_gate", boundary.goal, Digest{}, []string{string(OwnerBoundaryContinue)}),
-		}
-	}
-	if boundary.checkpoint == AttemptCheckpointCompleteGoalAndWait {
-		if !boundary.nextGoalIntentOK {
-			return true, "next_goal_intent_not_recorded", directives
-		}
-		if !boundary.nextGoalOK {
-			return true, "create_next_goal", []WorkspaceBoundaryDirective{
-				view("create_next_goal", boundary.nextGoalIntent.goal, boundary.nextGoalIntent.idempotencyKey, nil),
-			}
-		}
-	}
-	return false, "", directives
+	return true, string(boundary.kind), []WorkspaceBoundaryDirective{{
+		Kind:         "boundary_pending",
+		BoundaryKind: string(boundary.kind),
+		WorkspaceID:  core.workspaceID.String(),
+		Generation:   attempt.generation.String(),
+		AttemptID:    attempt.attemptID.String(),
+		BoundaryID:   boundary.boundaryID.String(),
+		GoalID:       boundary.goal.id.String(),
+		GoalScope:    string(boundary.goal.scope),
+		Head:         boundary.head.String(),
+	}}
 }
 
 func verifyWorkspaceViewProjectionConformance(

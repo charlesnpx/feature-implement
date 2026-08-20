@@ -47,6 +47,12 @@ func newAttemptBoundaryPolicy(wire *attemptBoundaryPolicyWire, location string) 
 		)
 	}
 	checkpoint := AttemptCheckpointMode(wire.Checkpoint)
+	if checkpoint == AttemptCheckpointCompleteGoalAndWait {
+		return AttemptBoundaryPolicy{}, fmt.Errorf(
+			"%s boundary checkpoint %q is no longer supported; use %q instead",
+			location, wire.Checkpoint, AttemptCheckpointPauseOnly,
+		)
+	}
 	if !checkpoint.valid() {
 		return AttemptBoundaryPolicy{}, fmt.Errorf(
 			"%s boundary checkpoint %q is unsupported", location, wire.Checkpoint,

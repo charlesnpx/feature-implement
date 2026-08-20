@@ -13,20 +13,20 @@ func TestTransitionCodecsRejectReceiptFields(t *testing.T) {
 		decode func() error
 	}{
 		{
-			name: "acknowledgement",
+			name: "boundary",
 			decode: func() error {
 				_, _, err := decodeAttemptJournalEvent(
-					JournalEventOrchestrationAck,
+					JournalEventAttemptBoundary,
 					payload,
 				)
 				return err
 			},
 		},
 		{
-			name: "owner response",
+			name: "resume",
 			decode: func() error {
 				_, _, err := decodeAttemptJournalEvent(
-					JournalEventOwnerResponse,
+					JournalEventAttemptResumed,
 					payload,
 				)
 				return err

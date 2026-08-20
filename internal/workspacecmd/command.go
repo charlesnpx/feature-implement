@@ -56,22 +56,7 @@ type MutationResult struct {
 	SchemaVersion int                     `json:"schema_version"`
 	Status        string                  `json:"status"`
 	Action        string                  `json:"action"`
-	Directives    []BoundaryDirectiveView `json:"directives,omitempty"`
 	Report        workspace.WorkspaceView `json:"report"`
-}
-
-type BoundaryDirectiveView struct {
-	Kind            string   `json:"kind"`
-	WorkspaceID     string   `json:"workspace_id"`
-	Generation      string   `json:"generation"`
-	AttemptID       string   `json:"attempt_id"`
-	BoundaryID      string   `json:"boundary_id"`
-	GoalID          string   `json:"goal_id"`
-	GoalScope       string   `json:"goal_scope"`
-	Head            string   `json:"head"`
-	DirectiveDigest string   `json:"directive_digest"`
-	IdempotencyKey  string   `json:"idempotency_key,omitempty"`
-	Choices         []string `json:"choices,omitempty"`
 }
 
 func Execute(ctx context.Context, options Options) (any, error) {
@@ -155,8 +140,7 @@ func validateWorkspaceSubaction(action, subaction string) error {
 	switch action {
 	case "attempt":
 		supported = stringSet(
-			"reserve", "materialize", "adopt-head", "boundary",
-			"next-goal", "acknowledge", "owner-response", "resume",
+			"start", "adopt-head", "pause", "resume", "abandon",
 		)
 	case "commit":
 		supported = stringSet("next")
@@ -264,33 +248,17 @@ func RequestSchemas() map[string]any {
 			"worktree_root": stringProperty(),
 		})),
 		"recover": request([]string{"occurred_at"}, occurred(map[string]any{})),
-		"attempt.reserve": request([]string{"occurred_at", "plan_id", "merge_unit_id", "attempt_number", "goal"}, occurred(map[string]any{
+		"attempt.start": request([]string{"occurred_at", "plan_id", "merge_unit_id", "attempt_number", "goal"}, occurred(map[string]any{
 			"plan_id": stringProperty(), "merge_unit_id": stringProperty(), "attempt_number": integerProperty(1),
 			"goal": goal,
 		})),
-		"attempt.materialize": request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
-		"attempt.adopt-head":  request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
-		"attempt.boundary": request([]string{"occurred_at", "attempt_id", "kind", "evidence"}, occurred(map[string]any{
+		"attempt.adopt-head": request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
+		"attempt.pause": request([]string{"occurred_at", "attempt_id", "kind", "evidence"}, occurred(map[string]any{
 			"attempt_id": stringProperty(), "kind": enumProperty("checkpoint", "escalation"),
 			"evidence": map[string]any{"type": "array", "items": evidence},
 		})),
-		"attempt.next-goal": request([]string{"occurred_at", "attempt_id", "goal"}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "goal": goal,
-		})),
-		"attempt.acknowledge": request([]string{
-			"occurred_at", "attempt_id", "kind", "directive_digest", "goal", "idempotency_key",
-		}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "kind": enumProperty("goal_completed", "next_goal_created"),
-			"directive_digest": stringProperty(), "goal": goal, "idempotency_key": stringProperty(),
-		})),
-		"attempt.owner-response": request([]string{
-			"occurred_at", "attempt_id", "boundary_id", "directive_digest", "goal", "expected_head", "response",
-		}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "boundary_id": stringProperty(),
-			"directive_digest": stringProperty(), "goal": goal,
-			"expected_head": stringProperty(), "response": enumProperty("continue"),
-		})),
-		"attempt.resume": request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
+		"attempt.resume":  request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
+		"attempt.abandon": request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
 		"commit.next": request([]string{"occurred_at", "attempt_id"}, occurred(map[string]any{
 			"attempt_id": stringProperty(), "body": optionalString(),
 		})),
@@ -573,14 +541,13 @@ func recoverWorkspace(
 	); err != nil {
 		return MutationResult{}, err
 	}
-	return mutationResult("recover", journal, bundle.Definition(), nil)
+	return mutationResult("recover", journal, bundle.Definition())
 }
 
 func mutationResult(
 	action string,
 	journal *workspace.WorkspaceJournal,
 	definition workspace.EffectiveWorkspaceDefinition,
-	directives []BoundaryDirectiveView,
 ) (MutationResult, error) {
 	if _, err := workspace.RebuildWorkspaceRuntimeProjectionFile(journal); err != nil {
 		return MutationResult{}, err
@@ -601,7 +568,7 @@ func mutationResult(
 	}
 	return MutationResult{
 		SchemaVersion: requestSchemaVersion, Status: "recorded", Action: action,
-		Directives: append([]BoundaryDirectiveView(nil), directives...), Report: report,
+		Report: report,
 	}, nil
 }
 

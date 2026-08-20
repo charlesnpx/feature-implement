@@ -111,7 +111,7 @@ merge_units:
     merge_unit_id: unit-two
     profile: standard
     boundary:
-      checkpoint: complete_goal_and_wait
+      checkpoint: pause_only
       escalation: allowed
     policy:
       require_passing_checks: true

@@ -789,27 +789,6 @@ func (session *localTargetGitSession) inspectOwnedState(
 			)
 		}
 	}
-	refs, exitCode, err := session.run(
-		ctx, nil, "for-each-ref", "--format=%(refname)", "refs/heads",
-	)
-	if err != nil {
-		return LocalTargetInspection{}, err
-	}
-	if exitCode != 0 {
-		return LocalTargetInspection{}, fmt.Errorf(
-			"inspect local feature-ref namespace: Git exited with status %d",
-			exitCode,
-		)
-	}
-	localRefs, err := parseLocalHeadRefs(refs)
-	if err != nil {
-		return LocalTargetInspection{}, err
-	}
-	if err := CheckAttemptRefConflicts(
-		session.binding.featureBranch, localRefs, true,
-	); err != nil {
-		return LocalTargetInspection{}, err
-	}
 	worktrees, err := session.inspectRegisteredWorktrees(ctx)
 	if err != nil {
 		return LocalTargetInspection{}, err

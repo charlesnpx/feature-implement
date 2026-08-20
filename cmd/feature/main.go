@@ -419,13 +419,13 @@ func usageWorkspace(w io.Writer) {
   feature workspace validate --bundle <dir> [--write-locks] [--json]
   feature workspace init|recover --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
   feature workspace status --bundle <dir> --workspace <dir> [--json]
-  feature workspace attempt reserve|materialize|adopt-head|boundary|next-goal|acknowledge|owner-response|resume --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
+  feature workspace attempt start|adopt-head|pause|resume|abandon --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
   feature workspace commit next --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
   feature workspace review start|reserve|record|reserve-fix|apply-fix|record-fix|ready --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
   feature workspace integrate merge-unit --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
   feature workspace complete verify --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
 
-The attempt boundary request requires kind: checkpoint or escalation.
+The attempt pause request requires kind: checkpoint or escalation.
 
 All mutations accept one strict schema-version-2 JSON request and record typed local journal events.`)
 }
