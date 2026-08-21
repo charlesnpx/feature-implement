@@ -388,7 +388,7 @@ func (session *localTargetGitSession) ensureFeatureRefStorageAncestors() error {
 				continue
 			}
 			seen[ancestor] = struct{}{}
-			if _, err := session.common.root.adapter.makeDirectory(
+			if _, _, err := session.common.root.adapter.makeDirectory(
 				ancestor, 0o700,
 			); err != nil {
 				return fmt.Errorf(

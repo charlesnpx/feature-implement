@@ -624,14 +624,6 @@ func parseDigest(value, label string) (workspace.Digest, error) {
 	return digest, nil
 }
 
-func parseGitObject(value, label string) (workspace.GitObjectID, error) {
-	object, err := workspace.ParseGitObjectID(value)
-	if err != nil {
-		return workspace.GitObjectID{}, fmt.Errorf("%s: %w", label, err)
-	}
-	return object, nil
-}
-
 func openWritableJournal(options Options) (*workspace.WorkspaceJournal, string, error) {
 	directory, err := absoluteDirectory(options.WorkspaceDir, "workspace")
 	if err != nil {

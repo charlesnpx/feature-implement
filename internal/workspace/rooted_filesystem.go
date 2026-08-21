@@ -568,89 +568,100 @@ func (adapter *RootedFilesystemAdapter) synchronizeOpenedFile(relative string, o
 	return adapter.syncDirectory(path.Dir(relative))
 }
 
-// makeDirectory reports a successful Mkdir even when its subsequent
-// synchronization fails, so callers can safely account for the created entry.
-func (adapter *RootedFilesystemAdapter) makeDirectory(relative string, permission os.FileMode) (bool, error) {
+// makeDirectory returns the entry observed immediately after a successful
+// Mkdir, even when its subsequent synchronization fails.
+func (adapter *RootedFilesystemAdapter) makeDirectory(
+	relative string,
+	permission os.FileMode,
+) (bool, os.FileInfo, error) {
 	rooted, err := NewRootedPath(adapter.rootPath, relative)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	parent := path.Dir(rooted.Relative())
 	base := path.Base(rooted.Relative())
 	directory, err := adapter.openDirectoryExact(parent)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	defer directory.Close()
 	info, exists, err := inspectRootEntryExact(directory, base)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if exists {
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return false, fmt.Errorf("rooted path %s already exists and is not a directory", relative)
+			return false, nil, fmt.Errorf("rooted path %s already exists and is not a directory", relative)
 		}
-		return false, nil
+		return false, nil, nil
 	}
 	if err := directory.Mkdir(base, permission.Perm()); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			info, exists, inspectErr := inspectRootEntryExact(directory, base)
 			if inspectErr != nil {
-				return false, inspectErr
+				return false, nil, inspectErr
 			}
 			if exists && info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
-				return false, nil
+				return false, nil, nil
 			}
 		}
-		return false, fmt.Errorf("create rooted directory %s: %w", relative, err)
+		return false, nil, fmt.Errorf("create rooted directory %s: %w", relative, err)
+	}
+	createdInfo, exists, err := inspectRootEntryExact(directory, base)
+	if err != nil {
+		return true, nil, fmt.Errorf("inspect created rooted directory %s: %w", relative, err)
+	}
+	if !exists || createdInfo.Mode()&os.ModeSymlink != 0 || !createdInfo.IsDir() {
+		return true, nil, fmt.Errorf("created rooted path %s is not a directory", relative)
 	}
 	if err := syncRootHandle(directory); err != nil {
-		return true, err
+		return true, createdInfo, err
 	}
-	return true, nil
+	return true, createdInfo, nil
 }
 
 func (adapter *RootedFilesystemAdapter) writeFileExclusive(relative string, content []byte, permission os.FileMode) error {
-	return adapter.writeFileExclusiveWith(
+	_, err := adapter.writeFileExclusiveWith(
 		relative, permission,
 		func(file *os.File) error {
 			return writeAll(file, content)
 		},
 	)
+	return err
 }
 
 func (adapter *RootedFilesystemAdapter) writeFileExclusiveWith(
 	relative string,
 	permission os.FileMode,
 	populate func(*os.File) error,
-) error {
+) (os.FileInfo, error) {
 	if populate == nil {
-		return fmt.Errorf("rooted file population is required")
+		return nil, fmt.Errorf("rooted file population is required")
 	}
 	rooted, err := NewRootedPath(adapter.rootPath, relative)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	parent := path.Dir(rooted.Relative())
 	base := path.Base(rooted.Relative())
 	directory, err := adapter.openDirectoryExact(parent)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer directory.Close()
 	if _, exists, err := inspectRootEntryExact(directory, base); err != nil {
-		return err
+		return nil, err
 	} else if exists {
-		return fmt.Errorf("rooted path %s already exists", relative)
+		return nil, fmt.Errorf("rooted path %s already exists", relative)
 	}
 	file, err := directory.OpenFile(base, os.O_WRONLY|os.O_CREATE|os.O_EXCL, permission.Perm())
 	if err != nil {
-		return fmt.Errorf("create rooted file %s: %w", relative, err)
+		return nil, fmt.Errorf("create rooted file %s: %w", relative, err)
 	}
 	createdInfo, err := file.Stat()
 	if err != nil {
 		_ = file.Close()
-		return fmt.Errorf("inspect created rooted file %s: %w", relative, err)
+		return nil, fmt.Errorf("inspect created rooted file %s: %w", relative, err)
 	}
 	remove := true
 	defer func() {
@@ -662,64 +673,67 @@ func (adapter *RootedFilesystemAdapter) writeFileExclusiveWith(
 		}
 	}()
 	if err := populate(file); err != nil {
-		return err
+		return createdInfo, err
 	}
 	if err := file.Chmod(permission.Perm()); err != nil {
-		return fmt.Errorf("set rooted file mode %s: %w", relative, err)
+		return createdInfo, fmt.Errorf("set rooted file mode %s: %w", relative, err)
 	}
 	if err := file.Sync(); err != nil {
-		return fmt.Errorf("synchronize rooted file %s: %w", relative, err)
+		return createdInfo, fmt.Errorf("synchronize rooted file %s: %w", relative, err)
 	}
 	if err := adapter.verifyOpenedFileSingleLink(relative, file); err != nil {
-		return err
+		return createdInfo, err
 	}
 	if err := file.Close(); err != nil {
-		return fmt.Errorf("close rooted file %s: %w", relative, err)
+		return createdInfo, fmt.Errorf("close rooted file %s: %w", relative, err)
 	}
 	remove = false
-	return syncRootHandle(directory)
+	return createdInfo, syncRootHandle(directory)
 }
 
-// writeSymlinkExclusive reports a successful Symlink even when a later
-// verification or synchronization step fails.
-func (adapter *RootedFilesystemAdapter) writeSymlinkExclusive(relative, target string) (bool, error) {
+// writeSymlinkExclusive returns the entry observed immediately after a
+// successful Symlink, even when a later verification or synchronization step
+// fails.
+func (adapter *RootedFilesystemAdapter) writeSymlinkExclusive(
+	relative, target string,
+) (bool, os.FileInfo, error) {
 	rooted, err := NewRootedPath(adapter.rootPath, relative)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	parent := path.Dir(rooted.Relative())
 	base := path.Base(rooted.Relative())
 	directory, err := adapter.openDirectoryExact(parent)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	defer directory.Close()
 	if _, exists, err := inspectRootEntryExact(directory, base); err != nil {
-		return false, err
+		return false, nil, err
 	} else if exists {
-		return false, fmt.Errorf("rooted path %s already exists", relative)
+		return false, nil, fmt.Errorf("rooted path %s already exists", relative)
 	}
 	if err := directory.Symlink(target, base); err != nil {
-		return false, fmt.Errorf("create rooted symlink %s: %w", relative, err)
+		return false, nil, fmt.Errorf("create rooted symlink %s: %w", relative, err)
 	}
-	info, exists, err := inspectRootEntryExact(directory, base)
-	if err != nil || !exists || info.Mode()&os.ModeSymlink == 0 {
+	createdInfo, exists, err := inspectRootEntryExact(directory, base)
+	if err != nil || !exists || createdInfo.Mode()&os.ModeSymlink == 0 {
 		if err == nil {
 			err = fmt.Errorf("created path is not a symbolic link")
 		}
-		return true, fmt.Errorf("verify rooted symlink %s: %w", relative, err)
+		return true, nil, fmt.Errorf("verify rooted symlink %s: %w", relative, err)
 	}
 	confirmed, err := directory.Readlink(base)
 	if err != nil || confirmed != target {
 		if err == nil {
 			err = fmt.Errorf("symbolic-link target changed")
 		}
-		return true, fmt.Errorf("verify rooted symlink %s: %w", relative, err)
+		return true, createdInfo, fmt.Errorf("verify rooted symlink %s: %w", relative, err)
 	}
 	if err := syncRootHandle(directory); err != nil {
-		return true, err
+		return true, createdInfo, err
 	}
-	return true, nil
+	return true, createdInfo, nil
 }
 
 func (adapter *RootedFilesystemAdapter) renameFileNoReplace(source, destination string) error {
@@ -1632,7 +1646,9 @@ func (adapter *RootedFilesystemAdapter) syncDirectory(relative string) error {
 	return syncRootHandle(directory)
 }
 
-func syncRootHandle(directory *os.Root) error {
+var syncRootHandle = synchronizeRootHandle
+
+func synchronizeRootHandle(directory *os.Root) error {
 	opened, err := directory.Open(".")
 	if err != nil {
 		return fmt.Errorf("open rooted directory for synchronization: %w", err)

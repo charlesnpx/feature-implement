@@ -370,6 +370,55 @@ func TestDetachedAttemptTreeMaterializationRejectsExternalHardLink(t *testing.T)
 	}
 }
 
+func TestDetachedAttemptTreeMaterializationPreservesReplacementAfterPathCreation(t *testing.T) {
+	t.Parallel()
+
+	repositoryRoot, base := newRawAttemptTreeRepository(t)
+	worktree := filepath.Join(t.TempDir(), "attempt")
+	original := filepath.Join(t.TempDir(), "original-payload.txt")
+	failure := errors.New("injected failure after path creation")
+	replaced := false
+	adapter := workspace.DefaultLocalAttemptGitAdapter().
+		WithAttemptWorktreeMaterializationFaultInjector(
+			func(point workspace.AttemptWorktreeMaterializationFaultPoint) error {
+				if point != workspace.AttemptMaterializationFaultAfterPathCreation || replaced {
+					return nil
+				}
+				path := filepath.Join(worktree, "payload.txt")
+				if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+					return nil
+				} else if err != nil {
+					return err
+				}
+				if err := os.Rename(path, original); err != nil {
+					return err
+				}
+				if err := os.WriteFile(path, []byte("replacement\n"), 0o600); err != nil {
+					return err
+				}
+				replaced = true
+				return failure
+			},
+		)
+
+	_, err := adapter.MaterializeAttemptTree(context.Background(), repositoryRoot, base, worktree)
+	if !errors.Is(err, failure) {
+		t.Fatalf("replacement materialization failure = %v", err)
+	}
+	if !replaced {
+		t.Fatal("replacement was not injected")
+	}
+	if content, readErr := os.ReadFile(filepath.Join(worktree, "payload.txt")); readErr != nil || string(content) != "replacement\n" {
+		t.Fatalf("replacement was removed or changed: %q, %v", content, readErr)
+	}
+	if info, statErr := os.Stat(worktree); statErr != nil || !info.IsDir() {
+		t.Fatalf("replacement worktree was not preserved: %v, %v", info, statErr)
+	}
+	if !strings.Contains(err.Error(), "will be preserved") {
+		t.Fatalf("replacement rollback explanation = %v", err)
+	}
+}
+
 func TestDetachedAttemptTreeMaterializationRejectsMissingBlob(t *testing.T) {
 	t.Parallel()
 

@@ -645,30 +645,6 @@ func inspectIntegrationSession(
 	)
 }
 
-func resolveIntegrationRef(
-	ctx context.Context,
-	session *localTargetGitSession,
-	ref string,
-) (GitObjectID, error) {
-	output, exitCode, err := session.run(
-		ctx, nil, "show-ref", "--verify", ref,
-	)
-	if err != nil || exitCode != 0 {
-		return GitObjectID{}, gitExitError(
-			"resolve integration ref "+ref, exitCode, err,
-		)
-	}
-	fields := strings.Fields(string(output))
-	if len(fields) != 2 || fields[1] != ref {
-		return GitObjectID{}, fmt.Errorf(
-			"Git returned malformed integration ref data for %s", ref,
-		)
-	}
-	return qualifyGitObjectID(
-		session.binding.objectFormat, fields[0],
-	)
-}
-
 func verifyIntegrationCommitObject(
 	ctx context.Context,
 	session *localTargetGitSession,

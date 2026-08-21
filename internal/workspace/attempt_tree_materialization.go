@@ -24,16 +24,12 @@ type attemptWorktreeRollback struct {
 	initializedRepository *initializedAttemptRepositoryRollback
 }
 
-func (rollback *attemptWorktreeRollback) record(relative string) error {
+func (rollback *attemptWorktreeRollback) record(relative string, info os.FileInfo) error {
 	if rollback == nil || rollback.root == nil || rollback.root.adapter == nil {
 		return fmt.Errorf("attempt worktree rollback root is unavailable")
 	}
-	info, exists, err := rollback.root.adapter.inspectEntryIncludingSymlinkExact(relative)
-	if err != nil {
-		return err
-	}
-	if !exists {
-		return fmt.Errorf("created attempt tree path %s disappeared before rollback binding", relative)
+	if info == nil {
+		return fmt.Errorf("created attempt tree path %s has no creation identity", relative)
 	}
 	rollback.entries = append(rollback.entries, attemptWorktreeRollbackEntry{
 		relative: relative,
@@ -205,14 +201,10 @@ func (adapter LocalAttemptGitAdapter) MaterializeAttemptTree(
 		return AttemptGitInspection{}, fmt.Errorf("attempt worktree parent is unavailable")
 	}
 	name := filepath.Base(worktree)
-	created, makeDirectoryErr := parent.adapter.makeDirectory(name, 0o700)
+	created, createdInfo, makeDirectoryErr := parent.adapter.makeDirectory(name, 0o700)
 	if created {
-		createdInfo, exists, inspectErr := parent.adapter.inspectExact(name)
-		if inspectErr != nil {
-			return AttemptGitInspection{}, fmt.Errorf("identify new attempt worktree directory: %w", inspectErr)
-		}
-		if !exists || createdInfo.Mode()&os.ModeSymlink != 0 || !createdInfo.IsDir() {
-			return AttemptGitInspection{}, fmt.Errorf("new attempt worktree directory changed before materialization")
+		if createdInfo == nil || createdInfo.Mode()&os.ModeSymlink != 0 || !createdInfo.IsDir() {
+			return AttemptGitInspection{}, fmt.Errorf("new attempt worktree directory has no creation identity")
 		}
 		identity, identityErr := platformFileIdentity(createdInfo)
 		if identityErr != nil {
@@ -390,9 +382,9 @@ func materializeExactAttemptTree(
 		return fmt.Errorf("new attempt directory is unexpectedly nonempty")
 	}
 	for _, directory := range directories {
-		created, makeDirectoryErr := root.adapter.makeDirectory(directory, 0o755)
+		created, createdInfo, makeDirectoryErr := root.adapter.makeDirectory(directory, 0o755)
 		if created {
-			if err := rollback.record(directory); err != nil {
+			if err := rollback.record(directory, createdInfo); err != nil {
 				return fmt.Errorf("record created attempt tree directory %s: %w", directory, err)
 			}
 		}
@@ -405,14 +397,15 @@ func materializeExactAttemptTree(
 	}
 	target := LocalTargetGitAdapter{git: adapter}
 	for _, entry := range entries {
+		var createdInfo os.FileInfo
 		created := false
 		switch entry.mode {
 		case GitModeRegular:
-			err = adapter.materializeAttemptBlob(ctx, source.root, root.adapter, entry, algorithm, 0o644)
-			created = err == nil
+			createdInfo, err = adapter.materializeAttemptBlob(ctx, source.root, root.adapter, entry, algorithm, 0o644)
+			created = createdInfo != nil
 		case GitModeExecutable:
-			err = adapter.materializeAttemptBlob(ctx, source.root, root.adapter, entry, algorithm, 0o755)
-			created = err == nil
+			createdInfo, err = adapter.materializeAttemptBlob(ctx, source.root, root.adapter, entry, algorithm, 0o755)
+			created = createdInfo != nil
 		case GitModeSymlink:
 			var content []byte
 			content, err = target.readBlob(ctx, source.root, entry.object)
@@ -428,23 +421,33 @@ func materializeExactAttemptTree(
 				err = validateRepositorySymlink(entry.path, content)
 			}
 			if err == nil {
-				created, err = root.adapter.writeSymlinkExclusive(entry.path, string(content))
+				created, createdInfo, err = root.adapter.writeSymlinkExclusive(entry.path, string(content))
 			}
 		case GitModeSubmodule:
-			created, err = root.adapter.makeDirectory(entry.path, 0o755)
+			created, createdInfo, err = root.adapter.makeDirectory(entry.path, 0o755)
 			if err == nil && !created {
 				err = fmt.Errorf("attempt tree directory appeared during materialization")
 			}
 		default:
 			err = fmt.Errorf("unsupported attempt tree mode %s", entry.mode)
 		}
+		var pathCreationErr error
 		if created {
-			if err := rollback.record(entry.path); err != nil {
+			if err == nil {
+				pathCreationErr = injectAttemptWorktreeMaterializationFault(
+					adapter.worktreeMaterializeFault,
+					AttemptMaterializationFaultAfterPathCreation,
+				)
+			}
+			if err := rollback.record(entry.path, createdInfo); err != nil {
 				return fmt.Errorf("record created attempt tree path %s: %w", entry.path, err)
 			}
 		}
 		if err != nil {
 			return fmt.Errorf("materialize attempt tree path %s: %w", entry.path, err)
+		}
+		if pathCreationErr != nil {
+			return pathCreationErr
 		}
 		if err := injectAttemptWorktreeMaterializationFault(
 			adapter.worktreeMaterializeFault, AttemptMaterializationFaultAfterPath,

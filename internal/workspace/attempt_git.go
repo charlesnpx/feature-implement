@@ -94,6 +94,7 @@ type AttemptWorktreeMaterializationFaultPoint string
 
 const (
 	AttemptMaterializationFaultAfterDirectoryBinding AttemptWorktreeMaterializationFaultPoint = "after_directory_binding"
+	AttemptMaterializationFaultAfterPathCreation     AttemptWorktreeMaterializationFaultPoint = "after_path_creation"
 	AttemptMaterializationFaultAfterPath             AttemptWorktreeMaterializationFaultPoint = "after_path"
 	AttemptMaterializationFaultAfterGitInit          AttemptWorktreeMaterializationFaultPoint = "after_git_init"
 )
@@ -161,14 +162,14 @@ func (adapter LocalAttemptGitAdapter) materializeAttemptBlob(
 	entry rawGitTreeEntry,
 	algorithm GitHashAlgorithm,
 	permission os.FileMode,
-) error {
+) (os.FileInfo, error) {
 	size, err := adapter.gitBlobSize(ctx, sourceRoot, entry.object)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	digest, err := newGitBlobHasher(algorithm, size)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	return root.writeFileExclusiveWith(
 		entry.path, permission,

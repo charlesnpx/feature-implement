@@ -192,17 +192,6 @@ func (guard *attemptWorktreeRootGuard) Verify(
 	return guard.validateLayout()
 }
 
-func (guard *attemptWorktreeRootGuard) verifyAfterEffect(
-	ctx context.Context,
-	adapter LocalAttemptGitAdapter,
-	effect string,
-) error {
-	if err := guard.Verify(ctx, adapter); err != nil {
-		return fmt.Errorf("verify attempt worktree roots after %s: %w", effect, err)
-	}
-	return nil
-}
-
 func (guard *attemptWorktreeRootGuard) validateLayout() error {
 	if guard == nil || guard.target == nil || guard.common == nil {
 		return fmt.Errorf("attempt worktree root guard is closed")

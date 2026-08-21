@@ -1337,18 +1337,6 @@ func existingMatchesCreateRequest(existing GitCommitInspection, request CreateGi
 	return nil
 }
 
-func (adapter LocalCommitGitAdapter) symbolicBranch(ctx context.Context, worktree string) (string, error) {
-	output, exitCode, err := adapter.git.run(ctx, worktree, "symbolic-ref", "--quiet", "--short", "HEAD")
-	if err != nil || exitCode != 0 {
-		return "", gitExitError("inspect commit worktree branch", exitCode, err)
-	}
-	branch := strings.TrimSpace(string(output))
-	if err := validateGitBranchSyntax(branch); err != nil {
-		return "", err
-	}
-	return branch, nil
-}
-
 func (adapter LocalCommitGitAdapter) resolveObject(
 	ctx context.Context,
 	repositoryRoot string,
