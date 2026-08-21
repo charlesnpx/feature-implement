@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -30,6 +31,112 @@ func (runner *protocolCheckRunner) RunConfiguredCheck(
 		}
 	}
 	return runner.result, runner.err
+}
+
+func TestLocalCommitUsesTargetRepositoryIdentity(t *testing.T) {
+	globalConfig := filepath.Join(t.TempDir(), "global.gitconfig")
+	if err := os.WriteFile(globalConfig, []byte(
+		"[user]\n\tname = Ambient Identity\n\temail = ambient@example.test\n",
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+
+	harness := newConfiguredAttemptHarness(t)
+	target := harness.definition.Workspace().RepositoryRoot()
+	runGitSetup(t, target, "config", "user.name", "Target Identity")
+	runGitSetup(t, target, "config", "user.email", "target@example.test")
+	attempt := harness.reserveWithLocalGit(t, "2026-07-21T10:55:00Z")
+
+	if err := os.MkdirAll(filepath.Join(attempt.Worktree(), "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(attempt.Worktree(), "src", "identity.go"),
+		[]byte("package protocol\n\nconst Identity = true\n"), 0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	runGitSetup(t, attempt.Worktree(), "add", "src/identity.go")
+
+	runner := &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())}
+	shell, err := workspace.NewCommitProtocolShell(workspace.DefaultLocalCommitGitAdapter(), runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := workspace.ExecuteAttemptCommitStep(
+		context.Background(), harness.journal, harness.definition, shell,
+		workspace.ExecuteAttemptCommitStepRequest{
+			AttemptID: attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T10:57:00Z"),
+		},
+	)
+	if err != nil {
+		t.Fatalf("execute configured commit: %v", err)
+	}
+	state, configured := result.Protocol()
+	if !configured || state.Phase() != workspace.CommitProtocolComplete {
+		t.Fatalf("configured commit result = %#v configured=%v", state, configured)
+	}
+	identity := strings.Split(strings.TrimSuffix(string(runGitSetup(
+		t, attempt.Worktree(), "show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", rawGitObject(state.Head()),
+	)), "\n"), "\x00")
+	if len(identity) != 4 || identity[0] != "Target Identity" || identity[1] != "target@example.test" ||
+		identity[2] != "Target Identity" || identity[3] != "target@example.test" {
+		t.Fatalf("configured commit identity = %#v", identity)
+	}
+	for _, key := range []string{"user.name", "user.email"} {
+		command := exec.Command("git", "-C", attempt.Worktree(), "config", "--local", "--get", key)
+		if output, err := command.Output(); err == nil {
+			t.Fatalf("attempt repository persisted %s=%q", key, output)
+		} else {
+			var exitError *exec.ExitError
+			if !errors.As(err, &exitError) || exitError.ExitCode() != 1 {
+				t.Fatalf("inspect attempt-local %s: %v", key, err)
+			}
+		}
+	}
+}
+
+func TestLocalCommitRejectsMissingTargetRepositoryIdentity(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+
+	harness := newConfiguredAttemptHarness(t)
+	attempt := harness.reserveWithLocalGit(t, "2026-07-21T10:55:00Z")
+	if err := os.MkdirAll(filepath.Join(attempt.Worktree(), "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(attempt.Worktree(), "src", "identity.go"),
+		[]byte("package protocol\n\nconst Identity = false\n"), 0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	runGitSetup(t, attempt.Worktree(), "add", "src/identity.go")
+	before := parseGitHead(t, attempt.Worktree())
+
+	runner := &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())}
+	shell, err := workspace.NewCommitProtocolShell(workspace.DefaultLocalCommitGitAdapter(), runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = workspace.ExecuteAttemptCommitStep(
+		context.Background(), harness.journal, harness.definition, shell,
+		workspace.ExecuteAttemptCommitStepRequest{
+			AttemptID: attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T10:57:00Z"),
+		},
+	)
+	if err == nil || !strings.Contains(
+		err.Error(), "target repository identity is incomplete; set user.name and user.email",
+	) {
+		t.Fatalf("missing target identity error = %v", err)
+	}
+	if after := parseGitHead(t, attempt.Worktree()); after != before {
+		t.Fatalf("missing target identity created commit %s, want head %s", after, before)
+	}
 }
 
 func TestLocalCommitShellCreatesExactCommitAndRevalidatesAfterRebase(t *testing.T) {

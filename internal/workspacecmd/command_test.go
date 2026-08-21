@@ -479,7 +479,10 @@ merge_units:
 	}
 	runGitTest(t, attempt.Worktree(), "add", "integration.txt")
 	runGitTest(
-		t, attempt.Worktree(), "commit", "-m",
+		t, attempt.Worktree(),
+		"-c", "user.name=Command Test",
+		"-c", "user.email=command@example.test",
+		"commit", "-m",
 		"Accepted command implementation",
 	)
 	repository := localReviewRepository{

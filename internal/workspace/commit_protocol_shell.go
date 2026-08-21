@@ -294,7 +294,7 @@ func (shell CommitProtocolShell) drive(
 		switch effect := effects[0].(type) {
 		case CreateConfiguredCommitEffect:
 			request, err := NewCreateGitCommitRequest(
-				worktree, effect.parent, effect.step, effect.ordinal,
+				worktree, worktree, effect.parent, effect.step, effect.ordinal,
 				effect.body, effect.inspection,
 			)
 			if err != nil {

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	pathpkg "path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -163,6 +164,7 @@ func (inspection GitCommitInspection) Evidence(
 }
 
 type CreateGitCommitRequest struct {
+	targetRoot string
 	worktree   string
 	parent     GitObjectID
 	step       CommitStep
@@ -172,16 +174,17 @@ type CreateGitCommitRequest struct {
 }
 
 func NewCreateGitCommitRequest(
-	worktree string,
+	targetRoot, worktree string,
 	parent GitObjectID,
 	step CommitStep,
 	ordinal uint16,
 	body string,
 	inspection StagedCommitInspection,
 ) (CreateGitCommitRequest, error) {
+	targetRoot = filepath.Clean(strings.TrimSpace(targetRoot))
 	worktree = filepath.Clean(strings.TrimSpace(worktree))
-	if !filepath.IsAbs(worktree) || parent.IsZero() || step.id.IsZero() || ordinal == 0 {
-		return CreateGitCommitRequest{}, fmt.Errorf("commit creation request requires absolute worktree, parent, step, and ordinal")
+	if !filepath.IsAbs(targetRoot) || !filepath.IsAbs(worktree) || parent.IsZero() || step.id.IsZero() || ordinal == 0 {
+		return CreateGitCommitRequest{}, fmt.Errorf("commit creation request requires absolute target repository, worktree, parent, step, and ordinal")
 	}
 	if err := inspection.Validate(step, parent); err != nil {
 		return CreateGitCommitRequest{}, err
@@ -191,14 +194,15 @@ func NewCreateGitCommitRequest(
 		return CreateGitCommitRequest{}, err
 	}
 	return CreateGitCommitRequest{
-		worktree: worktree, parent: parent,
+		targetRoot: targetRoot, worktree: worktree, parent: parent,
 		step: cloneCommitSteps([]CommitStep{step})[0], ordinal: ordinal,
 		body: resolvedBody, inspection: cloneStagedCommitInspection(inspection),
 	}, nil
 }
 
-func (request CreateGitCommitRequest) Worktree() string    { return request.worktree }
-func (request CreateGitCommitRequest) Parent() GitObjectID { return request.parent }
+func (request CreateGitCommitRequest) TargetRepositoryRoot() string { return request.targetRoot }
+func (request CreateGitCommitRequest) Worktree() string             { return request.worktree }
+func (request CreateGitCommitRequest) Parent() GitObjectID          { return request.parent }
 func (request CreateGitCommitRequest) Step() CommitStep {
 	return cloneCommitSteps([]CommitStep{request.step})[0]
 }
@@ -337,7 +341,7 @@ func (adapter LocalCommitGitAdapter) CreateConfiguredCommit(
 	ctx context.Context,
 	request CreateGitCommitRequest,
 ) (GitCommitInspection, error) {
-	if !filepath.IsAbs(request.worktree) || request.parent.IsZero() || request.step.id.IsZero() ||
+	if !filepath.IsAbs(request.targetRoot) || !filepath.IsAbs(request.worktree) || request.parent.IsZero() || request.step.id.IsZero() ||
 		request.ordinal == 0 || request.inspection.stateDigest.IsZero() {
 		return GitCommitInspection{}, fmt.Errorf("configured commit request is incomplete")
 	}
@@ -375,8 +379,14 @@ func (adapter LocalCommitGitAdapter) CreateConfiguredCommit(
 	message := canonicalCommitMessage(request.step.message.subject, request.body)
 	treeText := objectHex(request.inspection.indexTree)
 	parentText := objectHex(request.parent)
+	identity, err := adapter.readTargetCommitIdentity(ctx, request.targetRoot)
+	if err != nil {
+		return GitCommitInspection{}, err
+	}
 	output, exitCode, err := adapter.runWithInput(
 		ctx, request.worktree, message,
+		"-c", "user.name="+identity.name,
+		"-c", "user.email="+identity.email,
 		"-c", "commit.gpgSign=false", "commit-tree", treeText, "-p", parentText,
 	)
 	if err != nil || exitCode != 0 {
@@ -404,6 +414,55 @@ func (adapter LocalCommitGitAdapter) CreateConfiguredCommit(
 		return GitCommitInspection{}, fmt.Errorf("configured commit left dirty state: %w", err)
 	}
 	return inspection, nil
+}
+
+type targetCommitIdentity struct {
+	name  string
+	email string
+}
+
+// readTargetCommitIdentity resolves the target's ordinary Git configuration
+// before the hermetic attempt invocation. The resolved values are then passed
+// explicitly to commit-tree, so no configuration needs to be copied into the
+// scratch attempt repository.
+func (adapter LocalCommitGitAdapter) readTargetCommitIdentity(
+	ctx context.Context,
+	targetRoot string,
+) (targetCommitIdentity, error) {
+	name, nameFound, err := adapter.readTargetGitConfiguration(ctx, targetRoot, "user.name")
+	if err != nil {
+		return targetCommitIdentity{}, fmt.Errorf("read target repository user.name: %w", err)
+	}
+	email, emailFound, err := adapter.readTargetGitConfiguration(ctx, targetRoot, "user.email")
+	if err != nil {
+		return targetCommitIdentity{}, fmt.Errorf("read target repository user.email: %w", err)
+	}
+	if !nameFound || !emailFound {
+		return targetCommitIdentity{}, fmt.Errorf(
+			"target repository identity is incomplete; set user.name and user.email",
+		)
+	}
+	return targetCommitIdentity{name: name, email: email}, nil
+}
+
+func (adapter LocalCommitGitAdapter) readTargetGitConfiguration(
+	ctx context.Context,
+	targetRoot, key string,
+) (string, bool, error) {
+	output, exitCode, err := adapter.runWithTargetConfiguration(
+		ctx, targetRoot, "config", "--get", key,
+	)
+	if err != nil {
+		return "", false, err
+	}
+	if exitCode == 1 {
+		return "", false, nil
+	}
+	if exitCode != 0 {
+		return "", false, fmt.Errorf("Git exited with status %d", exitCode)
+	}
+	value := strings.TrimSpace(string(output))
+	return value, value != "", nil
 }
 
 func (adapter LocalCommitGitAdapter) InspectCommit(
@@ -1396,6 +1455,91 @@ func (adapter LocalCommitGitAdapter) runWithInput(
 		return nil, -1, err
 	}
 	return stdout.bytes(), 0, nil
+}
+
+func (adapter LocalCommitGitAdapter) runWithTargetConfiguration(
+	ctx context.Context,
+	targetRoot string,
+	arguments ...string,
+) ([]byte, int, error) {
+	targetRoot = filepath.Clean(strings.TrimSpace(targetRoot))
+	if !filepath.IsAbs(targetRoot) {
+		return nil, -1, fmt.Errorf("target repository root must be absolute")
+	}
+	command := exec.CommandContext(
+		ctx, adapter.git.executable,
+		trustedGitArguments(targetRoot, arguments...)...,
+	)
+	environment, err := targetGitConfigurationEnvironment(
+		os.Environ(), adapter.git.environment,
+	)
+	if err != nil {
+		return nil, -1, err
+	}
+	command.Env = environment
+	var stdout, stderr boundedProcessBuffer
+	stdout.maximum = maxAttemptGitOutputBytes
+	stderr.maximum = 64 * 1024
+	command.Stdout, command.Stderr = &stdout, &stderr
+	err = command.Run()
+	if stdout.exceeded || stderr.exceeded {
+		return nil, -1, fmt.Errorf("Git output exceeded its bound")
+	}
+	if err != nil {
+		var exitError *exec.ExitError
+		if errors.As(err, &exitError) {
+			return stdout.bytes(), exitError.ExitCode(), nil
+		}
+		return nil, -1, err
+	}
+	return stdout.bytes(), 0, nil
+}
+
+// targetGitConfigurationEnvironment permits the ordinary Git configuration
+// sources needed to read the target identity, but does not permit ambient Git
+// directory or worktree redirection. Attempt operations continue to use
+// BuildIsolatedProcessEnvironment instead.
+func targetGitConfigurationEnvironment(
+	base []string,
+	additions []EnvironmentVariable,
+) ([]string, error) {
+	values := make(map[string]string, len(base)+len(additions))
+	for _, entry := range base {
+		name, value, found := strings.Cut(entry, "=")
+		if found && allowedTargetGitConfigurationEnvironment(name) {
+			values[name] = value
+		}
+	}
+	for _, variable := range additions {
+		if variable.name == "" || unsafeAttemptGitEnvironment(variable.name) {
+			return nil, fmt.Errorf("target Git configuration environment variable %s is unsafe", variable.name)
+		}
+		values[variable.name] = variable.value
+	}
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	environment := make([]string, 0, len(names))
+	for _, name := range names {
+		environment = append(environment, name+"="+values[name])
+	}
+	return environment, nil
+}
+
+func allowedTargetGitConfigurationEnvironment(name string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(name))
+	if upper == "GIT_CONFIG" || strings.HasPrefix(upper, "GIT_CONFIG_") {
+		return true
+	}
+	switch upper {
+	case "PATH", "TMPDIR", "TMP", "TEMP", "TZ", "LANG", "LC_ALL", "LC_CTYPE",
+		"SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "HOME", "XDG_CONFIG_HOME":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseRawGitDiff(content []byte, algorithm GitHashAlgorithm) (CommitDiff, error) {

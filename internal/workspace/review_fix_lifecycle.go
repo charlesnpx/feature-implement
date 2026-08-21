@@ -200,7 +200,7 @@ func ExecuteAttemptReviewFix(
 		switch effect := effects[0].(type) {
 		case CreateConfiguredCommitEffect:
 			create, err := NewCreateGitCommitRequest(
-				result.attempt.worktree, effect.parent,
+				definition.workspace.target.root, result.attempt.worktree, effect.parent,
 				effect.step, effect.ordinal, effect.body, effect.inspection,
 			)
 			if err != nil {
