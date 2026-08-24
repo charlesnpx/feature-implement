@@ -50,7 +50,9 @@ permission to stop on its own.
 | `none` | `allowed` | Runs unit to unit without stopping. The agent may still stop if it hits something real. **This is the block-of-units default.** |
 | `none` | `forbidden` | Cannot stop for any reason. The agent must finish or fail. For unattended and CI runs. |
 | `pause_only` | `allowed` | Stops at this unit, owner responds `continue`, resumes on the same goal. |
+| `pause_only` | `forbidden` | Stops at this planned owner gate; the agent may not raise its own stop. After the owner responds `continue`, it resumes on the same goal. |
 | `complete_goal_and_wait` | `allowed` | Goal is finished here; owner responds, a next goal is reserved and acked, attempt resumes on the new goal. |
+| `complete_goal_and_wait` | `forbidden` | Goal is finished at this planned handoff; the agent may not raise its own stop. After the owner responds, a next goal is reserved and acknowledged before the attempt resumes on it. |
 
 `checkpoint: none` makes an unattended block expressible.
 

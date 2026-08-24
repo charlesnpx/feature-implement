@@ -178,7 +178,7 @@ merge_units:
 ```
 
 `checkpoint` is the owner's planned gate; `escalation` is the agent's
-permission to stop on its own when something genuinely goes wrong. The four
+permission to stop on its own when something genuinely goes wrong. The six
 workflow combinations are:
 
 | checkpoint | escalation | behavior |
@@ -186,7 +186,9 @@ workflow combinations are:
 | `none` | `allowed` | Runs unit to unit without stopping; the agent may still stop if it hits something real. The block-of-units default. |
 | `none` | `forbidden` | Cannot stop for any reason — finish or fail. For unattended and CI runs. |
 | `pause_only` | `allowed` | Stops here, owner responds `continue`, and resumes on the same goal. |
+| `pause_only` | `forbidden` | Stops at this planned owner gate; the agent may not raise its own stop. After the owner responds `continue`, it resumes on the same goal. |
 | `complete_goal_and_wait` | `allowed` | Goal finishes here; after the owner responds, a next goal is reserved and acknowledged, and the attempt resumes on the new goal. |
+| `complete_goal_and_wait` | `forbidden` | Goal finishes at this planned handoff; the agent may not raise its own stop. After the owner responds, a next goal is reserved and acknowledged before the attempt resumes on it. |
 
 An execution profile may optionally declare `boundary` with `escalation` only.
 A merge unit may narrow `allowed` to `forbidden`, but never widen `forbidden`
@@ -258,12 +260,18 @@ not interpreted or migrated.
    an allowed escalation. The request requires `kind`: use `checkpoint` for the
    configured gate and `escalation` for a genuine agent-raised stop. Record it
    while the attempt is active, before `integrate merge-unit`.
-8. Resolve every returned local directive and resume the attempt when a boundary
-   was recorded. If no boundary is needed, proceed directly. Only then submit
-   `integrate merge-unit` for the exact accepted head and tree. Integration
-   creates a deterministic two-parent local commit and compare-and-swap updates
-   only the workspace-owned feature ref. Acknowledgements and owner responses
-   bind the exact directive, goal, head, and idempotency inputs.
+8. Resolve every returned local directive. For a `complete_goal_and_wait`
+   checkpoint, after the owner response choose the next `GoalBinding`, submit
+   `attempt next-goal`, act on the returned `create_next_goal` directive, submit
+   the matching `next_goal_created` acknowledgement with `attempt acknowledge`,
+   and only then submit `attempt resume`. For any other recorded boundary,
+   submit `attempt resume` after every required acknowledgement and owner
+   response is recorded. If no boundary is needed, proceed directly. Only then
+   submit `integrate merge-unit` for the exact accepted head and tree.
+   Integration creates a deterministic two-parent local commit and
+   compare-and-swap updates only the workspace-owned feature ref.
+   Acknowledgements and owner responses bind the exact directive, goal, head,
+   and idempotency inputs.
 9. After every unit is integrated and every boundary is resolved, run
    `complete verify` to record local workspace completion.
 

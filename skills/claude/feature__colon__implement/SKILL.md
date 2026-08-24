@@ -110,6 +110,12 @@ readiness.
    - `create_next_goal`: create exactly the returned goal, then submit its
      matching acknowledgement.
 
+   For a `complete_goal_and_wait` checkpoint, after the owner response choose
+   the next `GoalBinding`, submit `attempt next-goal`, act on the returned
+   `create_next_goal` directive, submit the matching `next_goal_created`
+   acknowledgement with `attempt acknowledge`, and only then submit
+   `attempt resume`.
+
 3. When a boundary was recorded, call `attempt resume` only after every required
    acknowledgement and owner response is recorded. Do not resume a completed
    merge unit.
