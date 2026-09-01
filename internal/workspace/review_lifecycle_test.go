@@ -577,7 +577,7 @@ func TestReviewRunnerRejectsRepositoryMutationAndWeakIsolation(t *testing.T) {
 	)
 	runner := reviewRunnerStub{run: func(invocation workspace.ReviewInvocation) (workspace.ReviewRunnerOutput, error) {
 		if invocation.Request().Digest() != request.Digest() ||
-			invocation.Worktree() != harness.attempt.Worktree() || invocation.Branch() != harness.attempt.Branch() {
+			invocation.Worktree() != harness.attempt.Worktree() {
 			t.Fatalf("review invocation changed immutable inputs: %#v", invocation)
 		}
 		return workspace.NewReviewRunnerOutput(submission)
@@ -855,7 +855,7 @@ func TestReviewFixExecutionRequiresACompletedReviewRoundBeforeGitMutation(t *tes
 	); err != nil {
 		t.Fatal(err)
 	}
-	git := &journalCommitGit{branch: harness.attempt.Branch(), head: harness.attempt.VerifiedHead()}
+	git := &journalCommitGit{head: harness.attempt.VerifiedHead()}
 	shell, err := workspace.NewCommitProtocolShell(git, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1007,7 +1007,6 @@ func TestProtocolFreeAttemptAdoptsOrdinaryHeadWithoutReviewLoop(t *testing.T) {
 
 	harness := newAttemptHarness(t, "unit-one")
 	attempt := harness.reserve(t, "2026-07-21T11:18:00Z")
-	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T11:18:01Z")
 	implementationHead, implementationTree := mustGitObject(t, 'c'), mustGitObject(t, 'd')
 	repositorySnapshot, err := workspace.NewReviewRepositorySnapshot(implementationHead, implementationTree, true)
 	if err != nil {
@@ -1101,7 +1100,7 @@ func TestReviewFixCommitInvalidatesReadinessUntilAllProfilesReconfirm(t *testing
 		t.Fatal(err)
 	}
 	commitGit := &journalCommitGit{
-		branch: harness.attempt.Branch(), head: harness.attempt.VerifiedHead(), staged: staged, commit: commit,
+		head: harness.attempt.VerifiedHead(), staged: staged, commit: commit,
 	}
 	checkRunner := &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())}
 	shell, err := workspace.NewCommitProtocolShell(commitGit, checkRunner)
@@ -1119,7 +1118,9 @@ func TestReviewFixCommitInvalidatesReadinessUntilAllProfilesReconfirm(t *testing
 	if err != nil || fixResult.Attempt().VerifiedHead() != newHead {
 		t.Fatalf("durable review-fix commit = %#v error=%v", fixResult, err)
 	}
-	harness.git.setHead(t, harness.attempt.Branch(), newHead, true)
+	harness.git.setHead(
+		t, harness.attempt.Worktree(), newHead, true,
+	)
 	harness.repository.snapshot, _ = workspace.NewReviewRepositorySnapshot(newHead, newTree, true)
 	if _, err := workspace.RecordAttemptReviewFixRebase(
 		context.Background(), harness.journal, harness.definition, shell, harness.attempt.AttemptID(),
@@ -1241,7 +1242,9 @@ func TestReviewFixCommitInvalidatesReadinessUntilAllProfilesReconfirm(t *testing
 	if len(records) == 0 || records[len(records)-1].EventType() != workspace.JournalEventCommitProtocolRebased {
 		t.Fatalf("review-fix rebase journal tail = %#v", records)
 	}
-	harness.git.setHead(t, harness.attempt.Branch(), rebasedHead, true)
+	harness.git.setHead(
+		t, harness.attempt.Worktree(), rebasedHead, true,
+	)
 	harness.repository.snapshot, _ = workspace.NewReviewRepositorySnapshot(rebasedHead, rebasedTree, true)
 	if _, record, err := workspace.RecordReviewFixApplication(
 		harness.journal, harness.definition,
@@ -1344,7 +1347,7 @@ func TestReviewRebaseRejectsConcurrentFindingFixReservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	commitGit := &journalCommitGit{
-		branch: harness.attempt.Branch(), head: harness.attempt.VerifiedHead(), staged: staged, commit: fixCommit,
+		head: harness.attempt.VerifiedHead(), staged: staged, commit: fixCommit,
 	}
 	shell, err := workspace.NewCommitProtocolShell(
 		commitGit, &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())},
@@ -1372,7 +1375,9 @@ func TestReviewRebaseRejectsConcurrentFindingFixReservation(t *testing.T) {
 	); err != nil {
 		t.Fatalf("apply first review fix: %v", err)
 	}
-	harness.git.setHead(t, harness.attempt.Branch(), fixHead, true)
+	harness.git.setHead(
+		t, harness.attempt.Worktree(), fixHead, true,
+	)
 	harness.repository.snapshot, _ = workspace.NewReviewRepositorySnapshot(fixHead, fixTree, true)
 
 	confirmation, err := workspace.StartAttemptReviewRound(
@@ -1520,7 +1525,6 @@ func newReviewHarness(t *testing.T) *reviewHarness {
 		unit: mustMergeUnitReference(t, "alpha-plan", "unit-one"), goal: goal, worktrees: t.TempDir(),
 	}
 	attempt := core.reserve(t, "2026-07-21T10:01:00Z")
-	attempt = core.materialize(t, attempt.AttemptID(), "2026-07-21T10:02:00Z")
 	tree := mustGitObject(t, 'b')
 	repositorySnapshot, err := workspace.NewReviewRepositorySnapshot(base, tree, true)
 	if err != nil {

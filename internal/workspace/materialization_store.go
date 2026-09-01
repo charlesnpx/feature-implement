@@ -600,7 +600,7 @@ func createBootstrapMaterializationState(
 }
 
 func createMaterializationOwnershipNamespace(adapter *RootedFilesystemAdapter) error {
-	created, err := adapter.makeDirectory(MaterializationOwnershipDirectoryName, 0o700)
+	created, _, err := adapter.makeDirectory(MaterializationOwnershipDirectoryName, 0o700)
 	if err != nil {
 		return fmt.Errorf("create materialization ownership directory: %w", err)
 	}
@@ -1050,7 +1050,7 @@ func preparePendingMaterialization(
 	nextStateBytes []byte,
 ) error {
 	if len(pending.Writes) != 0 {
-		created, err := adapter.makeDirectory(MaterializationStagingDirectoryName, 0o755)
+		created, _, err := adapter.makeDirectory(MaterializationStagingDirectoryName, 0o755)
 		if err != nil {
 			return err
 		}
@@ -2088,7 +2088,7 @@ func applyPendingDirectoryCreate(
 	}
 	createdPreparation := false
 	if !preparationExists {
-		created, err := adapter.makeDirectory(directory.PreparationPath, 0o755)
+		created, _, err := adapter.makeDirectory(directory.PreparationPath, 0o755)
 		if err != nil {
 			return materializationApplyConflict("", directory.Path, MaterializationConflictUnsafePath, err.Error())
 		}

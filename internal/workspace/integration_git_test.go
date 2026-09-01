@@ -31,7 +31,7 @@ func (repository localIntegrationReviewRepository) InspectReviewSnapshot(
 	request workspace.ReviewRepositoryRequest,
 ) (workspace.ReviewRepositorySnapshot, error) {
 	inspection, err := repository.git.InspectCleanWorktreeHead(
-		ctx, request.Worktree(), request.Branch(), request.Head(),
+		ctx, request.Worktree(), request.Head(),
 	)
 	if err != nil {
 		return workspace.ReviewRepositorySnapshot{}, err
@@ -109,15 +109,13 @@ func TestLocalGitIntegrationCreatesExactTwoParentCommitForSHA1AndSHA256(
 					featureHead, result.MergeCommit(),
 				)
 			}
-			attemptHead := strings.TrimSpace(runTargetGitTest(
+			if got := strings.TrimSpace(runTargetGitTest(
 				t, scenario.repositoryRoot,
-				"rev-parse",
-				"refs/heads/"+scenario.attempt.Branch(),
-			))
-			if attemptHead != rawGitObject(scenario.acceptedHead) {
+				"cat-file", "-t", rawGitObject(scenario.acceptedHead),
+			)); got != "commit" {
 				t.Fatalf(
-					"attempt ref changed to %s, want %s",
-					attemptHead, scenario.acceptedHead,
+					"accepted detached attempt object type = %q, want commit",
+					got,
 				)
 			}
 			tree := strings.TrimSpace(runTargetGitTest(
@@ -148,7 +146,7 @@ func TestLocalGitIntegrationCreatesExactTwoParentCommitForSHA1AndSHA256(
 	}
 }
 
-func TestLocalGitIntegrationUsesExactRegisteredAttemptWorktree(t *testing.T) {
+func TestLocalGitIntegrationUsesExactDetachedAttemptTree(t *testing.T) {
 	t.Parallel()
 
 	fixture := newDefinitionFixture(t)
@@ -176,9 +174,9 @@ func TestLocalGitIntegrationUsesExactRegisteredAttemptWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 	attemptGit := workspace.DefaultLocalAttemptGitAdapter()
-	attempt, err := workspace.ReserveAttempt(
+	attempt, err := workspace.StartAttempt(
 		context.Background(), journal, definition, attemptGit,
-		workspace.ReserveAttemptRequest{
+		workspace.StartAttemptRequest{
 			MergeUnit: mustMergeUnitReference(
 				t, "alpha-plan", "unit-one",
 			),
@@ -186,18 +184,6 @@ func TestLocalGitIntegrationUsesExactRegisteredAttemptWorktree(t *testing.T) {
 			Goal:          goal,
 			OccurredAt: mustTime(
 				t, "2026-07-25T15:30:01Z",
-			),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	attempt, err = workspace.MaterializeAttempt(
-		context.Background(), journal, definition, attemptGit,
-		workspace.MaterializeAttemptRequest{
-			AttemptID: attempt.AttemptID(),
-			OccurredAt: mustTime(
-				t, "2026-07-25T15:30:02Z",
 			),
 		},
 	)
@@ -265,7 +251,7 @@ func TestLocalGitIntegrationUsesExactRegisteredAttemptWorktree(t *testing.T) {
 		result.Intent().AcceptedHead() != acceptedHead ||
 		result.Intent().AcceptedTree() != acceptedTree {
 		t.Fatalf(
-			"registered-worktree integration intent = %#v",
+			"detached-attempt integration intent = %#v",
 			result.Intent(),
 		)
 	}
@@ -275,10 +261,9 @@ func TestLocalGitIntegrationUsesExactRegisteredAttemptWorktree(t *testing.T) {
 			current, acceptedHead,
 		)
 	}
-	runTargetGitTest(
-		t, definition.Workspace().RepositoryRoot(),
-		"worktree", "remove", "--force", attempt.Worktree(),
-	)
+	if err := os.RemoveAll(attempt.Worktree()); err != nil {
+		t.Fatal(err)
+	}
 	if err := journal.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -628,20 +613,7 @@ func TestLocalGitCompletedIntegrationRetryFollowsLaterDurableFrontier(
 	if err != nil {
 		t.Fatal(err)
 	}
-	second := secondCore.reserve(t, "2026-07-25T16:25:01Z")
-	second, err = workspace.MaterializeAttempt(
-		context.Background(),
-		secondCore.journal,
-		secondCore.definition,
-		workspace.DefaultLocalAttemptGitAdapter(),
-		workspace.MaterializeAttemptRequest{
-			AttemptID:  second.AttemptID(),
-			OccurredAt: mustTime(t, "2026-07-25T16:25:02Z"),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	second := secondCore.reserveWithLocalGit(t, "2026-07-25T16:25:01Z")
 	if second.Base() != firstMerge {
 		t.Fatalf(
 			"second real integration base = %s, want %s",
@@ -656,8 +628,7 @@ func TestLocalGitCompletedIntegrationRetryFollowsLaterDurableFrontier(
 		"second accepted attempt",
 	)
 	runTargetGitTest(
-		t, scenario.repositoryRoot, "update-ref",
-		"refs/heads/"+second.Branch(),
+		t, second.Worktree(), "update-ref", "--no-deref", "HEAD",
 		rawGitObject(secondAccepted),
 	)
 	runTargetGitTest(
@@ -845,11 +816,12 @@ func TestLocalGitIntegrationRecoversCreatedObjectAndPublishedRef(
 				scenario.attempt.AttemptID(),
 			)
 			if test.point == workspace.IntegrationFaultAfterRefCAS {
-				runTargetGitTest(
-					t, scenario.repositoryRoot,
-					"worktree", "remove", "--force",
-					scenario.attempt.Worktree(),
-				)
+				if err := os.RemoveAll(scenario.attempt.Worktree()); err != nil {
+					t.Fatalf(
+						"remove detached attempt worktree %s: %v",
+						scenario.attempt.Worktree(), err,
+					)
+				}
 				if err := scenario.journal.Close(); err != nil {
 					t.Fatal(err)
 				}
@@ -1259,7 +1231,7 @@ func TestWorkspaceReadmissionRejectsRecreatedIntegratedFeatureRef(
 func TestLocalGitIntegrationRejectsRefChangesAfterIntent(t *testing.T) {
 	t.Parallel()
 
-	t.Run("attempt ref", func(t *testing.T) {
+	t.Run("accepted attempt head", func(t *testing.T) {
 		requireFullSuite(t, "post-intent ref drift permutation")
 
 		scenario := newRealIntegrationScenario(
@@ -1272,13 +1244,11 @@ func TestLocalGitIntegrationRejectsRefChangesAfterIntent(t *testing.T) {
 		attacker := createIntegrationTestCommit(
 			t, scenario.repositoryRoot, scenario.acceptedTree,
 			[]workspace.GitObjectID{scenario.acceptedHead},
-			"attempt ref attacker",
+			"accepted attempt head attacker",
 		)
-		attemptRef := "refs/heads/" + scenario.attempt.Branch()
 		runTargetGitTest(
-			t, scenario.repositoryRoot,
-			"update-ref", attemptRef, rawGitObject(attacker),
-			rawGitObject(scenario.acceptedHead),
+			t, scenario.attempt.Worktree(), "reset", "--hard",
+			rawGitObject(attacker),
 		)
 		if _, err := workspace.IntegrateMergeUnit(
 			context.Background(),
@@ -1295,9 +1265,9 @@ func TestLocalGitIntegrationRejectsRefChangesAfterIntent(t *testing.T) {
 		); err == nil ||
 			!strings.Contains(
 				err.Error(),
-				"exact registered clean attempt worktree",
+				"exact clean detached attempt worktree",
 			) {
-			t.Fatalf("moved attempt ref error = %v", err)
+			t.Fatalf("moved accepted attempt head error = %v", err)
 		}
 		featureHead := strings.TrimSpace(runTargetGitTest(
 			t, scenario.repositoryRoot, "rev-parse",
@@ -1305,15 +1275,13 @@ func TestLocalGitIntegrationRejectsRefChangesAfterIntent(t *testing.T) {
 		))
 		if featureHead != rawGitObject(scenario.base) {
 			t.Fatalf(
-				"moved attempt ref advanced feature to %s",
+				"moved accepted attempt head advanced feature to %s",
 				featureHead,
 			)
 		}
 		runTargetGitTest(
-			t, scenario.repositoryRoot,
-			"update-ref", attemptRef,
+			t, scenario.attempt.Worktree(), "reset", "--hard",
 			rawGitObject(scenario.acceptedHead),
-			rawGitObject(attacker),
 		)
 		recovered, err := workspace.IntegrateMergeUnit(
 			context.Background(),
@@ -1330,7 +1298,7 @@ func TestLocalGitIntegrationRejectsRefChangesAfterIntent(t *testing.T) {
 		)
 		if err != nil || recovered.MergeCommit() != expectedMerge {
 			t.Fatalf(
-				"recover restored attempt ref = %#v error=%v",
+				"recover restored accepted attempt head = %#v error=%v",
 				recovered, err,
 			)
 		}
@@ -1453,22 +1421,20 @@ func TestLocalGitIntegrationRejectsAttemptPathChangesBeforeCAS(
 			},
 		},
 		{
-			name: "registered worktree relocation",
+			name: "attempt directory relocation",
 			mutate: func(
 				t *testing.T,
 				scenario *realIntegrationScenario,
 			) func() {
 				worktree := scenario.attempt.Worktree()
 				relocated := worktree + "-relocated"
-				runTargetGitTest(
-					t, scenario.repositoryRoot,
-					"worktree", "move", worktree, relocated,
-				)
+				if err := os.Rename(worktree, relocated); err != nil {
+					t.Fatal(err)
+				}
 				return func() {
-					runTargetGitTest(
-						t, scenario.repositoryRoot,
-						"worktree", "move", relocated, worktree,
-					)
+					if err := os.Rename(relocated, worktree); err != nil {
+						t.Fatal(err)
+					}
 				}
 			},
 		},
@@ -1595,7 +1561,7 @@ func TestLocalGitIntegrationRejectsInvalidAcceptedAncestryTreeAndBase(
 		)
 		assertRejectedRealIntegration(
 			t, scenario,
-			"exact registered clean attempt worktree",
+			"exact clean detached attempt worktree",
 		)
 	})
 
@@ -1833,18 +1799,7 @@ func newRealIntegrationScenario(
 	t.Helper()
 	fixture := newDefinitionFixtureForHash(t, algorithm)
 	core := newAttemptHarnessFromFixture(t, fixture, "unit-one")
-	attempt := core.reserve(t, "2026-07-25T14:30:00Z")
-	attempt, err := workspace.MaterializeAttempt(
-		context.Background(), core.journal, core.definition,
-		workspace.DefaultLocalAttemptGitAdapter(),
-		workspace.MaterializeAttemptRequest{
-			AttemptID:  attempt.AttemptID(),
-			OccurredAt: mustTime(t, "2026-07-25T14:30:01Z"),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	attempt := core.reserveWithLocalGit(t, "2026-07-25T14:30:00Z")
 	repositoryRoot := core.definition.Workspace().RepositoryRoot()
 	treeText := strings.TrimSpace(runTargetGitTest(
 		t, repositoryRoot, "rev-parse",
@@ -1861,11 +1816,7 @@ func newRealIntegrationScenario(
 		parents = append(parents, core.base)
 	}
 	accepted := createIntegrationTestCommit(
-		t, repositoryRoot, tree, parents, "accepted attempt",
-	)
-	runTargetGitTest(
-		t, repositoryRoot, "update-ref",
-		"refs/heads/"+attempt.Branch(), rawGitObject(accepted),
+		t, attempt.Worktree(), tree, parents, "accepted attempt",
 	)
 	runTargetGitTest(
 		t, attempt.Worktree(), "reset", "--hard", rawGitObject(accepted),

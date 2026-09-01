@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -32,6 +33,144 @@ func (runner *protocolCheckRunner) RunConfiguredCheck(
 	return runner.result, runner.err
 }
 
+const commitProtocolGitTestChildEnvironment = "FEATURE_IMPLEMENT_COMMIT_PROTOCOL_GIT_TEST_CHILD"
+
+func runCommitProtocolGitTestInEnvironment(t *testing.T, environment ...string) {
+	t.Helper()
+	command := exec.Command(os.Args[0], "-test.run", "^"+t.Name()+"$")
+	command.Env = append(os.Environ(), environment...)
+	command.Env = append(command.Env, commitProtocolGitTestChildEnvironment+"="+t.Name())
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run %s in isolated environment: %v: %s", t.Name(), err, output)
+	}
+}
+
+func TestLocalCommitUsesTargetRepositoryIdentity(t *testing.T) {
+	t.Parallel()
+
+	if os.Getenv(commitProtocolGitTestChildEnvironment) != t.Name() {
+		globalConfig := filepath.Join(t.TempDir(), "global.gitconfig")
+		if err := os.WriteFile(globalConfig, []byte(
+			"[user]\n\tname = Ambient Identity\n\temail = ambient@example.test\n",
+		), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runCommitProtocolGitTestInEnvironment(
+			t,
+			"GIT_CONFIG_NOSYSTEM=1",
+			"GIT_CONFIG_GLOBAL="+globalConfig,
+			"GIT_CONFIG_SYSTEM="+os.DevNull,
+		)
+		return
+	}
+
+	harness := newConfiguredAttemptHarness(t)
+	target := harness.definition.Workspace().RepositoryRoot()
+	runGitSetup(t, target, "config", "user.name", "Target Identity")
+	runGitSetup(t, target, "config", "user.email", "target@example.test")
+	attempt := harness.reserveWithLocalGit(t, "2026-07-21T10:55:00Z")
+
+	if err := os.MkdirAll(filepath.Join(attempt.Worktree(), "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(attempt.Worktree(), "src", "identity.go"),
+		[]byte("package protocol\n\nconst Identity = true\n"), 0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	runGitSetup(t, attempt.Worktree(), "add", "src/identity.go")
+
+	runner := &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())}
+	shell, err := workspace.NewCommitProtocolShell(workspace.DefaultLocalCommitGitAdapter(), runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := workspace.ExecuteAttemptCommitStep(
+		context.Background(), harness.journal, harness.definition, shell,
+		workspace.ExecuteAttemptCommitStepRequest{
+			AttemptID: attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T10:57:00Z"),
+		},
+	)
+	if err != nil {
+		t.Fatalf("execute configured commit: %v", err)
+	}
+	state, configured := result.Protocol()
+	if !configured || state.Phase() != workspace.CommitProtocolComplete {
+		t.Fatalf("configured commit result = %#v configured=%v", state, configured)
+	}
+	identity := strings.Split(strings.TrimSuffix(string(runGitSetup(
+		t, attempt.Worktree(), "show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", rawGitObject(state.Head()),
+	)), "\n"), "\x00")
+	if len(identity) != 4 || identity[0] != "Target Identity" || identity[1] != "target@example.test" ||
+		identity[2] != "Target Identity" || identity[3] != "target@example.test" {
+		t.Fatalf("configured commit identity = %#v", identity)
+	}
+	for _, key := range []string{"user.name", "user.email"} {
+		command := exec.Command("git", "-C", attempt.Worktree(), "config", "--local", "--get", key)
+		if output, err := command.Output(); err == nil {
+			t.Fatalf("attempt repository persisted %s=%q", key, output)
+		} else {
+			var exitError *exec.ExitError
+			if !errors.As(err, &exitError) || exitError.ExitCode() != 1 {
+				t.Fatalf("inspect attempt-local %s: %v", key, err)
+			}
+		}
+	}
+}
+
+func TestLocalCommitRejectsMissingTargetRepositoryIdentity(t *testing.T) {
+	t.Parallel()
+
+	if os.Getenv(commitProtocolGitTestChildEnvironment) != t.Name() {
+		home := t.TempDir()
+		runCommitProtocolGitTestInEnvironment(
+			t,
+			"HOME="+home,
+			"XDG_CONFIG_HOME="+home,
+			"GIT_CONFIG_NOSYSTEM=1",
+			"GIT_CONFIG_GLOBAL="+os.DevNull,
+			"GIT_CONFIG_SYSTEM="+os.DevNull,
+		)
+		return
+	}
+
+	harness := newConfiguredAttemptHarness(t)
+	attempt := harness.reserveWithLocalGit(t, "2026-07-21T10:55:00Z")
+	if err := os.MkdirAll(filepath.Join(attempt.Worktree(), "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(attempt.Worktree(), "src", "identity.go"),
+		[]byte("package protocol\n\nconst Identity = false\n"), 0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	runGitSetup(t, attempt.Worktree(), "add", "src/identity.go")
+	before := parseGitHead(t, attempt.Worktree())
+
+	runner := &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())}
+	shell, err := workspace.NewCommitProtocolShell(workspace.DefaultLocalCommitGitAdapter(), runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = workspace.ExecuteAttemptCommitStep(
+		context.Background(), harness.journal, harness.definition, shell,
+		workspace.ExecuteAttemptCommitStepRequest{
+			AttemptID: attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T10:57:00Z"),
+		},
+	)
+	if err == nil || !strings.Contains(
+		err.Error(), "target repository identity is incomplete; set user.name and user.email",
+	) {
+		t.Fatalf("missing target identity error = %v", err)
+	}
+	if after := parseGitHead(t, attempt.Worktree()); after != before {
+		t.Fatalf("missing target identity created commit %s, want head %s", after, before)
+	}
+}
+
 func TestLocalCommitShellCreatesExactCommitAndRevalidatesAfterRebase(t *testing.T) {
 	t.Parallel()
 
@@ -56,7 +195,7 @@ func TestLocalCommitShellCreatesExactCommitAndRevalidatesAfterRebase(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err = shell.ExecuteNextCommitStep(context.Background(), state, branch, repository, "")
+	state, err = shell.ExecuteNextCommitStep(context.Background(), state, repository, "")
 	if err != nil {
 		t.Fatalf("ExecuteNextCommitStep: %v", err)
 	}
@@ -69,6 +208,7 @@ func TestLocalCommitShellCreatesExactCommitAndRevalidatesAfterRebase(t *testing.
 		t.Fatalf("zero-value VerifySequence error = %v", err)
 	}
 	head := parseGitHead(t, repository)
+	runGitSetup(t, repository, "branch", "-f", branch, rawGitObject(head))
 	completed := state.CompletedSteps()
 	if len(completed) != 1 || completed[0].Commit().Commit() != head || len(completed[0].Checks()) != 1 {
 		t.Fatalf("completed steps = %#v", completed)
@@ -98,10 +238,11 @@ func TestLocalCommitShellCreatesExactCommitAndRevalidatesAfterRebase(t *testing.
 	runGitSetup(t, repository, "switch", branch)
 	runGitSetup(t, repository, "rebase", "--onto", rawGitObject(newBase), rawGitObject(base), branch)
 	newHead := parseGitHead(t, repository)
+	runGitSetup(t, repository, "switch", "--detach", rawGitObject(newHead))
 	if newHead == head {
 		t.Fatal("rebase did not replace the configured commit object")
 	}
-	state, err = shell.RemapAfterRebase(context.Background(), state, branch, repository, newBase, newHead)
+	state, err = shell.RemapAfterRebase(context.Background(), state, repository, newBase, newHead)
 	if err != nil {
 		t.Fatalf("RemapAfterRebase: %v", err)
 	}
@@ -139,7 +280,7 @@ func TestLocalCommitShellRerunsEachRebasedStepCheckFromFinalHead(t *testing.T) {
 			t.Fatal(err)
 		}
 		runGitSetup(t, repository, "add", filepath.Join("src", name))
-		state, err = shell.ExecuteNextCommitStep(context.Background(), state, branch, repository, "")
+		state, err = shell.ExecuteNextCommitStep(context.Background(), state, repository, "")
 		if err != nil {
 			t.Fatalf("execute step %d: %v", index+1, err)
 		}
@@ -147,6 +288,7 @@ func TestLocalCommitShellRerunsEachRebasedStepCheckFromFinalHead(t *testing.T) {
 	if state.Phase() != workspace.CommitProtocolComplete || len(runner.invocations) != 2 {
 		t.Fatalf("initial state=%#v runner calls=%d", state, len(runner.invocations))
 	}
+	runGitSetup(t, repository, "branch", "-f", branch, rawGitObject(state.Head()))
 
 	runGitSetup(t, repository, "switch", "-c", "upstream", rawGitObject(base))
 	if err := os.WriteFile(filepath.Join(repository, "README.md"), []byte("upstream\n"), 0o644); err != nil {
@@ -158,8 +300,9 @@ func TestLocalCommitShellRerunsEachRebasedStepCheckFromFinalHead(t *testing.T) {
 	runGitSetup(t, repository, "switch", branch)
 	runGitSetup(t, repository, "rebase", "--onto", rawGitObject(newBase), rawGitObject(base), branch)
 	newHead := parseGitHead(t, repository)
+	runGitSetup(t, repository, "switch", "--detach", rawGitObject(newHead))
 
-	state, err = shell.RemapAfterRebase(context.Background(), state, branch, repository, newBase, newHead)
+	state, err = shell.RemapAfterRebase(context.Background(), state, repository, newBase, newHead)
 	if err != nil {
 		t.Fatalf("remap two-step rebase: %v", err)
 	}
@@ -200,14 +343,17 @@ func TestLocalCommitShellRemapsBaseOnlyRebaseBeforeFirstStep(t *testing.T) {
 	runGitSetup(t, repository, "add", "unexpected.txt")
 	runGitSetup(t, repository, "commit", "-m", "Unexpected commit")
 	unrecordedHead := parseGitHead(t, repository)
+	runGitSetup(t, repository, "switch", "--detach", rawGitObject(unrecordedHead))
 	if _, err := shell.RemapAfterRebase(
-		context.Background(), state, branch, repository, newBase, unrecordedHead,
+		context.Background(), state, repository, newBase, unrecordedHead,
 	); err == nil || !strings.Contains(err.Error(), "base-only commit rebase must end at the new base") {
 		t.Fatalf("base-only remap with an unrecorded commit error=%v", err)
 	}
+	runGitSetup(t, repository, "switch", branch)
 	runGitSetup(t, repository, "reset", "--hard", rawGitObject(newBase))
+	runGitSetup(t, repository, "switch", "--detach", rawGitObject(newBase))
 
-	state, err := shell.RemapAfterRebase(context.Background(), state, branch, repository, newBase, newBase)
+	state, err := shell.RemapAfterRebase(context.Background(), state, repository, newBase, newBase)
 	if err != nil {
 		t.Fatalf("base-only RemapAfterRebase: %v", err)
 	}
@@ -239,6 +385,7 @@ func TestLocalCommitShellSupportsSHA256Repositories(t *testing.T) {
 	if base.Algorithm() != workspace.GitHashSHA256 {
 		t.Fatalf("repository object format = %s", base.Algorithm())
 	}
+	runGitSetup(t, repository, "switch", "--detach", rawGitObject(base))
 	if err := os.WriteFile(tracked, []byte("package protocol\n\nconst Enabled = true\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +394,7 @@ func TestLocalCommitShellSupportsSHA256Repositories(t *testing.T) {
 	state := oneStepProtocolState(t, base, workspace.CheckExpectationPass, nil)
 	runner := &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())}
 	shell, _ := workspace.NewCommitProtocolShell(workspace.DefaultLocalCommitGitAdapter(), runner)
-	state, err := shell.ExecuteNextCommitStep(context.Background(), state, branch, repository, "")
+	state, err := shell.ExecuteNextCommitStep(context.Background(), state, repository, "")
 	if err != nil {
 		t.Fatalf("SHA-256 commit protocol: %v", err)
 	}
@@ -262,7 +409,7 @@ func TestLocalCommitAdapterParsesRenameModesSymlinksAndDeletion(t *testing.T) {
 	t.Parallel()
 	requireFullSuite(t, "Git diff-shape permutation")
 
-	repository, branch, _ := newProtocolRepository(t)
+	repository, _, _ := newProtocolRepository(t)
 	newPath := filepath.Join(repository, "src", "renamed.go")
 	runGitSetup(t, repository, "mv", "src/protocol.go", "src/renamed.go")
 	if err := os.Chmod(newPath, 0o755); err != nil {
@@ -273,7 +420,7 @@ func TestLocalCommitAdapterParsesRenameModesSymlinksAndDeletion(t *testing.T) {
 	}
 	runGitSetup(t, repository, "add", "-A")
 	adapter := workspace.DefaultLocalCommitGitAdapter()
-	staged, err := adapter.InspectStaged(context.Background(), repository, branch)
+	staged, err := adapter.InspectStaged(context.Background(), repository)
 	if err != nil {
 		t.Fatalf("InspectStaged: %v", err)
 	}
@@ -314,7 +461,7 @@ func TestLocalCommitAdapterRejectsDirtySubmoduleBeforeCommit(t *testing.T) {
 	runGitSetup(t, submodule, "add", "module.txt")
 	runGitSetup(t, submodule, "commit", "-m", "Initial module")
 
-	repository, branch, _ := newProtocolRepository(t)
+	repository, _, _ := newProtocolRepository(t)
 	runGitSetup(t, repository, "-c", "protocol.file.allow=always", "submodule", "add", submodule, "modules/tool")
 	runGitSetup(t, repository, "config", "diff.ignoreSubmodules", "all")
 	runGitSetup(t, repository, "config", "submodule.modules/tool.ignore", "all")
@@ -322,7 +469,7 @@ func TestLocalCommitAdapterRejectsDirtySubmoduleBeforeCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	inspection, err := workspace.DefaultLocalCommitGitAdapter().InspectStaged(context.Background(), repository, branch)
+	inspection, err := workspace.DefaultLocalCommitGitAdapter().InspectStaged(context.Background(), repository)
 	if err != nil {
 		t.Fatalf("InspectStaged: %v", err)
 	}
@@ -346,7 +493,7 @@ func TestLocalCommitAdapterDoesNotHideStagedGitlinkFromPathPolicy(t *testing.T) 
 	runGitSetup(t, submodule, "add", "module.txt")
 	runGitSetup(t, submodule, "commit", "-m", "Initial module")
 
-	repository, branch, _ := newProtocolRepository(t)
+	repository, _, _ := newProtocolRepository(t)
 	runGitSetup(t, repository, "-c", "protocol.file.allow=always", "submodule", "add", submodule, "modules/tool")
 	runGitSetup(t, repository, "commit", "-m", "Add module")
 	base := parseGitHead(t, repository)
@@ -375,7 +522,7 @@ func TestLocalCommitAdapterDoesNotHideStagedGitlinkFromPathPolicy(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := shell.ExecuteNextCommitStep(context.Background(), state, branch, repository, ""); err == nil ||
+	if _, err := shell.ExecuteNextCommitStep(context.Background(), state, repository, ""); err == nil ||
 		!strings.Contains(err.Error(), "outside configured allowed_paths") {
 		t.Fatalf("hidden gitlink path-policy error = %v", err)
 	}
@@ -395,7 +542,7 @@ func TestLocalCommitAdapterRejectsHiddenIndexFlags(t *testing.T) {
 		{"skip worktree", "--skip-worktree"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			repository, branch, head := newProtocolRepository(t)
+			repository, _, head := newProtocolRepository(t)
 			runGitSetup(t, repository, "update-index", test.flag, "src/protocol.go")
 			if err := os.WriteFile(
 				filepath.Join(repository, "src", "protocol.go"),
@@ -404,11 +551,11 @@ func TestLocalCommitAdapterRejectsHiddenIndexFlags(t *testing.T) {
 				t.Fatal(err)
 			}
 			adapter := workspace.DefaultLocalCommitGitAdapter()
-			if _, err := adapter.InspectStaged(context.Background(), repository, branch); err == nil ||
+			if _, err := adapter.InspectStaged(context.Background(), repository); err == nil ||
 				!strings.Contains(err.Error(), "assume-unchanged and skip-worktree") {
 				t.Fatalf("InspectStaged hidden-index error = %v", err)
 			}
-			if err := adapter.VerifyCleanWorktree(context.Background(), repository, branch, head); err == nil ||
+			if err := adapter.VerifyCleanWorktree(context.Background(), repository, head); err == nil ||
 				!strings.Contains(err.Error(), "assume-unchanged and skip-worktree") {
 				t.Fatalf("VerifyCleanWorktree hidden-index error = %v", err)
 			}
@@ -494,7 +641,7 @@ func TestLocalCommitAdapterDoesNotTrustFsmonitorOrIgnoredInputs(t *testing.T) {
 	requireFullSuite(t, "Git fsmonitor and ignore profile matrix")
 
 	t.Run("lying fsmonitor", func(t *testing.T) {
-		repository, branch, head := newProtocolRepository(t)
+		repository, _, head := newProtocolRepository(t)
 		hook := filepath.Join(t.TempDir(), "lying-fsmonitor")
 		if err := os.WriteFile(hook, []byte("#!/bin/sh\nprintf 'token\\000'\n"), 0o755); err != nil {
 			t.Fatal(err)
@@ -512,14 +659,14 @@ func TestLocalCommitAdapterDoesNotTrustFsmonitorOrIgnoredInputs(t *testing.T) {
 			t.Fatalf("lying fsmonitor did not hide the change from ordinary Git: %q", ordinary)
 		}
 		if err := workspace.DefaultLocalCommitGitAdapter().VerifyCleanWorktree(
-			context.Background(), repository, branch, head,
+			context.Background(), repository, head,
 		); err == nil {
 			t.Fatal("trusted clean-worktree verification accepted a change hidden by fsmonitor")
 		}
 	})
 
 	t.Run("ignored input", func(t *testing.T) {
-		repository, branch, _ := newProtocolRepository(t)
+		repository, _, _ := newProtocolRepository(t)
 		if err := os.WriteFile(filepath.Join(repository, ".gitignore"), []byte("generated/\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -538,7 +685,7 @@ func TestLocalCommitAdapterDoesNotTrustFsmonitorOrIgnoredInputs(t *testing.T) {
 			t.Fatalf("ignored input was not hidden from ordinary Git status: %q", ordinary)
 		}
 		if err := workspace.DefaultLocalCommitGitAdapter().VerifyCleanWorktree(
-			context.Background(), repository, branch, head,
+			context.Background(), repository, head,
 		); err == nil || !strings.Contains(err.Error(), "dirty") {
 			t.Fatalf("ignored-input clean-worktree error = %v", err)
 		}
@@ -581,18 +728,13 @@ func TestLocalCommitAdapterVerifiesRawBytesTypesAndModes(t *testing.T) {
 		}
 		adapter := workspace.DefaultLocalCommitGitAdapter()
 		if err := adapter.VerifyCleanWorktree(
-			context.Background(), repository, branch, head,
+			context.Background(), repository, head,
 		); err == nil || !strings.Contains(err.Error(), "external Git filter") {
 			t.Fatalf("clean-filter rejection error = %v", err)
 		}
-		if _, err := adapter.InspectStaged(context.Background(), repository, branch); err == nil ||
+		if _, err := adapter.InspectStaged(context.Background(), repository); err == nil ||
 			!strings.Contains(err.Error(), "external Git filter") {
 			t.Fatalf("staged clean-filter rejection error = %v", err)
-		}
-		if _, err := workspace.DefaultLocalAttemptGitAdapter().InspectAttemptWorktree(
-			context.Background(), repository, branch, repository,
-		); err == nil || !strings.Contains(err.Error(), "external Git filter") {
-			t.Fatalf("attempt clean-filter rejection error = %v", err)
 		}
 		if moved := parseGitHead(t, repository); moved != head {
 			t.Fatalf("trusted verification executed filter and moved head from %s to %s", head, moved)
@@ -603,7 +745,7 @@ func TestLocalCommitAdapterVerifiesRawBytesTypesAndModes(t *testing.T) {
 	})
 
 	t.Run("file mode", func(t *testing.T) {
-		repository, branch, head := newProtocolRepository(t)
+		repository, _, head := newProtocolRepository(t)
 		tracked := filepath.Join(repository, "src", "protocol.go")
 		runGitSetup(t, repository, "config", "core.fileMode", "false")
 		if err := os.Chmod(tracked, 0o755); err != nil {
@@ -613,14 +755,14 @@ func TestLocalCommitAdapterVerifiesRawBytesTypesAndModes(t *testing.T) {
 			t.Fatalf("core.fileMode=false did not hide mode change: %q", ordinary)
 		}
 		if err := workspace.DefaultLocalCommitGitAdapter().VerifyCleanWorktree(
-			context.Background(), repository, branch, head,
+			context.Background(), repository, head,
 		); err == nil || !strings.Contains(err.Error(), "executable mode differs") {
 			t.Fatalf("raw file-mode verification error = %v", err)
 		}
 	})
 
 	t.Run("stat cache", func(t *testing.T) {
-		repository, branch, head := newProtocolRepository(t)
+		repository, _, head := newProtocolRepository(t)
 		tracked := filepath.Join(repository, "src", "protocol.go")
 		before, err := os.Stat(tracked)
 		if err != nil {
@@ -647,14 +789,14 @@ func TestLocalCommitAdapterVerifiesRawBytesTypesAndModes(t *testing.T) {
 			t.Fatalf("stat-cache configuration did not hide same-size change: %q", ordinary)
 		}
 		if err := workspace.DefaultLocalCommitGitAdapter().VerifyCleanWorktree(
-			context.Background(), repository, branch, head,
+			context.Background(), repository, head,
 		); err == nil || !strings.Contains(err.Error(), "bytes differ from tree") {
 			t.Fatalf("stat-cache raw verification error = %v", err)
 		}
 	})
 
 	t.Run("symlink type", func(t *testing.T) {
-		repository, branch, _ := newProtocolRepository(t)
+		repository, _, _ := newProtocolRepository(t)
 		link := filepath.Join(repository, "src", "protocol.go")
 		if err := os.Remove(link); err != nil {
 			t.Fatal(err)
@@ -679,7 +821,7 @@ func TestLocalCommitAdapterVerifiesRawBytesTypesAndModes(t *testing.T) {
 			t.Fatalf("core.symlinks=false did not hide type change: %q", ordinary)
 		}
 		if err := workspace.DefaultLocalCommitGitAdapter().VerifyCleanWorktree(
-			context.Background(), repository, branch, head,
+			context.Background(), repository, head,
 		); err == nil || !strings.Contains(err.Error(), "not a symbolic link") {
 			t.Fatalf("raw symlink verification error = %v", err)
 		}
@@ -689,7 +831,7 @@ func TestLocalCommitAdapterVerifiesRawBytesTypesAndModes(t *testing.T) {
 func TestLocalCommitAdapterDisablesReferenceTransactionHooks(t *testing.T) {
 	t.Parallel()
 
-	repository, branch, base := stagedProtocolRepository(t)
+	repository, _, base := stagedProtocolRepository(t)
 	gitDir := strings.TrimSpace(string(runGitSetup(t, repository, "rev-parse", "--absolute-git-dir")))
 	hook := filepath.Join(gitDir, "hooks", "reference-transaction")
 	sentinel := filepath.Join(gitDir, "hook-ran")
@@ -715,7 +857,7 @@ func TestLocalCommitAdapterDisablesReferenceTransactionHooks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err = shell.ExecuteNextCommitStep(context.Background(), state, branch, repository, "")
+	state, err = shell.ExecuteNextCommitStep(context.Background(), state, repository, "")
 	if err != nil || state.Phase() != workspace.CommitProtocolComplete {
 		t.Fatalf("configured commit with disabled hooks state=%#v err=%v", state, err)
 	}
@@ -728,7 +870,7 @@ func TestCommitShellRejectsDirtyStateWeakIsolationAndWrongFailure(t *testing.T) 
 	t.Parallel()
 
 	t.Run("dirty before commit", func(t *testing.T) {
-		repository, branch, base := newProtocolRepository(t)
+		repository, _, base := newProtocolRepository(t)
 		tracked := filepath.Join(repository, "src", "protocol.go")
 		if err := os.WriteFile(tracked, []byte("package protocol\n\nconst Staged = true\n"), 0o644); err != nil {
 			t.Fatal(err)
@@ -740,19 +882,19 @@ func TestCommitShellRejectsDirtyStateWeakIsolationAndWrongFailure(t *testing.T) 
 		state := oneStepProtocolState(t, base, workspace.CheckExpectationPass, nil)
 		runner := &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())}
 		shell, _ := workspace.NewCommitProtocolShell(workspace.DefaultLocalCommitGitAdapter(), runner)
-		_, err := shell.ExecuteNextCommitStep(context.Background(), state, branch, repository, "")
+		_, err := shell.ExecuteNextCommitStep(context.Background(), state, repository, "")
 		if err == nil || !strings.Contains(err.Error(), "no unstaged, untracked, or conflicted") {
 			t.Fatalf("dirty pre-commit error = %v", err)
 		}
 	})
 
 	t.Run("weak check isolation", func(t *testing.T) {
-		repository, branch, base := stagedProtocolRepository(t)
+		repository, _, base := stagedProtocolRepository(t)
 		state := oneStepProtocolState(t, base, workspace.CheckExpectationPass, nil)
 		weak := workspace.NewCheckIsolationProof(true, false)
 		runner := &protocolCheckRunner{result: passingCheckResult(t, weak)}
 		shell, _ := workspace.NewCommitProtocolShell(workspace.DefaultLocalCommitGitAdapter(), runner)
-		state, err := shell.ExecuteNextCommitStep(context.Background(), state, branch, repository, "")
+		state, err := shell.ExecuteNextCommitStep(context.Background(), state, repository, "")
 		if err == nil || !strings.Contains(err.Error(), "did not prove") {
 			t.Fatalf("weak isolation error = %v", err)
 		}
@@ -762,7 +904,7 @@ func TestCommitShellRejectsDirtyStateWeakIsolationAndWrongFailure(t *testing.T) 
 	})
 
 	t.Run("wrong structured failure", func(t *testing.T) {
-		repository, branch, base := stagedProtocolRepository(t)
+		repository, _, base := stagedProtocolRepository(t)
 		state := oneStepProtocolState(
 			t, base, workspace.CheckExpectationExpectedTestFailure,
 			[]string{"example/pkg::TestExpected"},
@@ -776,14 +918,14 @@ func TestCommitShellRejectsDirtyStateWeakIsolationAndWrongFailure(t *testing.T) 
 			t, workspace.CheckExited, 1, "", wrongOutput, nil, workspace.StrictCheckIsolationProof(),
 		)}
 		shell, _ := workspace.NewCommitProtocolShell(workspace.DefaultLocalCommitGitAdapter(), runner)
-		_, err := shell.ExecuteNextCommitStep(context.Background(), state, branch, repository, "")
+		_, err := shell.ExecuteNextCommitStep(context.Background(), state, repository, "")
 		if err == nil || !strings.Contains(err.Error(), "does not satisfy") {
 			t.Fatalf("wrong failure error = %v", err)
 		}
 	})
 
 	t.Run("dirty after check", func(t *testing.T) {
-		repository, branch, base := stagedProtocolRepository(t)
+		repository, _, base := stagedProtocolRepository(t)
 		state := oneStepProtocolState(t, base, workspace.CheckExpectationPass, nil)
 		runner := &protocolCheckRunner{
 			result: passingCheckResult(t, workspace.StrictCheckIsolationProof()),
@@ -792,7 +934,7 @@ func TestCommitShellRejectsDirtyStateWeakIsolationAndWrongFailure(t *testing.T) 
 			},
 		}
 		shell, _ := workspace.NewCommitProtocolShell(workspace.DefaultLocalCommitGitAdapter(), runner)
-		_, err := shell.ExecuteNextCommitStep(context.Background(), state, branch, repository, "")
+		_, err := shell.ExecuteNextCommitStep(context.Background(), state, repository, "")
 		if err == nil || !strings.Contains(err.Error(), "changed Git state") {
 			t.Fatalf("dirty post-check error = %v", err)
 		}
@@ -802,7 +944,7 @@ func TestCommitShellRejectsDirtyStateWeakIsolationAndWrongFailure(t *testing.T) 
 func TestCommitShellAcceptsOnlyTheConfiguredExpectedFailure(t *testing.T) {
 	t.Parallel()
 
-	repository, branch, base := stagedProtocolRepository(t)
+	repository, _, base := stagedProtocolRepository(t)
 	state := oneStepProtocolState(
 		t, base, workspace.CheckExpectationExpectedTestFailure,
 		[]string{"example/pkg::TestExpected"},
@@ -816,7 +958,7 @@ func TestCommitShellAcceptsOnlyTheConfiguredExpectedFailure(t *testing.T) {
 		t, workspace.CheckExited, 1, "", output, nil, workspace.StrictCheckIsolationProof(),
 	)}
 	shell, _ := workspace.NewCommitProtocolShell(workspace.DefaultLocalCommitGitAdapter(), runner)
-	state, err := shell.ExecuteNextCommitStep(context.Background(), state, branch, repository, "")
+	state, err := shell.ExecuteNextCommitStep(context.Background(), state, repository, "")
 	if err != nil || state.Phase() != workspace.CommitProtocolComplete {
 		t.Fatalf("expected failure state=%#v err=%v", state, err)
 	}
@@ -837,7 +979,9 @@ func newProtocolRepository(t *testing.T) (string, string, workspace.GitObjectID)
 	}
 	runGitSetup(t, repository, "add", "src/protocol.go")
 	runGitSetup(t, repository, "commit", "-m", "Initial")
-	return repository, branch, parseGitHead(t, repository)
+	base := parseGitHead(t, repository)
+	runGitSetup(t, repository, "switch", "--detach", rawGitObject(base))
+	return repository, branch, base
 }
 
 func stagedProtocolRepository(t *testing.T) (string, string, workspace.GitObjectID) {

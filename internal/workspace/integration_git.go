@@ -32,7 +32,7 @@ func DefaultLocalIntegrationGitAdapter() LocalIntegrationGitAdapter {
 func (adapter LocalIntegrationGitAdapter) InspectAttempt(
 	ctx context.Context,
 	binding LocalTargetBinding,
-	worktree, branch string,
+	worktree string,
 	expectedHead, expectedTree GitObjectID,
 ) (result AttemptGitInspection, resultErr error) {
 	if ctx == nil {
@@ -48,9 +48,6 @@ func (adapter LocalIntegrationGitAdapter) InspectAttempt(
 			"integration attempt inspection requires target-format head and tree bindings",
 		)
 	}
-	if err := validateAttemptBranchSyntax(branch); err != nil {
-		return AttemptGitInspection{}, err
-	}
 	session, err := adapter.target.openBoundSession(binding)
 	if err != nil {
 		return AttemptGitInspection{}, err
@@ -59,13 +56,13 @@ func (adapter LocalIntegrationGitAdapter) InspectAttempt(
 		resultErr = errors.Join(resultErr, session.Close())
 	}()
 	inspection, err := adapter.target.git.InspectAttemptWorktree(
-		ctx, binding.root, branch, worktree,
+		ctx, binding.root, worktree,
 	)
 	if err != nil {
 		return AttemptGitInspection{}, err
 	}
 	if err := verifyIntegrationAttemptInspection(
-		binding, filepath.Clean(worktree), branch,
+		binding, filepath.Clean(worktree),
 		expectedHead, expectedTree, inspection,
 	); err != nil {
 		return AttemptGitInspection{}, err
@@ -79,7 +76,6 @@ func (adapter LocalIntegrationGitAdapter) InspectAttempt(
 func (adapter LocalIntegrationGitAdapter) InspectIntegration(
 	ctx context.Context,
 	binding LocalTargetBinding,
-	attemptBranch string,
 	intent MergeUnitIntegrationIntent,
 ) (result IntegrationGitInspection, resultErr error) {
 	if ctx == nil {
@@ -88,12 +84,12 @@ func (adapter LocalIntegrationGitAdapter) InspectIntegration(
 		)
 	}
 	if err := validateIntegrationGitRequest(
-		binding, attemptBranch, intent,
+		binding, intent,
 	); err != nil {
 		return IntegrationGitInspection{}, err
 	}
 	if _, err := adapter.inspectBoundAttempt(
-		ctx, binding, attemptBranch, intent,
+		ctx, binding, intent,
 	); err != nil {
 		return IntegrationGitInspection{}, err
 	}
@@ -105,14 +101,13 @@ func (adapter LocalIntegrationGitAdapter) InspectIntegration(
 		resultErr = errors.Join(resultErr, session.Close())
 	}()
 	return inspectIntegrationSession(
-		ctx, session, attemptBranch, intent,
+		ctx, session, intent,
 	)
 }
 
 func (adapter LocalIntegrationGitAdapter) CreateIntegrationCommit(
 	ctx context.Context,
 	binding LocalTargetBinding,
-	attemptBranch string,
 	intent MergeUnitIntegrationIntent,
 ) (resultErr error) {
 	if ctx == nil {
@@ -121,12 +116,12 @@ func (adapter LocalIntegrationGitAdapter) CreateIntegrationCommit(
 		)
 	}
 	if err := validateIntegrationGitRequest(
-		binding, attemptBranch, intent,
+		binding, intent,
 	); err != nil {
 		return err
 	}
 	if _, err := adapter.inspectBoundAttempt(
-		ctx, binding, attemptBranch, intent,
+		ctx, binding, intent,
 	); err != nil {
 		return err
 	}
@@ -138,7 +133,7 @@ func (adapter LocalIntegrationGitAdapter) CreateIntegrationCommit(
 		resultErr = errors.Join(resultErr, session.Close())
 	}()
 	inspection, err := inspectIntegrationSession(
-		ctx, session, attemptBranch, intent,
+		ctx, session, intent,
 	)
 	if err != nil {
 		return err
@@ -189,7 +184,6 @@ func (adapter LocalIntegrationGitAdapter) CreateIntegrationCommit(
 func (adapter LocalIntegrationGitAdapter) PublishIntegration(
 	ctx context.Context,
 	binding LocalTargetBinding,
-	attemptBranch string,
 	intent MergeUnitIntegrationIntent,
 	fault IntegrationLifecycleFaultInjector,
 ) (resultErr error) {
@@ -199,12 +193,12 @@ func (adapter LocalIntegrationGitAdapter) PublishIntegration(
 		)
 	}
 	if err := validateIntegrationGitRequest(
-		binding, attemptBranch, intent,
+		binding, intent,
 	); err != nil {
 		return err
 	}
 	if _, err := adapter.inspectBoundAttempt(
-		ctx, binding, attemptBranch, intent,
+		ctx, binding, intent,
 	); err != nil {
 		return err
 	}
@@ -216,7 +210,7 @@ func (adapter LocalIntegrationGitAdapter) PublishIntegration(
 		resultErr = errors.Join(resultErr, session.Close())
 	}()
 	inspection, err := inspectIntegrationSession(
-		ctx, session, attemptBranch, intent,
+		ctx, session, intent,
 	)
 	if err != nil {
 		return err
@@ -239,7 +233,7 @@ func (adapter LocalIntegrationGitAdapter) PublishIntegration(
 		)
 	}
 	if _, err := adapter.inspectBoundAttempt(
-		ctx, binding, attemptBranch, intent,
+		ctx, binding, intent,
 	); err != nil {
 		return fmt.Errorf(
 			"verify exact attempt worktree immediately before feature-ref publication: %w",
@@ -249,22 +243,16 @@ func (adapter LocalIntegrationGitAdapter) PublishIntegration(
 	if err := session.Verify(); err != nil {
 		return err
 	}
-	attemptRef := "refs/heads/" + attemptBranch
-	// The update command's old-object field is the feature-ref verification.
-	// Listing a separate verify for the same ref would make update-ref reject
-	// the transaction as duplicate commands for one ref.
-	transaction := []byte(fmt.Sprintf(
-		"verify %s %s\nupdate %s %s %s\n",
-		attemptRef,
-		gitObjectHex(intent.acceptedHead),
-		intent.featureRef,
-		gitObjectHex(intent.expectedMerge),
-		gitObjectHex(intent.expectedFeatureHead),
-	))
+	// The feature-ref old-object field supplies the compare-and-swap check; the
+	// detached scratch attempt is re-inspected immediately around the transaction.
+	transaction := fmt.Sprintf(
+		"update %s %s %s\n",
+		intent.featureRef, gitObjectHex(intent.expectedMerge), gitObjectHex(intent.expectedFeatureHead),
+	)
 	if err := session.runPreparedReferenceTransaction(
 		ctx,
 		integrationReflogMessage(intent.digest),
-		transaction,
+		[]byte(transaction),
 		func() error {
 			exists, preparedHead, preparedMarker, err :=
 				session.inspectFeatureRef(ctx)
@@ -289,7 +277,7 @@ func (adapter LocalIntegrationGitAdapter) PublishIntegration(
 		)
 	}
 	if _, err := adapter.inspectBoundAttempt(
-		ctx, binding, attemptBranch, intent,
+		ctx, binding, intent,
 	); err != nil {
 		return fmt.Errorf(
 			"verify exact attempt worktree after feature-ref publication: %w",
@@ -297,7 +285,7 @@ func (adapter LocalIntegrationGitAdapter) PublishIntegration(
 		)
 	}
 	verified, err := inspectIntegrationSession(
-		ctx, session, attemptBranch, intent,
+		ctx, session, intent,
 	)
 	if err != nil {
 		return err
@@ -451,12 +439,11 @@ func (adapter LocalIntegrationGitAdapter) VerifyCompletedIntegration(
 func (adapter LocalIntegrationGitAdapter) inspectBoundAttempt(
 	ctx context.Context,
 	binding LocalTargetBinding,
-	attemptBranch string,
 	intent MergeUnitIntegrationIntent,
 ) (AttemptGitInspection, error) {
 	inspection, err := adapter.InspectAttempt(
 		ctx, binding, intent.attemptWorktreeBinding.worktree,
-		attemptBranch, intent.acceptedHead, intent.acceptedTree,
+		intent.acceptedHead, intent.acceptedTree,
 	)
 	if err != nil {
 		return AttemptGitInspection{}, err
@@ -466,25 +453,67 @@ func (adapter LocalIntegrationGitAdapter) inspectBoundAttempt(
 			"attempt worktree Git binding changed after durable integration intent",
 		)
 	}
+	if err := adapter.importDetachedAttemptObjects(
+		ctx, binding, inspection.worktreeBinding.worktree, intent.acceptedHead,
+	); err != nil {
+		return AttemptGitInspection{}, err
+	}
 	return inspection, nil
+}
+
+// importDetachedAttemptObjects copies the accepted object closure into the
+// target object database without creating an attempt ref. Detached attempts
+// have their own Git administration, so their commits are otherwise visible
+// only through the attempt's object directory.
+func (adapter LocalIntegrationGitAdapter) importDetachedAttemptObjects(
+	ctx context.Context,
+	binding LocalTargetBinding,
+	worktree string,
+	head GitObjectID,
+) error {
+	if worktree == "" || head.IsZero() {
+		return fmt.Errorf("detached attempt import requires worktree and accepted head")
+	}
+	// A raw object ID is not an advertised upload-pack ref, so Git rejects a
+	// fetch of it from the detached repository. HEAD is advertised even when it
+	// is detached. The caller has already inspected that HEAD as `head`; verify
+	// the imported object below before allowing integration to use it.
+	output, exitCode, err := adapter.target.git.run(
+		ctx, binding.root,
+		"-c", "protocol.file.allow=always",
+		"fetch", "--no-tags", "--no-write-fetch-head", worktree, "HEAD",
+	)
+	if err != nil || exitCode != 0 {
+		if err == nil && len(output) != 0 {
+			return fmt.Errorf(
+				"import detached attempt objects: Git exited with status %d: %s",
+				exitCode, strings.TrimSpace(string(output)),
+			)
+		}
+		return gitExitError("import detached attempt objects", exitCode, err)
+	}
+	_, exitCode, err = adapter.target.git.run(
+		ctx, binding.root, "cat-file", "-e", objectHex(head)+"^{commit}",
+	)
+	if err != nil || exitCode != 0 {
+		return gitExitError(
+			"verify imported detached attempt object "+head.String(),
+			exitCode, err,
+		)
+	}
+	return nil
 }
 
 func verifyIntegrationAttemptInspection(
 	target LocalTargetBinding,
-	worktree, branch string,
+	worktree string,
 	expectedHead, expectedTree GitObjectID,
 	inspection AttemptGitInspection,
 ) error {
-	if !inspection.branchExists || !inspection.worktreeExists ||
-		!inspection.worktreeRegistered || !inspection.clean ||
-		inspection.worktreeBranch != branch ||
-		inspection.branchHead != expectedHead ||
-		inspection.worktreeHead != expectedHead ||
+	if !inspection.worktreeExists || !inspection.clean || inspection.worktreeHead != expectedHead ||
 		inspection.worktreeTree != expectedTree ||
 		inspection.worktreeBinding.IsZero() {
-		return fmt.Errorf(
-			"integration requires the exact registered clean attempt worktree at its accepted head and tree",
-		)
+		return fmt.Errorf("integration requires an exact clean detached attempt worktree at its accepted head and tree")
 	}
 	attemptBinding := inspection.worktreeBinding
 	if attemptBinding.worktree != worktree {
@@ -492,9 +521,9 @@ func verifyIntegrationAttemptInspection(
 			"integration attempt worktree path changed during exact inspection",
 		)
 	}
-	if attemptBinding.commonDirectory != target.commonDirectory {
+	if attemptBinding.commonDirectory == target.commonDirectory {
 		return fmt.Errorf(
-			"integration attempt worktree does not share the bound target repository",
+			"integration attempt unexpectedly shares the target Git administration",
 		)
 	}
 	return nil
@@ -502,21 +531,12 @@ func verifyIntegrationAttemptInspection(
 
 func validateIntegrationGitRequest(
 	binding LocalTargetBinding,
-	attemptBranch string,
 	intent MergeUnitIntegrationIntent,
 ) error {
 	if err := validateIntegrationTargetRequest(
 		binding, intent,
 	); err != nil {
 		return err
-	}
-	if err := validateAttemptBranchSyntax(attemptBranch); err != nil {
-		return err
-	}
-	if "refs/heads/"+attemptBranch == binding.featureRef {
-		return fmt.Errorf(
-			"integration attempt and feature refs must be distinct",
-		)
 	}
 	return nil
 }
@@ -545,7 +565,6 @@ func validateIntegrationTargetRequest(
 func inspectIntegrationSession(
 	ctx context.Context,
 	session *localTargetGitSession,
-	attemptBranch string,
 	intent MergeUnitIntegrationIntent,
 ) (IntegrationGitInspection, error) {
 	if err := session.Verify(); err != nil {
@@ -586,19 +605,6 @@ func inspectIntegrationSession(
 			"inspect current feature head: %w", err,
 		)
 	}
-	attemptRef := "refs/heads/" + attemptBranch
-	attemptHead, err := resolveIntegrationRef(
-		ctx, session, attemptRef,
-	)
-	if err != nil {
-		return IntegrationGitInspection{}, err
-	}
-	if attemptHead != intent.acceptedHead {
-		return IntegrationGitInspection{}, fmt.Errorf(
-			"accepted attempt ref %s is %s, expected %s",
-			attemptRef, attemptHead, intent.acceptedHead,
-		)
-	}
 	if err := verifyIntegrationCommitObject(
 		ctx, session, intent.acceptedHead, intent.acceptedTree,
 	); err != nil {
@@ -636,30 +642,6 @@ func inspectIntegrationSession(
 	}
 	return NewIntegrationGitInspection(
 		featureHead, refState, expectedCommit,
-	)
-}
-
-func resolveIntegrationRef(
-	ctx context.Context,
-	session *localTargetGitSession,
-	ref string,
-) (GitObjectID, error) {
-	output, exitCode, err := session.run(
-		ctx, nil, "show-ref", "--verify", ref,
-	)
-	if err != nil || exitCode != 0 {
-		return GitObjectID{}, gitExitError(
-			"resolve integration ref "+ref, exitCode, err,
-		)
-	}
-	fields := strings.Fields(string(output))
-	if len(fields) != 2 || fields[1] != ref {
-		return GitObjectID{}, fmt.Errorf(
-			"Git returned malformed integration ref data for %s", ref,
-		)
-	}
-	return qualifyGitObjectID(
-		session.binding.objectFormat, fields[0],
 	)
 }
 

@@ -522,26 +522,22 @@ type IntegrationGitPort interface {
 		context.Context,
 		LocalTargetBinding,
 		string,
-		string,
 		GitObjectID,
 		GitObjectID,
 	) (AttemptGitInspection, error)
 	InspectIntegration(
 		context.Context,
 		LocalTargetBinding,
-		string,
 		MergeUnitIntegrationIntent,
 	) (IntegrationGitInspection, error)
 	CreateIntegrationCommit(
 		context.Context,
 		LocalTargetBinding,
-		string,
 		MergeUnitIntegrationIntent,
 	) error
 	PublishIntegration(
 		context.Context,
 		LocalTargetBinding,
-		string,
 		MergeUnitIntegrationIntent,
 		IntegrationLifecycleFaultInjector,
 	) error

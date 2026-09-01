@@ -79,12 +79,6 @@ func assessWorkspaceCompletion(
 				attempt.attemptID,
 			))
 		}
-		if attempt.phase == AttemptMaterializing {
-			add(fmt.Sprintf(
-				"local_effect:attempt_materialization_pending:%s",
-				attempt.attemptID,
-			))
-		}
 		if attempt.phase == AttemptCompleted {
 			if attempt.integration == nil ||
 				!attempt.integration.Integrated() {

@@ -106,7 +106,7 @@ func ExecuteAttemptReviewFix(
 		if result.state.checkingFix < 0 &&
 			(request.Ordinal < result.state.Used() || fix.phase == ReviewFixComplete && result.state.Quiescent()) {
 			if err := shell.git.VerifyCleanWorktree(
-				ctx, result.attempt.worktree, result.attempt.branch, result.state.Head(),
+				ctx, result.attempt.worktree, result.state.Head(),
 			); err != nil {
 				return result, fmt.Errorf("verify completed review-fix head: %w", err)
 			}
@@ -119,7 +119,7 @@ func ExecuteAttemptReviewFix(
 	var reservationInspection StagedCommitInspection
 	if result.state.generation.IsZero() || request.Ordinal > result.state.Used() {
 		reservationInspection, err = shell.git.InspectStaged(
-			ctx, result.attempt.worktree, result.attempt.branch,
+			ctx, result.attempt.worktree,
 		)
 		if err != nil {
 			return result, fmt.Errorf("inspect staged review fix before reservation: %w", err)
@@ -147,7 +147,7 @@ func ExecuteAttemptReviewFix(
 	if state.Phase() == ReviewFixReserved {
 		inspection := reservationInspection
 		if inspection.stateDigest.IsZero() {
-			inspection, err = shell.git.InspectStaged(ctx, result.attempt.worktree, result.attempt.branch)
+			inspection, err = shell.git.InspectStaged(ctx, result.attempt.worktree)
 			if err != nil {
 				return result, err
 			}
@@ -200,7 +200,7 @@ func ExecuteAttemptReviewFix(
 		switch effect := effects[0].(type) {
 		case CreateConfiguredCommitEffect:
 			create, err := NewCreateGitCommitRequest(
-				result.attempt.branch, result.attempt.worktree, effect.parent,
+				definition.workspace.target.root, result.attempt.worktree, effect.parent,
 				effect.step, effect.ordinal, effect.body, effect.inspection,
 			)
 			if err != nil {
@@ -215,7 +215,7 @@ func ExecuteAttemptReviewFix(
 				return result, err
 			}
 			if err := shell.git.VerifyCleanWorktree(
-				ctx, result.attempt.worktree, result.attempt.branch, evidence.commit,
+				ctx, result.attempt.worktree, evidence.commit,
 			); err != nil {
 				return result, err
 			}
@@ -240,7 +240,7 @@ func ExecuteAttemptReviewFix(
 				return result, fmt.Errorf("review-fix check %s requires an isolated runner", effect.check.id)
 			}
 			if err := shell.git.VerifyCleanWorktree(
-				ctx, result.attempt.worktree, result.attempt.branch, result.attempt.verifiedHead,
+				ctx, result.attempt.worktree, result.attempt.verifiedHead,
 			); err != nil {
 				return result, err
 			}
@@ -267,7 +267,7 @@ func ExecuteAttemptReviewFix(
 				)
 			}
 			if err := shell.git.VerifyCleanWorktree(
-				ctx, result.attempt.worktree, result.attempt.branch, result.attempt.verifiedHead,
+				ctx, result.attempt.worktree, result.attempt.verifiedHead,
 			); err != nil {
 				return result, fmt.Errorf("review-fix check %s changed Git state: %w", effect.check.id, err)
 			}
@@ -307,7 +307,7 @@ func ExecuteAttemptReviewFix(
 		return result, fmt.Errorf("review-fix %d did not reach completion", request.Ordinal)
 	}
 	if err := shell.git.VerifyCleanWorktree(
-		ctx, result.attempt.worktree, result.attempt.branch, state.Head(),
+		ctx, result.attempt.worktree, state.Head(),
 	); err != nil {
 		return result, fmt.Errorf("verify completed review-fix head: %w", err)
 	}

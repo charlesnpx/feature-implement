@@ -44,7 +44,7 @@ func executeCommit(ctx context.Context, bundle workspace.WorkspaceBundle, option
 		}); err != nil {
 			return MutationResult{}, err
 		}
-		return mutationResult("commit.next", journal, definition, nil)
+		return mutationResult("commit.next", journal, definition)
 	case "rebase":
 		return MutationResult{}, fmt.Errorf(
 			"workspace commit rebase was removed; attempt bases are immutable",

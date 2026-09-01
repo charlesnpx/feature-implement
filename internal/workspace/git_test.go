@@ -16,10 +16,8 @@ import (
 func TestAttemptMaterializationLeavesDirtyPrimaryByteIdentical(t *testing.T) {
 	t.Parallel()
 
-	fixture := reserveSafetyNetMaterializationAttempt(
-		t, mustDefinition(t, newDefinitionFixture(t).sources),
-	)
-	primary := fixture.definition.Workspace().RepositoryRoot()
+	definition := mustDefinition(t, newDefinitionFixture(t).sources)
+	primary := definition.Workspace().RepositoryRoot()
 	seed := filepath.Join(primary, "seed.txt")
 	if err := os.WriteFile(seed, []byte("staged primary change\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -53,19 +51,7 @@ func TestAttemptMaterializationLeavesDirtyPrimaryByteIdentical(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	if _, err := workspace.MaterializeAttempt(
-		context.Background(),
-		fixture.journal,
-		fixture.definition,
-		workspace.DefaultLocalAttemptGitAdapter(),
-		workspace.MaterializeAttemptRequest{
-			AttemptID:  fixture.attempt.AttemptID(),
-			OccurredAt: mustTime(t, "2026-08-18T13:00:00Z"),
-		},
-	); err != nil {
-		t.Fatalf("materialize attempt with dirty primary: %v", err)
-	}
+	reserveSafetyNetMaterializationAttempt(t, definition)
 
 	indexAfter, err := os.ReadFile(filepath.Join(gitDir, "index"))
 	if err != nil {
@@ -131,19 +117,7 @@ func TestAttemptWorktreeMaterializesExactRequestedTree(t *testing.T) {
 	sources.Workspace.Bytes = []byte(updated)
 	definition := mustDefinition(t, sources)
 	attemptFixture := reserveSafetyNetMaterializationAttempt(t, definition)
-	attempt, err := workspace.MaterializeAttempt(
-		context.Background(),
-		attemptFixture.journal,
-		attemptFixture.definition,
-		workspace.DefaultLocalAttemptGitAdapter(),
-		workspace.MaterializeAttemptRequest{
-			AttemptID:  attemptFixture.attempt.AttemptID(),
-			OccurredAt: mustTime(t, "2026-08-18T13:10:00Z"),
-		},
-	)
-	if err != nil {
-		t.Fatalf("materialize exact tree: %v", err)
-	}
+	attempt := attemptFixture.attempt
 
 	wantTree := safetyNetGitObject(
 		t,
@@ -536,12 +510,12 @@ func reserveSafetyNetMaterializationAttempt(
 	if err != nil {
 		t.Fatal(err)
 	}
-	attempt, err := workspace.ReserveAttempt(
+	attempt, err := workspace.StartAttempt(
 		context.Background(),
 		journal,
 		definition,
 		workspace.DefaultLocalAttemptGitAdapter(),
-		workspace.ReserveAttemptRequest{
+		workspace.StartAttemptRequest{
 			MergeUnit:     mustMergeUnitReference(t, "alpha-plan", "unit-one"),
 			AttemptNumber: 1,
 			Goal:          goal,
@@ -596,12 +570,12 @@ func newIndependentIntegrationConstruction(
 		t.Fatal(err)
 	}
 	mergeUnit := mustMergeUnitReference(t, "alpha-plan", "unit-one")
-	attempt, err := workspace.ReserveAttempt(
+	attempt, err := workspace.StartAttempt(
 		context.Background(),
 		journal,
 		definition,
 		workspace.DefaultLocalAttemptGitAdapter(),
-		workspace.ReserveAttemptRequest{
+		workspace.StartAttemptRequest{
 			MergeUnit:     mergeUnit,
 			AttemptNumber: 1,
 			Goal:          goal,
@@ -611,25 +585,13 @@ func newIndependentIntegrationConstruction(
 	if err != nil {
 		t.Fatalf("reserve independent integration attempt: %v", err)
 	}
-	attempt, err = workspace.MaterializeAttempt(
-		context.Background(),
-		journal,
-		definition,
-		workspace.DefaultLocalAttemptGitAdapter(),
-		workspace.MaterializeAttemptRequest{
-			AttemptID:  attempt.AttemptID(),
-			OccurredAt: mustTime(t, "2026-08-18T13:20:02Z"),
-		},
-	)
-	if err != nil {
-		t.Fatalf("materialize independent integration attempt: %v", err)
-	}
 	repositoryRoot := definition.Workspace().RepositoryRoot()
 	runTargetGitTest(
 		t,
-		repositoryRoot,
+		attempt.Worktree(),
 		"update-ref",
-		"refs/heads/"+attempt.Branch(),
+		"--no-deref",
+		"HEAD",
 		rawGitObject(acceptedHead),
 	)
 	runTargetGitTest(
@@ -684,21 +646,9 @@ func discardIndependentIntegrationConstruction(
 	if err := scenario.journal.Close(); err != nil {
 		t.Fatalf("close independent integration journal: %v", err)
 	}
-	runTargetGitTest(
-		t,
-		scenario.repositoryRoot,
-		"worktree",
-		"remove",
-		"--force",
-		scenario.attempt.Worktree(),
-	)
-	runTargetGitTest(
-		t,
-		scenario.repositoryRoot,
-		"update-ref",
-		"-d",
-		"refs/heads/"+scenario.attempt.Branch(),
-	)
+	if err := os.RemoveAll(scenario.attempt.Worktree()); err != nil {
+		t.Fatalf("remove detached independent integration worktree: %v", err)
+	}
 	runTargetGitTest(
 		t,
 		scenario.repositoryRoot,

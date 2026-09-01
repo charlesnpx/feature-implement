@@ -34,9 +34,6 @@ func (adapter LocalAttemptGitAdapter) ValidateAttemptWorktreeRoot(
 		return err
 	}
 	defer guard.Close()
-	if err := guard.Verify(ctx, adapter); err != nil {
-		return fmt.Errorf("verify attempt worktree root admission: %w", err)
-	}
 	return nil
 }
 
@@ -193,17 +190,6 @@ func (guard *attemptWorktreeRootGuard) Verify(
 		return fmt.Errorf("registered Git worktrees changed during root admission")
 	}
 	return guard.validateLayout()
-}
-
-func (guard *attemptWorktreeRootGuard) verifyAfterEffect(
-	ctx context.Context,
-	adapter LocalAttemptGitAdapter,
-	effect string,
-) error {
-	if err := guard.Verify(ctx, adapter); err != nil {
-		return fmt.Errorf("verify attempt worktree roots after %s: %w", effect, err)
-	}
-	return nil
 }
 
 func (guard *attemptWorktreeRootGuard) validateLayout() error {

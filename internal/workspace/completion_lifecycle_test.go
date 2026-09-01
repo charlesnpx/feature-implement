@@ -287,19 +287,6 @@ func TestWorkspaceCompletionSupportsConfiguredReviewAndAdoptHead(
 	second := secondCore.reserve(
 		t, "2026-07-25T20:20:04Z",
 	)
-	secondCore.git.inspection, err =
-		workspace.NewAttemptGitInspection(
-			false, workspace.GitObjectID{},
-			false, false, "",
-			workspace.GitObjectID{}, false,
-		)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second = secondCore.materialize(
-		t, second.AttemptID(),
-		"2026-07-25T20:20:05Z",
-	)
 	secondRepository := adoptedIntegrationRepository(
 		t, secondCore, second,
 		mustGitObject(t, 'e'),
@@ -438,33 +425,41 @@ func TestLocalRecoveryResumesPendingMaterializationAndIntegration(
 
 	t.Run("materialization", func(t *testing.T) {
 		core := newAttemptHarness(t, "unit-one")
-		attempt := core.reserve(
-			t, "2026-07-25T20:40:00Z",
-		)
+		beforeStart := journalRecordCount(t, core.journal)
 		crash := errors.New("materialization crash")
-		if _, err := workspace.MaterializeAttempt(
+		if _, err := workspace.StartAttempt(
 			context.Background(),
 			core.journal,
 			core.definition,
 			core.git,
-			workspace.MaterializeAttemptRequest{
-				AttemptID: attempt.AttemptID(),
+			workspace.StartAttemptRequest{
+				MergeUnit:     core.unit,
+				AttemptNumber: 1,
+				Goal:          core.goal,
 				OccurredAt: mustTime(
-					t, "2026-07-25T20:40:01Z",
+					t, "2026-07-25T20:40:00Z",
 				),
 				Fault: func(
 					point workspace.AttemptLifecycleFaultPoint,
 				) error {
 					if point ==
-						workspace.AttemptFaultAfterMaterializationIntent {
+						workspace.AttemptFaultAfterReservation {
 						return crash
 					}
 					return nil
 				},
 			},
 		); !errors.Is(err, crash) {
-			t.Fatalf("materialization fault = %v", err)
+			t.Fatalf("attempt start fault = %v", err)
 		}
+		afterCrash := journalRecordCount(t, core.journal)
+		if afterCrash != beforeStart+1 || core.git.createCalls != 0 {
+			t.Fatalf(
+				"start crash records=%d/%d creates=%d",
+				afterCrash, beforeStart, core.git.createCalls,
+			)
+		}
+		attempt := onlyRuntimeAttempt(t, core.journal)
 		result, err := workspace.RecoverWorkspaceLocalEffects(
 			context.Background(),
 			core.journal,
@@ -494,6 +489,43 @@ func TestLocalRecoveryResumesPendingMaterializationAndIntegration(
 		if recovered.Phase() != workspace.AttemptActive {
 			t.Fatalf(
 				"recovered materialization = %#v", recovered,
+			)
+		}
+		if recovered.StartRecord() != attempt.StartRecord() ||
+			core.git.createCalls != 1 ||
+			journalRecordCount(t, core.journal) != afterCrash {
+			t.Fatalf(
+				"materialization recovery records=%d/%d creates=%d attempt=%#v",
+				journalRecordCount(t, core.journal), afterCrash,
+				core.git.createCalls, recovered,
+			)
+		}
+		replayed, err := workspace.RecoverWorkspaceLocalEffects(
+			context.Background(),
+			core.journal,
+			core.definition,
+			workspace.DefaultLocalTargetGitAdapter(),
+			core.git,
+			&reviewRepositoryStub{},
+			&integrationGitStub{featureHead: core.base},
+			workspace.RecoverWorkspaceLocalEffectsRequest{
+				OccurredAt: mustTime(
+					t, "2026-07-25T20:40:03Z",
+				),
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if containsRecoveryAction(
+			replayed.Actions(),
+			workspace.LocalRecoveryAttemptMaterialized,
+		) || core.git.createCalls != 1 ||
+			journalRecordCount(t, core.journal) != afterCrash {
+			t.Fatalf(
+				"replayed materialization recovery = %v records=%d/%d creates=%d",
+				replayed.Actions(), journalRecordCount(t, core.journal),
+				afterCrash, core.git.createCalls,
 			)
 		}
 	})
@@ -807,19 +839,6 @@ func newCompletedWorkspaceHarness(
 	}
 	second := secondCore.reserve(
 		t, "2026-07-25T19:00:01Z",
-	)
-	secondCore.git.inspection, err =
-		workspace.NewAttemptGitInspection(
-			false, workspace.GitObjectID{},
-			false, false, "",
-			workspace.GitObjectID{}, false,
-		)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second = secondCore.materialize(
-		t, second.AttemptID(),
-		"2026-07-25T19:00:02Z",
 	)
 	secondRepository := adoptedIntegrationRepository(
 		t, secondCore, second,

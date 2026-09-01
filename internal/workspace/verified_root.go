@@ -250,7 +250,7 @@ func (root *VerifiedRoot) EnsureDirectory(relative string, permission os.FileMod
 	if err := root.VerifyPath(); err != nil {
 		return err
 	}
-	if _, err := root.adapter.makeDirectory(relative, permission); err != nil {
+	if _, _, err := root.adapter.makeDirectory(relative, permission); err != nil {
 		return err
 	}
 	return root.VerifyPath()
@@ -378,7 +378,7 @@ func (root *VerifiedRoot) probeDurabilityAt(probeDirectory string) error {
 		return fmt.Errorf("%s root does not support required %s semantics: %w", root.role, capability, capabilityErr)
 	}
 
-	created, err := root.adapter.makeDirectory(probeDirectory, 0o700)
+	created, _, err := root.adapter.makeDirectory(probeDirectory, 0o700)
 	if err != nil || !created {
 		if err == nil {
 			err = fmt.Errorf("probe directory already exists")

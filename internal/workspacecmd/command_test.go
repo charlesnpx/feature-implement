@@ -44,48 +44,6 @@ func TestLocalCommandDecodersRequireExactReceiptFreeFields(t *testing.T) {
 			want:   "unknown field",
 		},
 		{
-			name: "acknowledgement requires directive",
-			source: `{
-  "schema_version": 2,
-  "occurred_at": "2026-07-22T10:00:00Z",
-  "attempt_id": "attempt-one",
-  "kind": "goal_completed",
-  "goal": {"id": "goal-one", "scope": "merge_unit"},
-  "idempotency_key": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-}`,
-			target: func() any { return &acknowledgeInput{} },
-			want:   "directive_digest",
-		},
-		{
-			name: "acknowledgement rejects receipt",
-			source: `{
-  "schema_version": 2,
-  "occurred_at": "2026-07-22T10:00:00Z",
-  "attempt_id": "attempt-one",
-  "kind": "goal_completed",
-  "directive_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  "goal": {"id": "goal-one", "scope": "merge_unit"},
-  "idempotency_key": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "receipt": {}
-}`,
-			target: func() any { return &acknowledgeInput{} },
-			want:   "unknown field",
-		},
-		{
-			name: "owner response requires exact head",
-			source: `{
-  "schema_version": 2,
-  "occurred_at": "2026-07-22T10:00:00Z",
-  "attempt_id": "attempt-one",
-  "boundary_id": "boundary-one",
-  "directive_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  "goal": {"id": "goal-one", "scope": "merge_unit"},
-  "response": "continue"
-}`,
-			target: func() any { return &ownerResponseInput{} },
-			want:   "expected_head",
-		},
-		{
 			name: "review result rejects receipt",
 			source: `{
   "schema_version": 2,
@@ -180,14 +138,11 @@ func TestRequestSchemasExposeOnlySupportedLocalMutations(t *testing.T) {
 	for _, required := range []string{
 		"init",
 		"recover",
-		"attempt.reserve",
-		"attempt.materialize",
+		"attempt.start",
 		"attempt.adopt-head",
-		"attempt.boundary",
-		"attempt.next-goal",
-		"attempt.acknowledge",
-		"attempt.owner-response",
+		"attempt.pause",
 		"attempt.resume",
+		"attempt.abandon",
 		"commit.next",
 		"review.start",
 		"review.reserve",
@@ -203,7 +158,7 @@ func TestRequestSchemasExposeOnlySupportedLocalMutations(t *testing.T) {
 			t.Fatalf("request schemas omit %s", required)
 		}
 	}
-	if len(schemas) != 20 {
+	if len(schemas) != 17 {
 		t.Fatalf("request schema count = %d: %+v", len(schemas), schemas)
 	}
 	for _, action := range []string{
@@ -243,7 +198,7 @@ func TestDecodeRequestKeepsSchemaOptionalFieldsOptional(t *testing.T) {
 	}
 }
 
-func TestWorkspaceViewSchemaKeepsChoicesOptional(t *testing.T) {
+func TestWorkspaceViewSchemaOmitsRetiredDirectiveFields(t *testing.T) {
 	view := WorkspaceViewSchema()
 	if view["additionalProperties"] != false {
 		t.Fatalf("workspace view schema permits unknown fields: %+v", view)
@@ -254,24 +209,38 @@ func TestWorkspaceViewSchemaKeepsChoicesOptional(t *testing.T) {
 	units := schedulerProperties["units"].(map[string]any)
 	unit := units["items"].(map[string]any)
 	unitProperties := unit["properties"].(map[string]any)
+	if _, exists := unitProperties["branch"]; exists {
+		t.Fatalf("workspace unit schema still exposes retired branch: %+v", unitProperties)
+	}
 	directives := unitProperties["pending_directives"].(map[string]any)
 	directive := directives["items"].(map[string]any)
 	required := directive["required"].([]string)
 	boundaryKindRequired := false
 	for _, name := range required {
-		if name == "choices" {
-			t.Fatalf("directive schema still requires omitted empty choices: %+v", required)
-		}
 		if name == "boundary_kind" {
 			boundaryKindRequired = true
 		}
 	}
 	directiveProperties := directive["properties"].(map[string]any)
-	if _, exists := directiveProperties["choices"]; !exists {
-		t.Fatalf("directive schema no longer describes choices: %+v", directiveProperties)
+	expectedDirectiveFields := map[string]bool{
+		"kind": true, "boundary_kind": true, "workspace_id": true,
+		"generation": true, "attempt_id": true, "boundary_id": true,
+		"goal_id": true, "goal_scope": true, "head": true,
+	}
+	if len(directiveProperties) != len(expectedDirectiveFields) {
+		t.Fatalf("directive schema fields = %+v", directiveProperties)
+	}
+	for field := range expectedDirectiveFields {
+		if _, exists := directiveProperties[field]; !exists {
+			t.Fatalf("directive schema omits %q: %+v", field, directiveProperties)
+		}
 	}
 	if _, exists := directiveProperties["boundary_kind"]; !exists || !boundaryKindRequired {
 		t.Fatalf("directive schema does not require boundary kind: %+v / %+v", required, directiveProperties)
+	}
+	kinds := directiveProperties["kind"].(map[string]any)["enum"].([]string)
+	if len(kinds) != 1 || kinds[0] != "boundary_pending" {
+		t.Fatalf("directive schema kinds = %+v", kinds)
 	}
 	blockers := unitProperties["blockers"].(map[string]any)
 	blocker := blockers["items"].(map[string]any)
@@ -280,6 +249,12 @@ func TestWorkspaceViewSchemaKeepsChoicesOptional(t *testing.T) {
 	}
 	if _, exists := blocker["properties"]; exists {
 		t.Fatalf("workspace view blocker retains object properties: %+v", blocker)
+	}
+	attempts := properties["attempts"].(map[string]any)
+	attempt := attempts["items"].(map[string]any)
+	attemptProperties := attempt["properties"].(map[string]any)
+	if _, exists := attemptProperties["branch"]; exists {
+		t.Fatalf("workspace attempt schema still exposes retired branch: %+v", attemptProperties)
 	}
 }
 
@@ -484,24 +459,12 @@ merge_units:
 	if err != nil {
 		t.Fatal(err)
 	}
-	attempt, err := workspace.ReserveAttempt(
+	attempt, err := workspace.StartAttempt(
 		context.Background(), journal, bundle.Definition(), attemptGit,
-		workspace.ReserveAttemptRequest{
+		workspace.StartAttemptRequest{
 			MergeUnit: mergeUnit, AttemptNumber: 1, Goal: goal,
 			OccurredAt: time.Date(
 				2026, time.July, 25, 18, 0, 1, 0, time.UTC,
-			),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	attempt, err = workspace.MaterializeAttempt(
-		context.Background(), journal, bundle.Definition(), attemptGit,
-		workspace.MaterializeAttemptRequest{
-			AttemptID: attempt.AttemptID(),
-			OccurredAt: time.Date(
-				2026, time.July, 25, 18, 0, 2, 0, time.UTC,
 			),
 		},
 	)
@@ -516,7 +479,10 @@ merge_units:
 	}
 	runGitTest(t, attempt.Worktree(), "add", "integration.txt")
 	runGitTest(
-		t, attempt.Worktree(), "commit", "-m",
+		t, attempt.Worktree(),
+		"-c", "user.name=Command Test",
+		"-c", "user.email=command@example.test",
+		"commit", "-m",
 		"Accepted command implementation",
 	)
 	repository := localReviewRepository{

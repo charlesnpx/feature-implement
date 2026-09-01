@@ -8,8 +8,6 @@ import (
 type AttemptRuntimePhase string
 
 const (
-	AttemptReserved        AttemptRuntimePhase = "reserved"
-	AttemptMaterializing   AttemptRuntimePhase = "materializing"
 	AttemptActive          AttemptRuntimePhase = "active"
 	AttemptPaused          AttemptRuntimePhase = "paused"
 	AttemptReviewExhausted AttemptRuntimePhase = "review_exhausted"
@@ -21,7 +19,7 @@ const (
 
 func (phase AttemptRuntimePhase) valid() bool {
 	switch phase {
-	case AttemptReserved, AttemptMaterializing, AttemptActive, AttemptPaused,
+	case AttemptActive, AttemptPaused,
 		AttemptReviewExhausted, AttemptSuperseded, AttemptCompleted,
 		AttemptFailed, AttemptAbandoned:
 		return true
@@ -31,8 +29,7 @@ func (phase AttemptRuntimePhase) valid() bool {
 }
 
 func (phase AttemptRuntimePhase) nonterminal() bool {
-	return phase == AttemptReserved || phase == AttemptMaterializing ||
-		phase == AttemptActive || phase == AttemptPaused ||
+	return phase == AttemptActive || phase == AttemptPaused ||
 		phase == AttemptReviewExhausted
 }
 
@@ -42,117 +39,19 @@ func (phase AttemptRuntimePhase) retryableTerminal() bool {
 		phase == AttemptAbandoned
 }
 
-type AttemptGenerationBinding struct {
-	attemptID  ID
-	mergeUnit  MergeUnitReference
-	generation Digest
-	phase      AttemptRuntimePhase
-}
-
-func NewAttemptGenerationBinding(
-	attemptID ID,
-	mergeUnit MergeUnitReference,
-	generation Digest,
-	phase AttemptRuntimePhase,
-) (AttemptGenerationBinding, error) {
-	if attemptID.IsZero() || mergeUnit.planID.IsZero() ||
-		mergeUnit.mergeUnitID.IsZero() || generation.IsZero() ||
-		!phase.valid() {
-		return AttemptGenerationBinding{}, fmt.Errorf(
-			"attempt requires identity, merge unit, exact generation, and valid phase",
-		)
-	}
-	return AttemptGenerationBinding{
-		attemptID: attemptID, mergeUnit: mergeUnit,
-		generation: generation, phase: phase,
-	}, nil
-}
-
-func (attempt AttemptGenerationBinding) AttemptID() ID {
-	return attempt.attemptID
-}
-
-func (attempt AttemptGenerationBinding) MergeUnit() MergeUnitReference {
-	return attempt.mergeUnit
-}
-
-func (attempt AttemptGenerationBinding) Generation() Digest {
-	return attempt.generation
-}
-
-func (attempt AttemptGenerationBinding) Phase() AttemptRuntimePhase {
-	return attempt.phase
-}
-
-type RuntimeOrchestrationAcknowledgement struct {
-	record         uint64
-	kind           OrchestrationAcknowledgementKind
-	goal           GoalBinding
-	idempotencyKey Digest
-	requestDigest  Digest
-}
-
-func (acknowledgement RuntimeOrchestrationAcknowledgement) Record() uint64 {
-	return acknowledgement.record
-}
-func (acknowledgement RuntimeOrchestrationAcknowledgement) Kind() OrchestrationAcknowledgementKind {
-	return acknowledgement.kind
-}
-func (acknowledgement RuntimeOrchestrationAcknowledgement) Goal() GoalBinding {
-	return acknowledgement.goal
-}
-func (acknowledgement RuntimeOrchestrationAcknowledgement) IdempotencyKey() Digest {
-	return acknowledgement.idempotencyKey
-}
-func (acknowledgement RuntimeOrchestrationAcknowledgement) RequestDigest() Digest {
-	return acknowledgement.requestDigest
-}
-
-type RuntimeOwnerBoundaryResponse struct {
-	record        uint64
-	response      OwnerBoundaryResponse
-	requestDigest Digest
-}
-
-func (response RuntimeOwnerBoundaryResponse) Record() uint64 { return response.record }
-func (response RuntimeOwnerBoundaryResponse) Response() OwnerBoundaryResponse {
-	return response.response
-}
-func (response RuntimeOwnerBoundaryResponse) RequestDigest() Digest { return response.requestDigest }
-
-type RuntimeNextGoalIntent struct {
-	record         uint64
-	goal           GoalBinding
-	idempotencyKey Digest
-}
-
-func (intent RuntimeNextGoalIntent) Record() uint64         { return intent.record }
-func (intent RuntimeNextGoalIntent) Goal() GoalBinding      { return intent.goal }
-func (intent RuntimeNextGoalIntent) IdempotencyKey() Digest { return intent.idempotencyKey }
-
 type RuntimeBoundaryProjection struct {
-	boundaryID       ID
-	ordinal          uint64
-	record           uint64
-	resumedRecord    uint64
-	kind             AttemptBoundaryKind
-	checkpoint       AttemptCheckpointMode
-	serialSegment    ID
-	leaseID          ID
-	goal             GoalBinding
-	head             GitObjectID
-	evidence         []Evidence
-	evidenceDigest   Digest
-	directiveDigest  Digest
-	idempotencyKey   Digest
-	goalCompleted    RuntimeOrchestrationAcknowledgement
-	goalCompletedOK  bool
-	ownerResponse    RuntimeOwnerBoundaryResponse
-	ownerResponseOK  bool
-	nextGoalIntent   RuntimeNextGoalIntent
-	nextGoalIntentOK bool
-	nextGoal         RuntimeOrchestrationAcknowledgement
-	nextGoalOK       bool
+	boundaryID     ID
+	ordinal        uint64
+	record         uint64
+	resumedRecord  uint64
+	kind           AttemptBoundaryKind
+	checkpoint     AttemptCheckpointMode
+	serialSegment  ID
+	leaseID        ID
+	goal           GoalBinding
+	head           GitObjectID
+	evidence       []Evidence
+	evidenceDigest Digest
 }
 
 func (boundary RuntimeBoundaryProjection) BoundaryID() ID        { return boundary.boundaryID }
@@ -175,54 +74,37 @@ func (boundary RuntimeBoundaryProjection) Head() GitObjectID { return boundary.h
 func (boundary RuntimeBoundaryProjection) Evidence() []Evidence {
 	return cloneEvidence(boundary.evidence)
 }
-func (boundary RuntimeBoundaryProjection) EvidenceDigest() Digest  { return boundary.evidenceDigest }
-func (boundary RuntimeBoundaryProjection) DirectiveDigest() Digest { return boundary.directiveDigest }
-func (boundary RuntimeBoundaryProjection) IdempotencyKey() Digest  { return boundary.idempotencyKey }
-func (boundary RuntimeBoundaryProjection) GoalCompletion() (RuntimeOrchestrationAcknowledgement, bool) {
-	return boundary.goalCompleted, boundary.goalCompletedOK
-}
-func (boundary RuntimeBoundaryProjection) OwnerResponse() (RuntimeOwnerBoundaryResponse, bool) {
-	return boundary.ownerResponse, boundary.ownerResponseOK
-}
-func (boundary RuntimeBoundaryProjection) NextGoalIntent() (RuntimeNextGoalIntent, bool) {
-	return boundary.nextGoalIntent, boundary.nextGoalIntentOK
-}
-func (boundary RuntimeBoundaryProjection) NextGoalCreation() (RuntimeOrchestrationAcknowledgement, bool) {
-	return boundary.nextGoal, boundary.nextGoalOK
-}
+func (boundary RuntimeBoundaryProjection) EvidenceDigest() Digest { return boundary.evidenceDigest }
 
 type RuntimeAttemptProjection struct {
-	attemptID             ID
-	mergeUnit             MergeUnitReference
-	generation            Digest
-	attemptNumber         uint64
-	base                  GitObjectID
-	branch                string
-	worktree              string
-	checkpoint            AttemptCheckpointMode
-	escalation            AttemptEscalationPolicy
-	serialSegment         ID
-	serialSegmentHeld     bool
-	phase                 AttemptRuntimePhase
-	reservationRecord     uint64
-	materializationRecord uint64
-	startRecord           uint64
-	verifiedHead          GitObjectID
-	inspectionDigest      Digest
-	leaseID               ID
-	goal                  GoalBinding
-	boundaries            []RuntimeBoundaryProjection
-	commitProtocol        *CommitProtocolState
-	reviewFixes           *ReviewFixState
-	integration           *RuntimeIntegrationProjection
+	attemptID         ID
+	mergeUnit         MergeUnitReference
+	generation        Digest
+	attemptNumber     uint64
+	base              GitObjectID
+	worktree          string
+	checkpoint        AttemptCheckpointMode
+	escalation        AttemptEscalationPolicy
+	serialSegment     ID
+	serialSegmentHeld bool
+	phase             AttemptRuntimePhase
+	startRecord       uint64
+	verifiedHead      GitObjectID
+	inspectionDigest  Digest
+	leaseID           ID
+	goal              GoalBinding
+	boundaries        []RuntimeBoundaryProjection
+	commitProtocol    *CommitProtocolState
+	reviewFixes       *ReviewFixState
+	integration       *RuntimeIntegrationProjection
 }
 
-func (attempt RuntimeAttemptProjection) AttemptID() ID                     { return attempt.attemptID }
-func (attempt RuntimeAttemptProjection) MergeUnit() MergeUnitReference     { return attempt.mergeUnit }
-func (attempt RuntimeAttemptProjection) Generation() Digest                { return attempt.generation }
-func (attempt RuntimeAttemptProjection) AttemptNumber() uint64             { return attempt.attemptNumber }
-func (attempt RuntimeAttemptProjection) Base() GitObjectID                 { return attempt.base }
-func (attempt RuntimeAttemptProjection) Branch() string                    { return attempt.branch }
+func (attempt RuntimeAttemptProjection) AttemptID() ID                 { return attempt.attemptID }
+func (attempt RuntimeAttemptProjection) MergeUnit() MergeUnitReference { return attempt.mergeUnit }
+func (attempt RuntimeAttemptProjection) Generation() Digest            { return attempt.generation }
+func (attempt RuntimeAttemptProjection) AttemptNumber() uint64         { return attempt.attemptNumber }
+func (attempt RuntimeAttemptProjection) Base() GitObjectID             { return attempt.base }
+
 func (attempt RuntimeAttemptProjection) Worktree() string                  { return attempt.worktree }
 func (attempt RuntimeAttemptProjection) Checkpoint() AttemptCheckpointMode { return attempt.checkpoint }
 func (attempt RuntimeAttemptProjection) Escalation() AttemptEscalationPolicy {
@@ -231,15 +113,11 @@ func (attempt RuntimeAttemptProjection) Escalation() AttemptEscalationPolicy {
 func (attempt RuntimeAttemptProjection) SerialSegment() ID          { return attempt.serialSegment }
 func (attempt RuntimeAttemptProjection) SerialSegmentHeld() bool    { return attempt.serialSegmentHeld }
 func (attempt RuntimeAttemptProjection) Phase() AttemptRuntimePhase { return attempt.phase }
-func (attempt RuntimeAttemptProjection) ReservationRecord() uint64  { return attempt.reservationRecord }
-func (attempt RuntimeAttemptProjection) MaterializationRecord() uint64 {
-	return attempt.materializationRecord
-}
-func (attempt RuntimeAttemptProjection) StartRecord() uint64       { return attempt.startRecord }
-func (attempt RuntimeAttemptProjection) VerifiedHead() GitObjectID { return attempt.verifiedHead }
-func (attempt RuntimeAttemptProjection) InspectionDigest() Digest  { return attempt.inspectionDigest }
-func (attempt RuntimeAttemptProjection) LeaseID() ID               { return attempt.leaseID }
-func (attempt RuntimeAttemptProjection) Goal() GoalBinding         { return attempt.goal }
+func (attempt RuntimeAttemptProjection) StartRecord() uint64        { return attempt.startRecord }
+func (attempt RuntimeAttemptProjection) VerifiedHead() GitObjectID  { return attempt.verifiedHead }
+func (attempt RuntimeAttemptProjection) InspectionDigest() Digest   { return attempt.inspectionDigest }
+func (attempt RuntimeAttemptProjection) LeaseID() ID                { return attempt.leaseID }
+func (attempt RuntimeAttemptProjection) Goal() GoalBinding          { return attempt.goal }
 func (attempt RuntimeAttemptProjection) Boundaries() []RuntimeBoundaryProjection {
 	return cloneRuntimeBoundaries(attempt.boundaries)
 }
@@ -288,17 +166,6 @@ func (projection WorkspaceRuntimeProjection) Attempt(attemptID ID) (RuntimeAttem
 	return RuntimeAttemptProjection{}, false
 }
 
-func (projection WorkspaceRuntimeProjection) AttemptGenerationBindings() []AttemptGenerationBinding {
-	result := make([]AttemptGenerationBinding, 0, len(projection.attempts))
-	for _, attempt := range projection.attempts {
-		result = append(result, AttemptGenerationBinding{
-			attemptID: attempt.attemptID, mergeUnit: attempt.mergeUnit,
-			generation: attempt.generation, phase: attempt.phase,
-		})
-	}
-	return result
-}
-
 func reduceAttemptRuntime(
 	current WorkspaceRuntimeProjection,
 	next *WorkspaceRuntimeProjection,
@@ -311,21 +178,19 @@ func reduceAttemptRuntime(
 		return fmt.Errorf("attempt event generation is not active")
 	}
 	switch event := record.event.(type) {
-	case AttemptReservedJournalEvent:
+	case AttemptStartJournalEvent:
 		if event.workspaceID != current.workspaceID || event.generation != current.activeGeneration {
-			return fmt.Errorf("attempt reservation does not match the active workspace generation")
+			return fmt.Errorf("attempt start does not match the active workspace generation")
 		}
 		for _, attempt := range current.attempts {
-			if attempt.integration != nil &&
-				!attempt.integration.Integrated() {
+			if attempt.integration != nil && !attempt.integration.Integrated() {
 				return fmt.Errorf(
-					"attempt reservation conflicts with pending integration attempt %s",
-					attempt.attemptID,
+					"attempt start conflicts with pending integration attempt %s", attempt.attemptID,
 				)
 			}
 		}
 		if _, exists := findRuntimeAttempt(current.attempts, event.attemptID); exists {
-			return fmt.Errorf("attempt %s is already reserved", event.attemptID)
+			return fmt.Errorf("attempt %s is already started", event.attemptID)
 		}
 		for _, attempt := range current.attempts {
 			if attempt.mergeUnit == event.mergeUnit && attempt.phase.nonterminal() {
@@ -335,41 +200,17 @@ func reduceAttemptRuntime(
 				return fmt.Errorf("serial segment %s is held by attempt %s", event.serialSegment, attempt.attemptID)
 			}
 		}
+		if err := ensureRuntimeLeaseAvailable(current.attempts, event.attemptID, event.leaseID); err != nil {
+			return err
+		}
 		next.attempts = append(next.attempts, RuntimeAttemptProjection{
 			attemptID: event.attemptID, mergeUnit: event.mergeUnit, generation: event.generation,
-			attemptNumber: event.attemptNumber, base: event.base,
-			branch: event.branch, worktree: event.worktree,
+			attemptNumber: event.attemptNumber, base: event.base, worktree: event.worktree,
 			checkpoint: event.checkpoint, escalation: event.escalation,
 			serialSegment: event.serialSegment, serialSegmentHeld: !event.serialSegment.IsZero(),
-			goal: event.goal, phase: AttemptReserved, reservationRecord: record.sequence,
+			phase: AttemptActive, startRecord: record.sequence, verifiedHead: event.base,
+			leaseID: event.leaseID, goal: event.goal,
 		})
-		return nil
-	case AttemptMaterializationIntendedJournalEvent:
-		index, attempt, err := requireRuntimeAttempt(current, event.attemptID, event.workspaceID, event.generation)
-		if err != nil {
-			return err
-		}
-		if attempt.phase != AttemptReserved || attempt.base != event.base || attempt.branch != event.branch || attempt.worktree != event.worktree {
-			return fmt.Errorf("attempt materialization intent does not match a reserved attempt")
-		}
-		next.attempts[index].phase = AttemptMaterializing
-		next.attempts[index].materializationRecord = record.sequence
-		return nil
-	case AttemptStartedJournalEvent:
-		index, attempt, err := requireRuntimeAttempt(current, event.attemptID, event.workspaceID, event.generation)
-		if err != nil {
-			return err
-		}
-		if attempt.phase != AttemptMaterializing || attempt.base != event.verifiedHead || attempt.goal != event.goal {
-			return fmt.Errorf("attempt start requires materializing state at the reserved base")
-		}
-		if err := ensureRuntimeLeaseAvailable(current.attempts, attempt.attemptID, event.leaseID); err != nil {
-			return err
-		}
-		updated := &next.attempts[index]
-		updated.phase, updated.startRecord = AttemptActive, record.sequence
-		updated.verifiedHead, updated.inspectionDigest = event.verifiedHead, event.inspectionDigest
-		updated.leaseID, updated.goal = event.leaseID, event.goal
 		return nil
 	case AttemptBoundaryReachedJournalEvent:
 		index, attempt, err := requireRuntimeAttempt(current, event.attemptID, event.workspaceID, event.generation)
@@ -403,130 +244,8 @@ func reduceAttemptRuntime(
 			kind: event.kind, checkpoint: event.checkpoint, serialSegment: event.serialSegment,
 			leaseID: event.leaseID,
 			goal:    event.goal, head: event.head, evidence: cloneEvidence(event.evidence),
-			evidenceDigest: event.evidenceDigest, directiveDigest: event.directiveDigest,
-			idempotencyKey: event.idempotencyKey,
+			evidenceDigest: event.evidenceDigest,
 		})
-		return nil
-	case AttemptNextGoalIntendedJournalEvent:
-		index, _, boundaryIndex, boundary, err := requireCurrentRuntimeBoundary(
-			current, event.workspaceID, event.generation, event.attemptID, event.boundaryID,
-		)
-		if err != nil {
-			return err
-		}
-		if boundary.checkpoint != AttemptCheckpointCompleteGoalAndWait || !boundary.goalCompletedOK ||
-			!boundary.ownerResponseOK || boundary.nextGoalIntentOK || event.goal == boundary.goal {
-			return fmt.Errorf("next-goal intent is out of order, duplicate, or reuses the completed goal")
-		}
-		expected, err := deriveNextGoalIdempotencyKey(
-			event.workspaceID, event.generation, event.attemptID, boundary.boundaryID,
-			boundary.directiveDigest, event.goal,
-		)
-		if err != nil || expected != event.idempotencyKey {
-			return fmt.Errorf("next-goal intent has an invalid idempotency key")
-		}
-		updated := &next.attempts[index].boundaries[boundaryIndex]
-		updated.nextGoalIntent = RuntimeNextGoalIntent{
-			record: record.sequence, goal: event.goal, idempotencyKey: event.idempotencyKey,
-		}
-		updated.nextGoalIntentOK = true
-		return nil
-	case AttemptOrchestrationAcknowledgedJournalEvent:
-		index, _, boundaryIndex, boundary, err := requireCurrentRuntimeBoundary(
-			current, event.workspaceID, event.generation, event.attemptID,
-			event.boundaryID,
-		)
-		if err != nil {
-			return err
-		}
-		if boundary.checkpoint != AttemptCheckpointCompleteGoalAndWait {
-			return fmt.Errorf(
-				"pause-only boundary %s cannot acknowledge goal completion or creation",
-				boundary.boundaryID,
-			)
-		}
-		if event.directiveDigest != boundary.directiveDigest {
-			return fmt.Errorf(
-				"acknowledgement does not match the exact boundary directive",
-			)
-		}
-		expectedRequest, err := deriveOrchestrationAcknowledgementRequestDigest(
-			event.workspaceID, event.generation, event.attemptID, boundary,
-			event.kind, event.goal, event.idempotencyKey,
-		)
-		if err != nil || expectedRequest != event.requestDigest {
-			return fmt.Errorf(
-				"acknowledgement has an invalid request digest",
-			)
-		}
-		acknowledgement := RuntimeOrchestrationAcknowledgement{
-			record: record.sequence, kind: event.kind, goal: event.goal,
-			idempotencyKey: event.idempotencyKey,
-			requestDigest:  event.requestDigest,
-		}
-		updated := &next.attempts[index].boundaries[boundaryIndex]
-		switch event.kind {
-		case AcknowledgementGoalCompleted:
-			if boundary.goalCompletedOK || event.goal != boundary.goal ||
-				event.idempotencyKey != boundary.idempotencyKey {
-				return fmt.Errorf(
-					"goal-completion acknowledgement does not match the pending boundary directive",
-				)
-			}
-			updated.goalCompleted, updated.goalCompletedOK =
-				acknowledgement, true
-		case AcknowledgementNextGoalCreated:
-			if boundary.nextGoalOK || !boundary.nextGoalIntentOK ||
-				event.goal != boundary.nextGoalIntent.goal ||
-				event.idempotencyKey != boundary.nextGoalIntent.idempotencyKey {
-				return fmt.Errorf(
-					"next-goal acknowledgement does not match the durable creation intent",
-				)
-			}
-			updated.nextGoal, updated.nextGoalOK = acknowledgement, true
-		default:
-			return fmt.Errorf(
-				"unsupported acknowledgement %q", event.kind,
-			)
-		}
-		return nil
-	case AttemptOwnerResponseJournalEvent:
-		index, _, boundaryIndex, boundary, err := requireCurrentRuntimeBoundary(
-			current, event.workspaceID, event.generation, event.attemptID,
-			event.boundaryID,
-		)
-		if err != nil {
-			return err
-		}
-		if boundary.ownerResponseOK ||
-			boundary.checkpoint == AttemptCheckpointCompleteGoalAndWait &&
-				!boundary.goalCompletedOK {
-			return fmt.Errorf(
-				"owner response is duplicate or precedes goal-completion acknowledgement",
-			)
-		}
-		if event.directiveDigest != boundary.directiveDigest ||
-			event.goal != boundary.goal ||
-			event.expectedHead != boundary.head {
-			return fmt.Errorf(
-				"owner response does not match the exact boundary directive, goal, and head",
-			)
-		}
-		expected, err := deriveOwnerResponseRequestDigest(
-			event.workspaceID, event.generation, event.attemptID, boundary,
-			event.response,
-		)
-		if err != nil || expected != event.requestDigest {
-			return fmt.Errorf(
-				"owner response request digest does not match its boundary",
-			)
-		}
-		updated := &next.attempts[index].boundaries[boundaryIndex]
-		updated.ownerResponse = RuntimeOwnerBoundaryResponse{
-			record: record.sequence, response: event.response,
-			requestDigest: event.requestDigest,
-		}
-		updated.ownerResponseOK = true
 		return nil
 	case AttemptResumedJournalEvent:
 		index, attempt, boundaryIndex, boundary, err := requireCurrentRuntimeBoundary(
@@ -535,15 +254,8 @@ func reduceAttemptRuntime(
 		if err != nil {
 			return err
 		}
-		if !boundary.ownerResponseOK || event.verifiedHead != boundary.head || event.serialSegment != attempt.serialSegment {
-			return fmt.Errorf("attempt resume requires owner response, unchanged head, and matching serial policy")
-		}
-		if boundary.checkpoint == AttemptCheckpointCompleteGoalAndWait {
-			if !boundary.nextGoalOK || event.goal != boundary.nextGoal.goal {
-				return fmt.Errorf("complete-goal boundary resume requires acknowledged next goal")
-			}
-		} else if event.goal != boundary.goal {
-			return fmt.Errorf("pause-only boundary must resume the same goal")
+		if event.verifiedHead != boundary.head || event.serialSegment != attempt.serialSegment || event.goal != boundary.goal {
+			return fmt.Errorf("attempt resume requires an unchanged paused head, goal, and serial policy")
 		}
 		for _, other := range current.attempts {
 			if !event.serialSegment.IsZero() && other.attemptID != attempt.attemptID &&
@@ -560,6 +272,19 @@ func reduceAttemptRuntime(
 		updated.verifiedHead, updated.inspectionDigest = event.verifiedHead, event.inspectionDigest
 		updated.leaseID, updated.goal = event.leaseID, event.goal
 		updated.boundaries[boundaryIndex].resumedRecord = record.sequence
+		return nil
+	case AttemptAbandonedJournalEvent:
+		index, attempt, err := requireRuntimeAttempt(current, event.attemptID, event.workspaceID, event.generation)
+		if err != nil {
+			return err
+		}
+		if !attempt.phase.nonterminal() || attempt.integration != nil {
+			return fmt.Errorf("attempt abandonment requires a nonterminal attempt without integration")
+		}
+		updated := &next.attempts[index]
+		updated.phase = AttemptAbandoned
+		updated.leaseID = ID{}
+		updated.serialSegmentHeld = false
 		return nil
 	default:
 		return fmt.Errorf("unsupported attempt runtime event %T", record.event)
@@ -665,44 +390,19 @@ func cloneRuntimeBoundary(value RuntimeBoundaryProjection) RuntimeBoundaryProjec
 }
 
 func canonicalAttemptRuntime(attempt RuntimeAttemptProjection) (json.RawMessage, error) {
-	type acknowledgementJSON struct {
-		Record         uint64                           `json:"record"`
-		Kind           OrchestrationAcknowledgementKind `json:"kind"`
-		GoalID         string                           `json:"goal_id"`
-		GoalScope      GoalScope                        `json:"goal_scope"`
-		IdempotencyKey string                           `json:"idempotency_key"`
-		RequestDigest  string                           `json:"request_digest"`
-	}
-	type ownerJSON struct {
-		Record        uint64                `json:"record"`
-		Response      OwnerBoundaryResponse `json:"response"`
-		RequestDigest string                `json:"request_digest"`
-	}
-	type nextGoalIntentJSON struct {
-		Record         uint64    `json:"record"`
-		GoalID         string    `json:"goal_id"`
-		GoalScope      GoalScope `json:"goal_scope"`
-		IdempotencyKey string    `json:"idempotency_key"`
-	}
 	type boundaryJSON struct {
-		BoundaryID      string                `json:"boundary_id"`
-		Ordinal         uint64                `json:"ordinal"`
-		Record          uint64                `json:"record"`
-		ResumedRecord   uint64                `json:"resumed_record"`
-		Kind            AttemptBoundaryKind   `json:"kind"`
-		Checkpoint      AttemptCheckpointMode `json:"checkpoint"`
-		SerialSegment   string                `json:"serial_segment,omitempty"`
-		LeaseID         string                `json:"lease_id"`
-		GoalID          string                `json:"goal_id"`
-		GoalScope       GoalScope             `json:"goal_scope"`
-		Head            string                `json:"head"`
-		EvidenceDigest  string                `json:"evidence_digest"`
-		DirectiveDigest string                `json:"directive_digest,omitempty"`
-		IdempotencyKey  string                `json:"idempotency_key,omitempty"`
-		GoalCompleted   *acknowledgementJSON  `json:"goal_completed,omitempty"`
-		OwnerResponse   *ownerJSON            `json:"owner_response,omitempty"`
-		NextGoalIntent  *nextGoalIntentJSON   `json:"next_goal_intent,omitempty"`
-		NextGoal        *acknowledgementJSON  `json:"next_goal,omitempty"`
+		BoundaryID     string                `json:"boundary_id"`
+		Ordinal        uint64                `json:"ordinal"`
+		Record         uint64                `json:"record"`
+		ResumedRecord  uint64                `json:"resumed_record"`
+		Kind           AttemptBoundaryKind   `json:"kind"`
+		Checkpoint     AttemptCheckpointMode `json:"checkpoint"`
+		SerialSegment  string                `json:"serial_segment,omitempty"`
+		LeaseID        string                `json:"lease_id"`
+		GoalID         string                `json:"goal_id"`
+		GoalScope      GoalScope             `json:"goal_scope"`
+		Head           string                `json:"head"`
+		EvidenceDigest string                `json:"evidence_digest"`
 	}
 	type integrationJSON struct {
 		IntentDigest     string `json:"intent_digest"`
@@ -716,47 +416,37 @@ func canonicalAttemptRuntime(attempt RuntimeAttemptProjection) (json.RawMessage,
 		AcceptanceMode   string `json:"acceptance_mode"`
 	}
 	type attemptJSON struct {
-		AttemptID             string                  `json:"attempt_id"`
-		PlanID                string                  `json:"plan_id"`
-		MergeUnitID           string                  `json:"merge_unit_id"`
-		Generation            string                  `json:"generation"`
-		AttemptNumber         uint64                  `json:"attempt_number"`
-		Base                  string                  `json:"base"`
-		Branch                string                  `json:"branch"`
-		Worktree              string                  `json:"worktree"`
-		Checkpoint            AttemptCheckpointMode   `json:"checkpoint"`
-		Escalation            AttemptEscalationPolicy `json:"escalation"`
-		SerialSegment         string                  `json:"serial_segment,omitempty"`
-		SerialSegmentHeld     bool                    `json:"serial_segment_held"`
-		Phase                 AttemptRuntimePhase     `json:"phase"`
-		ReservationRecord     uint64                  `json:"reservation_record"`
-		MaterializationRecord uint64                  `json:"materialization_record"`
-		StartRecord           uint64                  `json:"start_record"`
-		VerifiedHead          string                  `json:"verified_head,omitempty"`
-		InspectionDigest      string                  `json:"inspection_digest,omitempty"`
-		LeaseID               string                  `json:"lease_id,omitempty"`
-		GoalID                string                  `json:"goal_id,omitempty"`
-		GoalScope             GoalScope               `json:"goal_scope,omitempty"`
-		Boundaries            []boundaryJSON          `json:"boundaries"`
-		CommitProtocol        json.RawMessage         `json:"commit_protocol,omitempty"`
-		ReviewFixes           json.RawMessage         `json:"review_fixes,omitempty"`
-		Integration           *integrationJSON        `json:"integration,omitempty"`
-	}
-	ackJSON := func(value RuntimeOrchestrationAcknowledgement) *acknowledgementJSON {
-		return &acknowledgementJSON{
-			Record: value.record, Kind: value.kind, GoalID: value.goal.id.String(), GoalScope: value.goal.scope,
-			IdempotencyKey: value.idempotencyKey.String(), RequestDigest: value.requestDigest.String(),
-		}
+		AttemptID         string                  `json:"attempt_id"`
+		PlanID            string                  `json:"plan_id"`
+		MergeUnitID       string                  `json:"merge_unit_id"`
+		Generation        string                  `json:"generation"`
+		AttemptNumber     uint64                  `json:"attempt_number"`
+		Base              string                  `json:"base"`
+		Worktree          string                  `json:"worktree"`
+		Checkpoint        AttemptCheckpointMode   `json:"checkpoint"`
+		Escalation        AttemptEscalationPolicy `json:"escalation"`
+		SerialSegment     string                  `json:"serial_segment,omitempty"`
+		SerialSegmentHeld bool                    `json:"serial_segment_held"`
+		Phase             AttemptRuntimePhase     `json:"phase"`
+		StartRecord       uint64                  `json:"start_record"`
+		VerifiedHead      string                  `json:"verified_head,omitempty"`
+		InspectionDigest  string                  `json:"inspection_digest,omitempty"`
+		LeaseID           string                  `json:"lease_id,omitempty"`
+		GoalID            string                  `json:"goal_id,omitempty"`
+		GoalScope         GoalScope               `json:"goal_scope,omitempty"`
+		Boundaries        []boundaryJSON          `json:"boundaries"`
+		CommitProtocol    json.RawMessage         `json:"commit_protocol,omitempty"`
+		ReviewFixes       json.RawMessage         `json:"review_fixes,omitempty"`
+		Integration       *integrationJSON        `json:"integration,omitempty"`
 	}
 	value := attemptJSON{
 		AttemptID: attempt.attemptID.String(), PlanID: attempt.mergeUnit.planID.String(),
 		MergeUnitID: attempt.mergeUnit.mergeUnitID.String(), Generation: attempt.generation.String(),
 		AttemptNumber: attempt.attemptNumber, Base: attempt.base.String(),
-		Branch: attempt.branch, Worktree: attempt.worktree,
+		Worktree:   attempt.worktree,
 		Checkpoint: attempt.checkpoint, Escalation: attempt.escalation,
 		SerialSegment: attempt.serialSegment.String(), SerialSegmentHeld: attempt.serialSegmentHeld,
-		Phase: attempt.phase, ReservationRecord: attempt.reservationRecord,
-		MaterializationRecord: attempt.materializationRecord, StartRecord: attempt.startRecord,
+		Phase: attempt.phase, StartRecord: attempt.startRecord,
 		VerifiedHead: attempt.verifiedHead.String(), InspectionDigest: attempt.inspectionDigest.String(),
 		LeaseID: attempt.leaseID.String(),
 		GoalID:  attempt.goal.id.String(), GoalScope: attempt.goal.scope,
@@ -797,27 +487,7 @@ func canonicalAttemptRuntime(attempt RuntimeAttemptProjection) (json.RawMessage,
 			SerialSegment: boundary.serialSegment.String(),
 			LeaseID:       boundary.leaseID.String(),
 			GoalID:        boundary.goal.id.String(), GoalScope: boundary.goal.scope, Head: boundary.head.String(),
-			EvidenceDigest: boundary.evidenceDigest.String(), DirectiveDigest: boundary.directiveDigest.String(),
-			IdempotencyKey: boundary.idempotencyKey.String(),
-		}
-		if boundary.goalCompletedOK {
-			item.GoalCompleted = ackJSON(boundary.goalCompleted)
-		}
-		if boundary.ownerResponseOK {
-			item.OwnerResponse = &ownerJSON{
-				Record: boundary.ownerResponse.record, Response: boundary.ownerResponse.response,
-				RequestDigest: boundary.ownerResponse.requestDigest.String(),
-			}
-		}
-		if boundary.nextGoalIntentOK {
-			item.NextGoalIntent = &nextGoalIntentJSON{
-				Record: boundary.nextGoalIntent.record, GoalID: boundary.nextGoalIntent.goal.id.String(),
-				GoalScope:      boundary.nextGoalIntent.goal.scope,
-				IdempotencyKey: boundary.nextGoalIntent.idempotencyKey.String(),
-			}
-		}
-		if boundary.nextGoalOK {
-			item.NextGoal = ackJSON(boundary.nextGoal)
+			EvidenceDigest: boundary.evidenceDigest.String(),
 		}
 		value.Boundaries = append(value.Boundaries, item)
 	}

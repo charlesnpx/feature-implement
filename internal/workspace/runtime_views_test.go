@@ -146,8 +146,7 @@ func TestWorkspaceRuntimeViewsExposeOnlyLocalStateAndReplayDeterministically(
 		attempt.MergeUnitID != "unit-one" ||
 		attempt.Base != harness.base.String() ||
 		attempt.Phase != workspace.AttemptActive ||
-		attempt.BoundaryPending ||
-		len(attempt.PendingDirectives) != 0 {
+		attempt.BoundaryPending {
 		t.Fatalf("attempt view = %+v", attempt)
 	}
 	if len(first.Reviews) != 1 {
@@ -217,7 +216,7 @@ func TestWorkspaceViewRetainsZeroGenerationConformanceError(t *testing.T) {
 	}
 }
 
-func TestWorkspaceRuntimeViewsDistinguishPausedBoundaryKinds(
+func TestWorkspaceRuntimeViewsProjectPausedBoundaryKinds(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -232,17 +231,36 @@ func TestWorkspaceRuntimeViewsDistinguishPausedBoundaryKinds(
 		t.Run(test.name, func(t *testing.T) {
 			harness := newAttemptHarness(t, "unit-one")
 			attempt := harness.reserve(t, "2026-07-21T11:01:00Z")
-			attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T11:02:00Z")
-			if _, err := workspace.RecordAttemptBoundary(
+			snapshot, err := harness.journal.ReadSnapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			active, err := workspace.RebuildWorkspaceView(snapshot, harness.definition)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertNoDirective := func(surface string, pending bool, directives []workspace.WorkspaceBoundaryDirective) {
+				t.Helper()
+				if pending || directives == nil || len(directives) != 0 {
+					t.Fatalf("%s active boundary = pending=%v directives=%+v", surface, pending, directives)
+				}
+			}
+			status := schedulerUnitByID(t, active.Scheduler, "unit-one")
+			assertNoDirective("status", status.BoundaryPending, status.PendingDirectives)
+			if len(active.Attempts) != 1 {
+				t.Fatalf("active attempts = %+v", active.Attempts)
+			}
+			assertNoDirective("report", active.Attempts[0].BoundaryPending, active.Attempts[0].PendingDirectives)
+			if _, err := workspace.PauseAttempt(
 				context.Background(), harness.journal, harness.definition, harness.git,
-				workspace.RecordAttemptBoundaryRequest{
+				workspace.PauseAttemptRequest{
 					AttemptID: attempt.AttemptID(), Kind: test.boundaryKind,
 					Evidence: boundaryEvidence(t, test.name), OccurredAt: mustTime(t, "2026-07-21T11:03:00Z"),
 				},
 			); err != nil {
 				t.Fatal(err)
 			}
-			snapshot, err := harness.journal.ReadSnapshot()
+			snapshot, err = harness.journal.ReadSnapshot()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -251,26 +269,39 @@ func TestWorkspaceRuntimeViewsDistinguishPausedBoundaryKinds(
 				t.Fatal(err)
 			}
 
-			assertDirective := func(surface string, pending bool, directives []workspace.WorkspaceBoundaryDirective) {
+			assertDirective := func(
+				surface string,
+				pending bool,
+				reason string,
+				directives []workspace.WorkspaceBoundaryDirective,
+			) {
 				t.Helper()
-				if !pending || len(directives) != 1 {
-					t.Fatalf("%s paused boundary = pending=%v directives=%+v", surface, pending, directives)
+				if !pending || reason != string(test.boundaryKind) || len(directives) != 1 {
+					t.Fatalf(
+						"%s paused boundary = pending=%v reason=%q directives=%+v",
+						surface, pending, reason, directives,
+					)
 				}
 				directive := directives[0]
-				if directive.Kind != "owner_gate" || directive.BoundaryKind != string(test.boundaryKind) {
+				if directive.Kind != "boundary_pending" || directive.BoundaryKind != string(test.boundaryKind) {
 					t.Fatalf("%s directive = %+v", surface, directive)
 				}
 			}
 
-			status := schedulerUnitByID(t, report.Scheduler, "unit-one")
+			status = schedulerUnitByID(t, report.Scheduler, "unit-one")
 			if status.Status != workspace.SchedulerUnitPaused {
 				t.Fatalf("status unit = %+v", status)
 			}
-			assertDirective("status", status.BoundaryPending, status.PendingDirectives)
+			assertDirective("status", status.BoundaryPending, status.BoundaryReason, status.PendingDirectives)
 			if len(report.Attempts) != 1 || report.Attempts[0].Phase != workspace.AttemptPaused {
 				t.Fatalf("report attempts = %+v", report.Attempts)
 			}
-			assertDirective("report", report.Attempts[0].BoundaryPending, report.Attempts[0].PendingDirectives)
+			assertDirective(
+				"report",
+				report.Attempts[0].BoundaryPending,
+				report.Attempts[0].BoundaryReason,
+				report.Attempts[0].PendingDirectives,
+			)
 
 			encoded, err := json.Marshal(report)
 			if err != nil {

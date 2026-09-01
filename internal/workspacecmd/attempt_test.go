@@ -18,11 +18,11 @@ type attemptBoundaryCommandFixture struct {
 	attemptID    workspace.ID
 }
 
-func TestExecuteAttemptBoundaryRequiresKindAndRecordsBoundary(t *testing.T) {
+func TestExecuteAttemptPauseRequiresKindAndRecordsPause(t *testing.T) {
 	fixture := newAttemptBoundaryCommandFixture(t)
 	options := Options{
 		Action:       "attempt",
-		Subaction:    "boundary",
+		Subaction:    "pause",
 		BundleDir:    fixture.bundleRoot,
 		WorkspaceDir: fixture.workspaceDir,
 		Input: attemptBoundaryCommandInput(
@@ -34,8 +34,8 @@ func TestExecuteAttemptBoundaryRequiresKindAndRecordsBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	mutation, ok := result.(MutationResult)
-	if !ok || mutation.Status != "recorded" || mutation.Action != "attempt.boundary" {
-		t.Fatalf("boundary command result = %#v", result)
+	if !ok || mutation.Status != "recorded" || mutation.Action != "attempt.pause" {
+		t.Fatalf("pause command result = %#v", result)
 	}
 
 	journal, err := workspace.OpenWorkspaceJournal(
@@ -57,11 +57,11 @@ func TestExecuteAttemptBoundaryRequiresKindAndRecordsBoundary(t *testing.T) {
 	}
 	attempt, exists := runtime.Attempt(fixture.attemptID)
 	if !exists {
-		t.Fatalf("recorded boundary has no attempt %s", fixture.attemptID)
+		t.Fatalf("recorded pause has no attempt %s", fixture.attemptID)
 	}
 	boundary, exists := attempt.CurrentBoundary()
 	if !exists || boundary.Kind() != workspace.AttemptBoundaryKindCheckpoint {
-		t.Fatalf("recorded command boundary = %#v exists=%v", boundary, exists)
+		t.Fatalf("recorded command pause = %#v exists=%v", boundary, exists)
 	}
 
 	for _, test := range []struct {
@@ -81,11 +81,11 @@ func TestExecuteAttemptBoundaryRequiresKindAndRecordsBoundary(t *testing.T) {
 			options.Input = test.input
 			_, err := Execute(context.Background(), options)
 			if err == nil {
-				t.Fatal("boundary command accepted an invalid kind")
+				t.Fatal("pause command accepted an invalid kind")
 			}
 			for _, required := range []string{"kind", "checkpoint", "escalation"} {
 				if !strings.Contains(err.Error(), required) {
-					t.Fatalf("boundary kind error = %q, missing %q", err, required)
+					t.Fatalf("pause kind error = %q, missing %q", err, required)
 				}
 			}
 		})
@@ -250,21 +250,11 @@ merge_units:
 		t.Fatal(err)
 	}
 	attemptGit := workspace.DefaultLocalAttemptGitAdapter()
-	attempt, err := workspace.ReserveAttempt(
+	attempt, err := workspace.StartAttempt(
 		context.Background(), journal, bundle.Definition(), attemptGit,
-		workspace.ReserveAttemptRequest{
+		workspace.StartAttemptRequest{
 			MergeUnit: mergeUnit, AttemptNumber: 1, Goal: goal,
 			OccurredAt: time.Date(2026, time.July, 25, 18, 0, 1, 0, time.UTC),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	attempt, err = workspace.MaterializeAttempt(
-		context.Background(), journal, bundle.Definition(), attemptGit,
-		workspace.MaterializeAttemptRequest{
-			AttemptID:  attempt.AttemptID(),
-			OccurredAt: time.Date(2026, time.July, 25, 18, 0, 2, 0, time.UTC),
 		},
 	)
 	if err != nil {

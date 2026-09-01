@@ -213,7 +213,7 @@ func normalizeFullyQualifiedBaseRef(value string) (string, error) {
 		return "", fmt.Errorf("base_ref must be a fully qualified refs/heads/ ref")
 	}
 	branch := strings.TrimPrefix(value, "refs/heads/")
-	if err := validateAttemptBranchSyntax(branch); err != nil {
+	if err := validateGitBranchSyntax(branch); err != nil {
 		return "", fmt.Errorf("base_ref: %w", err)
 	}
 	return value, nil
@@ -227,7 +227,7 @@ func normalizeFeatureBranch(value string) (string, error) {
 			maxFeatureBranchBytes,
 		)
 	}
-	if err := validateAttemptBranchSyntax(value); err != nil {
+	if err := validateGitBranchSyntax(value); err != nil {
 		return "", fmt.Errorf("feature_branch: %w", err)
 	}
 	return value, nil

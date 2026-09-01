@@ -662,12 +662,12 @@ func TestLocalTargetInitializationReadinessBarrierAtEveryFault(t *testing.T) {
 				t.Fatal(err)
 			}
 			fakeGit := &fakeAttemptGit{}
-			if _, err := workspace.ReserveAttempt(
+			if _, err := workspace.StartAttempt(
 				context.Background(),
 				journal,
 				definition,
 				fakeGit,
-				workspace.ReserveAttemptRequest{
+				workspace.StartAttemptRequest{
 					MergeUnit: mustMergeUnitReference(
 						t, "alpha-plan", "unit-one",
 					),
@@ -680,7 +680,7 @@ func TestLocalTargetInitializationReadinessBarrierAtEveryFault(t *testing.T) {
 			); err == nil || !strings.Contains(err.Error(), "feature_ref_created") {
 				t.Fatalf("incomplete initialization attempt error = %v", err)
 			}
-			if fakeGit.prepareCalls != 0 || fakeGit.createCalls != 0 {
+			if fakeGit.createCalls != 0 {
 				t.Fatal("incomplete initialization reached attempt Git mutation")
 			}
 		})

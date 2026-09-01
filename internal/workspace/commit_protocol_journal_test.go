@@ -13,7 +13,6 @@ import (
 )
 
 type journalCommitGit struct {
-	branch       string
 	head         workspace.GitObjectID
 	staged       workspace.StagedCommitInspection
 	commit       workspace.GitCommitInspection
@@ -28,8 +27,10 @@ func TestJournaledCommitProtocolStartsFromRealStagedWorktree(t *testing.T) {
 	t.Parallel()
 
 	harness := newConfiguredAttemptHarness(t)
+	target := harness.definition.Workspace().RepositoryRoot()
+	runGitSetup(t, target, "config", "user.name", "Protocol Test")
+	runGitSetup(t, target, "config", "user.email", "protocol@example.test")
 	attempt := harness.reserve(t, "2026-07-21T10:55:00Z")
-	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T10:56:00Z")
 
 	runGitSetup(
 		t, "", "clone", "--no-local",
@@ -39,7 +40,7 @@ func TestJournaledCommitProtocolStartsFromRealStagedWorktree(t *testing.T) {
 	runGitSetup(t, attempt.Worktree(), "config", "user.name", "Protocol Test")
 	runGitSetup(t, attempt.Worktree(), "config", "user.email", "protocol@example.test")
 	runGitSetup(
-		t, attempt.Worktree(), "switch", "-c", attempt.Branch(),
+		t, attempt.Worktree(), "switch", "--detach",
 		rawGitObject(attempt.Base()),
 	)
 	if err := os.MkdirAll(
@@ -115,7 +116,7 @@ func TestJournaledCommitProtocolStartsFromRealStagedWorktree(t *testing.T) {
 	}
 }
 
-func (git *journalCommitGit) InspectStaged(context.Context, string, string) (workspace.StagedCommitInspection, error) {
+func (git *journalCommitGit) InspectStaged(context.Context, string) (workspace.StagedCommitInspection, error) {
 	return git.staged, nil
 }
 
@@ -156,10 +157,10 @@ func (git *journalCommitGit) InspectFirstParentRange(
 
 func (git *journalCommitGit) VerifyCleanWorktree(
 	_ context.Context,
-	_, branch string,
+	_ string,
 	head workspace.GitObjectID,
 ) error {
-	if branch != git.branch || head != git.head {
+	if head != git.head {
 		return errors.New("fake commit worktree verification failed")
 	}
 	return nil
@@ -170,7 +171,6 @@ func TestJournaledCommitProtocolRecoversCommitAndCheckCrashWindows(t *testing.T)
 
 	harness := newConfiguredAttemptHarness(t)
 	attempt := harness.reserve(t, "2026-07-21T11:00:00Z")
-	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T11:01:00Z")
 
 	if _, err := workspace.RecordAttemptBoundary(
 		context.Background(), harness.journal, harness.definition, harness.git,
@@ -206,7 +206,7 @@ func TestJournaledCommitProtocolRecoversCommitAndCheckCrashWindows(t *testing.T)
 	}
 	_ = commitEvidence
 	git := &journalCommitGit{
-		branch: attempt.Branch(), head: harness.base, staged: staged, commit: commitInspection,
+		head: harness.base, staged: staged, commit: commitInspection,
 	}
 	runner := &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())}
 	shell, _ := workspace.NewCommitProtocolShell(git, runner)
@@ -275,7 +275,9 @@ func TestJournaledCommitProtocolRecoversCommitAndCheckCrashWindows(t *testing.T)
 		t.Fatalf("replayed protocol = %#v exists=%v", replayedState, exists)
 	}
 
-	harness.git.setHead(t, attempt.Branch(), mustGitObject(t, 'e'), true)
+	harness.git.setHead(
+		t, attempt.Worktree(), mustGitObject(t, 'e'), true,
+	)
 	if _, err := workspace.RecordAttemptBoundary(
 		context.Background(), harness.journal, harness.definition, harness.git,
 		workspace.RecordAttemptBoundaryRequest{
@@ -287,7 +289,9 @@ func TestJournaledCommitProtocolRecoversCommitAndCheckCrashWindows(t *testing.T)
 		t.Fatalf("extra commit boundary error = %v", err)
 	}
 
-	harness.git.setHead(t, attempt.Branch(), commitObject, true)
+	harness.git.setHead(
+		t, attempt.Worktree(), commitObject, true,
+	)
 	boundary, err := workspace.RecordAttemptBoundary(
 		context.Background(), harness.journal, harness.definition, harness.git,
 		workspace.RecordAttemptBoundaryRequest{
@@ -656,7 +660,12 @@ func TestJournaledReviewFixReplayBudgetExactHeadAndBoundary(t *testing.T) {
 		t.Fatalf("replayed budget=%#v configured=%v err=%v", budget, configured, err)
 	}
 
-	scenario.harness.git.setHead(t, scenario.attempt.Branch(), secondCommit, true)
+	scenario.harness.git.setHead(
+		t,
+		scenario.attempt.Worktree(),
+		secondCommit,
+		true,
+	)
 	boundary, err := workspace.RecordAttemptBoundary(
 		context.Background(), scenario.harness.journal, scenario.harness.definition, scenario.harness.git,
 		workspace.RecordAttemptBoundaryRequest{
@@ -691,7 +700,12 @@ func TestAttemptBoundaryRejectsInFlightReviewFix(t *testing.T) {
 	); err == nil {
 		t.Fatal("review-fix reservation fault was not injected")
 	}
-	scenario.harness.git.setHead(t, scenario.attempt.Branch(), scenario.implementation, true)
+	scenario.harness.git.setHead(
+		t,
+		scenario.attempt.Worktree(),
+		scenario.implementation,
+		true,
+	)
 	if _, err := workspace.RecordAttemptBoundary(
 		context.Background(), scenario.harness.journal, scenario.harness.definition, scenario.harness.git,
 		workspace.RecordAttemptBoundaryRequest{
@@ -709,7 +723,6 @@ func TestReviewFixCanFollowUnconstrainedImplementationHistory(t *testing.T) {
 
 	harness := newReviewOnlyAttemptHarness(t)
 	attempt := harness.reserve(t, "2026-07-21T12:20:00Z")
-	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T12:21:00Z")
 	review := configuredReviewFixProtocol(t, harness.definition)
 	step, err := review.Step(1)
 	if err != nil {
@@ -730,7 +743,7 @@ func TestReviewFixCanFollowUnconstrainedImplementationHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	git := &journalCommitGit{
-		branch: attempt.Branch(), head: implementationHead, staged: staged, commit: commit,
+		head: implementationHead, staged: staged, commit: commit,
 	}
 	runner := &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())}
 	shell, err := workspace.NewCommitProtocolShell(git, runner)
@@ -1231,7 +1244,6 @@ func newJournalCommitScenario(t *testing.T) journalCommitScenario {
 	t.Helper()
 	harness := newConfiguredAttemptHarness(t)
 	attempt := harness.reserve(t, "2026-07-21T12:00:00Z")
-	attempt = harness.materialize(t, attempt.AttemptID(), "2026-07-21T12:01:00Z")
 	step := configuredProtocolStep(t, harness.definition)
 	tree, commitObject, changedObject := mustGitObject(t, 'b'), mustGitObject(t, 'c'), mustGitObject(t, 'd')
 	diff := addedDiff(t, "src/protocol.go", changedObject)
@@ -1246,7 +1258,7 @@ func newJournalCommitScenario(t *testing.T) journalCommitScenario {
 	if err != nil {
 		t.Fatal(err)
 	}
-	git := &journalCommitGit{branch: attempt.Branch(), head: harness.base, staged: staged, commit: commit}
+	git := &journalCommitGit{head: harness.base, staged: staged, commit: commit}
 	runner := &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())}
 	shell, err := workspace.NewCommitProtocolShell(git, runner)
 	if err != nil {

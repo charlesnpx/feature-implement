@@ -320,7 +320,7 @@ func executeReview(ctx context.Context, bundle workspace.WorkspaceBundle, option
 }
 
 func reviewCommandResult(action string, detail any, journal *workspace.WorkspaceJournal, definition workspace.EffectiveWorkspaceDefinition) (ReviewCommandResult, error) {
-	base, err := mutationResult(action, journal, definition, nil)
+	base, err := mutationResult(action, journal, definition)
 	if err != nil {
 		return ReviewCommandResult{}, err
 	}

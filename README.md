@@ -47,7 +47,7 @@ feature workspace validate --bundle <bundle-root> [--write-locks] [--json]
 feature workspace init|recover --bundle <bundle-root> --workspace <runtime-root> --input <file|-> [--json]
 feature workspace status --bundle <bundle-root> --workspace <runtime-root> [--json]
 
-feature workspace attempt reserve|materialize|adopt-head|boundary|next-goal|acknowledge|owner-response|resume ...
+feature workspace attempt start|adopt-head|pause|resume|abandon ...
 feature workspace commit next ...
 feature workspace review start|reserve|record|reserve-fix|apply-fix|record-fix|ready ...
 feature workspace integrate merge-unit ...
@@ -185,13 +185,12 @@ workflow combinations are:
 |---|---|---|
 | `none` | `allowed` | Runs unit to unit without stopping; the agent may still stop if it hits something real. The block-of-units default. |
 | `none` | `forbidden` | Cannot stop for any reason — finish or fail. For unattended and CI runs. |
-| `pause_only` | `allowed` | Stops here, owner responds `continue`, and resumes on the same goal. |
-| `complete_goal_and_wait` | `allowed` | Goal finishes here; after the owner responds, a next goal is reserved and acknowledged, and the attempt resumes on the new goal. |
+| `pause_only` | `allowed` | Records a planned pause and resumes on the same goal. |
 
 An execution profile may optionally declare `boundary` with `escalation` only.
 A merge unit may narrow `allowed` to `forbidden`, but never widen `forbidden`
-to `allowed`. Profiles deliberately do not declare `checkpoint`, because
-`pause_only` and `complete_goal_and_wait` do not order against each other.
+to `allowed`. Profiles deliberately do not declare `checkpoint`; planned
+checkpoints remain on individual merge units.
 
 Commit protocols, review-fix protocols, and review loops are optional strict
 schemas within each merge-unit entry. Without a commit protocol, ordinary
@@ -242,10 +241,11 @@ not interpreted or migrated.
 ## Local execution
 
 1. Run `recover`, then read `status`.
-2. Select a `ready` merge unit. Submit `attempt reserve` with its plan ID,
-   merge-unit ID, next attempt number, and goal. The base, branch, and worktree
-   root are derived from locked runtime state.
-3. Submit `attempt materialize`. Work only in the returned worktree and branch.
+2. Select a `ready` merge unit. Submit `attempt start` with its plan ID,
+   merge-unit ID, next attempt number, and goal. The base and detached scratch
+   worktree are derived from locked runtime state.
+3. Work only in the returned detached worktree. Its working history is scratch
+   until an exact clean head is selected for integration.
 4. Use `commit next` for a configured commit step. Otherwise make ordinary
    local commits and keep the worktree clean.
 5. For configured review, use `review start`, `reserve`, `record`, bounded fix
@@ -253,18 +253,18 @@ not interpreted or migrated.
    every result binds the exact request, head, tree, and evidence.
 6. Without configured review, submit `attempt adopt-head` for the exact clean
    descendant selected for integration.
-7. Before integration, submit `attempt boundary` only when the merge unit
+7. Before integration, submit `attempt pause` only when the merge unit
    configures a checkpoint other than `none`, or when the agent genuinely needs
    an allowed escalation. The request requires `kind`: use `checkpoint` for the
-   configured gate and `escalation` for a genuine agent-raised stop. Record it
+   configured planned stop and `escalation` for a genuine agent-raised stop. Record it
    while the attempt is active, before `integrate merge-unit`.
-8. Resolve every returned local directive and resume the attempt when a boundary
-   was recorded. If no boundary is needed, proceed directly. Only then submit
-   `integrate merge-unit` for the exact accepted head and tree. Integration
+8. Resume the attempt directly when a pause was recorded. Use `attempt abandon`
+   only to terminally exit a non-integrated attempt; it leaves its detached
+   scratch directory intact for inspection. If no pause is needed, proceed
+   directly. Only then submit `integrate merge-unit` for the exact accepted head and tree. Integration
    creates a deterministic two-parent local commit and compare-and-swap updates
-   only the workspace-owned feature ref. Acknowledgements and owner responses
-   bind the exact directive, goal, head, and idempotency inputs.
-9. After every unit is integrated and every boundary is resolved, run
+   only the workspace-owned feature ref.
+9. After every unit is integrated and every pause is resolved, run
    `complete verify` to record local workspace completion.
 
 Every mutation returns a fresh journal-derived workspace view. Treat that view as the

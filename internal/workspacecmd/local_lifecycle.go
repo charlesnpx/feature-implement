@@ -68,7 +68,6 @@ func executeIntegration(
 		"integrate.merge-unit",
 		journal,
 		bundle.Definition(),
-		nil,
 	)
 }
 
@@ -113,6 +112,5 @@ func executeCompletion(
 		"complete.verify",
 		journal,
 		bundle.Definition(),
-		nil,
 	)
 }

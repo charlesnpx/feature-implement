@@ -40,21 +40,17 @@ func WorkspaceViewSchema() map[string]any {
 		[]string{
 			"kind", "boundary_kind", "workspace_id", "generation", "attempt_id",
 			"boundary_id", "goal_id", "goal_scope", "head",
-			"directive_digest",
 		},
 		map[string]any{
-			"kind":             nonEmptyText(),
-			"boundary_kind":    enum("checkpoint", "escalation"),
-			"workspace_id":     nonEmptyText(),
-			"generation":       nonEmptyText(),
-			"attempt_id":       nonEmptyText(),
-			"boundary_id":      nonEmptyText(),
-			"goal_id":          nonEmptyText(),
-			"goal_scope":       enum("merge_unit", "workspace"),
-			"head":             nonEmptyText(),
-			"directive_digest": nonEmptyText(),
-			"idempotency_key":  text(),
-			"choices":          array(nonEmptyText()),
+			"kind":          enum("boundary_pending"),
+			"boundary_kind": enum("checkpoint", "escalation"),
+			"workspace_id":  nonEmptyText(),
+			"generation":    nonEmptyText(),
+			"attempt_id":    nonEmptyText(),
+			"boundary_id":   nonEmptyText(),
+			"goal_id":       nonEmptyText(),
+			"goal_scope":    enum("merge_unit", "workspace"),
+			"head":          nonEmptyText(),
 		},
 	)
 	schedulerUnit := object(
@@ -67,7 +63,7 @@ func WorkspaceViewSchema() map[string]any {
 			"plan_id":       nonEmptyText(),
 			"merge_unit_id": nonEmptyText(),
 			"status": enum(
-				"blocked", "ready", "reserved", "materializing",
+				"blocked", "ready",
 				"active", "paused", "review_exhausted", "completed",
 			),
 			"generation":         nonEmptyText(),
@@ -75,7 +71,6 @@ func WorkspaceViewSchema() map[string]any {
 			"blockers":           array(nonEmptyText()),
 			"attempt_id":         nonEmptyText(),
 			"attempt_number":     integer(1),
-			"branch":             nonEmptyText(),
 			"worktree":           nonEmptyText(),
 			"head":               nonEmptyText(),
 			"boundary_pending":   boolean(),
@@ -177,7 +172,7 @@ func WorkspaceViewSchema() map[string]any {
 	attempt := object(
 		[]string{
 			"attempt_id", "plan_id", "merge_unit_id", "generation",
-			"attempt_number", "base", "branch", "worktree", "phase",
+			"attempt_number", "base", "worktree", "phase",
 			"goal_id", "goal_scope", "boundary_pending",
 			"pending_directives",
 		},
@@ -188,10 +183,9 @@ func WorkspaceViewSchema() map[string]any {
 			"generation":     nonEmptyText(),
 			"attempt_number": integer(1),
 			"base":           nonEmptyText(),
-			"branch":         nonEmptyText(),
 			"worktree":       nonEmptyText(),
 			"phase": enum(
-				"reserved", "materializing", "active", "paused",
+				"active", "paused",
 				"review_exhausted", "completed", "failed", "abandoned",
 			),
 			"head":               nonEmptyText(),

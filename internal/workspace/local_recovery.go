@@ -106,26 +106,37 @@ func RecoverWorkspaceLocalEffects(
 		if err != nil {
 			return WorkspaceLocalRecoveryResult{}, err
 		}
-		materializing := make([]ID, 0)
+		pending := make([]RuntimeAttemptProjection, 0)
 		for _, attempt := range runtime.attempts {
-			if attempt.phase == AttemptMaterializing {
-				materializing = append(
-					materializing, attempt.attemptID,
+			if attempt.phase != AttemptActive {
+				continue
+			}
+			inspection, inspectErr := attemptGit.InspectAttemptWorktree(
+				ctx, definition.workspace.target.root, attempt.worktree,
+			)
+			if inspectErr != nil {
+				return WorkspaceLocalRecoveryResult{}, fmt.Errorf(
+					"inspect started scratch attempt %s: %w", attempt.attemptID, inspectErr,
+				)
+			}
+			if !inspection.WorktreeExists() {
+				pending = append(pending, attempt)
+				continue
+			}
+			if inspection.WorktreeHead().IsZero() {
+				return WorkspaceLocalRecoveryResult{}, fmt.Errorf(
+					"started scratch attempt %s has an incomplete worktree; rerun attempt start to inspect or repair it",
+					attempt.attemptID,
 				)
 			}
 		}
-		for _, attemptID := range materializing {
-			if _, err := MaterializeAttempt(
-				ctx, journal, definition, attemptGit,
-				MaterializeAttemptRequest{
-					AttemptID:  attemptID,
-					OccurredAt: request.OccurredAt,
-					Fault:      request.AttemptFault,
-				},
+		for _, attempt := range pending {
+			if _, err := reconcileStartedAttempt(
+				ctx, journal, definition, attemptGit, attempt, request.AttemptFault,
 			); err != nil {
 				return WorkspaceLocalRecoveryResult{}, fmt.Errorf(
 					"recover attempt materialization %s: %w",
-					attemptID, err,
+					attempt.attemptID, err,
 				)
 			}
 			result.actions = append(
