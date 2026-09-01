@@ -460,7 +460,7 @@ func executeReviewRequest(
 		return nil, err
 	}
 	paths, err := writeReviewRequestArtifacts(
-		input.OutputDir, definition.Workspace().RepositoryRoot(), materialization.Attempt().Worktree(),
+		input.OutputDir, definition.Workspace().RepositoryRoot(), materialization.Worktree(),
 		materialization.CharterJSON(), materialization.RequestJSON(), materialization.ReviewInput(),
 	)
 	if err != nil {
@@ -472,8 +472,8 @@ func executeReviewRequest(
 		CharterHash:             materialization.CharterHash().String(),
 		ReviewRequestDigest:     materialization.RequestDocumentDigest().String(),
 		ReviewInputDigest:       materialization.ReviewInputDigest().String(),
-		ReservationDigest:       materialization.Reservation().Digest().String(),
-		InvocationRequestDigest: materialization.Reservation().Request().Digest().String(),
+		ReservationDigest:       materialization.ReservationDigest().String(),
+		InvocationRequestDigest: materialization.InvocationRequestDigest().String(),
 	}, journal, definition)
 }
 

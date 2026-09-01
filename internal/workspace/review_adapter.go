@@ -39,15 +39,17 @@ type ReviewAdapterBuildRequest struct {
 // one pending review reservation. The three serialized documents are kept as
 // canonical bytes so callers can write exactly what was hashed and validated.
 type ReviewAdapterMaterialization struct {
-	frozen                witnesscharter.FrozenCharter
-	charterJSON           []byte
-	requestJSON           []byte
-	reviewInput           []byte
-	charterHash           Digest
-	requestDocumentDigest Digest
-	reviewInputDigest     Digest
-	reservation           ReviewInvocationReservation
-	attempt               RuntimeAttemptProjection
+	frozen                  witnesscharter.FrozenCharter
+	charterJSON             []byte
+	requestJSON             []byte
+	reviewInput             []byte
+	charterHash             Digest
+	requestDocumentDigest   Digest
+	reviewInputDigest       Digest
+	reservationDigest       Digest
+	invocationRequestDigest Digest
+	workspaceID             ID
+	worktree                string
 }
 
 func (materialization ReviewAdapterMaterialization) FrozenCharter() witnesscharter.FrozenCharter {
@@ -78,12 +80,19 @@ func (materialization ReviewAdapterMaterialization) ReviewInputDigest() Digest {
 	return materialization.reviewInputDigest
 }
 
-func (materialization ReviewAdapterMaterialization) Reservation() ReviewInvocationReservation {
-	return materialization.reservation
+func (materialization ReviewAdapterMaterialization) ReservationDigest() Digest {
+	return materialization.reservationDigest
 }
 
-func (materialization ReviewAdapterMaterialization) Attempt() RuntimeAttemptProjection {
-	return materialization.attempt
+func (materialization ReviewAdapterMaterialization) InvocationRequestDigest() Digest {
+	return materialization.invocationRequestDigest
+}
+
+func (materialization ReviewAdapterMaterialization) WorkspaceID() ID {
+	return materialization.workspaceID
+}
+func (materialization ReviewAdapterMaterialization) Worktree() string {
+	return materialization.worktree
 }
 
 // BuildReviewAdapterRequest resolves the exact pending reservation and builds
@@ -193,7 +202,7 @@ func buildReviewAdapterMaterialization(
 	}
 	requestDocument := witnessreview.ReviewRequestDocument{
 		SchemaVersion:    witnessreview.ReviewRequestV1,
-		ConsumerIdentity: reviewAdapterConsumerIdentity(request),
+		ConsumerIdentity: reviewAdapterConsumerIdentity(request.workspaceID),
 		Subject: witnessreview.RequestSubject{
 			Head: request.head.String(),
 			Tree: request.tree.String(),
@@ -221,15 +230,17 @@ func buildReviewAdapterMaterialization(
 		return ReviewAdapterMaterialization{}, fmt.Errorf("canonicalize review request: %w", err)
 	}
 	return ReviewAdapterMaterialization{
-		frozen:                frozen,
-		charterJSON:           charterJSON,
-		requestJSON:           requestJSON,
-		reviewInput:           append([]byte(nil), reviewInput...),
-		charterHash:           charterHash,
-		requestDocumentDigest: requestDocumentDigest,
-		reviewInputDigest:     reviewInputDigest,
-		reservation:           resolved.reservation,
-		attempt:               resolved.attempt,
+		frozen:                  frozen,
+		charterJSON:             charterJSON,
+		requestJSON:             requestJSON,
+		reviewInput:             append([]byte(nil), reviewInput...),
+		charterHash:             charterHash,
+		requestDocumentDigest:   requestDocumentDigest,
+		reviewInputDigest:       reviewInputDigest,
+		reservationDigest:       resolved.reservation.digest,
+		invocationRequestDigest: request.digest,
+		workspaceID:             request.workspaceID,
+		worktree:                resolved.attempt.worktree,
 	}, nil
 }
 
@@ -295,10 +306,10 @@ func reviewAdapterRequestDetails(request ReviewRequest) map[string]any {
 	}
 }
 
-func reviewAdapterConsumerIdentity(request ReviewRequest) map[string]any {
+func reviewAdapterConsumerIdentity(workspaceID ID) map[string]any {
 	return map[string]any{
 		"kind": "feature-implement",
-		"id":   request.workspaceID.String(),
+		"id":   workspaceID.String(),
 	}
 }
 
@@ -394,19 +405,26 @@ func ReviewDocumentArtifactPath(workspaceDir string, artifact ReviewDocumentArti
 	return filepath.Join(WorkspaceStateDirectory(workspaceDir), filepath.FromSlash(artifact.path)), nil
 }
 
+func validateReviewDocumentArtifactOperation(
+	journal *WorkspaceJournal,
+	artifact ReviewDocumentArtifact,
+	rawDocument []byte,
+) error {
+	if journal == nil || len(rawDocument) == 0 || len(rawDocument) > MaxArtifactBytes ||
+		DigestBytes(rawDocument) != artifact.rawDocumentDigest {
+		return fmt.Errorf("review document artifact requires exact bounded raw bytes")
+	}
+	if err := artifact.validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func writeReviewDocumentArtifact(
 	journal *WorkspaceJournal,
 	artifact ReviewDocumentArtifact,
 	rawDocument []byte,
 ) (bool, error) {
-	if journal == nil || len(rawDocument) == 0 || len(rawDocument) > MaxArtifactBytes ||
-		DigestBytes(rawDocument) != artifact.rawDocumentDigest {
-		return false, fmt.Errorf("review document artifact requires exact bounded raw bytes")
-	}
-	if err := artifact.validate(); err != nil {
-		return false, err
-	}
-
 	journal.mu.Lock()
 	defer journal.mu.Unlock()
 	if err := journal.requireWriter(); err != nil {
@@ -426,20 +444,67 @@ func writeReviewDocumentArtifact(
 	if !os.IsNotExist(err) {
 		return false, fmt.Errorf("inspect review document artifact: %w", err)
 	}
-	if err := state.WriteExclusive(artifact.path, rawDocument, 0o600); err != nil {
-		return false, fmt.Errorf("retain raw review document: %w", err)
+	created, err := state.writeExclusivePublished(
+		artifact.path,
+		rawDocument,
+		0o600,
+		func() error { return journal.inject(JournalFaultAfterReviewDocumentArtifactPublication) },
+	)
+	if err != nil {
+		return false, rollbackPublishedReviewDocumentArtifact(
+			journal,
+			artifact,
+			rawDocument,
+			created,
+			fmt.Errorf("retain raw review document: %w", err),
+		)
 	}
 	if err := state.Sync(); err != nil {
-		return false, fmt.Errorf("synchronize raw review document: %w", err)
+		return false, rollbackPublishedReviewDocumentArtifact(
+			journal,
+			artifact,
+			rawDocument,
+			created,
+			fmt.Errorf("synchronize raw review document: %w", err),
+		)
 	}
 	stored, err = state.ReadBounded(artifact.path, MaxArtifactBytes)
 	if err != nil {
-		return false, fmt.Errorf("verify retained raw review document: %w", err)
+		return false, rollbackPublishedReviewDocumentArtifact(
+			journal,
+			artifact,
+			rawDocument,
+			created,
+			fmt.Errorf("verify retained raw review document: %w", err),
+		)
 	}
 	if !bytes.Equal(stored, rawDocument) {
-		return false, fmt.Errorf("retained raw review document differs from the validated input")
+		return false, rollbackPublishedReviewDocumentArtifact(
+			journal,
+			artifact,
+			rawDocument,
+			created,
+			fmt.Errorf("retained raw review document differs from the validated input"),
+		)
 	}
-	return true, nil
+	return created, nil
+}
+
+func rollbackPublishedReviewDocumentArtifact(
+	journal *WorkspaceJournal,
+	artifact ReviewDocumentArtifact,
+	rawDocument []byte,
+	created bool,
+	cause error,
+) error {
+	if !created {
+		return cause
+	}
+	cleanupErr := removeReviewDocumentArtifactLocked(journal, artifact, rawDocument)
+	if cleanupErr != nil {
+		cleanupErr = fmt.Errorf("rollback published raw review document artifact: %w", cleanupErr)
+	}
+	return errors.Join(cause, cleanupErr)
 }
 
 func removeReviewDocumentArtifact(
@@ -447,19 +512,19 @@ func removeReviewDocumentArtifact(
 	artifact ReviewDocumentArtifact,
 	rawDocument []byte,
 ) error {
-	if journal == nil || len(rawDocument) == 0 || len(rawDocument) > MaxArtifactBytes ||
-		DigestBytes(rawDocument) != artifact.rawDocumentDigest {
-		return fmt.Errorf("review document artifact cleanup requires exact bounded raw bytes")
-	}
-	if err := artifact.validate(); err != nil {
-		return err
-	}
-
 	journal.mu.Lock()
 	defer journal.mu.Unlock()
 	if err := journal.requireWriter(); err != nil {
 		return err
 	}
+	return removeReviewDocumentArtifactLocked(journal, artifact, rawDocument)
+}
+
+func removeReviewDocumentArtifactLocked(
+	journal *WorkspaceJournal,
+	artifact ReviewDocumentArtifact,
+	rawDocument []byte,
+) error {
 	removed, err := journal.runtime.state.adapter.removeFileContentExact(
 		artifact.path, rawDocument, MaxArtifactBytes, journal.runtime.Verify,
 	)
@@ -585,6 +650,97 @@ type RecordedReviewDocument struct {
 func (result RecordedReviewDocument) Verified() VerifiedReviewResult   { return result.verified }
 func (result RecordedReviewDocument) Artifact() ReviewDocumentArtifact { return result.artifact }
 
+func recordedReviewDocumentForRequest(
+	snapshot JournalSnapshot,
+	projection ReviewRuntimeProjection,
+	request RecordAttemptReviewDocumentRequest,
+) (RecordedReviewDocument, JournalRecord, bool, error) {
+	for _, record := range snapshot.Records() {
+		event, ok := record.Event().(ReviewResultRecordedJournalEvent)
+		if !ok || event.AttemptID() != request.AttemptID || event.ReservationDigest() != request.ReservationDigest {
+			continue
+		}
+		artifact, hasArtifact := event.DocumentArtifact()
+		if !hasArtifact {
+			return RecordedReviewDocument{}, JournalRecord{}, true,
+				fmt.Errorf("review document cannot attach raw evidence to an existing result")
+		}
+		if artifact.RawDocumentDigest() != DigestBytes(request.Document) {
+			return RecordedReviewDocument{}, JournalRecord{}, true, fmt.Errorf(
+				"recorded review document raw report digest %s does not match request digest %s",
+				artifact.RawDocumentDigest(),
+				DigestBytes(request.Document),
+			)
+		}
+		result := event.Result()
+		if result.Status() != ReviewResultCompleted || result.RequestDigest() != request.RequestDigest ||
+			result.ReviewerInstance() != request.ReviewerInstance ||
+			result.Isolation().Digest() != request.Isolation.Digest() {
+			return RecordedReviewDocument{}, JournalRecord{}, true,
+				fmt.Errorf("recorded review document bindings do not match request")
+		}
+		state, exists := projection.State(request.AttemptID)
+		if !exists {
+			return RecordedReviewDocument{}, JournalRecord{}, true,
+				fmt.Errorf("recorded review document has no rebuilt review state")
+		}
+		for _, round := range state.Rounds() {
+			for _, verified := range round.Attempts() {
+				if verified.ReservationDigest() != request.ReservationDigest {
+					continue
+				}
+				if verified.Request().Digest() != request.RequestDigest ||
+					verified.Submission().Digest() != result.Digest() {
+					return RecordedReviewDocument{}, JournalRecord{}, true,
+						fmt.Errorf("recorded review document result bindings do not match its journal projection")
+				}
+				return RecordedReviewDocument{verified: verified, artifact: artifact}, record, true, nil
+			}
+		}
+		return RecordedReviewDocument{}, JournalRecord{}, true,
+			fmt.Errorf("recorded review document result is missing from its rebuilt review state")
+	}
+	return RecordedReviewDocument{}, JournalRecord{}, false, nil
+}
+
+func reconcileAmbiguousReviewDocumentAppend(
+	journal *WorkspaceJournal,
+	definition EffectiveWorkspaceDefinition,
+	request RecordAttemptReviewDocumentRequest,
+	eventHash Digest,
+) (RecordedReviewDocument, JournalRecord, bool, error) {
+	snapshot, err := journal.ReadSnapshot()
+	if err != nil {
+		return RecordedReviewDocument{}, JournalRecord{}, false,
+			fmt.Errorf("re-read journal after ambiguous review document append: %w", err)
+	}
+	var found bool
+	for _, record := range snapshot.Records() {
+		if record.EventHash() == eventHash {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return RecordedReviewDocument{}, JournalRecord{}, false, nil
+	}
+	projection, err := RebuildReviewRuntime(snapshot, definition)
+	if err != nil {
+		return RecordedReviewDocument{}, JournalRecord{}, false,
+			fmt.Errorf("rebuild review runtime after ambiguous review document append: %w", err)
+	}
+	recorded, record, exists, err := recordedReviewDocumentForRequest(snapshot, projection, request)
+	if err != nil {
+		return RecordedReviewDocument{}, JournalRecord{}, false, err
+	}
+	if !exists || record.EventHash() != eventHash {
+		return RecordedReviewDocument{}, JournalRecord{}, false, fmt.Errorf(
+			"ambiguous review document event %s is not the recorded request result", eventHash,
+		)
+	}
+	return recorded, record, true, nil
+}
+
 // RecordAttemptReviewDocument validates a raw review-report-v1 against the
 // exact pending reservation's deterministic request packet, retains those
 // exact raw bytes, and records the legacy finding bridge in the normal review
@@ -606,6 +762,15 @@ func RecordAttemptReviewDocument(
 			"record review document requires exact reservation, reviewer, bounded document, and occurrence time",
 		)
 	}
+	snapshot, projection, err := readReviewRuntime(journal, definition)
+	if err != nil {
+		return RecordedReviewDocument{}, JournalRecord{}, err
+	}
+	if recorded, _, exists, err := recordedReviewDocumentForRequest(snapshot, projection, request); err != nil {
+		return RecordedReviewDocument{}, JournalRecord{}, err
+	} else if exists {
+		return recorded, JournalRecord{}, nil
+	}
 
 	materialization, err := BuildReviewAdapterRequest(ctx, journal, definition, repository, ReviewAdapterBuildRequest{
 		AttemptID: request.AttemptID, ReservationDigest: request.ReservationDigest, RequestDigest: request.RequestDigest,
@@ -619,9 +784,16 @@ func RecordAttemptReviewDocument(
 	if err != nil {
 		return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("validate review report document: %w", err)
 	}
+	if len(document.Findings) > maxReviewFindings {
+		return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf(
+			"review report findings count %d exceeds legacy limit %d",
+			len(document.Findings),
+			maxReviewFindings,
+		)
+	}
 	if err := requireMatchingReviewConsumerIdentity(
 		document.ConsumerIdentity,
-		reviewAdapterConsumerIdentity(materialization.Reservation().Request()),
+		reviewAdapterConsumerIdentity(materialization.WorkspaceID()),
 	); err != nil {
 		return RecordedReviewDocument{}, JournalRecord{}, err
 	}
@@ -634,7 +806,7 @@ func RecordAttemptReviewDocument(
 		return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("parse validated review report digest: %w", err)
 	}
 	submission, err := NewReviewReportResultSubmission(
-		materialization.Reservation().Request().Digest(), request.ReviewerInstance, request.Isolation, document,
+		materialization.InvocationRequestDigest(), request.ReviewerInstance, request.Isolation, document,
 	)
 	if err != nil {
 		return RecordedReviewDocument{}, JournalRecord{}, err
@@ -647,13 +819,29 @@ func RecordAttemptReviewDocument(
 		return RecordedReviewDocument{}, JournalRecord{}, err
 	}
 	if prepared.alreadyRecorded {
-		return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("review document cannot attach raw evidence to an existing result")
+		snapshot, projection, err := readReviewRuntime(journal, definition)
+		if err != nil {
+			return RecordedReviewDocument{}, JournalRecord{}, err
+		}
+		recorded, _, exists, err := recordedReviewDocumentForRequest(snapshot, projection, request)
+		if err != nil {
+			return RecordedReviewDocument{}, JournalRecord{}, err
+		}
+		if exists {
+			return recorded, JournalRecord{}, nil
+		}
+		return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf(
+			"review document cannot attach raw evidence to an existing result",
+		)
 	}
 	artifact, err := NewReviewDocumentArtifact(
 		request.Document, reportDigest, materialization.RequestDocumentDigest(),
 		materialization.ReviewInputDigest(), materialization.CharterHash(),
 	)
 	if err != nil {
+		return RecordedReviewDocument{}, JournalRecord{}, err
+	}
+	if err := validateReviewDocumentArtifactOperation(journal, artifact, request.Document); err != nil {
 		return RecordedReviewDocument{}, JournalRecord{}, err
 	}
 	event, err := NewReviewResultRecordedDocumentJournalEvent(
@@ -669,6 +857,24 @@ func RecordAttemptReviewDocument(
 	}
 	record, err := appendReviewJournalEvent(journal, prepared.snapshot, event, request.OccurredAt)
 	if err != nil {
+		var ambiguous JournalAppendAmbiguousError
+		if errors.As(err, &ambiguous) {
+			recorded, recovered, durable, reconcileErr := reconcileAmbiguousReviewDocumentAppend(
+				journal,
+				definition,
+				request,
+				ambiguous.EventHash,
+			)
+			if reconcileErr != nil {
+				return RecordedReviewDocument{}, JournalRecord{}, errors.Join(
+					err,
+					fmt.Errorf("reconcile ambiguous review document append: %w", reconcileErr),
+				)
+			}
+			if durable {
+				return recorded, recovered, nil
+			}
+		}
 		if created {
 			if cleanupErr := removeReviewDocumentArtifact(journal, artifact, request.Document); cleanupErr != nil {
 				return RecordedReviewDocument{}, JournalRecord{}, errors.Join(

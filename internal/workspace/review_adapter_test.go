@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -279,6 +280,183 @@ func TestRecordAttemptReviewDocumentRemovesNewArtifactAfterStaleAppend(t *testin
 	}
 }
 
+func TestRecordAttemptReviewDocumentRecoversAmbiguousFullAppend(t *testing.T) {
+	t.Parallel()
+	harness, repository, reservation := newReviewAdapterReservation(t)
+	materialization := mustReviewAdapterMaterialization(t, harness, repository, reservation)
+	raw := validReviewAdapterReportBytes(t, materialization)
+	reopenReviewAdapterJournal(t, harness, workspace.JournalOptions{
+		FaultInjector: func(point workspace.JournalFaultPoint) error {
+			if point == workspace.JournalFaultAfterAppendFullRecord {
+				return errors.New("simulated full-record sync failure")
+			}
+			return nil
+		},
+	})
+
+	recorded, record, err := workspace.RecordAttemptReviewDocument(
+		context.Background(), harness.journal, harness.definition, repository,
+		workspace.RecordAttemptReviewDocumentRequest{
+			AttemptID: harness.attempt.AttemptID(), ReservationDigest: reservation.Digest(),
+			RequestDigest: reservation.Request().Digest(), ReviewerInstance: reservation.ReviewerInstance(),
+			Isolation: workspace.StrictReviewIsolationProof(), Document: raw,
+			OccurredAt: mustTime(t, "2026-07-21T11:00:02Z"),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.EventHash().IsZero() {
+		t.Fatal("ambiguous full append did not return the recovered journal record")
+	}
+	event, ok := record.Event().(workspace.ReviewResultRecordedJournalEvent)
+	if !ok {
+		t.Fatalf("recovered full append event = %T", record.Event())
+	}
+	durableArtifact, exists := event.DocumentArtifact()
+	if !exists || durableArtifact.RawDocumentDigest() != recorded.Artifact().RawDocumentDigest() {
+		t.Fatalf("recovered full append artifact event = %#v exists=%v", durableArtifact, exists)
+	}
+	path, err := workspace.ReviewDocumentArtifactPath(harness.workspace, recorded.Artifact())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(stored, raw) {
+		t.Fatalf("recovered full append artifact = %q, want %q", stored, raw)
+	}
+	snapshot, err := harness.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Records()) == 0 || snapshot.Records()[len(snapshot.Records())-1].EventHash() != record.EventHash() {
+		t.Fatalf("recovered full append record is not durable: %#v", snapshot.Records())
+	}
+}
+
+func TestRecordAttemptReviewDocumentRollsBackArtifactAfterPublicationFault(t *testing.T) {
+	t.Parallel()
+	harness, repository, reservation := newReviewAdapterReservation(t)
+	materialization := mustReviewAdapterMaterialization(t, harness, repository, reservation)
+	raw := validReviewAdapterReportBytes(t, materialization)
+	before := reviewAdapterJournalHead(t, harness.journal)
+	reopenReviewAdapterJournal(t, harness, workspace.JournalOptions{
+		FaultInjector: func(point workspace.JournalFaultPoint) error {
+			if point == workspace.JournalFaultAfterReviewDocumentArtifactPublication {
+				return errors.New("simulated artifact publication fault")
+			}
+			return nil
+		},
+	})
+
+	_, _, err := workspace.RecordAttemptReviewDocument(
+		context.Background(), harness.journal, harness.definition, repository,
+		workspace.RecordAttemptReviewDocumentRequest{
+			AttemptID: harness.attempt.AttemptID(), ReservationDigest: reservation.Digest(),
+			RequestDigest: reservation.Request().Digest(), ReviewerInstance: reservation.ReviewerInstance(),
+			Isolation: workspace.StrictReviewIsolationProof(), Document: raw,
+			OccurredAt: mustTime(t, "2026-07-21T11:00:02Z"),
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), string(workspace.JournalFaultAfterReviewDocumentArtifactPublication)) {
+		t.Fatalf("artifact publication fault error = %v", err)
+	}
+	if after := reviewAdapterJournalHead(t, harness.journal); after != before {
+		t.Fatalf("artifact publication failure changed journal head: before=%s after=%s", before, after)
+	}
+	artifactPath := filepath.Join(
+		harness.workspace,
+		workspace.WorkspaceStateDirectoryName,
+		"review-documents",
+		"report-"+strings.TrimPrefix(workspace.DigestBytes(raw).String(), "sha256:")+".json",
+	)
+	if _, statErr := os.Stat(artifactPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("publication failure left raw report artifact %s: %v", artifactPath, statErr)
+	}
+}
+
+func TestRecordAttemptReviewDocumentRejectsFindingsBeyondLegacyLimit(t *testing.T) {
+	t.Parallel()
+	harness, repository, reservation := newReviewAdapterReservation(t)
+	materialization := mustReviewAdapterMaterialization(t, harness, repository, reservation)
+	var document witnessreview.ReviewReportDocument
+	if err := json.Unmarshal(validReviewAdapterReportBytes(t, materialization), &document); err != nil {
+		t.Fatal(err)
+	}
+	finding := document.Findings[0]
+	document.Findings = make([]witnessreview.ReportFinding, 129)
+	for index := range document.Findings {
+		item := finding
+		item.ID = fmt.Sprintf("adapter-finding-%d", index+1)
+		item.Title = fmt.Sprintf("Adapter finding %d", index+1)
+		item.Witness.Content = fmt.Sprintf("The adapter finding %d is independently reported.", index+1)
+		document.Findings[index] = item
+	}
+	before := reviewAdapterJournalHead(t, harness.journal)
+	_, _, err := workspace.RecordAttemptReviewDocument(
+		context.Background(), harness.journal, harness.definition, repository,
+		workspace.RecordAttemptReviewDocumentRequest{
+			AttemptID: harness.attempt.AttemptID(), ReservationDigest: reservation.Digest(),
+			RequestDigest: reservation.Request().Digest(), ReviewerInstance: reservation.ReviewerInstance(),
+			Isolation: workspace.StrictReviewIsolationProof(), Document: marshalReviewAdapterReport(t, document),
+			OccurredAt: mustTime(t, "2026-07-21T11:00:02Z"),
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "129") || !strings.Contains(err.Error(), "128") {
+		t.Fatalf("legacy findings limit error = %v", err)
+	}
+	if after := reviewAdapterJournalHead(t, harness.journal); after != before {
+		t.Fatalf("oversized report changed journal head: before=%s after=%s", before, after)
+	}
+}
+
+func TestRecordAttemptReviewDocumentReplaysRecordedDocument(t *testing.T) {
+	t.Parallel()
+	harness, repository, reservation := newReviewAdapterReservation(t)
+	materialization := mustReviewAdapterMaterialization(t, harness, repository, reservation)
+	raw := validReviewAdapterReportBytes(t, materialization)
+	request := workspace.RecordAttemptReviewDocumentRequest{
+		AttemptID: harness.attempt.AttemptID(), ReservationDigest: reservation.Digest(),
+		RequestDigest: reservation.Request().Digest(), ReviewerInstance: reservation.ReviewerInstance(),
+		Isolation: workspace.StrictReviewIsolationProof(), Document: raw,
+		OccurredAt: mustTime(t, "2026-07-21T11:00:02Z"),
+	}
+	first, firstRecord, err := workspace.RecordAttemptReviewDocument(
+		context.Background(), harness.journal, harness.definition, repository, request,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeRetry := journalRecordCount(t, harness.journal)
+	replayed, replayRecord, err := workspace.RecordAttemptReviewDocument(
+		context.Background(), harness.journal, harness.definition, repository, request,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !replayRecord.EventHash().IsZero() || replayed.Artifact().RawDocumentDigest() != first.Artifact().RawDocumentDigest() ||
+		replayed.Verified().Submission().Digest() != first.Verified().Submission().Digest() {
+		t.Fatalf("recorded review document replay = %#v record=%#v first=%#v firstRecord=%#v", replayed, replayRecord, first, firstRecord)
+	}
+	if afterRetry := journalRecordCount(t, harness.journal); afterRetry != beforeRetry {
+		t.Fatalf("recorded document retry appended a record: before=%d after=%d", beforeRetry, afterRetry)
+	}
+	mismatched := append(append([]byte(nil), raw...), ' ')
+	request.Document = mismatched
+	_, _, err = workspace.RecordAttemptReviewDocument(
+		context.Background(), harness.journal, harness.definition, repository, request,
+	)
+	if err == nil || !strings.Contains(err.Error(), "raw report digest") {
+		t.Fatalf("mismatched recorded document retry error = %v", err)
+	}
+	if afterMismatch := journalRecordCount(t, harness.journal); afterMismatch != beforeRetry {
+		t.Fatalf("mismatched document retry appended a record: before=%d after=%d", beforeRetry, afterMismatch)
+	}
+}
+
 func TestRecordAttemptReviewDocumentRejectsMismatchedConsumerIdentity(t *testing.T) {
 	t.Parallel()
 	harness, repository, reservation := newReviewAdapterReservation(t)
@@ -409,7 +587,7 @@ func validReviewAdapterReportBytes(
 		SourceIdentity:    map[string]any{"kind": "test-reviewer", "id": "adapter-test"},
 		ConsumerIdentity: map[string]any{
 			"kind": "feature-implement",
-			"id":   materialization.Reservation().Request().WorkspaceID().String(),
+			"id":   materialization.WorkspaceID().String(),
 		},
 		Findings: []witnessreview.ReportFinding{{
 			ID: "adapter-finding", Title: "Adapter keeps review evidence", ClaimedSeverity: witnessreview.SeverityHigh,
@@ -439,4 +617,25 @@ func reviewAdapterJournalHead(t *testing.T, journal *workspace.WorkspaceJournal)
 		t.Fatal(err)
 	}
 	return snapshot.Head()
+}
+
+func reopenReviewAdapterJournal(
+	t *testing.T,
+	harness *reviewHarness,
+	options workspace.JournalOptions,
+) {
+	t.Helper()
+	if err := harness.journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := workspace.OpenWorkspaceJournalWithOptions(
+		harness.workspace,
+		workspace.JournalReadWrite,
+		options,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness.attemptHarness.journal = journal
+	t.Cleanup(func() { _ = journal.Close() })
 }

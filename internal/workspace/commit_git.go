@@ -590,9 +590,6 @@ func (adapter LocalCommitGitAdapter) ReadReviewInput(
 	if err != nil || exitCode != 0 {
 		return nil, gitExitError("read review input diff", exitCode, err)
 	}
-	if err := adapter.VerifyCleanWorktree(ctx, worktree, head); err != nil {
-		return nil, fmt.Errorf("confirm exact review input after diff: %w", err)
-	}
 	return append([]byte(nil), output...), nil
 }
 
