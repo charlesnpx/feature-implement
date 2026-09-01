@@ -555,6 +555,47 @@ func (adapter LocalCommitGitAdapter) InspectCleanWorktreeHead(
 	return inspection, nil
 }
 
+// ReadReviewInput returns the exact patch between an attempt's durable base
+// and its reserved review head. It is intentionally part of the same trusted
+// local Git adapter used by review snapshot inspection: callers must not
+// independently shell out for reviewer input.
+func (adapter LocalCommitGitAdapter) ReadReviewInput(
+	ctx context.Context,
+	worktree string,
+	base, head GitObjectID,
+) ([]byte, error) {
+	if ctx == nil || base.IsZero() || head.IsZero() || base.Algorithm() != head.Algorithm() {
+		return nil, fmt.Errorf("review input requires context and algorithm-matched base and head")
+	}
+	worktree = filepath.Clean(strings.TrimSpace(worktree))
+	if !filepath.IsAbs(worktree) {
+		return nil, fmt.Errorf("review input worktree must be absolute")
+	}
+	if err := adapter.VerifyCleanWorktree(ctx, worktree, head); err != nil {
+		return nil, fmt.Errorf("verify exact review input before diff: %w", err)
+	}
+	algorithm, err := adapter.git.objectFormat(ctx, worktree)
+	if err != nil {
+		return nil, err
+	}
+	if algorithm != base.Algorithm() {
+		return nil, fmt.Errorf("review input objects do not match the worktree Git object format")
+	}
+	output, exitCode, err := adapter.git.run(
+		ctx,
+		worktree,
+		"diff", "--no-ext-diff", "--no-textconv",
+		objectHex(base)+".."+objectHex(head), "--",
+	)
+	if err != nil || exitCode != 0 {
+		return nil, gitExitError("read review input diff", exitCode, err)
+	}
+	if err := adapter.VerifyCleanWorktree(ctx, worktree, head); err != nil {
+		return nil, fmt.Errorf("confirm exact review input after diff: %w", err)
+	}
+	return append([]byte(nil), output...), nil
+}
+
 func (adapter LocalCommitGitAdapter) InspectFirstParentRange(
 	ctx context.Context,
 	repositoryRoot string,

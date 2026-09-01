@@ -406,20 +406,59 @@ func RecordAttemptReviewResult(
 	repository ReviewRepositoryPort,
 	request RecordAttemptReviewResultRequest,
 ) (VerifiedReviewResult, JournalRecord, error) {
+	prepared, err := prepareAttemptReviewResult(ctx, journal, definition, repository, request)
+	if err != nil {
+		return VerifiedReviewResult{}, JournalRecord{}, err
+	}
+	if prepared.alreadyRecorded {
+		return prepared.verified, JournalRecord{}, nil
+	}
+	event, err := NewReviewResultRecordedJournalEvent(
+		definition.workspace.id, definition.generation, request.AttemptID, prepared.state.loop.digest, prepared.domain,
+	)
+	if err != nil {
+		return VerifiedReviewResult{}, JournalRecord{}, err
+	}
+	record, err := appendReviewJournalEvent(journal, prepared.snapshot, event, request.OccurredAt)
+	if err != nil {
+		return VerifiedReviewResult{}, JournalRecord{}, err
+	}
+	return prepared.verified, record, nil
+}
+
+// preparedReviewResult contains a fully validated result transition before it
+// is made durable. Document-backed review uses this seam so its raw report is
+// retained only after all legacy lifecycle checks have passed, and immediately
+// before the journal event that references it is appended.
+type preparedReviewResult struct {
+	snapshot        JournalSnapshot
+	state           ReviewState
+	domain          RecordReviewResult
+	verified        VerifiedReviewResult
+	alreadyRecorded bool
+}
+
+func prepareAttemptReviewResult(
+	ctx context.Context,
+	journal *WorkspaceJournal,
+	definition EffectiveWorkspaceDefinition,
+	repository ReviewRepositoryPort,
+	request RecordAttemptReviewResultRequest,
+) (preparedReviewResult, error) {
 	if journal == nil || repository == nil || request.AttemptID.IsZero() ||
 		request.ReservationDigest.IsZero() || request.Submission.digest.IsZero() ||
 		request.OccurredAt.IsZero() {
-		return VerifiedReviewResult{}, JournalRecord{}, fmt.Errorf(
+		return preparedReviewResult{}, fmt.Errorf(
 			"record review result requires journal, repository, attempt, reservation, result, and occurrence time",
 		)
 	}
 	snapshot, projection, err := readReviewRuntime(journal, definition)
 	if err != nil {
-		return VerifiedReviewResult{}, JournalRecord{}, err
+		return preparedReviewResult{}, err
 	}
 	state, exists := projection.State(request.AttemptID)
 	if !exists {
-		return VerifiedReviewResult{}, JournalRecord{}, fmt.Errorf("attempt %s has no active review round", request.AttemptID)
+		return preparedReviewResult{}, fmt.Errorf("attempt %s has no active review round", request.AttemptID)
 	}
 	for _, round := range state.rounds {
 		for _, existing := range round.attempts {
@@ -427,67 +466,60 @@ func RecordAttemptReviewResult(
 				continue
 			}
 			if existing.submission.digest == request.Submission.digest {
-				return existing, JournalRecord{}, nil
+				return preparedReviewResult{verified: existing, alreadyRecorded: true}, nil
 			}
-			return VerifiedReviewResult{}, JournalRecord{}, fmt.Errorf("review request already has different durable evidence")
+			return preparedReviewResult{}, fmt.Errorf("review request already has different durable evidence")
 		}
 	}
 	pending, ok, err := state.NextRequest()
 	if err != nil || !ok {
-		return VerifiedReviewResult{}, JournalRecord{}, fmt.Errorf("review round has no pending profile")
+		return preparedReviewResult{}, fmt.Errorf("review round has no pending profile")
 	}
 	latestRound := state.rounds[len(state.rounds)-1]
 	reservation, reserved := pendingReviewInvocation(latestRound)
 	if !reserved || reservation.digest != request.ReservationDigest || pending.digest != request.Submission.requestDigest ||
 		request.Submission.reviewerInstance != reservation.reviewerInstance || !request.Submission.isolation.Strict() {
-		return VerifiedReviewResult{}, JournalRecord{}, fmt.Errorf("review result does not match pending request or strict isolation")
+		return preparedReviewResult{}, fmt.Errorf("review result does not match pending request or strict isolation")
 	}
 	attempt, exists := projection.core.Attempt(request.AttemptID)
 	if !exists || attempt.phase != AttemptActive || attempt.verifiedHead != pending.head {
-		return VerifiedReviewResult{}, JournalRecord{}, fmt.Errorf("review result attempt is stale or inactive")
+		return preparedReviewResult{}, fmt.Errorf("review result attempt is stale or inactive")
 	}
 	unit, err := executionForMergeUnit(definition.execution, attempt.mergeUnit)
 	if err != nil {
-		return VerifiedReviewResult{}, JournalRecord{}, err
+		return preparedReviewResult{}, err
 	}
 	if err := validateAttemptReviewProtocolState(definition, unit, attempt, state, true, false); err != nil {
-		return VerifiedReviewResult{}, JournalRecord{}, err
+		return preparedReviewResult{}, err
 	}
 	repositoryRequest, err := NewReviewRepositoryRequest(attempt.worktree, pending.head)
 	if err != nil {
-		return VerifiedReviewResult{}, JournalRecord{}, err
+		return preparedReviewResult{}, err
 	}
 	repositorySnapshot, err := repository.InspectReviewSnapshot(ctx, repositoryRequest)
 	if err != nil {
-		return VerifiedReviewResult{}, JournalRecord{}, err
+		return preparedReviewResult{}, err
 	}
 	if !repositorySnapshot.clean || repositorySnapshot.head != pending.head || repositorySnapshot.tree != pending.tree {
-		return VerifiedReviewResult{}, JournalRecord{}, fmt.Errorf("reviewer changed or no longer matches the exact clean head/tree")
+		return preparedReviewResult{}, fmt.Errorf("reviewer changed or no longer matches the exact clean head/tree")
 	}
 	domain, err := NewRecordReviewResult(
 		pending.round, pending.profileOrdinal, pending.invocation,
 		request.ReservationDigest, request.Submission,
 	)
 	if err != nil {
-		return VerifiedReviewResult{}, JournalRecord{}, err
+		return preparedReviewResult{}, err
 	}
 	if _, err := ReduceReview(state, domain); err != nil {
-		return VerifiedReviewResult{}, JournalRecord{}, err
+		return preparedReviewResult{}, err
 	}
-	event, err := NewReviewResultRecordedJournalEvent(
-		definition.workspace.id, definition.generation, request.AttemptID, state.loop.digest, domain,
-	)
-	if err != nil {
-		return VerifiedReviewResult{}, JournalRecord{}, err
-	}
-	record, err := appendReviewJournalEvent(journal, snapshot, event, request.OccurredAt)
-	if err != nil {
-		return VerifiedReviewResult{}, JournalRecord{}, err
-	}
-	return VerifiedReviewResult{
-		request: pending, submission: cloneReviewResult(request.Submission),
-		reservationDigest: request.ReservationDigest,
-	}, record, nil
+	return preparedReviewResult{
+		snapshot: snapshot, state: state, domain: domain,
+		verified: VerifiedReviewResult{
+			request: pending, submission: cloneReviewResult(request.Submission),
+			reservationDigest: request.ReservationDigest,
+		},
+	}, nil
 }
 
 type RecordAttemptReviewInvocationFailureRequest struct {

@@ -196,11 +196,23 @@ func WorkspaceViewSchema() map[string]any {
 			"pending_directives": array(directive),
 		},
 	)
+	reviewFindingView := object(
+		[]string{"id", "severity", "category", "summary", "evidence_digest"},
+		map[string]any{
+			"id":              nonEmptyText(),
+			"severity":        enum("critical", "high", "medium", "low"),
+			"category":        nonEmptyText(),
+			"path":            text(),
+			"line":            integer(0),
+			"summary":         nonEmptyText(),
+			"evidence_digest": nonEmptyText(),
+		},
+	)
 	review := object(
 		[]string{
 			"attempt_id", "plan_id", "merge_unit_id", "generation",
 			"head", "tree", "status", "rounds_used", "fixes_used",
-			"infrastructure_retries", "merge_ready",
+			"infrastructure_retries", "merge_ready", "findings",
 		},
 		map[string]any{
 			"attempt_id":             nonEmptyText(),
@@ -214,6 +226,7 @@ func WorkspaceViewSchema() map[string]any {
 			"fixes_used":             integer(0),
 			"infrastructure_retries": integer(0),
 			"merge_ready":            boolean(),
+			"findings":               array(reviewFindingView),
 		},
 	)
 	integrationUnit := object(
