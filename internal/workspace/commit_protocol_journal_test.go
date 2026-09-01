@@ -27,6 +27,9 @@ func TestJournaledCommitProtocolStartsFromRealStagedWorktree(t *testing.T) {
 	t.Parallel()
 
 	harness := newConfiguredAttemptHarness(t)
+	target := harness.definition.Workspace().RepositoryRoot()
+	runGitSetup(t, target, "config", "user.name", "Protocol Test")
+	runGitSetup(t, target, "config", "user.email", "protocol@example.test")
 	attempt := harness.reserve(t, "2026-07-21T10:55:00Z")
 
 	runGitSetup(

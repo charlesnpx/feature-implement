@@ -33,15 +33,37 @@ func (runner *protocolCheckRunner) RunConfiguredCheck(
 	return runner.result, runner.err
 }
 
-func TestLocalCommitUsesTargetRepositoryIdentity(t *testing.T) {
-	globalConfig := filepath.Join(t.TempDir(), "global.gitconfig")
-	if err := os.WriteFile(globalConfig, []byte(
-		"[user]\n\tname = Ambient Identity\n\temail = ambient@example.test\n",
-	), 0o600); err != nil {
-		t.Fatal(err)
+const commitProtocolGitTestChildEnvironment = "FEATURE_IMPLEMENT_COMMIT_PROTOCOL_GIT_TEST_CHILD"
+
+func runCommitProtocolGitTestInEnvironment(t *testing.T, environment ...string) {
+	t.Helper()
+	command := exec.Command(os.Args[0], "-test.run", "^"+t.Name()+"$")
+	command.Env = append(os.Environ(), environment...)
+	command.Env = append(command.Env, commitProtocolGitTestChildEnvironment+"="+t.Name())
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run %s in isolated environment: %v: %s", t.Name(), err, output)
 	}
-	t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
-	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+}
+
+func TestLocalCommitUsesTargetRepositoryIdentity(t *testing.T) {
+	t.Parallel()
+
+	if os.Getenv(commitProtocolGitTestChildEnvironment) != t.Name() {
+		globalConfig := filepath.Join(t.TempDir(), "global.gitconfig")
+		if err := os.WriteFile(globalConfig, []byte(
+			"[user]\n\tname = Ambient Identity\n\temail = ambient@example.test\n",
+		), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runCommitProtocolGitTestInEnvironment(
+			t,
+			"GIT_CONFIG_NOSYSTEM=1",
+			"GIT_CONFIG_GLOBAL="+globalConfig,
+			"GIT_CONFIG_SYSTEM="+os.DevNull,
+		)
+		return
+	}
 
 	harness := newConfiguredAttemptHarness(t)
 	target := harness.definition.Workspace().RepositoryRoot()
@@ -99,10 +121,20 @@ func TestLocalCommitUsesTargetRepositoryIdentity(t *testing.T) {
 }
 
 func TestLocalCommitRejectsMissingTargetRepositoryIdentity(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
-	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	t.Parallel()
+
+	if os.Getenv(commitProtocolGitTestChildEnvironment) != t.Name() {
+		home := t.TempDir()
+		runCommitProtocolGitTestInEnvironment(
+			t,
+			"HOME="+home,
+			"XDG_CONFIG_HOME="+home,
+			"GIT_CONFIG_NOSYSTEM=1",
+			"GIT_CONFIG_GLOBAL="+os.DevNull,
+			"GIT_CONFIG_SYSTEM="+os.DevNull,
+		)
+		return
+	}
 
 	harness := newConfiguredAttemptHarness(t)
 	attempt := harness.reserveWithLocalGit(t, "2026-07-21T10:55:00Z")
