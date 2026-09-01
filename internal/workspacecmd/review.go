@@ -127,8 +127,6 @@ type recordReviewDocumentInput struct {
 }
 
 type ReviewAdapterRequestDetail struct {
-	Charter                 any    `json:"charter"`
-	Request                 any    `json:"request"`
 	ReviewInput             string `json:"review_input"`
 	CharterPath             string `json:"charter_path"`
 	RequestPath             string `json:"request_path"`
@@ -469,7 +467,7 @@ func executeReviewRequest(
 		return nil, err
 	}
 	return reviewReadResult("review.request", ReviewAdapterRequestDetail{
-		Charter: materialization.Charter(), Request: materialization.Request(), ReviewInput: paths.reviewInput,
+		ReviewInput: paths.reviewInput,
 		CharterPath: paths.charter, RequestPath: paths.request,
 		CharterHash:             materialization.CharterHash().String(),
 		ReviewRequestDigest:     materialization.RequestDocumentDigest().String(),

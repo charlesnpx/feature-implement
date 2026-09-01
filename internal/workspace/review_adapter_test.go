@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/charlesnpx/feature-implement/internal/workspace"
@@ -15,8 +17,23 @@ import (
 
 type reviewAdapterRepositoryStub struct {
 	reviewRepositoryStub
-	reviewInput []byte
-	inputErr    error
+	reviewInput    []byte
+	inputErr       error
+	beforeSnapshot func() error
+}
+
+func (repository *reviewAdapterRepositoryStub) InspectReviewSnapshot(
+	ctx context.Context,
+	request workspace.ReviewRepositoryRequest,
+) (workspace.ReviewRepositorySnapshot, error) {
+	if repository.beforeSnapshot != nil {
+		hook := repository.beforeSnapshot
+		repository.beforeSnapshot = nil
+		if err := hook(); err != nil {
+			return workspace.ReviewRepositorySnapshot{}, err
+		}
+	}
+	return repository.reviewRepositoryStub.InspectReviewSnapshot(ctx, request)
 }
 
 func (repository *reviewAdapterRepositoryStub) ReadReviewInput(
@@ -56,7 +73,7 @@ func TestReviewAdapterRequestIsDeterministicForOneReservation(t *testing.T) {
 		!bytes.Equal(first.RequestJSON(), second.RequestJSON()) {
 		t.Fatalf("same reservation generated non-deterministic request packets: first=%#v second=%#v", first, second)
 	}
-	if got := first.Charter().Goals; len(got) == 0 || got[0].ID != "story-one-ac-1" {
+	if got := first.FrozenCharter().Charter.Goals; len(got) == 0 || got[0].ID != "story-one-ac-1" {
 		t.Fatalf("adapter charter goals = %#v", got)
 	}
 }
@@ -105,20 +122,13 @@ func TestRecordAttemptReviewDocumentRetainsRawReportAndBridgesFindings(t *testin
 		t.Fatalf("journal artifact reference = %#v exists=%v", journalArtifact, ok)
 	}
 
-	snapshot, err := harness.journal.ReadSnapshot()
-	if err != nil {
-		t.Fatal(err)
+	findings := recorded.Verified().Submission().Findings()
+	if len(findings) != 1 {
+		t.Fatalf("bridged review findings = %#v", findings)
 	}
-	view, err := workspace.RebuildWorkspaceView(snapshot, harness.definition)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(view.Reviews) != 1 || len(view.Reviews[0].Findings) != 1 {
-		t.Fatalf("bridged review view = %#v", view.Reviews)
-	}
-	bridged := view.Reviews[0].Findings[0]
-	if bridged.Severity != "high" || bridged.Category != "contract" ||
-		bridged.Path != "src/adapter.go" || bridged.Line != 12 || bridged.Summary != "The adapter must retain the raw report." {
+	bridged := findings[0]
+	if bridged.Severity() != workspace.ReviewSeverityHigh || bridged.Category().String() != "contract" ||
+		bridged.Path() != "src/adapter.go" || bridged.Line() != 12 || bridged.Summary() != "The adapter must retain the raw report." {
 		t.Fatalf("bridged finding = %#v", bridged)
 	}
 	var document witnessreview.ReviewReportDocument
@@ -129,8 +139,8 @@ func TestRecordAttemptReviewDocumentRetainsRawReportAndBridgesFindings(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bridged.EvidenceDigest != workspace.DigestBytes(canonical).String() {
-		t.Fatalf("bridged evidence digest = %s, want %s", bridged.EvidenceDigest, workspace.DigestBytes(canonical))
+	if bridged.EvidenceDigest() != workspace.DigestBytes(canonical) {
+		t.Fatalf("bridged evidence digest = %s, want %s", bridged.EvidenceDigest(), workspace.DigestBytes(canonical))
 	}
 }
 
@@ -222,6 +232,124 @@ func TestRecordAttemptReviewDocumentRejectsBeforeDurableWrite(t *testing.T) {
 	}
 }
 
+func TestRecordAttemptReviewDocumentRemovesNewArtifactAfterStaleAppend(t *testing.T) {
+	t.Parallel()
+	harness, repository, reservation := newReviewAdapterReservation(t)
+	materialization := mustReviewAdapterMaterialization(t, harness, repository, reservation)
+	raw := validReviewAdapterReportBytes(t, materialization)
+	appended := false
+	repository.beforeSnapshot = func() error {
+		appended = true
+		_, _, err := workspace.RecordAttemptReviewInvocationFailure(
+			harness.journal,
+			harness.definition,
+			workspace.RecordAttemptReviewInvocationFailureRequest{
+				AttemptID:         harness.attempt.AttemptID(),
+				ReservationDigest: reservation.Digest(),
+				FailureDigest:     workspace.DigestBytes([]byte("concurrent-review-failure")),
+				OccurredAt:        mustTime(t, "2026-07-21T11:00:03Z"),
+			},
+		)
+		return err
+	}
+
+	_, _, err := workspace.RecordAttemptReviewDocument(
+		context.Background(), harness.journal, harness.definition, repository,
+		workspace.RecordAttemptReviewDocumentRequest{
+			AttemptID: harness.attempt.AttemptID(), ReservationDigest: reservation.Digest(),
+			RequestDigest: reservation.Request().Digest(), ReviewerInstance: reservation.ReviewerInstance(),
+			Isolation: workspace.StrictReviewIsolationProof(), Document: raw,
+			OccurredAt: mustTime(t, "2026-07-21T11:00:02Z"),
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "stale journal head") {
+		t.Fatalf("stale append error = %v", err)
+	}
+	if !appended {
+		t.Fatal("concurrent journal append was not attempted")
+	}
+	artifactPath := filepath.Join(
+		harness.workspace,
+		workspace.WorkspaceStateDirectoryName,
+		"review-documents",
+		"report-"+strings.TrimPrefix(workspace.DigestBytes(raw).String(), "sha256:")+".json",
+	)
+	if _, statErr := os.Stat(artifactPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("stale append left raw report artifact %s: %v", artifactPath, statErr)
+	}
+}
+
+func TestRecordAttemptReviewDocumentRejectsMismatchedConsumerIdentity(t *testing.T) {
+	t.Parallel()
+	harness, repository, reservation := newReviewAdapterReservation(t)
+	materialization := mustReviewAdapterMaterialization(t, harness, repository, reservation)
+	var document witnessreview.ReviewReportDocument
+	if err := json.Unmarshal(validReviewAdapterReportBytes(t, materialization), &document); err != nil {
+		t.Fatal(err)
+	}
+	document.ConsumerIdentity = map[string]any{"kind": "feature-implement", "id": "another-workspace"}
+	before := reviewAdapterJournalHead(t, harness.journal)
+	_, _, err := workspace.RecordAttemptReviewDocument(
+		context.Background(), harness.journal, harness.definition, repository,
+		workspace.RecordAttemptReviewDocumentRequest{
+			AttemptID: harness.attempt.AttemptID(), ReservationDigest: reservation.Digest(),
+			RequestDigest: reservation.Request().Digest(), ReviewerInstance: reservation.ReviewerInstance(),
+			Isolation: workspace.StrictReviewIsolationProof(), Document: marshalReviewAdapterReport(t, document),
+			OccurredAt: mustTime(t, "2026-07-21T11:00:02Z"),
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "another-workspace") || !strings.Contains(err.Error(), "example-workspace") {
+		t.Fatalf("consumer identity mismatch error = %v", err)
+	}
+	if after := reviewAdapterJournalHead(t, harness.journal); after != before {
+		t.Fatalf("consumer identity rejection changed journal head: before=%s after=%s", before, after)
+	}
+}
+
+func TestRecordAttemptReviewDocumentFallsBackForLocalAnnotationCategory(t *testing.T) {
+	t.Parallel()
+	harness, repository, reservation := newReviewAdapterReservation(t)
+	materialization := mustReviewAdapterMaterialization(t, harness, repository, reservation)
+	var document witnessreview.ReviewReportDocument
+	if err := json.Unmarshal(validReviewAdapterReportBytes(t, materialization), &document); err != nil {
+		t.Fatal(err)
+	}
+	document.Findings[0].Annotation.Category = "correctness.logic"
+	raw := marshalReviewAdapterReport(t, document)
+
+	recorded, _, err := workspace.RecordAttemptReviewDocument(
+		context.Background(), harness.journal, harness.definition, repository,
+		workspace.RecordAttemptReviewDocumentRequest{
+			AttemptID: harness.attempt.AttemptID(), ReservationDigest: reservation.Digest(),
+			RequestDigest: reservation.Request().Digest(), ReviewerInstance: reservation.ReviewerInstance(),
+			Isolation: workspace.StrictReviewIsolationProof(), Document: raw,
+			OccurredAt: mustTime(t, "2026-07-21T11:00:02Z"),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := recorded.Verified().Submission().Findings()
+	if len(findings) != 1 || findings[0].Category().String() != witnessreview.WitnessKindDefect {
+		t.Fatalf("fallback local finding = %#v", findings)
+	}
+	path, err := workspace.ReviewDocumentArtifactPath(harness.workspace, recorded.Artifact())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var retained witnessreview.ReviewReportDocument
+	if err := json.Unmarshal(stored, &retained); err != nil {
+		t.Fatal(err)
+	}
+	if retained.Findings[0].Annotation == nil || retained.Findings[0].Annotation.Category != "correctness.logic" {
+		t.Fatalf("retained annotation = %#v", retained.Findings[0].Annotation)
+	}
+}
+
 func newReviewAdapterReservation(t *testing.T) (*reviewHarness, *reviewAdapterRepositoryStub, workspace.ReviewInvocationReservation) {
 	t.Helper()
 	harness := newReviewHarness(t)
@@ -269,7 +397,7 @@ func validReviewAdapterReportBytes(
 	materialization workspace.ReviewAdapterMaterialization,
 ) []byte {
 	t.Helper()
-	goals := materialization.Charter().Goals
+	goals := materialization.FrozenCharter().Charter.Goals
 	if len(goals) == 0 {
 		t.Fatal("adapter charter has no goals")
 	}
@@ -279,7 +407,10 @@ func validReviewAdapterReportBytes(
 		CharterHash:       materialization.CharterHash().String(),
 		ReviewInputDigest: materialization.ReviewInputDigest().String(),
 		SourceIdentity:    map[string]any{"kind": "test-reviewer", "id": "adapter-test"},
-		ConsumerIdentity:  map[string]any{"kind": "feature-implement", "id": "adapter-workspace"},
+		ConsumerIdentity: map[string]any{
+			"kind": "feature-implement",
+			"id":   materialization.Reservation().Request().WorkspaceID().String(),
+		},
 		Findings: []witnessreview.ReportFinding{{
 			ID: "adapter-finding", Title: "Adapter keeps review evidence", ClaimedSeverity: witnessreview.SeverityHigh,
 			CharterGoalIDs: []string{goals[0].ID},

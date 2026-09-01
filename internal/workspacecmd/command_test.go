@@ -258,6 +258,12 @@ func TestWorkspaceViewSchemaOmitsRetiredDirectiveFields(t *testing.T) {
 	if _, exists := attemptProperties["branch"]; exists {
 		t.Fatalf("workspace attempt schema still exposes retired branch: %+v", attemptProperties)
 	}
+	reviews := properties["reviews"].(map[string]any)
+	review := reviews["items"].(map[string]any)
+	reviewProperties := review["properties"].(map[string]any)
+	if _, exists := reviewProperties["findings"]; exists {
+		t.Fatalf("workspace review schema still exposes report findings: %+v", reviewProperties)
+	}
 }
 
 func TestDeferredLocalCommandsStrictlyDecodeTheirFinalEnvelopes(

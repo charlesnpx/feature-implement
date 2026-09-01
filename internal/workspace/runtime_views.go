@@ -132,30 +132,17 @@ type WorkspaceAttempt struct {
 }
 
 type WorkspaceReview struct {
-	AttemptID             string                   `json:"attempt_id"`
-	PlanID                string                   `json:"plan_id"`
-	MergeUnitID           string                   `json:"merge_unit_id"`
-	Generation            string                   `json:"generation"`
-	Head                  string                   `json:"head"`
-	Tree                  string                   `json:"tree"`
-	Status                string                   `json:"status"`
-	RoundsUsed            uint16                   `json:"rounds_used"`
-	FixesUsed             uint16                   `json:"fixes_used"`
-	InfrastructureRetries uint16                   `json:"infrastructure_retries"`
-	MergeReady            bool                     `json:"merge_ready"`
-	Findings              []WorkspaceReviewFinding `json:"findings"`
-}
-
-// WorkspaceReviewFinding exposes the established local ReviewFinding bridge
-// in the journal-derived operator report without redefining Witness evidence.
-type WorkspaceReviewFinding struct {
-	ID             string `json:"id"`
-	Severity       string `json:"severity"`
-	Category       string `json:"category"`
-	Path           string `json:"path,omitempty"`
-	Line           uint32 `json:"line,omitempty"`
-	Summary        string `json:"summary"`
-	EvidenceDigest string `json:"evidence_digest"`
+	AttemptID             string `json:"attempt_id"`
+	PlanID                string `json:"plan_id"`
+	MergeUnitID           string `json:"merge_unit_id"`
+	Generation            string `json:"generation"`
+	Head                  string `json:"head"`
+	Tree                  string `json:"tree"`
+	Status                string `json:"status"`
+	RoundsUsed            uint16 `json:"rounds_used"`
+	FixesUsed             uint16 `json:"fixes_used"`
+	InfrastructureRetries uint16 `json:"infrastructure_retries"`
+	MergeReady            bool   `json:"merge_ready"`
 }
 
 type WorkspaceIntegrationUnit struct {
@@ -597,7 +584,6 @@ func workspaceReviewViews(
 		} else if _, pending := state.PendingFix(); pending {
 			status = "fix_pending"
 		}
-		findings := workspaceReviewFindings(state)
 		result = append(result, WorkspaceReview{
 			AttemptID:             state.AttemptID().String(),
 			PlanID:                state.MergeUnit().PlanID().String(),
@@ -610,30 +596,12 @@ func workspaceReviewViews(
 			FixesUsed:             state.FixesUsed(),
 			InfrastructureRetries: state.InfrastructureRetriesUsed(),
 			MergeReady:            state.MergeReady(),
-			Findings:              findings,
 		})
 	}
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].AttemptID < result[j].AttemptID
 	})
 	return result
-}
-
-func workspaceReviewFindings(state ReviewState) []WorkspaceReviewFinding {
-	findings := []WorkspaceReviewFinding{}
-	for _, round := range state.Rounds() {
-		for _, finding := range round.Findings() {
-			findings = append(findings, WorkspaceReviewFinding{
-				ID: finding.ID().String(), Severity: string(finding.Severity()),
-				Category: finding.Category().String(), Path: finding.Path(), Line: finding.Line(),
-				Summary: finding.Summary(), EvidenceDigest: finding.EvidenceDigest().String(),
-			})
-		}
-	}
-	sort.SliceStable(findings, func(i, j int) bool {
-		return findings[i].ID < findings[j].ID
-	})
-	return findings
 }
 
 func attemptBoundaryStatus(

@@ -205,6 +205,58 @@ func TestWorkspaceRuntimeViewsExposeOnlyLocalStateAndReplayDeterministically(
 	}
 }
 
+func TestWorkspaceReviewViewSerializationMatchesPreAdapterSchema(t *testing.T) {
+	t.Parallel()
+
+	// This workspace follows the established review lifecycle and never uses the
+	// review-document adapter path.
+	harness := newReviewHarness(t)
+	if _, err := workspace.StartAttemptReviewRound(
+		context.Background(),
+		harness.journal,
+		harness.definition,
+		harness.repository,
+		workspace.StartAttemptReviewRoundRequest{
+			AttemptID:  harness.attempt.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-21T18:00:00Z"),
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := harness.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := workspace.RebuildWorkspaceView(snapshot, harness.definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Reviews) != 1 {
+		t.Fatalf("review views = %#v", view.Reviews)
+	}
+	encoded, err := json.Marshal(view.Reviews[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]struct{}{
+		"attempt_id": {}, "plan_id": {}, "merge_unit_id": {}, "generation": {},
+		"head": {}, "tree": {}, "status": {}, "rounds_used": {}, "fixes_used": {},
+		"infrastructure_retries": {}, "merge_ready": {},
+	}
+	if len(fields) != len(want) {
+		t.Fatalf("pre-adapter review JSON fields = %#v, want %#v", fields, want)
+	}
+	for field := range want {
+		if _, exists := fields[field]; !exists {
+			t.Fatalf("pre-adapter review JSON omits %q: %#v", field, fields)
+		}
+	}
+}
+
 func TestWorkspaceViewRetainsZeroGenerationConformanceError(t *testing.T) {
 	t.Parallel()
 

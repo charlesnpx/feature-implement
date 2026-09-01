@@ -250,11 +250,10 @@ not interpreted or migrated.
    local commits and keep the worktree clean.
 5. For configured review, use `review start`, `reserve`, `request`,
    `record-document`, bounded fix actions, and `ready`; `record` remains the
-   path for an infrastructure failure. The request and report documents use
-   the Witness review contract, while `record-document` strictly validates the
-   report against the exact charter and patch, retains its raw bytes, and maps
-   compatible findings into the local review view. Reviewer labels are
-   descriptive local metadata, and every result binds the exact request, head,
+	   path for an infrastructure failure. The request and report documents use
+	   the Witness review contract, while `record-document` strictly validates the
+	   report against the exact charter and patch and retains its raw bytes. Reviewer labels are
+	   descriptive local metadata, and every result binds the exact request, head,
    tree, and evidence.
 6. Without configured review, submit `attempt adopt-head` for the exact clean
    descendant selected for integration.
