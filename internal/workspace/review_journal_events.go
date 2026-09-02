@@ -211,16 +211,44 @@ type ReviewResultRecordedJournalEvent struct {
 	invocation        uint16
 	reservationDigest Digest
 	result            ReviewResultSubmission
+	document          *ReviewDocumentArtifact
 }
 
 func NewReviewResultRecordedJournalEvent(
 	workspaceID ID, generation Digest, attemptID ID, loopDigest Digest,
 	record RecordReviewResult,
 ) (ReviewResultRecordedJournalEvent, error) {
+	return newReviewResultRecordedJournalEvent(
+		workspaceID, generation, attemptID, loopDigest, record, nil,
+	)
+}
+
+// NewReviewResultRecordedDocumentJournalEvent records the same local review
+// result transition as the legacy constructor while retaining a reference to
+// the independently durable raw review-report-v1 artifact.
+func NewReviewResultRecordedDocumentJournalEvent(
+	workspaceID ID, generation Digest, attemptID ID, loopDigest Digest,
+	record RecordReviewResult,
+	document ReviewDocumentArtifact,
+) (ReviewResultRecordedJournalEvent, error) {
+	return newReviewResultRecordedJournalEvent(
+		workspaceID, generation, attemptID, loopDigest, record, &document,
+	)
+}
+
+func newReviewResultRecordedJournalEvent(
+	workspaceID ID, generation Digest, attemptID ID, loopDigest Digest,
+	record RecordReviewResult,
+	document *ReviewDocumentArtifact,
+) (ReviewResultRecordedJournalEvent, error) {
 	event := ReviewResultRecordedJournalEvent{
 		workspaceID: workspaceID, generation: generation, attemptID: attemptID, loopDigest: loopDigest,
 		round: record.round, profileOrdinal: record.profileOrdinal, invocation: record.invocation,
 		reservationDigest: record.reservationDigest, result: cloneReviewResult(record.result),
+	}
+	if document != nil {
+		copyDocument := *document
+		event.document = &copyDocument
 	}
 	if err := event.validate(); err != nil {
 		return ReviewResultRecordedJournalEvent{}, err
@@ -244,7 +272,13 @@ func (event ReviewResultRecordedJournalEvent) validate() error {
 		event.round, event.profileOrdinal, event.invocation, event.reservationDigest,
 		event.result,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if event.document != nil {
+		return event.document.validate()
+	}
+	return nil
 }
 func (event ReviewResultRecordedJournalEvent) WorkspaceID() ID        { return event.workspaceID }
 func (event ReviewResultRecordedJournalEvent) Generation() Digest     { return event.generation }
@@ -258,6 +292,12 @@ func (event ReviewResultRecordedJournalEvent) ReservationDigest() Digest {
 }
 func (event ReviewResultRecordedJournalEvent) Result() ReviewResultSubmission {
 	return cloneReviewResult(event.result)
+}
+func (event ReviewResultRecordedJournalEvent) DocumentArtifact() (ReviewDocumentArtifact, bool) {
+	if event.document == nil {
+		return ReviewDocumentArtifact{}, false
+	}
+	return *event.document, true
 }
 
 type ReviewFindingFixReservedJournalEvent struct {
@@ -374,6 +414,10 @@ func cloneReviewJournalEvent(event WorkspaceJournalEvent) WorkspaceJournalEvent 
 		return value
 	case ReviewResultRecordedJournalEvent:
 		value.result = cloneReviewResult(value.result)
+		if value.document != nil {
+			document := *value.document
+			value.document = &document
+		}
 		return value
 	case ReviewFindingFixReservedJournalEvent:
 		value.reservation = *cloneReviewFixReservation(&value.reservation)

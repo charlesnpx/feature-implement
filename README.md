@@ -49,7 +49,7 @@ feature workspace status --bundle <bundle-root> --workspace <runtime-root> [--js
 
 feature workspace attempt start|adopt-head|pause|resume|abandon ...
 feature workspace commit next ...
-feature workspace review start|reserve|record|reserve-fix|apply-fix|record-fix|ready ...
+feature workspace review start|reserve|request|record|record-document|reserve-fix|apply-fix|record-fix|ready ...
 feature workspace integrate merge-unit ...
 feature workspace complete verify ...
 ```
@@ -248,9 +248,13 @@ not interpreted or migrated.
    until an exact clean head is selected for integration.
 4. Use `commit next` for a configured commit step. Otherwise make ordinary
    local commits and keep the worktree clean.
-5. For configured review, use `review start`, `reserve`, `record`, bounded fix
-   actions, and `ready`. Reviewer labels are descriptive local metadata, and
-   every result binds the exact request, head, tree, and evidence.
+5. For configured review, use `review start`, `reserve`, `request`,
+   `record-document`, bounded fix actions, and `ready`; `record` remains the
+	   path for an infrastructure failure. The request and report documents use
+	   the Witness review contract, while `record-document` strictly validates the
+	   report against the exact charter and patch and retains its raw bytes. Reviewer labels are
+	   descriptive local metadata, and every result binds the exact request, head,
+   tree, and evidence.
 6. Without configured review, submit `attempt adopt-head` for the exact clean
    descendant selected for integration.
 7. Before integration, submit `attempt pause` only when the merge unit

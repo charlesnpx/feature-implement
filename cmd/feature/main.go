@@ -421,7 +421,7 @@ func usageWorkspace(w io.Writer) {
   feature workspace status --bundle <dir> --workspace <dir> [--json]
   feature workspace attempt start|adopt-head|pause|resume|abandon --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
   feature workspace commit next --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
-  feature workspace review start|reserve|record|reserve-fix|apply-fix|record-fix|ready --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
+  feature workspace review start|reserve|request|record|record-document|reserve-fix|apply-fix|record-fix|ready --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
   feature workspace integrate merge-unit --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
   feature workspace complete verify --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
 

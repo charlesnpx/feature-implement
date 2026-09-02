@@ -740,6 +740,19 @@ func (adapter *RootedFilesystemAdapter) renameFileNoReplace(source, destination 
 	return adapter.renamePathNoReplace(source, destination, false, nil)
 }
 
+// renameFileNoReplaceWithPublication invokes afterPublication immediately
+// after the no-replace rename makes destination visible. It reports that
+// boundary separately so a caller can clean up a published file if a later
+// verification or synchronization step fails.
+func (adapter *RootedFilesystemAdapter) renameFileNoReplaceWithPublication(
+	source, destination string,
+	afterPublication func() error,
+) (bool, error) {
+	return adapter.renamePathNoReplaceWithPublication(
+		source, destination, false, nil, afterPublication,
+	)
+}
+
 func (adapter *RootedFilesystemAdapter) renameDirectoryNoReplace(source, destination string) error {
 	return adapter.renamePathNoReplace(source, destination, true, nil)
 }
@@ -756,14 +769,26 @@ func (adapter *RootedFilesystemAdapter) renamePathNoReplace(
 	directorySource bool,
 	expected *PlatformFileIdentity,
 ) error {
+	_, err := adapter.renamePathNoReplaceWithPublication(
+		source, destination, directorySource, expected, nil,
+	)
+	return err
+}
+
+func (adapter *RootedFilesystemAdapter) renamePathNoReplaceWithPublication(
+	source, destination string,
+	directorySource bool,
+	expected *PlatformFileIdentity,
+	afterPublication func() error,
+) (bool, error) {
 	sourceDirectory, err := adapter.openDirectoryExact(path.Dir(source))
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer sourceDirectory.Close()
 	destinationDirectory, err := adapter.openDirectoryExact(path.Dir(destination))
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer destinationDirectory.Close()
 	sourceBase := path.Base(source)
@@ -779,16 +804,16 @@ func (adapter *RootedFilesystemAdapter) renamePathNoReplace(
 		if err == nil {
 			err = fmt.Errorf("source is missing or has the wrong type")
 		}
-		return fmt.Errorf("quarantine rooted file %s: %w", source, err)
+		return false, fmt.Errorf("quarantine rooted file %s: %w", source, err)
 	}
 	openedSourceDirectory, err := sourceDirectory.Open(".")
 	if err != nil {
-		return fmt.Errorf("open rooted quarantine parent: %w", err)
+		return false, fmt.Errorf("open rooted quarantine parent: %w", err)
 	}
 	defer openedSourceDirectory.Close()
 	openedSource, err := openFileDescriptorNoFollow(openedSourceDirectory, sourceBase, directorySource)
 	if err != nil {
-		return fmt.Errorf("open rooted quarantine source %s without following links: %w", source, err)
+		return false, fmt.Errorf("open rooted quarantine source %s without following links: %w", source, err)
 	}
 	defer openedSource.Close()
 	openedInfo, err := openedSource.Stat()
@@ -796,37 +821,42 @@ func (adapter *RootedFilesystemAdapter) renamePathNoReplace(
 		if err == nil {
 			err = fmt.Errorf("source identity changed")
 		}
-		return fmt.Errorf("verify rooted quarantine source %s: %w", source, err)
+		return false, fmt.Errorf("verify rooted quarantine source %s: %w", source, err)
 	}
 	if expected != nil {
 		identity, identityErr := platformFileIdentity(openedInfo)
 		if identityErr != nil {
-			return fmt.Errorf(
+			return false, fmt.Errorf(
 				"identify rooted quarantine source %s: %w", source, identityErr,
 			)
 		}
 		if identity != *expected {
-			return fmt.Errorf(
+			return false, fmt.Errorf(
 				"rooted quarantine source %s identity does not match its durable binding",
 				source,
 			)
 		}
 	}
 	if _, exists, err := inspectRootEntryExact(destinationDirectory, destinationBase); err != nil {
-		return err
+		return false, err
 	} else if exists {
-		return fmt.Errorf("rooted quarantine path %s already exists", destination)
+		return false, fmt.Errorf("rooted quarantine path %s already exists", destination)
 	}
 	openedDestinationDirectory, err := destinationDirectory.Open(".")
 	if err != nil {
-		return fmt.Errorf("open rooted quarantine destination parent: %w", err)
+		return false, fmt.Errorf("open rooted quarantine destination parent: %w", err)
 	}
 	defer openedDestinationDirectory.Close()
 	if err := renameFileDescriptorNoReplace(
 		openedSourceDirectory, sourceBase,
 		openedDestinationDirectory, destinationBase,
 	); err != nil {
-		return fmt.Errorf("quarantine rooted file %s: %w", source, err)
+		return false, fmt.Errorf("quarantine rooted file %s: %w", source, err)
+	}
+	if afterPublication != nil {
+		if err := afterPublication(); err != nil {
+			return true, err
+		}
 	}
 	movedInfo, movedExists, verifyErr := inspectRootEntryExact(destinationDirectory, destinationBase)
 	if verifyErr != nil || !movedExists || !os.SameFile(openedInfo, movedInfo) {
@@ -838,17 +868,17 @@ func (adapter *RootedFilesystemAdapter) renamePathNoReplace(
 			openedSourceDirectory, sourceBase,
 		)
 		if restoreErr != nil {
-			return fmt.Errorf("verify quarantined rooted path %s: %w; restore moved path: %v", destination, verifyErr, restoreErr)
+			return true, fmt.Errorf("verify quarantined rooted path %s: %w; restore moved path: %v", destination, verifyErr, restoreErr)
 		}
-		return fmt.Errorf("verify quarantined rooted path %s: %w", destination, verifyErr)
+		return true, fmt.Errorf("verify quarantined rooted path %s: %w", destination, verifyErr)
 	}
 	if err := syncRootHandle(sourceDirectory); err != nil {
-		return err
+		return true, err
 	}
 	if path.Dir(source) != path.Dir(destination) {
-		return syncRootHandle(destinationDirectory)
+		return true, syncRootHandle(destinationDirectory)
 	}
-	return nil
+	return true, nil
 }
 
 func (adapter *RootedFilesystemAdapter) linkFileNoReplace(source, destination string) error {

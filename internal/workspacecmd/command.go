@@ -146,7 +146,7 @@ func validateWorkspaceSubaction(action, subaction string) error {
 		supported = stringSet("next")
 	case "review":
 		supported = stringSet(
-			"start", "reserve", "record", "reserve-fix",
+			"start", "reserve", "request", "record", "record-document", "reserve-fix",
 			"apply-fix", "record-fix", "ready",
 		)
 	case "integrate":
@@ -271,6 +271,12 @@ func RequestSchemas() map[string]any {
 			},
 			"idempotency_key": stringProperty(),
 		})),
+		"review.request": request([]string{
+			"attempt_id", "reservation_digest", "request_digest", "output_dir",
+		}, map[string]any{
+			"attempt_id": stringProperty(), "reservation_digest": stringProperty(),
+			"request_digest": stringProperty(), "output_dir": stringProperty(),
+		}),
 		"review.record": request([]string{
 			"occurred_at", "attempt_id", "reservation_digest", "request_digest",
 			"reviewer_instance", "status", "findings", "isolation",
@@ -283,6 +289,21 @@ func RequestSchemas() map[string]any {
 			"status":                 enumProperty("completed", "infrastructure_failure"),
 			"findings":               map[string]any{"type": "array", "items": reviewFinding},
 			"infrastructure_failure": optionalString(), "isolation": isolation,
+		})),
+		"review.record-document": request([]string{
+			"occurred_at", "attempt_id", "reservation_digest", "request_digest",
+			"reviewer_instance", "document", "isolation",
+		}, occurred(map[string]any{
+			"attempt_id": stringProperty(), "reservation_digest": stringProperty(), "request_digest": stringProperty(),
+			"reviewer_instance": map[string]any{
+				"type": "string", "minLength": 1,
+				"description": "Descriptive local reviewer label; not an authenticated identity.",
+			},
+			"document": map[string]any{
+				"type":        "object",
+				"description": "Raw review-report-v1 document; the Witness contract performs strict decoding and validation.",
+			},
+			"isolation": isolation,
 		})),
 		"review.reserve-fix": request([]string{"occurred_at", "attempt_id", "ordinal", "accepted_finding_ids"}, occurred(map[string]any{
 			"attempt_id": stringProperty(), "ordinal": integerProperty(1), "accepted_finding_ids": arrayOfStrings(),

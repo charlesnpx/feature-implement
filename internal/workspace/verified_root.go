@@ -199,29 +199,42 @@ func (root *VerifiedRoot) ReadBounded(relative string, maximum int64) ([]byte, e
 }
 
 func (root *VerifiedRoot) WriteExclusive(relative string, content []byte, permission os.FileMode) error {
+	_, err := root.writeExclusivePublished(relative, content, permission, nil)
+	return err
+}
+
+// writeExclusivePublished reports whether its no-replace rename made the
+// target visible, including when a later check fails. Callers that need an
+// all-or-nothing higher-level operation can then remove that exact target.
+func (root *VerifiedRoot) writeExclusivePublished(
+	relative string,
+	content []byte,
+	permission os.FileMode,
+	afterPublication func() error,
+) (bool, error) {
 	if err := root.VerifyPath(); err != nil {
-		return err
+		return false, err
 	}
 	rooted, err := NewRootedPath(root.path, relative)
 	if err != nil {
-		return err
+		return false, err
 	}
 	relative = rooted.Relative()
 	if _, exists, err := root.adapter.inspectExact(relative); err != nil {
-		return err
+		return false, err
 	} else if exists {
-		return fmt.Errorf("rooted path %s already exists", relative)
+		return false, fmt.Errorf("rooted path %s already exists", relative)
 	}
 	random := make([]byte, 16)
 	if _, err := rand.Read(random); err != nil {
-		return fmt.Errorf("create exclusive rooted publication nonce: %w", err)
+		return false, fmt.Errorf("create exclusive rooted publication nonce: %w", err)
 	}
 	temporary := path.Join(
 		path.Dir(relative),
 		"runtime-stage-"+hex.EncodeToString(random),
 	)
 	if err := root.adapter.writeFileExclusive(temporary, content, permission); err != nil {
-		return err
+		return false, err
 	}
 	removeTemporary := true
 	defer func() {
@@ -231,19 +244,24 @@ func (root *VerifiedRoot) WriteExclusive(relative string, content []byte, permis
 			)
 		}
 	}()
-	if err := root.adapter.renameFileNoReplace(temporary, relative); err != nil {
-		return err
+	published, err := root.adapter.renameFileNoReplaceWithPublication(
+		temporary, relative, afterPublication,
+	)
+	if published {
+		removeTemporary = false
 	}
-	removeTemporary = false
+	if err != nil {
+		return published, err
+	}
 	file, _, err := root.adapter.openRegularFileExact(relative, os.O_RDONLY, 0, false)
 	if err != nil {
-		return err
+		return true, err
 	}
 	defer file.Close()
 	if err := root.verifyOwnedRegularFile(relative, file); err != nil {
-		return err
+		return true, err
 	}
-	return root.VerifyPath()
+	return true, root.VerifyPath()
 }
 
 func (root *VerifiedRoot) EnsureDirectory(relative string, permission os.FileMode) error {

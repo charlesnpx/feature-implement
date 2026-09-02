@@ -92,15 +92,28 @@ type reviewHeadAdoptedPayloadWire struct {
 }
 
 type reviewResultRecordedPayloadWire struct {
-	WorkspaceID    string                  `json:"workspace_id"`
-	Generation     string                  `json:"generation"`
-	AttemptID      string                  `json:"attempt_id"`
-	LoopDigest     string                  `json:"loop_digest"`
-	Round          uint16                  `json:"round"`
-	ProfileOrdinal uint16                  `json:"profile_ordinal"`
-	Invocation     uint16                  `json:"invocation"`
-	Reservation    string                  `json:"reservation_digest"`
-	Result         reviewResultPayloadWire `json:"result"`
+	WorkspaceID    string                             `json:"workspace_id"`
+	Generation     string                             `json:"generation"`
+	AttemptID      string                             `json:"attempt_id"`
+	LoopDigest     string                             `json:"loop_digest"`
+	Round          uint16                             `json:"round"`
+	ProfileOrdinal uint16                             `json:"profile_ordinal"`
+	Invocation     uint16                             `json:"invocation"`
+	Reservation    string                             `json:"reservation_digest"`
+	Result         reviewResultPayloadWire            `json:"result"`
+	Document       *reviewDocumentArtifactPayloadWire `json:"document,omitempty"`
+}
+
+// reviewDocumentArtifactPayloadWire is metadata for a content-addressed raw
+// review-report-v1 file. The legacy result contains the invocation request
+// digest; Request here is the semantic digest of review-request-v1.
+type reviewDocumentArtifactPayloadWire struct {
+	RawDocumentDigest string `json:"raw_document_digest"`
+	ReportDigest      string `json:"report_digest"`
+	RequestDigest     string `json:"request_digest"`
+	ReviewInputDigest string `json:"review_input_digest"`
+	CharterHash       string `json:"charter_hash"`
+	Path              string `json:"path"`
 }
 
 type reviewInvocationReservedPayloadWire struct {
@@ -184,11 +197,16 @@ func marshalReviewJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, bo
 			ReservationDigest: event.reservationDigest.String(), FailureDigest: event.failureDigest.String(),
 		}
 	case ReviewResultRecordedJournalEvent:
+		var document *reviewDocumentArtifactPayloadWire
+		if artifact, exists := event.DocumentArtifact(); exists {
+			value := reviewDocumentArtifactToWire(artifact)
+			document = &value
+		}
 		value = reviewResultRecordedPayloadWire{
 			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
 			AttemptID: event.attemptID.String(), LoopDigest: event.loopDigest.String(),
 			Round: event.round, ProfileOrdinal: event.profileOrdinal, Invocation: event.invocation,
-			Reservation: event.reservationDigest.String(), Result: reviewResultToWire(event.result),
+			Reservation: event.reservationDigest.String(), Result: reviewResultToWire(event.result), Document: document,
 		}
 	case ReviewFindingFixReservedJournalEvent:
 		findings := make([]string, 0, len(event.reservation.findings))
@@ -390,6 +408,16 @@ func decodeReviewJournalEvent(
 		if err != nil {
 			return nil, true, err
 		}
+		if wire.Document != nil {
+			document, documentErr := reviewDocumentArtifactFromWire(*wire.Document)
+			if documentErr != nil {
+				return nil, true, documentErr
+			}
+			event, eventErr := NewReviewResultRecordedDocumentJournalEvent(
+				workspaceID, generation, attemptID, loopDigest, record, document,
+			)
+			return event, true, eventErr
+		}
 		event, err := NewReviewResultRecordedJournalEvent(workspaceID, generation, attemptID, loopDigest, record)
 		return event, true, err
 	case JournalEventReviewFindingFixReserved:
@@ -473,6 +501,52 @@ func decodeReviewJournalEvent(
 	default:
 		return nil, false, nil
 	}
+}
+
+func reviewDocumentArtifactToWire(artifact ReviewDocumentArtifact) reviewDocumentArtifactPayloadWire {
+	return reviewDocumentArtifactPayloadWire{
+		RawDocumentDigest: artifact.rawDocumentDigest.String(),
+		ReportDigest:      artifact.reportDigest.String(),
+		RequestDigest:     artifact.requestDigest.String(),
+		ReviewInputDigest: artifact.reviewInputDigest.String(),
+		CharterHash:       artifact.charterHash.String(),
+		Path:              artifact.path,
+	}
+}
+
+func reviewDocumentArtifactFromWire(wire reviewDocumentArtifactPayloadWire) (ReviewDocumentArtifact, error) {
+	rawDocumentDigest, err := ParseDigest(wire.RawDocumentDigest)
+	if err != nil {
+		return ReviewDocumentArtifact{}, err
+	}
+	reportDigest, err := ParseDigest(wire.ReportDigest)
+	if err != nil {
+		return ReviewDocumentArtifact{}, err
+	}
+	requestDigest, err := ParseDigest(wire.RequestDigest)
+	if err != nil {
+		return ReviewDocumentArtifact{}, err
+	}
+	reviewInputDigest, err := ParseDigest(wire.ReviewInputDigest)
+	if err != nil {
+		return ReviewDocumentArtifact{}, err
+	}
+	charterHash, err := ParseDigest(wire.CharterHash)
+	if err != nil {
+		return ReviewDocumentArtifact{}, err
+	}
+	artifact := ReviewDocumentArtifact{
+		rawDocumentDigest: rawDocumentDigest,
+		reportDigest:      reportDigest,
+		requestDigest:     requestDigest,
+		reviewInputDigest: reviewInputDigest,
+		charterHash:       charterHash,
+		path:              wire.Path,
+	}
+	if err := artifact.validate(); err != nil {
+		return ReviewDocumentArtifact{}, err
+	}
+	return artifact, nil
 }
 
 func reviewRequestToWire(request ReviewRequest) reviewRequestPayloadWire {

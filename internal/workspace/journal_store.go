@@ -31,7 +31,9 @@ const (
 type JournalFaultPoint string
 
 const (
-	JournalFaultAfterAppendPrefix JournalFaultPoint = "after_append_prefix"
+	JournalFaultAfterAppendPrefix                      JournalFaultPoint = "after_append_prefix"
+	JournalFaultAfterAppendFullRecord                  JournalFaultPoint = "after_append_full_record"
+	JournalFaultAfterReviewDocumentArtifactPublication JournalFaultPoint = "after_review_document_artifact_publication"
 )
 
 type JournalFaultInjector func(JournalFaultPoint) error
@@ -392,6 +394,9 @@ func (journal *WorkspaceJournal) appendToSnapshot(snapshot JournalSnapshot, requ
 		return JournalRecord{}, closeWith(err)
 	}
 	if err := writeAll(file, encoded[prefix:]); err != nil {
+		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: closeWith(err)}
+	}
+	if err := journal.inject(JournalFaultAfterAppendFullRecord); err != nil {
 		return JournalRecord{}, JournalAppendAmbiguousError{EventHash: record.eventHash, Cause: closeWith(err)}
 	}
 	if err := file.Sync(); err != nil {

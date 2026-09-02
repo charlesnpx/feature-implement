@@ -56,6 +56,7 @@ func TestPublishedPublicContractIncludesLicenseOperationsAndNotices(t *testing.T
 		"golang.org/x/sys",
 		"golang.org/x/text",
 		"gopkg.in/yaml.v3",
+		"github.com/charlesnpx/witness",
 		"Copyright 2011-2016 Canonical Ltd.",
 	} {
 		if !strings.Contains(notices, required) {
