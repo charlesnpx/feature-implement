@@ -186,6 +186,7 @@ workflow combinations are:
 | `none` | `allowed` | Runs unit to unit without stopping; the agent may still stop if it hits something real. The block-of-units default. |
 | `none` | `forbidden` | Cannot stop for any reason — finish or fail. For unattended and CI runs. |
 | `pause_only` | `allowed` | Records a planned pause and resumes on the same goal. |
+| `pause_only` | `forbidden` | Records the planned pause; the agent may not raise its own stop. Resumes on the same goal. |
 
 An execution profile may optionally declare `boundary` with `escalation` only.
 A merge unit may narrow `allowed` to `forbidden`, but never widen `forbidden`

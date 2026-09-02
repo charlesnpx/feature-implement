@@ -35,6 +35,7 @@ permission to stop on its own.
 | `none` | `allowed` | Runs unit to unit without stopping. The agent may still stop if it hits something real. **This is the block-of-units default.** |
 | `none` | `forbidden` | Cannot stop for any reason. The agent must finish or fail. For unattended and CI runs. |
 | `pause_only` | `allowed` | Records a planned boundary and pauses the attempt. |
+| `pause_only` | `forbidden` | Records the planned boundary and pauses; the agent may not raise its own stop. |
 
 `checkpoint: none` makes an unattended block expressible.
 
