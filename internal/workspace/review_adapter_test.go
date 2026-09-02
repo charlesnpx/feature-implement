@@ -465,7 +465,7 @@ func TestRecordAttemptReviewDocumentRejectsMismatchedConsumerIdentity(t *testing
 	if err := json.Unmarshal(validReviewAdapterReportBytes(t, materialization), &document); err != nil {
 		t.Fatal(err)
 	}
-	document.ConsumerIdentity = map[string]any{"kind": "feature-implement", "id": "another-workspace"}
+	document.ConsumerIdentity = witnessreview.Identity{Kind: "feature-implement", ID: "another-workspace"}
 	before := reviewAdapterJournalHead(t, harness.journal)
 	_, _, err := workspace.RecordAttemptReviewDocument(
 		context.Background(), harness.journal, harness.definition, repository,
@@ -584,10 +584,10 @@ func validReviewAdapterReportBytes(
 		Role:              witnessreview.RoleDefect,
 		CharterHash:       materialization.CharterHash().String(),
 		ReviewInputDigest: materialization.ReviewInputDigest().String(),
-		SourceIdentity:    map[string]any{"kind": "test-reviewer", "id": "adapter-test"},
-		ConsumerIdentity: map[string]any{
-			"kind": "feature-implement",
-			"id":   materialization.WorkspaceID().String(),
+		SourceIdentity:    witnessreview.Identity{Kind: "test-reviewer", ID: "adapter-test"},
+		ConsumerIdentity: witnessreview.Identity{
+			Kind: "feature-implement",
+			ID:   materialization.WorkspaceID().String(),
 		},
 		Findings: []witnessreview.ReportFinding{{
 			ID: "adapter-finding", Title: "Adapter keeps review evidence", ClaimedSeverity: witnessreview.SeverityHigh,
@@ -598,6 +598,10 @@ func validReviewAdapterReportBytes(
 			},
 			Annotation: &witnessreview.FindingAnnotation{Path: "src/adapter.go", Line: 12, Category: "contract"},
 		}},
+		Evaluation: &witnessreview.ReportEvaluation{
+			EvaluatedPaths:   []string{"src/adapter.go"},
+			EvaluatedGoalIDs: []string{goals[0].ID},
+		},
 	})
 }
 

@@ -99,6 +99,11 @@ func (materialization ReviewAdapterMaterialization) Worktree() string {
 // the Witness charter, review request, and Git patch it binds. Re-running this
 // function against the same reservation produces the same charter and request
 // digests.
+//
+// The patch is the raw diff of the reserved revisions, verbatim. No secret
+// screening runs on it here or downstream: delegate's contract mode submits
+// these bytes as supplied. The operator owns what the reserved commits
+// contain.
 func BuildReviewAdapterRequest(
 	ctx context.Context,
 	journal *WorkspaceJournal,
@@ -306,28 +311,20 @@ func reviewAdapterRequestDetails(request ReviewRequest) map[string]any {
 	}
 }
 
-func reviewAdapterConsumerIdentity(workspaceID ID) map[string]any {
-	return map[string]any{
-		"kind": "feature-implement",
-		"id":   workspaceID.String(),
+func reviewAdapterConsumerIdentity(workspaceID ID) witnessreview.Identity {
+	return witnessreview.Identity{
+		Kind: "feature-implement",
+		ID:   workspaceID.String(),
 	}
 }
 
 func requireMatchingReviewConsumerIdentity(
-	reportIdentity, requestIdentity map[string]any,
+	reportIdentity, requestIdentity witnessreview.Identity,
 ) error {
-	reportJSON, err := canonjson.Marshal(reportIdentity)
-	if err != nil {
-		return fmt.Errorf("canonicalize review report consumer identity: %w", err)
-	}
-	requestJSON, err := canonjson.Marshal(requestIdentity)
-	if err != nil {
-		return fmt.Errorf("canonicalize review request consumer identity: %w", err)
-	}
-	if !bytes.Equal(reportJSON, requestJSON) {
+	if reportIdentity != requestIdentity {
 		return fmt.Errorf(
-			"review report consumer identity %s does not match review request consumer identity %s",
-			reportJSON, requestJSON,
+			"review report consumer identity {kind:%q id:%q} does not match review request consumer identity {kind:%q id:%q}",
+			reportIdentity.Kind, reportIdentity.ID, requestIdentity.Kind, requestIdentity.ID,
 		)
 	}
 	return nil
