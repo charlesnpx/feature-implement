@@ -71,13 +71,11 @@ type ReviewGateDispatchRequest struct {
 type ReviewGateDispatchResult struct {
 	dispatch   ReviewGateDispatch
 	frozenCopy string
-	record     JournalRecord
 	policy     []byte
 }
 
 func (result ReviewGateDispatchResult) Dispatch() ReviewGateDispatch { return result.dispatch }
 func (result ReviewGateDispatchResult) FrozenCopy() string           { return result.frozenCopy }
-func (result ReviewGateDispatchResult) Record() JournalRecord        { return result.record }
 func (result ReviewGateDispatchResult) Policy() []byte {
 	return append([]byte(nil), result.policy...)
 }
@@ -128,7 +126,7 @@ func DispatchAttemptReviewGate(
 	if err := verifyAttemptFinalHistory(ctx, repository, unit, attempt, artifact.head); err != nil {
 		return ReviewGateDispatchResult{}, fmt.Errorf("verify final history before review gate dispatch: %w", err)
 	}
-	if config.adapter.String() == WitnessReviewGateAdapter {
+	if ReviewGateCarriesDocumentContract(config.adapter) {
 		if err := validateWitnessReviewInputTransport(ctx, repository, attempt, artifact.head); err != nil {
 			return ReviewGateDispatchResult{}, err
 		}
@@ -168,18 +166,17 @@ func DispatchAttemptReviewGate(
 			if pending != dispatch {
 				return ReviewGateDispatchResult{}, fmt.Errorf("attempt %s has an unresolved review gate dispatch", attempt.attemptID)
 			}
-			return materializeReviewGateCopy(ctx, materializer, projection.core, attempt, pending, JournalRecord{}, config.Policy())
+			return materializeReviewGateCopy(ctx, materializer, projection.core, attempt, pending, config.Policy())
 		}
 	}
 	event, err := NewReviewGateDispatchedJournalEvent(dispatch)
 	if err != nil {
 		return ReviewGateDispatchResult{}, err
 	}
-	record, err := appendReviewJournalEvent(journal, snapshot, event, request.OccurredAt)
-	if err != nil {
+	if _, err := appendReviewJournalEvent(journal, snapshot, event, request.OccurredAt); err != nil {
 		return ReviewGateDispatchResult{}, err
 	}
-	return materializeReviewGateCopy(ctx, materializer, projection.core, attempt, dispatch, record, config.Policy())
+	return materializeReviewGateCopy(ctx, materializer, projection.core, attempt, dispatch, config.Policy())
 }
 
 func validateWitnessReviewInputTransport(
@@ -208,7 +205,6 @@ func materializeReviewGateCopy(
 	runtime WorkspaceRuntimeProjection,
 	attempt RuntimeAttemptProjection,
 	dispatch ReviewGateDispatch,
-	record JournalRecord,
 	policy []byte,
 ) (ReviewGateDispatchResult, error) {
 	if runtime.worktreeRoot.IsZero() {
@@ -227,7 +223,7 @@ func materializeReviewGateCopy(
 		return ReviewGateDispatchResult{}, fmt.Errorf("frozen review gate copy is not the dispatched exact head and tree")
 	}
 	return ReviewGateDispatchResult{
-		dispatch: dispatch, frozenCopy: frozenCopy, record: record, policy: append([]byte(nil), policy...),
+		dispatch: dispatch, frozenCopy: frozenCopy, policy: append([]byte(nil), policy...),
 	}, nil
 }
 
@@ -252,16 +248,13 @@ type RecordAttemptReviewGateRequest struct {
 }
 
 type ReviewGateRecordResult struct {
-	record  ReviewGateRecord
-	journal JournalRecord
+	record ReviewGateRecord
 }
 
 func (result ReviewGateRecordResult) GateRecord() ReviewGateRecord { return result.record }
-func (result ReviewGateRecordResult) Record() JournalRecord        { return result.journal }
 
-// RecordAttemptReviewGate stores one terminal result without interpreting the
-// adapter's policy or evidence. A failed-to-run result remains a distinct,
-// durable fact and does not alter the attempt's lifecycle phase.
+// RecordAttemptReviewGate stores an opaque terminal result. Dispatches with a
+// document contract use this route only to record a failed-to-run outcome.
 func RecordAttemptReviewGate(
 	journal *WorkspaceJournal,
 	definition EffectiveWorkspaceDefinition,
@@ -283,6 +276,9 @@ func RecordAttemptReviewGate(
 	if !exists {
 		return ReviewGateRecordResult{}, fmt.Errorf("review gate dispatch %s is unknown for attempt %s", request.DispatchDigest, request.AttemptID)
 	}
+	if ReviewGateCarriesDocumentContract(dispatch.adapter) && request.Verdict != ReviewGateFailedToRun {
+		return ReviewGateRecordResult{}, fmt.Errorf("review gate dispatch %s requires a review document for %s", request.DispatchDigest, request.Verdict)
+	}
 	if existing, recorded := state.Record(request.DispatchDigest); recorded {
 		if existing.verdict == request.Verdict && existing.evidenceDigest == request.EvidenceDigest {
 			if err := discardReviewGateFrozenCopy(projection.core.worktreeRoot, dispatch); err != nil {
@@ -303,14 +299,13 @@ func RecordAttemptReviewGate(
 	if err != nil {
 		return ReviewGateRecordResult{}, err
 	}
-	journalRecord, err := appendReviewJournalEvent(journal, snapshot, event, request.OccurredAt)
-	if err != nil {
+	if _, err := appendReviewJournalEvent(journal, snapshot, event, request.OccurredAt); err != nil {
 		return ReviewGateRecordResult{}, err
 	}
 	if err := discardReviewGateFrozenCopy(projection.core.worktreeRoot, dispatch); err != nil {
 		return ReviewGateRecordResult{}, fmt.Errorf("discard terminal review gate frozen copy: %w", err)
 	}
-	return ReviewGateRecordResult{record: gateRecord, journal: journalRecord}, nil
+	return ReviewGateRecordResult{record: gateRecord}, nil
 }
 
 // discardReviewGateFrozenCopy removes only the deterministic top-level copy

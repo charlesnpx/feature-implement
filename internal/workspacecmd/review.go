@@ -123,7 +123,7 @@ func executeReview(ctx context.Context, bundle workspace.WorkspaceBundle, option
 			return nil, err
 		}
 		detail := reviewGateDispatchView(dispatched)
-		if dispatched.Dispatch().Adapter().String() == workspace.WitnessReviewGateAdapter {
+		if workspace.ReviewGateCarriesDocumentContract(dispatched.Dispatch().Adapter()) {
 			materialization, err := workspace.BuildReviewAdapterRequest(
 				ctx, journal, definition, repository, workspace.ReviewAdapterBuildRequest{
 					AttemptID: attemptID, DispatchDigest: dispatched.Dispatch().Digest(),

@@ -70,16 +70,14 @@ func NewReviewGateDispatch(options ReviewGateDispatchOptions) (ReviewGateDispatc
 	return dispatch, nil
 }
 
-func (dispatch ReviewGateDispatch) WorkspaceID() ID               { return dispatch.workspaceID }
-func (dispatch ReviewGateDispatch) Generation() Digest            { return dispatch.generation }
-func (dispatch ReviewGateDispatch) AttemptID() ID                 { return dispatch.attemptID }
-func (dispatch ReviewGateDispatch) MergeUnit() MergeUnitReference { return dispatch.mergeUnit }
-func (dispatch ReviewGateDispatch) Adapter() ID                   { return dispatch.adapter }
-func (dispatch ReviewGateDispatch) Recipe() ID                    { return dispatch.recipe }
-func (dispatch ReviewGateDispatch) PolicyDigest() Digest          { return dispatch.policyDigest }
-func (dispatch ReviewGateDispatch) Head() GitObjectID             { return dispatch.head }
-func (dispatch ReviewGateDispatch) Tree() GitObjectID             { return dispatch.tree }
-func (dispatch ReviewGateDispatch) Digest() Digest                { return dispatch.digest }
+func (dispatch ReviewGateDispatch) WorkspaceID() ID      { return dispatch.workspaceID }
+func (dispatch ReviewGateDispatch) AttemptID() ID        { return dispatch.attemptID }
+func (dispatch ReviewGateDispatch) Adapter() ID          { return dispatch.adapter }
+func (dispatch ReviewGateDispatch) Recipe() ID           { return dispatch.recipe }
+func (dispatch ReviewGateDispatch) PolicyDigest() Digest { return dispatch.policyDigest }
+func (dispatch ReviewGateDispatch) Head() GitObjectID    { return dispatch.head }
+func (dispatch ReviewGateDispatch) Tree() GitObjectID    { return dispatch.tree }
+func (dispatch ReviewGateDispatch) Digest() Digest       { return dispatch.digest }
 
 func canonicalReviewGateDispatch(dispatch ReviewGateDispatch) ([]byte, error) {
 	if dispatch.workspaceID.IsZero() || dispatch.generation.IsZero() ||
@@ -201,7 +199,6 @@ type ReviewGateState struct {
 	records     []ReviewGateRecord
 }
 
-func (state ReviewGateState) WorkspaceID() ID               { return state.workspaceID }
 func (state ReviewGateState) Generation() Digest            { return state.generation }
 func (state ReviewGateState) AttemptID() ID                 { return state.attemptID }
 func (state ReviewGateState) MergeUnit() MergeUnitReference { return state.mergeUnit }

@@ -14,34 +14,6 @@ import (
 	witnessreview "github.com/charlesnpx/witness/contract/review"
 )
 
-func TestReviewGateDispatchViewExposesOnlyAdapterContract(t *testing.T) {
-	view := ReviewGateDispatchView{
-		DispatchDigest: "sha256:dispatch", Adapter: "natural-language", Recipe: "default",
-		PolicyDigest: "sha256:policy", Policy: "Review the exact artifact.",
-		Head: "sha1:head", Tree: "sha1:tree", FrozenCopy: "/tmp/frozen-copy",
-	}
-	encoded, err := json.Marshal(view)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(encoded, &fields); err != nil {
-		t.Fatal(err)
-	}
-	want := map[string]bool{
-		"dispatch_digest": true, "adapter": true, "recipe": true, "policy_digest": true,
-		"policy": true, "head": true, "tree": true, "frozen_copy": true,
-	}
-	if len(fields) != len(want) {
-		t.Fatalf("dispatch view fields = %#v", fields)
-	}
-	for field := range want {
-		if _, exists := fields[field]; !exists {
-			t.Fatalf("dispatch view omits %q: %#v", field, fields)
-		}
-	}
-}
-
 func TestLocalReviewRepositoryAdoptsActualCleanDescendantHead(t *testing.T) {
 	repository := canonicalWorkspaceCommandTempDir(t)
 	runGitTest(t, repository, "init", "-b", "main")

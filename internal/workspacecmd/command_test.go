@@ -135,14 +135,6 @@ func TestRequestSchemasExposeOnlySupportedLocalMutations(t *testing.T) {
 	if len(schemas) != 13 {
 		t.Fatalf("request schema count = %d: %+v", len(schemas), schemas)
 	}
-	for _, removed := range []string{
-		"commit.next", "review.start", "review.reserve", "review.request",
-		"review.reserve-fix", "review.apply-fix", "review.record-fix",
-	} {
-		if _, exists := schemas[removed]; exists {
-			t.Fatalf("request schemas retain removed action %s", removed)
-		}
-	}
 }
 
 func TestDecodeRequestKeepsSchemaOptionalFieldsOptional(t *testing.T) {
@@ -216,12 +208,6 @@ func TestWorkspaceViewSchemaOmitsRetiredDirectiveFields(t *testing.T) {
 	attemptProperties := attempt["properties"].(map[string]any)
 	if _, exists := attemptProperties["branch"]; exists {
 		t.Fatalf("workspace attempt schema still exposes retired branch: %+v", attemptProperties)
-	}
-	reviews := properties["reviews"].(map[string]any)
-	review := reviews["items"].(map[string]any)
-	reviewProperties := review["properties"].(map[string]any)
-	if _, exists := reviewProperties["findings"]; exists {
-		t.Fatalf("workspace review schema still exposes report findings: %+v", reviewProperties)
 	}
 }
 

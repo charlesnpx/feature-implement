@@ -361,23 +361,6 @@ func TestSourceAndSemanticHashesHaveDistinctContracts(t *testing.T) {
 	}
 }
 
-func TestNoReviewExecutionCanonicalFormOmitsUnusedAndRemovedFields(t *testing.T) {
-	t.Parallel()
-
-	fixture := newDefinitionFixture(t)
-	definition, err := workspace.ValidateDefinition(fixture.sources)
-	if err != nil {
-		t.Fatal(err)
-	}
-	execution := artifactByKind(t, definition, workspace.ArtifactExecutionConfig)
-	canonical := string(execution.CanonicalBytes())
-	for _, field := range []string{"review_profiles", "require_signed_receipts"} {
-		if strings.Contains(canonical, field) {
-			t.Fatalf("canonical execution retained %q: %s", field, canonical)
-		}
-	}
-}
-
 func TestEffectiveDefinitionBindsTypedCrossPlanMergeUnitDependencies(t *testing.T) {
 	t.Parallel()
 

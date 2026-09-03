@@ -21,6 +21,11 @@ const (
 	WitnessReviewGateAdapter    = "witness"
 )
 
+// ReviewGateCarriesDocumentContract is the shared dispatch-routing predicate.
+func ReviewGateCarriesDocumentContract(adapter ID) bool {
+	return adapter.String() == WitnessReviewGateAdapter
+}
+
 // ReviewAdapterRepositoryPort reads an exact diff from a verified worktree.
 // BuildReviewAdapterRequest always supplies the adapter's frozen copy.
 type ReviewAdapterRepositoryPort interface {
@@ -154,7 +159,7 @@ func buildReviewAdapterMaterialization(
 			Type:    "review-gate-dispatch",
 			Actor:   "feature-implement",
 			Summary: unitName,
-			Details: reviewAdapterRequestDetails(resolved.dispatch),
+			Details: map[string]any{"dispatch_digest": resolved.dispatch.digest.String()},
 		}},
 	}
 	frozen, err := witnesscharter.Freeze(charter, nil)
@@ -230,16 +235,6 @@ func reviewRequestOwnerEventID(digest Digest) string {
 	return "review-gate-" + hex
 }
 
-func reviewAdapterRequestDetails(dispatch ReviewGateDispatch) map[string]any {
-	return map[string]any{
-		"workspace_id": dispatch.workspaceID.String(), "generation": dispatch.generation.String(),
-		"attempt_id": dispatch.attemptID.String(), "plan_id": dispatch.mergeUnit.planID.String(),
-		"merge_unit_id": dispatch.mergeUnit.mergeUnitID.String(), "adapter": dispatch.adapter.String(),
-		"recipe": dispatch.recipe.String(), "policy_digest": dispatch.policyDigest.String(),
-		"head": dispatch.head.String(), "tree": dispatch.tree.String(), "dispatch_digest": dispatch.digest.String(),
-	}
-}
-
 func reviewAdapterConsumerIdentity(workspaceID ID) witnessreview.Identity {
 	return witnessreview.Identity{Kind: "feature-implement", ID: workspaceID.String()}
 }
@@ -294,13 +289,6 @@ func ReviewDocumentArtifactPath(workspaceDir string, artifact ReviewDocumentArti
 		return "", fmt.Errorf("review document runtime directory must be absolute")
 	}
 	return filepath.Join(WorkspaceStateDirectory(workspaceDir), filepath.FromSlash(artifact.path)), nil
-}
-
-func validateReviewDocumentArtifactOperation(journal *WorkspaceJournal, artifact ReviewDocumentArtifact, rawDocument []byte) error {
-	if journal == nil || len(rawDocument) == 0 || len(rawDocument) > MaxArtifactBytes || DigestBytes(rawDocument) != artifact.rawDocumentDigest {
-		return fmt.Errorf("review document artifact requires exact bounded raw bytes")
-	}
-	return artifact.validate()
 }
 
 func writeReviewDocumentArtifact(journal *WorkspaceJournal, artifact ReviewDocumentArtifact, rawDocument []byte) (bool, error) {
@@ -403,6 +391,9 @@ func RecordAttemptReviewDocument(
 		!request.Verdict.valid() || len(request.Document) == 0 || len(request.Document) > MaxArtifactBytes || request.OccurredAt.IsZero() {
 		return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("record review document requires exact dispatch, verdict, bounded document, and occurrence time")
 	}
+	if request.Verdict == ReviewGateFailedToRun {
+		return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("review document route does not accept failed_to_run")
+	}
 	snapshot, projection, err := readReviewRuntime(journal, definition)
 	if err != nil {
 		return RecordedReviewDocument{}, JournalRecord{}, err
@@ -428,7 +419,7 @@ func RecordAttemptReviewDocument(
 		return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("attempt %s has no review gate state", request.AttemptID)
 	}
 	dispatch, exists := state.Dispatch(request.DispatchDigest)
-	if !exists || dispatch.adapter.String() != WitnessReviewGateAdapter {
+	if !exists || !ReviewGateCarriesDocumentContract(dispatch.adapter) {
 		return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("review document requires a Witness gate dispatch")
 	}
 	materialization, err := BuildReviewAdapterRequest(ctx, journal, definition, repository, ReviewAdapterBuildRequest{
@@ -446,9 +437,6 @@ func RecordAttemptReviewDocument(
 	}
 	artifact, err := NewReviewDocumentArtifact(request.Document)
 	if err != nil {
-		return RecordedReviewDocument{}, JournalRecord{}, err
-	}
-	if err := validateReviewDocumentArtifactOperation(journal, artifact, request.Document); err != nil {
 		return RecordedReviewDocument{}, JournalRecord{}, err
 	}
 	gateRecord, err := NewReviewGateRecord(ReviewGateRecordOptions{

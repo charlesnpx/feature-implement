@@ -297,6 +297,42 @@ func TestWitnessReviewDispatchRejectsNonUTF8ReviewInputBeforeJournal(t *testing.
 	}
 }
 
+func TestWitnessReviewTerminalRoutesAreExclusive(t *testing.T) {
+	t.Parallel()
+
+	harness := newWitnessReviewHarness(t)
+	dispatch := harness.dispatch(t, "2026-09-03T12:00:01Z").Dispatch()
+	recordRequest := workspace.RecordAttemptReviewGateRequest{
+		AttemptID: harness.attempt.AttemptID(), DispatchDigest: dispatch.Digest(),
+		EvidenceDigest: workspace.DigestBytes([]byte("generic-review-record")),
+		OccurredAt:     mustTime(t, "2026-09-03T12:00:02Z"),
+	}
+	if _, err := workspace.RecordAttemptReviewGate(
+		harness.journal, harness.definition, workspace.RecordAttemptReviewGateRequest{
+			AttemptID: recordRequest.AttemptID, DispatchDigest: recordRequest.DispatchDigest,
+			Verdict: workspace.ReviewGateSatisfied, EvidenceDigest: recordRequest.EvidenceDigest,
+			OccurredAt: recordRequest.OccurredAt,
+		},
+	); err == nil || !strings.Contains(err.Error(), "requires a review document") {
+		t.Fatalf("generic satisfied Witness record error = %v", err)
+	}
+	if _, _, err := workspace.RecordAttemptReviewDocument(
+		context.Background(), harness.journal, harness.definition, harness.repository,
+		workspace.RecordAttemptReviewDocumentRequest{
+			AttemptID: harness.attempt.AttemptID(), DispatchDigest: dispatch.Digest(),
+			Verdict: workspace.ReviewGateFailedToRun, Document: []byte(`{}`),
+			OccurredAt: mustTime(t, "2026-09-03T12:00:02Z"),
+		},
+	); err == nil || !strings.Contains(err.Error(), "does not accept failed_to_run") {
+		t.Fatalf("document failed-to-run Witness record error = %v", err)
+	}
+	recordRequest.Verdict = workspace.ReviewGateFailedToRun
+	recorded, err := workspace.RecordAttemptReviewGate(harness.journal, harness.definition, recordRequest)
+	if err != nil || recorded.GateRecord().Verdict() != workspace.ReviewGateFailedToRun {
+		t.Fatalf("generic failed-to-run Witness record = %#v error=%v", recorded, err)
+	}
+}
+
 func TestSatisfiedGatePassesBothReadinessPathsOnlyForExactArtifact(t *testing.T) {
 	t.Parallel()
 

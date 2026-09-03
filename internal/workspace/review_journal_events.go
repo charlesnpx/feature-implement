@@ -56,14 +56,6 @@ func (event ReviewHeadAdoptedJournalEvent) validate() error {
 	}
 	return nil
 }
-func (event ReviewHeadAdoptedJournalEvent) WorkspaceID() ID               { return event.workspaceID }
-func (event ReviewHeadAdoptedJournalEvent) Generation() Digest            { return event.generation }
-func (event ReviewHeadAdoptedJournalEvent) AttemptID() ID                 { return event.attemptID }
-func (event ReviewHeadAdoptedJournalEvent) MergeUnit() MergeUnitReference { return event.mergeUnit }
-func (event ReviewHeadAdoptedJournalEvent) PriorHead() GitObjectID        { return event.priorHead }
-func (event ReviewHeadAdoptedJournalEvent) Head() GitObjectID             { return event.head }
-func (event ReviewHeadAdoptedJournalEvent) Tree() GitObjectID             { return event.tree }
-func (event ReviewHeadAdoptedJournalEvent) SnapshotDigest() Digest        { return event.snapshotDigest }
 
 // ReviewGateDispatchedJournalEvent records a repeatable adapter request before
 // any adapter is given a frozen copy.
