@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,12 +11,12 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 
 	"github.com/charlesnpx/feature-implement/internal/workspace"
 )
 
 const configuredCheckOutputLimit = 8 * 1024 * 1024
+const configuredCheckDiagnosticLimit = 64 * 1024
 
 // isolatedCheckRunner materializes the exact recorded commit into a private
 // clone and executes its typed argv under an OS network sandbox. Environments
@@ -33,54 +32,48 @@ func defaultIsolatedCheckRunner() isolatedCheckRunner {
 func (runner isolatedCheckRunner) RunConfiguredCheck(
 	ctx context.Context,
 	invocation workspace.CommitCheckInvocation,
-) (workspace.CheckProcessResult, error) {
+) error {
 	if ctx == nil {
-		return workspace.CheckProcessResult{}, fmt.Errorf("configured check requires context")
+		return fmt.Errorf("configured check %s requires context", invocation.CheckID())
 	}
 	scratch, err := os.MkdirTemp("", "feature-workspace-check-")
 	if err != nil {
-		return workspace.CheckProcessResult{}, err
+		return fmt.Errorf("configured check %s creates isolated scratch: %w", invocation.CheckID(), err)
 	}
 	canonicalScratch, err := filepath.EvalSymlinks(scratch)
 	if err != nil {
 		_ = os.RemoveAll(scratch)
-		return workspace.CheckProcessResult{}, err
+		return fmt.Errorf("configured check %s resolves isolated scratch: %w", invocation.CheckID(), err)
 	}
 	scratch = canonicalScratch
 	defer os.RemoveAll(scratch)
 	repository := filepath.Join(scratch, "repository")
 	if err := runner.materializeExactCommit(ctx, invocation, repository); err != nil {
-		return workspace.CheckProcessResult{}, err
+		return fmt.Errorf("configured check %s materializes exact head: %w", invocation.CheckID(), err)
 	}
 	argv := invocation.Command().Values()
 	resolved, err := resolveCheckExecutable(repository, argv[0])
 	if err != nil {
-		return workspace.NewCheckProcessResult(
-			workspace.CheckMissingExecutable, -1, "", nil, []byte(err.Error()), workspace.StrictCheckIsolationProof(),
-		)
+		return fmt.Errorf("configured check %s cannot start: %w", invocation.CheckID(), err)
 	}
 	argv[0] = resolved
 	environment, moduleCache, err := configuredCheckEnvironment(scratch)
 	if err != nil {
-		return workspace.CheckProcessResult{}, err
+		return fmt.Errorf("configured check %s prepares isolated environment: %w", invocation.CheckID(), err)
 	}
 	command, err := sandboxedCheckCommand(ctx, scratch, repository, invocation.Worktree(), moduleCache, argv)
 	if err != nil {
-		return workspace.CheckProcessResult{}, err
+		return fmt.Errorf("configured check %s constructs sandbox: %w", invocation.CheckID(), err)
 	}
 	command.Dir = repository
 	command.Env = environment
 	var stdout, stderr boundedCheckBuffer
 	stdout.maximum, stderr.maximum = configuredCheckOutputLimit, configuredCheckOutputLimit
 	command.Stdout, command.Stderr = &stdout, &stderr
-	runErr := command.Run()
-	termination, exitCode, signal, err := classifyCheckTermination(ctx, runErr)
-	if err != nil {
-		return workspace.CheckProcessResult{}, err
+	if err := command.Run(); err != nil {
+		return configuredCheckRunError(invocation, err, stderr.bytes(), stdout.bytes())
 	}
-	return workspace.NewCheckProcessResult(
-		termination, exitCode, signal, stdout.bytes(), stderr.bytes(), workspace.StrictCheckIsolationProof(),
-	)
+	return nil
 }
 
 func (runner isolatedCheckRunner) materializeExactCommit(
@@ -132,7 +125,7 @@ func runIsolatedSetup(ctx context.Context, executable string, arguments ...strin
 	stdout.maximum, stderr.maximum = configuredCheckOutputLimit, configuredCheckOutputLimit
 	command.Stdout, command.Stderr = &stdout, &stderr
 	if err := command.Run(); err != nil {
-		return nil, fmt.Errorf("%s %s: %w: %s", executable, strings.Join(arguments, " "), err, strings.TrimSpace(string(stderr.bytes())))
+		return nil, fmt.Errorf("%s %s: %w: %s", executable, strings.Join(arguments, " "), err, boundedCheckDiagnostic(stderr.bytes()))
 	}
 	if stdout.exceeded || stderr.exceeded {
 		return nil, fmt.Errorf("setup output exceeded %d bytes", configuredCheckOutputLimit)
@@ -388,26 +381,6 @@ func darwinCheckSandboxProfile(scratch string, readRoots []string) string {
 	return profile.String()
 }
 
-func classifyCheckTermination(ctx context.Context, runErr error) (workspace.CheckTerminationKind, int, string, error) {
-	if runErr == nil {
-		return workspace.CheckExited, 0, "", nil
-	}
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return workspace.CheckTimedOut, -1, "", nil
-	}
-	if ctx.Err() != nil {
-		return "", 0, "", ctx.Err()
-	}
-	var exitError *exec.ExitError
-	if errors.As(runErr, &exitError) {
-		if status, ok := exitError.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-			return workspace.CheckSignaled, -1, status.Signal().String(), nil
-		}
-		return workspace.CheckExited, exitError.ExitCode(), "", nil
-	}
-	return workspace.CheckInfrastructure, -1, "", nil
-}
-
 func pathWithin(root, candidate string) bool {
 	root, candidate = filepath.Clean(root), filepath.Clean(candidate)
 	relative, err := filepath.Rel(root, candidate)
@@ -434,6 +407,40 @@ func (buffer *boundedCheckBuffer) Write(value []byte) (int, error) {
 
 func (buffer *boundedCheckBuffer) bytes() []byte {
 	return append([]byte(nil), buffer.content.Bytes()...)
+}
+
+func configuredCheckRunError(
+	invocation workspace.CommitCheckInvocation,
+	runErr error,
+	stderr, stdout []byte,
+) error {
+	diagnostic := boundedCheckDiagnostic(stderr)
+	if diagnostic == "" {
+		diagnostic = boundedCheckDiagnostic(stdout)
+	}
+	if diagnostic == "" {
+		diagnostic = boundedCheckDiagnostic([]byte(runErr.Error()))
+	}
+	return fmt.Errorf(
+		"configured check %s did not exit zero: %s",
+		invocation.CheckID(), diagnostic,
+	)
+}
+
+func boundedCheckDiagnostic(value []byte) string {
+	if len(value) > configuredCheckDiagnosticLimit {
+		value = value[:configuredCheckDiagnosticLimit]
+	}
+	diagnostic := strings.ToValidUTF8(string(value), "\uFFFD")
+	diagnostic = strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n', r == '\t', r >= ' ' && r != 0x7f:
+			return r
+		default:
+			return '\uFFFD'
+		}
+	}, diagnostic)
+	return strings.TrimSpace(diagnostic)
 }
 
 func sortStrings(values []string) {

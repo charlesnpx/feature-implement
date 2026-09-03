@@ -438,7 +438,7 @@ func RecordAttemptBoundary(
 		if exhaustion, exhausted := reviewState.Exhaustion(); exhausted {
 			return AttemptBoundaryResult{}, fmt.Errorf(
 				"attempt %s cannot reach a boundary because its configured review loop is exhausted (%s)",
-				attempt.attemptID, exhaustion.reason,
+				attempt.attemptID, exhaustion,
 			)
 		}
 		if !reviewState.MergeReady() || reviewState.head != attempt.verifiedHead {

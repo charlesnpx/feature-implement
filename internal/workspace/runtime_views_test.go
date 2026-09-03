@@ -205,6 +205,101 @@ func TestWorkspaceRuntimeViewsExposeOnlyLocalStateAndReplayDeterministically(
 	}
 }
 
+func TestConfiguredCommitGateResolvesAtDurableIntegrationIntent(t *testing.T) {
+	t.Parallel()
+
+	core := newAttemptHarnessFromFixture(t, configuredCommitProtocolFixture(t), "unit-one")
+	first := core.reserve(t, "2026-07-21T18:10:00Z")
+	repository := adoptedIntegrationRepository(
+		t, core, first, mustGitObject(t, 'c'), mustGitObject(t, 'd'), "2026-07-21T18:10:01Z",
+	)
+	snapshot, err := core.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := workspace.RebuildWorkspaceView(snapshot, core.definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gate := gateCheckByName(t, gateUnitByID(t, before.Gates, "unit-one"), "commit"); gate.Status != workspace.GatePending || gate.Reason != "final_history_validated_at_integration" {
+		t.Fatalf("pre-integration commit gate = %#v", gate)
+	}
+	git := &integrationGitStub{featureHead: core.base}
+	if _, err := workspace.CompleteWorkspace(
+		context.Background(), core.journal, core.definition, git,
+		workspace.CompleteWorkspaceRequest{OccurredAt: mustTime(t, "2026-07-21T18:10:02Z")},
+	); err == nil {
+		t.Fatal("completion was claimable while the configured commit gate was pending")
+	}
+	if _, err := workspace.IntegrateMergeUnit(
+		context.Background(), core.journal, core.definition, repository, git,
+		workspace.IntegrateMergeUnitRequest{
+			AttemptID: first.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T18:10:03Z"),
+			Fault: failIntegrationOnce(workspace.IntegrationFaultAfterIntentSynced),
+		},
+	); err == nil || !strings.Contains(err.Error(), "after_intent_synced") {
+		t.Fatalf("integration-intent fault = %v", err)
+	}
+	snapshot, err = core.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	intentView, err := workspace.RebuildWorkspaceView(snapshot, core.definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gate := gateCheckByName(t, gateUnitByID(t, intentView.Gates, "unit-one"), "commit"); gate.Status != workspace.GatePassed || gate.Reason != "final_history_validated_for_integration" {
+		t.Fatalf("durable-intent commit gate = %#v", gate)
+	}
+	if _, err := workspace.IntegrateMergeUnit(
+		context.Background(), core.journal, core.definition, repository, git,
+		workspace.IntegrateMergeUnitRequest{
+			AttemptID: first.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T18:10:04Z"),
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	secondCore := core
+	secondCore.unit = mustMergeUnitReference(t, "alpha-plan", "unit-two")
+	secondCore.goal, err = workspace.NewGoalBinding(
+		workspace.MustID("commit-gate-second-goal"), workspace.GoalScopeMergeUnit,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := secondCore.reserve(t, "2026-07-21T18:10:05Z")
+	secondRepository := adoptedIntegrationRepository(
+		t, secondCore, second, mustGitObject(t, 'e'), mustGitObject(t, 'f'), "2026-07-21T18:10:06Z",
+	)
+	git.expectedCommit = false
+	if _, err := workspace.IntegrateMergeUnit(
+		context.Background(), secondCore.journal, secondCore.definition, secondRepository, git,
+		workspace.IntegrateMergeUnitRequest{
+			AttemptID: second.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T18:10:07Z"),
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = secondCore.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	readyToComplete, err := workspace.RebuildWorkspaceView(snapshot, secondCore.definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gate := gateCheckByName(t, gateUnitByID(t, readyToComplete.Gates, "unit-one"), "commit"); gate.Status != workspace.GatePassed {
+		t.Fatalf("completion-ready commit gate = %#v", gate)
+	}
+	if _, err := workspace.CompleteWorkspace(
+		context.Background(), secondCore.journal, secondCore.definition, git,
+		workspace.CompleteWorkspaceRequest{OccurredAt: mustTime(t, "2026-07-21T18:10:08Z")},
+	); err != nil {
+		t.Fatalf("completion with passed configured commit gate: %v", err)
+	}
+}
+
 func TestWorkspaceReviewViewSerializationMatchesPreAdapterSchema(t *testing.T) {
 	t.Parallel()
 

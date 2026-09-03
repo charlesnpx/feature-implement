@@ -66,7 +66,7 @@ func TestDeclarativeCommitProtocolSchemaKeepsOnlyFinalHistoryConstraints(t *test
 	}
 }
 
-func TestCommitPathPolicyCoversAllFinalHistoryChangeKinds(t *testing.T) {
+func TestCommitPathPolicyValidatesBothPathsIncludingFrozenAndHiddenPaths(t *testing.T) {
 	t.Parallel()
 
 	policy, err := workspace.NewCommitPathPolicy(
@@ -76,33 +76,25 @@ func TestCommitPathPolicyCoversAllFinalHistoryChangeKinds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldObject, newObject := mustGitObject(t, '1'), mustGitObject(t, '2')
 	for _, test := range []struct {
 		name    string
-		kind    workspace.CommitChangeKind
 		oldPath string
 		newPath string
-		oldMode workspace.GitFileMode
-		newMode workspace.GitFileMode
-		old     workspace.GitObjectID
-		new     workspace.GitObjectID
 		wantErr string
 	}{
-		{"rename allowed", workspace.CommitChangeRenamed, "src/old.go", "src/new.go", workspace.GitModeRegular, workspace.GitModeRegular, oldObject, newObject, ""},
-		{"rename into frozen", workspace.CommitChangeRenamed, "src/old.go", "src/frozen.go", workspace.GitModeRegular, workspace.GitModeRegular, oldObject, newObject, "frozen"},
-		{"rename from outside", workspace.CommitChangeRenamed, "private/old.go", "src/new.go", workspace.GitModeRegular, workspace.GitModeRegular, oldObject, newObject, "outside"},
-		{"delete allowed", workspace.CommitChangeDeleted, "src/delete.go", "", workspace.GitModeRegular, workspace.GitModeAbsent, oldObject, workspace.GitObjectID{}, ""},
-		{"mode allowed", workspace.CommitChangeTypeChanged, "src/tool", "src/tool", workspace.GitModeRegular, workspace.GitModeExecutable, oldObject, newObject, ""},
-		{"symlink allowed", workspace.CommitChangeAdded, "", "src/link", workspace.GitModeAbsent, workspace.GitModeSymlink, workspace.GitObjectID{}, newObject, ""},
-		{"submodule allowed", workspace.CommitChangeAdded, "", "modules/tool", workspace.GitModeAbsent, workspace.GitModeSubmodule, workspace.GitObjectID{}, newObject, ""},
-		{"submodule frozen", workspace.CommitChangeAdded, "", "modules/vendor/tool", workspace.GitModeAbsent, workspace.GitModeSubmodule, workspace.GitObjectID{}, newObject, "frozen"},
-		{"hidden subtree allowed", workspace.CommitChangeAdded, "", ".github/workflows/test.yml", workspace.GitModeAbsent, workspace.GitModeRegular, workspace.GitObjectID{}, newObject, ""},
-		{"hidden file allowed", workspace.CommitChangeAdded, "", ".gitignore", workspace.GitModeAbsent, workspace.GitModeRegular, workspace.GitObjectID{}, newObject, ""},
+		{"rename or copy allowed", "src/old.go", "src/new.go", ""},
+		{"rename or copy into frozen path", "src/old.go", "src/frozen.go", "frozen"},
+		{"rename or copy from frozen path", "src/frozen.go", "src/new.go", "frozen"},
+		{"rename or copy from outside allowed paths", "private/old.go", "src/new.go", "outside"},
+		{"old path only", "src/delete.go", "", ""},
+		{"new path only", "", "src/add.go", ""},
+		{"hidden subtree explicitly allowed", "", ".github/workflows/test.yml", ""},
+		{"hidden file explicitly allowed", "", ".gitignore", ""},
+		{"unlisted hidden path rejected", "", ".private", "outside"},
+		{"frozen module path rejected", "", "modules/vendor/tool", "frozen"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			change, err := workspace.NewCommitPathChange(
-				test.kind, test.oldPath, test.newPath, test.oldMode, test.newMode, test.old, test.new,
-			)
+			change, err := workspace.NewCommitPathChange(test.oldPath, test.newPath)
 			if err != nil {
 				t.Fatalf("NewCommitPathChange: %v", err)
 			}
@@ -117,31 +109,39 @@ func TestCommitPathPolicyCoversAllFinalHistoryChangeKinds(t *testing.T) {
 	}
 }
 
-func TestCommitDiffRejectsMixedObjectFormats(t *testing.T) {
+func TestCommitDiffDetectsUnchangedSourceCopiesForPathPolicy(t *testing.T) {
 	t.Parallel()
 
-	sha1 := mustGitObject(t, '1')
-	sha256, err := workspace.ParseGitObjectID("sha256:" + strings.Repeat("2", 64))
+	repository, _, _ := newProtocolRepository(t)
+	source := filepath.Join(repository, "src", "protocol.go")
+	target := filepath.Join(repository, "src", "copied.go")
+	content, err := os.ReadFile(source)
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := workspace.NewCommitPathChange(
-		workspace.CommitChangeAdded, "", "src/one.go",
-		workspace.GitModeAbsent, workspace.GitModeRegular, workspace.GitObjectID{}, sha1,
+	if err := os.WriteFile(target, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitSetup(t, repository, "add", "--", "src/copied.go")
+	runGitSetup(t, repository, "commit", "-m", "Copy protocol source")
+	head := parseGitHead(t, repository)
+
+	inspection, err := workspace.DefaultLocalCommitGitAdapter().InspectCommit(
+		context.Background(), repository, head,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := workspace.NewCommitPathChange(
-		workspace.CommitChangeAdded, "", "src/two.go",
-		workspace.GitModeAbsent, workspace.GitModeRegular, workspace.GitObjectID{}, sha256,
-	)
+	changes := inspection.Diff().Changes()
+	if len(changes) != 1 || changes[0].OldPath() != "src/protocol.go" || changes[0].NewPath() != "src/copied.go" {
+		t.Fatalf("copy path evidence = %#v", changes)
+	}
+	policy, err := workspace.NewCommitPathPolicy([]string{"src/**"}, []string{"src/protocol.go"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := workspace.NewCommitDiff([]workspace.CommitPathChange{first, second}); err == nil ||
-		!strings.Contains(err.Error(), "mixes Git object algorithms") {
-		t.Fatalf("mixed diff error = %v", err)
+	if err := policy.ValidateChange(changes[0]); err == nil || !strings.Contains(err.Error(), "frozen") {
+		t.Fatalf("unchanged-source copy escaped frozen policy: %v", err)
 	}
 }
 
@@ -152,11 +152,12 @@ func TestFinalHistoryVerifierInspectsRealDetachedHistory(t *testing.T) {
 	for _, commit := range []struct {
 		path    string
 		subject string
+		content []byte
 	}{
-		{path: "src/first.go", subject: "Add first checkpoint"},
-		{path: "src/second.go", subject: "Add second checkpoint"},
+		{path: "src/first.go", subject: "Add first checkpoint", content: []byte("redwood comet\n")},
+		{path: "src/second.go", subject: "Add second checkpoint", content: []byte("quartz lantern\n")},
 	} {
-		if err := os.WriteFile(filepath.Join(repository, commit.path), []byte("package protocol\n"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(repository, commit.path), commit.content, 0o644); err != nil {
 			t.Fatal(err)
 		}
 		runGitSetup(t, repository, "add", "--", commit.path)

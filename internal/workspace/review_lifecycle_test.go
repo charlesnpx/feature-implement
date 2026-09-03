@@ -285,10 +285,10 @@ func TestReviewReducerSeparatesInfrastructureAndRoundBudgets(t *testing.T) {
 				}
 			}
 		}
-		directive, exhausted := state.Exhaustion()
-		if !exhausted || directive.Reason() != workspace.ReviewExhaustedInfrastructure ||
-			directive.InfrastructureRetriesUsed() != 2 || directive.RoundsUsed() != 1 {
-			t.Fatalf("infrastructure exhaustion = %#v exhausted=%v", directive, exhausted)
+		reason, exhausted := state.Exhaustion()
+		if !exhausted || reason != workspace.ReviewExhaustedInfrastructure ||
+			state.InfrastructureRetriesUsed() != 2 || state.RoundsUsed() != 1 {
+			t.Fatalf("infrastructure exhaustion = %q exhausted=%v state=%#v", reason, exhausted, state)
 		}
 	})
 
@@ -303,9 +303,9 @@ func TestReviewReducerSeparatesInfrastructureAndRoundBudgets(t *testing.T) {
 				state = startNextDomainReviewRound(t, state, state.Head(), state.Tree())
 			}
 		}
-		directive, exhausted := state.Exhaustion()
-		if !exhausted || directive.Reason() != workspace.ReviewExhaustedRounds || directive.RoundsUsed() != 3 {
-			t.Fatalf("round exhaustion = %#v exhausted=%v", directive, exhausted)
+		reason, exhausted := state.Exhaustion()
+		if !exhausted || reason != workspace.ReviewExhaustedRounds || state.RoundsUsed() != 3 {
+			t.Fatalf("round exhaustion = %q exhausted=%v state=%#v", reason, exhausted, state)
 		}
 	})
 
@@ -382,10 +382,9 @@ func TestReviewRoundBudgetRejectsFourthBlockingReviewAcrossHeadChanges(t *testin
 		t.Fatalf("aggregate review rounds = %d, want 3", reviews.RoundsUsed(harness.attempt.AttemptID()))
 	}
 	state, exists := reviews.State(harness.attempt.AttemptID())
-	directive, exhausted := state.Exhaustion()
-	if !exists || !exhausted || directive.Reason() != workspace.ReviewExhaustedRounds ||
-		directive.RoundsUsed() != 3 {
-		t.Fatalf("cross-head review exhaustion = %#v exists=%v exhausted=%v", directive, exists, exhausted)
+	reason, exhausted := state.Exhaustion()
+	if !exists || !exhausted || reason != workspace.ReviewExhaustedRounds {
+		t.Fatalf("cross-head review exhaustion = %q exists=%v exhausted=%v", reason, exists, exhausted)
 	}
 	view, err := workspace.RebuildWorkspaceView(snapshot, harness.definition)
 	if err != nil {
@@ -953,6 +952,115 @@ func TestOrdinaryCommitInvalidatesPriorReview(t *testing.T) {
 		context.Background(), harness.journal, harness.definition, harness.repository, harness.attempt.AttemptID(),
 	); err == nil {
 		t.Fatal("prior review remained valid after an ordinary commit")
+	}
+}
+
+func TestAttemptWideReviewConstraintsSurviveOrdinaryHeadAdoption(t *testing.T) {
+	t.Parallel()
+
+	harness := newReviewHarness(t)
+	first, err := workspace.StartAttemptReviewRound(
+		context.Background(), harness.journal, harness.definition, harness.repository,
+		workspace.StartAttemptReviewRoundRequest{
+			AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T11:20:00Z"),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness.record(t, first.Request(), reviewSubmission(
+		t, first.Request(), workspace.MustID("security-one"), workspace.ReviewResultCompleted, nil, workspace.Digest{},
+	), "2026-07-21T11:20:01Z")
+
+	state := mustReviewState(t, harness.journal, harness.definition, harness.attempt.AttemptID())
+	correctness, ok, err := state.NextRequest()
+	if err != nil || !ok || correctness.Profile().ID().String() != "correctness" {
+		t.Fatalf("H1 correctness request = %#v ok=%t err=%v", correctness, ok, err)
+	}
+	harness.record(t, correctness, reviewSubmission(
+		t, correctness, workspace.MustID("correctness-one"), workspace.ReviewResultInfrastructureFailure,
+		nil, workspace.DigestBytes([]byte("H1 correctness unavailable")),
+	), "2026-07-21T11:20:02Z")
+	state = mustReviewState(t, harness.journal, harness.definition, harness.attempt.AttemptID())
+	correctnessRetry, ok, err := state.NextRequest()
+	if err != nil || !ok || correctnessRetry.Invocation() != 2 {
+		t.Fatalf("H1 correctness retry = %#v ok=%t err=%v", correctnessRetry, ok, err)
+	}
+	harness.record(t, correctnessRetry, reviewSubmission(
+		t, correctnessRetry, workspace.MustID("correctness-two"), workspace.ReviewResultCompleted, nil, workspace.Digest{},
+	), "2026-07-21T11:20:03Z")
+
+	secondHead, secondTree := mustGitObject(t, 'c'), mustGitObject(t, 'd')
+	harness.repository.snapshot, err = workspace.NewReviewRepositorySnapshot(secondHead, secondTree, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := workspace.StartAttemptReviewRound(
+		context.Background(), harness.journal, harness.definition, harness.repository,
+		workspace.StartAttemptReviewRoundRequest{
+			AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T11:20:04Z"),
+		},
+	)
+	if err != nil || second.Request().Head() != secondHead || second.Request().Round() != 1 {
+		t.Fatalf("H2 review after ordinary commit = %#v error=%v", second, err)
+	}
+	harness.record(t, second.Request(), reviewSubmission(
+		t, second.Request(), workspace.MustID("security-one"), workspace.ReviewResultCompleted, nil, workspace.Digest{},
+	), "2026-07-21T11:20:05Z")
+	state = mustReviewState(t, harness.journal, harness.definition, harness.attempt.AttemptID())
+	secondCorrectness, ok, err := state.NextRequest()
+	if err != nil || !ok || secondCorrectness.Profile().ID().String() != "correctness" {
+		t.Fatalf("H2 correctness request = %#v ok=%t err=%v", secondCorrectness, ok, err)
+	}
+	if _, err := workspace.ReserveAttemptReviewInvocation(
+		harness.journal, harness.definition, workspace.ReserveAttemptReviewInvocationRequest{
+			AttemptID: harness.attempt.AttemptID(), ReviewerInstance: workspace.MustID("correctness-three"),
+			IdempotencyKey: workspace.DigestBytes([]byte("review-invocation:" + correctnessRetry.Digest().String())),
+			OccurredAt:     mustTime(t, "2026-07-21T11:20:06Z"),
+		},
+	); err == nil || !strings.Contains(err.Error(), "idempotency key") {
+		t.Fatalf("H2 reused idempotency key error = %v", err)
+	}
+	if _, err := workspace.ReserveAttemptReviewInvocation(
+		harness.journal, harness.definition, workspace.ReserveAttemptReviewInvocationRequest{
+			AttemptID: harness.attempt.AttemptID(), ReviewerInstance: workspace.MustID("correctness-two"),
+			IdempotencyKey: workspace.DigestBytes([]byte("H2 reused completed reviewer")),
+			OccurredAt:     mustTime(t, "2026-07-21T11:20:06Z"),
+		},
+	); err == nil || !strings.Contains(err.Error(), "fresh reviewer") {
+		t.Fatalf("H2 reused completed reviewer error = %v", err)
+	}
+
+	harness.record(t, secondCorrectness, reviewSubmission(
+		t, secondCorrectness, workspace.MustID("correctness-three"), workspace.ReviewResultInfrastructureFailure,
+		nil, workspace.DigestBytes([]byte("H2 correctness unavailable")),
+	), "2026-07-21T11:20:07Z")
+	state = mustReviewState(t, harness.journal, harness.definition, harness.attempt.AttemptID())
+	secondRetry, ok, err := state.NextRequest()
+	if err != nil || !ok || secondRetry.Invocation() != 2 {
+		t.Fatalf("H2 remaining retry = %#v ok=%t err=%v", secondRetry, ok, err)
+	}
+	harness.record(t, secondRetry, reviewSubmission(
+		t, secondRetry, workspace.MustID("correctness-four"), workspace.ReviewResultInfrastructureFailure,
+		nil, workspace.DigestBytes([]byte("H2 retry unavailable")),
+	), "2026-07-21T11:20:08Z")
+
+	snapshot, err := harness.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviews, err := workspace.RebuildReviewRuntime(snapshot, harness.definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, exists := reviews.State(harness.attempt.AttemptID())
+	reason, exhausted := state.Exhaustion()
+	if !exists || !exhausted || reason != workspace.ReviewExhaustedInfrastructure ||
+		reviews.InfrastructureRetriesUsed(harness.attempt.AttemptID()) != 2 {
+		t.Fatalf("attempt-wide review history = reason=%q exhausted=%t retries=%d", reason, exhausted, reviews.InfrastructureRetriesUsed(harness.attempt.AttemptID()))
+	}
+	if next, ok, err := state.NextRequest(); err != nil || ok {
+		t.Fatalf("retry budget reset after head adoption: next=%#v ok=%t err=%v", next, ok, err)
 	}
 }
 

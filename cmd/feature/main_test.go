@@ -116,8 +116,6 @@ func TestRemovedWorkspaceCommandsAndWrongSubactionsFailClearly(
 		{"workspace", "reconcile", "stage"},
 		{"workspace", "control", "grant"},
 		{"workspace", "provider", "dispatch"},
-		{"workspace", "commit", "next"},
-		{"workspace", "commit", "rebase"},
 	} {
 		stdout, stderr, err := runFeature(t, args...)
 		if err == nil {

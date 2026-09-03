@@ -214,8 +214,8 @@ func StartAttemptReviewRound(
 		if state.loop.digest != loop.digest || state.generation != definition.generation {
 			return ReviewRoundStartResult{}, fmt.Errorf("review configuration cannot reset durable counters")
 		}
-		if directive, exhausted := state.Exhaustion(); exhausted {
-			if directive.Reason() == ReviewExhaustedRounds {
+		if exhaustion, exhausted := state.Exhaustion(); exhausted {
+			if exhaustion == ReviewExhaustedRounds {
 				return ReviewRoundStartResult{}, reviewRoundBudgetExhaustedError(loop.MaxRounds())
 			}
 			return ReviewRoundStartResult{}, fmt.Errorf("review loop is exhausted")
@@ -366,6 +366,11 @@ func ReserveAttemptReviewInvocation(
 		pending, request.ReviewerInstance, request.IdempotencyKey,
 	)
 	if err != nil {
+		return ReviewInvocationReservationResult{}, err
+	}
+	if err := projection.validateNewReviewInvocationReservation(
+		request.AttemptID, state.loop, reservation,
+	); err != nil {
 		return ReviewInvocationReservationResult{}, err
 	}
 	latestRound := state.rounds[len(state.rounds)-1]

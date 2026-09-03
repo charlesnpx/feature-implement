@@ -27,7 +27,7 @@ func NewFinalHistoryVerifier(
 
 // Verify validates every configured checkpoint in order, then runs each
 // configured command at the exact accepted head. A command succeeds only when
-// it exits with status zero under strict isolation.
+// the isolated runner returns after an exit-zero command.
 func (verifier FinalHistoryVerifier) Verify(
 	ctx context.Context,
 	protocol CommitProtocol,
@@ -82,17 +82,9 @@ func (verifier FinalHistoryVerifier) Verify(
 			if err != nil {
 				return err
 			}
-			result, err := verifier.checks.RunConfiguredCheck(ctx, invocation)
-			if err != nil {
-				return fmt.Errorf("run configured check %s: %w", check.id, err)
-			}
-			if !result.isolation.Strict() {
-				return fmt.Errorf("configured check %s did not prove strict isolation", check.id)
-			}
-			if !result.Succeeded() {
+			if err := verifier.checks.RunConfiguredCheck(ctx, invocation); err != nil {
 				return fmt.Errorf(
-					"configured check %s did not exit zero: %s",
-					check.id, result.failureDiagnostic(),
+					"configured check %s did not exit zero: %w", check.id, err,
 				)
 			}
 			if err := verifier.git.VerifyCleanWorktree(ctx, worktree, head); err != nil {

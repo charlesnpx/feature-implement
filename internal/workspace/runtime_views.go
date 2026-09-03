@@ -300,6 +300,8 @@ func RebuildWorkspaceView(snapshot JournalSnapshot, definition EffectiveWorkspac
 			commitGate.Status, commitGate.Reason = GatePending, "no_attempt"
 		case !commitConfigured:
 			commitGate.Status, commitGate.Reason = GatePassed, "not_configured"
+		case attempt.integration != nil:
+			commitGate.Status, commitGate.Reason = GatePassed, "final_history_validated_for_integration"
 		default:
 			commitGate.Status, commitGate.Reason = GatePending, "final_history_validated_at_integration"
 		}
@@ -588,7 +590,7 @@ func workspaceReviewViews(
 			Tree:                  state.Tree().String(),
 			Status:                status,
 			RoundsUsed:            reviews.RoundsUsed(state.AttemptID()),
-			InfrastructureRetries: state.InfrastructureRetriesUsed(),
+			InfrastructureRetries: reviews.InfrastructureRetriesUsed(state.AttemptID()),
 			MergeReady:            state.MergeReady(),
 		})
 	}

@@ -469,29 +469,12 @@ func reviewRoundBudgetExhaustedError(maxRounds uint16) error {
 	)
 }
 
-type ReviewExhaustionDirective struct {
-	workspaceID    ID
-	generation     Digest
-	attemptID      ID
-	head           GitObjectID
-	tree           GitObjectID
-	reason         ReviewExhaustionReason
-	roundsUsed     uint16
-	infrastructure uint16
-	digest         Digest
+func reviewInfrastructureRetryBudgetExhaustedError(maxRetries uint16) error {
+	return fmt.Errorf(
+		"review infrastructure retry budget exhausted: max_infrastructure_retries=%d per attempt",
+		maxRetries,
+	)
 }
-
-func (directive ReviewExhaustionDirective) WorkspaceID() ID                { return directive.workspaceID }
-func (directive ReviewExhaustionDirective) Generation() Digest             { return directive.generation }
-func (directive ReviewExhaustionDirective) AttemptID() ID                  { return directive.attemptID }
-func (directive ReviewExhaustionDirective) Head() GitObjectID              { return directive.head }
-func (directive ReviewExhaustionDirective) Tree() GitObjectID              { return directive.tree }
-func (directive ReviewExhaustionDirective) Reason() ReviewExhaustionReason { return directive.reason }
-func (directive ReviewExhaustionDirective) RoundsUsed() uint16             { return directive.roundsUsed }
-func (directive ReviewExhaustionDirective) InfrastructureRetriesUsed() uint16 {
-	return directive.infrastructure
-}
-func (directive ReviewExhaustionDirective) Digest() Digest { return directive.digest }
 
 type ReviewState struct {
 	workspaceID ID
@@ -502,7 +485,7 @@ type ReviewState struct {
 	head        GitObjectID
 	tree        GitObjectID
 	rounds      []ReviewRoundState
-	exhaustion  *ReviewExhaustionDirective
+	exhaustion  *ReviewExhaustionReason
 }
 
 func (state ReviewState) WorkspaceID() ID               { return state.workspaceID }
@@ -528,9 +511,9 @@ func (state ReviewState) InfrastructureRetriesUsed() uint16 {
 	}
 	return used
 }
-func (state ReviewState) Exhaustion() (ReviewExhaustionDirective, bool) {
+func (state ReviewState) Exhaustion() (ReviewExhaustionReason, bool) {
 	if state.exhaustion == nil {
-		return ReviewExhaustionDirective{}, false
+		return ReviewExhaustionReason(""), false
 	}
 	return *state.exhaustion, true
 }
@@ -723,7 +706,11 @@ func ReduceReview(current ReviewState, event ReviewEvent) (ReviewState, error) {
 				}
 			}
 		}
-		if err := validateReviewInstancePolicy(current, request.profile, value.reservation.reviewerInstance); err != nil {
+		if err := validateReviewInstancePolicy(
+			request.profile,
+			value.reservation.reviewerInstance,
+			reviewReviewerInstanceUsesFromRounds(current.rounds),
+		); err != nil {
 			return ReviewState{}, err
 		}
 		round.reservations = append(round.reservations, value.reservation)
@@ -765,9 +752,7 @@ func ReduceReview(current ReviewState, event ReviewEvent) (ReviewState, error) {
 	default:
 		return ReviewState{}, fmt.Errorf("unsupported review event %T", event)
 	}
-	if next.exhaustion == nil {
-		next.exhaustion = deriveReviewExhaustion(next)
-	}
+	next.exhaustion = deriveReviewExhaustion(next)
 	return next, nil
 }
 
@@ -807,13 +792,32 @@ func latestReviewInvocationFailed(round ReviewRoundState) bool {
 	return false
 }
 
-func validateReviewInstancePolicy(state ReviewState, profile ReviewProfile, instance ID) error {
-	var prior []ID
-	for _, round := range state.rounds {
+type reviewReviewerInstanceUse struct {
+	profileID ID
+	instance  ID
+}
+
+func reviewReviewerInstanceUsesFromRounds(rounds []ReviewRoundState) []reviewReviewerInstanceUse {
+	uses := make([]reviewReviewerInstanceUse, 0)
+	for _, round := range rounds {
 		for _, reservation := range round.reservations {
-			if reservation.request.profile.id == profile.id {
-				prior = append(prior, reservation.reviewerInstance)
-			}
+			uses = append(uses, reviewReviewerInstanceUse{
+				profileID: reservation.request.profile.id, instance: reservation.reviewerInstance,
+			})
+		}
+	}
+	return uses
+}
+
+func validateReviewInstancePolicy(
+	profile ReviewProfile,
+	instance ID,
+	uses []reviewReviewerInstanceUse,
+) error {
+	prior := make([]ID, 0, len(uses))
+	for _, use := range uses {
+		if use.profileID == profile.id {
+			prior = append(prior, use.instance)
 		}
 	}
 	if len(prior) == 0 {
@@ -833,19 +837,21 @@ func validateReviewInstancePolicy(state ReviewState, profile ReviewProfile, inst
 	return nil
 }
 
-func deriveReviewExhaustion(state ReviewState) *ReviewExhaustionDirective {
-	return deriveReviewExhaustionAtRounds(state, state.RoundsUsed())
+func deriveReviewExhaustion(state ReviewState) *ReviewExhaustionReason {
+	return deriveReviewExhaustionAtUsage(
+		state, state.RoundsUsed(), state.InfrastructureRetriesUsed(),
+	)
 }
 
-func deriveReviewExhaustionAtRounds(
-	state ReviewState, roundsUsed uint16,
-) *ReviewExhaustionDirective {
+func deriveReviewExhaustionAtUsage(
+	state ReviewState, roundsUsed, infrastructureRetriesUsed uint16,
+) *ReviewExhaustionReason {
 	reason := ReviewExhaustionReason("")
 	latestInfrastructureFailure := false
 	if len(state.rounds) != 0 {
 		latestInfrastructureFailure = latestReviewInvocationFailed(state.rounds[len(state.rounds)-1])
 	}
-	if latestInfrastructureFailure && state.InfrastructureRetriesUsed() >= state.loop.maxInfrastructureRetries {
+	if latestInfrastructureFailure && infrastructureRetriesUsed >= state.loop.maxInfrastructureRetries {
 		reason = ReviewExhaustedInfrastructure
 	} else if len(state.rounds) != 0 {
 		round := state.rounds[len(state.rounds)-1]
@@ -859,29 +865,7 @@ func deriveReviewExhaustionAtRounds(
 	if !reason.valid() {
 		return nil
 	}
-	directive := ReviewExhaustionDirective{
-		workspaceID: state.workspaceID, generation: state.generation, attemptID: state.attemptID,
-		head: state.head, tree: state.tree, reason: reason, roundsUsed: roundsUsed,
-		infrastructure: state.InfrastructureRetriesUsed(),
-	}
-	type directiveJSON struct {
-		SchemaVersion  int                    `json:"schema_version"`
-		WorkspaceID    string                 `json:"workspace_id"`
-		Generation     string                 `json:"generation"`
-		AttemptID      string                 `json:"attempt_id"`
-		Head           string                 `json:"head"`
-		Tree           string                 `json:"tree"`
-		Reason         ReviewExhaustionReason `json:"reason"`
-		RoundsUsed     uint16                 `json:"rounds_used"`
-		Infrastructure uint16                 `json:"infrastructure_retries_used"`
-	}
-	canonical, _ := json.Marshal(directiveJSON{
-		SchemaVersion: 2, WorkspaceID: directive.workspaceID.String(), Generation: directive.generation.String(),
-		AttemptID: directive.attemptID.String(), Head: directive.head.String(), Tree: directive.tree.String(),
-		Reason: directive.reason, RoundsUsed: directive.roundsUsed, Infrastructure: directive.infrastructure,
-	})
-	directive.digest = DigestBytes(canonical)
-	return &directive
+	return &reason
 }
 
 func cloneReviewResult(result ReviewResultSubmission) ReviewResultSubmission {
@@ -912,8 +896,8 @@ func cloneReviewState(state ReviewState) ReviewState {
 	state.loop = cloneReviewLoop(state.loop)
 	state.rounds = cloneReviewRounds(state.rounds)
 	if state.exhaustion != nil {
-		directive := *state.exhaustion
-		state.exhaustion = &directive
+		reason := *state.exhaustion
+		state.exhaustion = &reason
 	}
 	return state
 }

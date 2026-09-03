@@ -215,12 +215,6 @@ func workspaceCommand(args []string) error {
 	action := args[0]
 	remaining := args[1:]
 	subaction := ""
-	if action == "commit" {
-		return fmt.Errorf(
-			"workspace %s was removed from the local-only workflow",
-			action,
-		)
-	}
 	switch action {
 	case "queue", "receipts", "reconcile", "control", "provider":
 		return fmt.Errorf(

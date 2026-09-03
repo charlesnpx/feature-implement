@@ -127,12 +127,8 @@ exit 0
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := defaultIsolatedCheckRunner().RunConfiguredCheck(context.Background(), invocation)
-	if err != nil {
+	if err := defaultIsolatedCheckRunner().RunConfiguredCheck(context.Background(), invocation); err != nil {
 		t.Fatalf("RunConfiguredCheck with isolated runner: %v", err)
-	}
-	if !result.Succeeded() {
-		t.Fatalf("isolated check result = %#v", result)
 	}
 }
 

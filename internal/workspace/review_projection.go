@@ -10,13 +10,21 @@ type ReviewRuntimeProjection struct {
 	workspaceID      ID
 	activeGeneration Digest
 	states           []ReviewState
-	roundCounts      []reviewRoundCount
+	attemptHistory   []reviewAttemptHistory
 	core             WorkspaceRuntimeProjection
 }
 
-type reviewRoundCount struct {
-	attemptID  ID
-	roundsUsed uint16
+type reviewAttemptHistory struct {
+	attemptID                 ID
+	roundsUsed                uint16
+	infrastructureRetriesUsed uint16
+	reservations              []reviewAttemptReservation
+}
+
+type reviewAttemptReservation struct {
+	profileID        ID
+	reviewerInstance ID
+	idempotencyKey   Digest
 }
 
 func (projection ReviewRuntimeProjection) WorkspaceID() ID { return projection.workspaceID }
@@ -39,10 +47,24 @@ func (projection ReviewRuntimeProjection) State(attemptID ID) (ReviewState, bool
 	return ReviewState{}, false
 }
 func (projection ReviewRuntimeProjection) RoundsUsed(attemptID ID) uint16 {
-	if index := reviewRoundCountIndex(projection.roundCounts, attemptID); index >= 0 {
-		return projection.roundCounts[index].roundsUsed
+	if history, exists := projection.attemptHistoryFor(attemptID); exists {
+		return history.roundsUsed
 	}
 	return 0
+}
+
+func (projection ReviewRuntimeProjection) InfrastructureRetriesUsed(attemptID ID) uint16 {
+	if history, exists := projection.attemptHistoryFor(attemptID); exists {
+		return history.infrastructureRetriesUsed
+	}
+	return 0
+}
+
+func (projection ReviewRuntimeProjection) attemptHistoryFor(attemptID ID) (reviewAttemptHistory, bool) {
+	if index := reviewAttemptHistoryIndex(projection.attemptHistory, attemptID); index >= 0 {
+		return cloneReviewAttemptHistory(projection.attemptHistory[index]), true
+	}
+	return reviewAttemptHistory{}, false
 }
 
 func RebuildReviewRuntime(
@@ -143,7 +165,7 @@ func reduceReviewRuntime(current ReviewRuntimeProjection, record JournalRecord) 
 		} else {
 			next.states[index] = state
 		}
-		next.roundCounts = incrementReviewRoundCount(next.roundCounts, event.attemptID)
+		next.attemptHistory = incrementReviewRoundCount(next.attemptHistory, event.attemptID)
 	case ReviewInvocationReservedJournalEvent:
 		index := reviewStateIndex(current.states, event.attemptID)
 		attempt, exists := current.core.Attempt(event.attemptID)
@@ -158,11 +180,19 @@ func reduceReviewRuntime(current ReviewRuntimeProjection, record JournalRecord) 
 		if err != nil {
 			return ReviewRuntimeProjection{}, err
 		}
+		if err := current.validateNewReviewInvocationReservation(
+			event.attemptID, current.states[index].loop, event.reservation,
+		); err != nil {
+			return ReviewRuntimeProjection{}, err
+		}
 		state, err := ReduceReview(current.states[index], domain)
 		if err != nil {
 			return ReviewRuntimeProjection{}, err
 		}
 		next.states[index] = state
+		next.attemptHistory = appendReviewInvocationReservation(
+			next.attemptHistory, event.attemptID, event.reservation,
+		)
 	case ReviewInvocationFailedJournalEvent:
 		index := reviewStateIndex(current.states, event.attemptID)
 		attempt, exists := current.core.Attempt(event.attemptID)
@@ -179,6 +209,10 @@ func reduceReviewRuntime(current ReviewRuntimeProjection, record JournalRecord) 
 		if err != nil {
 			return ReviewRuntimeProjection{}, err
 		}
+		state.exhaustion = deriveReviewExhaustionAtUsage(
+			state, current.RoundsUsed(event.attemptID),
+			current.InfrastructureRetriesUsed(event.attemptID),
+		)
 		next.states[index] = state
 	case ReviewResultRecordedJournalEvent:
 		index := reviewStateIndex(current.states, event.attemptID)
@@ -199,11 +233,10 @@ func reduceReviewRuntime(current ReviewRuntimeProjection, record JournalRecord) 
 		if err != nil {
 			return ReviewRuntimeProjection{}, err
 		}
-		if state.exhaustion == nil {
-			state.exhaustion = deriveReviewExhaustionAtRounds(
-				state, current.RoundsUsed(event.attemptID),
-			)
-		}
+		state.exhaustion = deriveReviewExhaustionAtUsage(
+			state, current.RoundsUsed(event.attemptID),
+			current.InfrastructureRetriesUsed(event.attemptID),
+		)
 		next.states[index] = state
 	}
 	return next, nil
@@ -218,9 +251,9 @@ func reviewStateIndex(states []ReviewState, attemptID ID) int {
 	return -1
 }
 
-func reviewRoundCountIndex(counts []reviewRoundCount, attemptID ID) int {
-	for index, count := range counts {
-		if count.attemptID == attemptID {
+func reviewAttemptHistoryIndex(history []reviewAttemptHistory, attemptID ID) int {
+	for index, item := range history {
+		if item.attemptID == attemptID {
 			return index
 		}
 	}
@@ -228,13 +261,78 @@ func reviewRoundCountIndex(counts []reviewRoundCount, attemptID ID) int {
 }
 
 func incrementReviewRoundCount(
-	counts []reviewRoundCount, attemptID ID,
-) []reviewRoundCount {
-	if index := reviewRoundCountIndex(counts, attemptID); index >= 0 {
-		counts[index].roundsUsed++
-		return counts
+	history []reviewAttemptHistory, attemptID ID,
+) []reviewAttemptHistory {
+	if index := reviewAttemptHistoryIndex(history, attemptID); index >= 0 {
+		history[index].roundsUsed++
+		return history
 	}
-	return append(counts, reviewRoundCount{attemptID: attemptID, roundsUsed: 1})
+	return append(history, reviewAttemptHistory{attemptID: attemptID, roundsUsed: 1})
+}
+
+func appendReviewInvocationReservation(
+	history []reviewAttemptHistory,
+	attemptID ID,
+	reservation ReviewInvocationReservation,
+) []reviewAttemptHistory {
+	index := reviewAttemptHistoryIndex(history, attemptID)
+	if index < 0 {
+		history = append(history, reviewAttemptHistory{attemptID: attemptID})
+		index = len(history) - 1
+	}
+	history[index].reservations = append(
+		history[index].reservations,
+		reviewAttemptReservation{
+			profileID:        reservation.request.profile.id,
+			reviewerInstance: reservation.reviewerInstance,
+			idempotencyKey:   reservation.idempotencyKey,
+		},
+	)
+	if reservation.request.invocation > 1 {
+		history[index].infrastructureRetriesUsed++
+	}
+	return history
+}
+
+func (projection ReviewRuntimeProjection) validateNewReviewInvocationReservation(
+	attemptID ID,
+	loop ReviewLoop,
+	reservation ReviewInvocationReservation,
+) error {
+	history, _ := projection.attemptHistoryFor(attemptID)
+	for _, prior := range history.reservations {
+		if prior.idempotencyKey == reservation.idempotencyKey {
+			return fmt.Errorf("review invocation idempotency key is already bound")
+		}
+	}
+	if reservation.request.invocation > 1 &&
+		history.infrastructureRetriesUsed >= loop.maxInfrastructureRetries {
+		return reviewInfrastructureRetryBudgetExhaustedError(loop.maxInfrastructureRetries)
+	}
+	return validateReviewInstancePolicy(
+		reservation.request.profile,
+		reservation.reviewerInstance,
+		reviewReviewerInstanceUsesFromHistory(history),
+	)
+}
+
+func reviewReviewerInstanceUsesFromHistory(
+	history reviewAttemptHistory,
+) []reviewReviewerInstanceUse {
+	uses := make([]reviewReviewerInstanceUse, 0, len(history.reservations))
+	for _, reservation := range history.reservations {
+		uses = append(uses, reviewReviewerInstanceUse{
+			profileID: reservation.profileID, instance: reservation.reviewerInstance,
+		})
+	}
+	return uses
+}
+
+func cloneReviewAttemptHistory(source reviewAttemptHistory) reviewAttemptHistory {
+	source.reservations = append(
+		[]reviewAttemptReservation(nil), source.reservations...,
+	)
+	return source
 }
 
 func cloneReviewRuntime(source ReviewRuntimeProjection) ReviewRuntimeProjection {
@@ -243,7 +341,10 @@ func cloneReviewRuntime(source ReviewRuntimeProjection) ReviewRuntimeProjection 
 	for _, state := range source.states {
 		result.states = append(result.states, cloneReviewState(state))
 	}
-	result.roundCounts = append([]reviewRoundCount(nil), source.roundCounts...)
+	result.attemptHistory = make([]reviewAttemptHistory, 0, len(source.attemptHistory))
+	for _, history := range source.attemptHistory {
+		result.attemptHistory = append(result.attemptHistory, cloneReviewAttemptHistory(history))
+	}
 	result.core = cloneWorkspaceRuntime(source.core)
 	return result
 }
@@ -283,21 +384,28 @@ func canonicalReviewRuntime(projection ReviewRuntimeProjection) ([]byte, error) 
 		Tree        string      `json:"tree"`
 		Rounds      []roundJSON `json:"rounds"`
 	}
-	type roundCountJSON struct {
-		AttemptID  string `json:"attempt_id"`
-		RoundsUsed uint16 `json:"rounds_used"`
+	type attemptReservationJSON struct {
+		Profile        string `json:"profile"`
+		Reviewer       string `json:"reviewer_instance"`
+		IdempotencyKey string `json:"idempotency_key"`
+	}
+	type attemptHistoryJSON struct {
+		AttemptID                 string                   `json:"attempt_id"`
+		RoundsUsed                uint16                   `json:"rounds_used"`
+		InfrastructureRetriesUsed uint16                   `json:"infrastructure_retries_used"`
+		Reservations              []attemptReservationJSON `json:"reservations"`
 	}
 	type runtimeJSON struct {
-		SchemaVersion    int              `json:"schema_version"`
-		WorkspaceID      string           `json:"workspace_id"`
-		ActiveGeneration string           `json:"active_generation"`
-		States           []stateJSON      `json:"states"`
-		RoundCounts      []roundCountJSON `json:"round_counts"`
+		SchemaVersion    int                  `json:"schema_version"`
+		WorkspaceID      string               `json:"workspace_id"`
+		ActiveGeneration string               `json:"active_generation"`
+		States           []stateJSON          `json:"states"`
+		AttemptHistory   []attemptHistoryJSON `json:"attempt_history"`
 	}
 	value := runtimeJSON{
 		SchemaVersion: 2, WorkspaceID: projection.workspaceID.String(),
 		ActiveGeneration: projection.activeGeneration.String(), States: make([]stateJSON, 0, len(projection.states)),
-		RoundCounts: make([]roundCountJSON, 0, len(projection.roundCounts)),
+		AttemptHistory: make([]attemptHistoryJSON, 0, len(projection.attemptHistory)),
 	}
 	for _, state := range projection.states {
 		item := stateJSON{
@@ -341,13 +449,22 @@ func canonicalReviewRuntime(projection ReviewRuntimeProjection) ([]byte, error) 
 		value.States = append(value.States, item)
 	}
 	sort.Slice(value.States, func(i, j int) bool { return value.States[i].AttemptID < value.States[j].AttemptID })
-	for _, count := range projection.roundCounts {
-		value.RoundCounts = append(value.RoundCounts, roundCountJSON{
-			AttemptID: count.attemptID.String(), RoundsUsed: count.roundsUsed,
-		})
+	for _, history := range projection.attemptHistory {
+		item := attemptHistoryJSON{
+			AttemptID: history.attemptID.String(), RoundsUsed: history.roundsUsed,
+			InfrastructureRetriesUsed: history.infrastructureRetriesUsed,
+			Reservations:              make([]attemptReservationJSON, 0, len(history.reservations)),
+		}
+		for _, reservation := range history.reservations {
+			item.Reservations = append(item.Reservations, attemptReservationJSON{
+				Profile: reservation.profileID.String(), Reviewer: reservation.reviewerInstance.String(),
+				IdempotencyKey: reservation.idempotencyKey.String(),
+			})
+		}
+		value.AttemptHistory = append(value.AttemptHistory, item)
 	}
-	sort.Slice(value.RoundCounts, func(i, j int) bool {
-		return value.RoundCounts[i].AttemptID < value.RoundCounts[j].AttemptID
+	sort.Slice(value.AttemptHistory, func(i, j int) bool {
+		return value.AttemptHistory[i].AttemptID < value.AttemptHistory[j].AttemptID
 	})
 	return json.Marshal(value)
 }

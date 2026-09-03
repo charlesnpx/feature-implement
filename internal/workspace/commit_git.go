@@ -97,9 +97,6 @@ func NewGitCommitInspection(
 	if tree.Algorithm() != commit.Algorithm() {
 		return GitCommitInspection{}, fmt.Errorf("Git commit inspection tree object format differs")
 	}
-	if commitDiffObjectAlgorithm(diff) != commit.Algorithm() {
-		return GitCommitInspection{}, fmt.Errorf("Git commit inspection diff object format differs")
-	}
 	if err := validateCommitSubject(subject); err != nil {
 		return GitCommitInspection{}, err
 	}
@@ -185,12 +182,13 @@ func (adapter LocalCommitGitAdapter) InspectCommit(
 	}
 	diffRaw, exitCode, err := adapter.git.run(
 		ctx, repositoryRoot, "diff-tree", "--raw", "-z", "--no-commit-id", "--no-abbrev", "-r",
-		"--find-renames=50%", "--ignore-submodules=none", objectHex(parents[0]), objectHex(commit), "--",
+		"--find-renames=50%", "--find-copies=50%", "--find-copies-harder", "--ignore-submodules=none",
+		objectHex(parents[0]), objectHex(commit), "--",
 	)
 	if err != nil || exitCode != 0 {
 		return GitCommitInspection{}, gitExitError("inspect configured commit diff", exitCode, err)
 	}
-	diff, err := parseRawGitDiff(diffRaw, algorithm)
+	diff, err := parseRawGitDiff(diffRaw)
 	if err != nil {
 		return GitCommitInspection{}, err
 	}
@@ -1137,7 +1135,7 @@ func (adapter LocalCommitGitAdapter) writeTree(
 	return qualifyGitObjectID(algorithm, strings.TrimSpace(string(output)))
 }
 
-func parseRawGitDiff(content []byte, algorithm GitHashAlgorithm) (CommitDiff, error) {
+func parseRawGitDiff(content []byte) (CommitDiff, error) {
 	if len(content) == 0 {
 		return CommitDiff{}, fmt.Errorf("configured commit requires a non-empty raw Git diff")
 	}
@@ -1154,68 +1152,35 @@ func parseRawGitDiff(content []byte, algorithm GitHashAlgorithm) (CommitDiff, er
 		if len(fields) != 5 || !strings.HasPrefix(fields[0], ":") || len(fields[4]) == 0 {
 			return CommitDiff{}, fmt.Errorf("raw Git diff header is malformed")
 		}
-		oldMode := GitFileMode(strings.TrimPrefix(fields[0], ":"))
-		newMode := GitFileMode(fields[1])
-		oldObject, err := parseRawDiffObject(algorithm, fields[2])
-		if err != nil {
-			return CommitDiff{}, err
-		}
-		newObject, err := parseRawDiffObject(algorithm, fields[3])
-		if err != nil {
-			return CommitDiff{}, err
-		}
 		status := fields[4][0]
 		if index >= len(tokens) {
 			return CommitDiff{}, fmt.Errorf("raw Git diff path is missing")
 		}
 		firstPath := string(tokens[index])
 		index++
-		kind := CommitChangeKind("")
 		oldPath, newPath := firstPath, firstPath
 		switch status {
 		case 'A':
-			kind, oldPath = CommitChangeAdded, ""
+			oldPath = ""
 		case 'D':
-			kind, newPath = CommitChangeDeleted, ""
-		case 'M':
-			kind = CommitChangeModified
-		case 'T':
-			kind = CommitChangeTypeChanged
+			newPath = ""
+		case 'M', 'T':
 		case 'R', 'C':
 			if index >= len(tokens) {
 				return CommitDiff{}, fmt.Errorf("raw Git rename or copy target is missing")
 			}
 			newPath = string(tokens[index])
 			index++
-			if status == 'R' {
-				kind = CommitChangeRenamed
-			} else {
-				kind = CommitChangeCopied
-			}
 		default:
 			return CommitDiff{}, fmt.Errorf("unsupported raw Git diff status %q", fields[4])
 		}
-		change, err := NewCommitPathChange(kind, oldPath, newPath, oldMode, newMode, oldObject, newObject)
+		change, err := NewCommitPathChange(oldPath, newPath)
 		if err != nil {
 			return CommitDiff{}, fmt.Errorf("parse raw Git change: %w", err)
 		}
 		changes = append(changes, change)
 	}
 	return NewCommitDiff(changes)
-}
-
-func parseRawDiffObject(algorithm GitHashAlgorithm, value string) (GitObjectID, error) {
-	want := 40
-	if algorithm == GitHashSHA256 {
-		want = 64
-	}
-	if len(value) != want {
-		return GitObjectID{}, fmt.Errorf("raw Git diff object has the wrong length")
-	}
-	if strings.Trim(value, "0") == "" {
-		return GitObjectID{}, nil
-	}
-	return qualifyGitObjectID(algorithm, value)
 }
 
 func parseRawCommitObject(content []byte, algorithm GitHashAlgorithm) (GitObjectID, []GitObjectID, string, string, error) {

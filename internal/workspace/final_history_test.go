@@ -1,8 +1,8 @@
 package workspace_test
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -38,7 +38,6 @@ func (stub *finalHistoryGitStub) VerifyCleanWorktree(
 }
 
 type finalHistoryCheckRunnerStub struct {
-	result      workspace.CheckProcessResult
 	err         error
 	invocations []workspace.CommitCheckInvocation
 }
@@ -46,9 +45,9 @@ type finalHistoryCheckRunnerStub struct {
 func (stub *finalHistoryCheckRunnerStub) RunConfiguredCheck(
 	_ context.Context,
 	invocation workspace.CommitCheckInvocation,
-) (workspace.CheckProcessResult, error) {
+) error {
 	stub.invocations = append(stub.invocations, invocation)
-	return stub.result, stub.err
+	return stub.err
 }
 
 type finalHistoryFixture struct {
@@ -69,8 +68,8 @@ func newFinalHistoryFixture(t *testing.T) finalHistoryFixture {
 	head := mustGitObject(t, 'c')
 	firstTree := mustGitObject(t, 'd')
 	secondTree := mustGitObject(t, 'e')
-	firstDiff := finalHistoryAddedDiff(t, "src/first.go", mustGitObject(t, 'f'))
-	secondDiff := finalHistoryAddedDiff(t, "src/second.go", mustGitObject(t, '1'))
+	firstDiff := finalHistoryAddedDiff(t, "src/first.go")
+	secondDiff := finalHistoryAddedDiff(t, "src/second.go")
 	firstMessage, err := workspace.NewCommitMessagePolicy(
 		"Add first checkpoint", workspace.CommitBodyForbidden, nil,
 	)
@@ -145,14 +144,9 @@ func newFinalHistoryFixture(t *testing.T) finalHistoryFixture {
 func finalHistoryAddedDiff(
 	t *testing.T,
 	path string,
-	object workspace.GitObjectID,
 ) workspace.CommitDiff {
 	t.Helper()
-	change, err := workspace.NewCommitPathChange(
-		workspace.CommitChangeAdded, "", path,
-		workspace.GitModeAbsent, workspace.GitModeRegular,
-		workspace.GitObjectID{}, object,
-	)
+	change, err := workspace.NewCommitPathChange("", path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,23 +157,12 @@ func finalHistoryAddedDiff(
 	return diff
 }
 
-func passingFinalHistoryCheckResult(t *testing.T) workspace.CheckProcessResult {
-	t.Helper()
-	result, err := workspace.NewCheckProcessResult(
-		workspace.CheckExited, 0, "", nil, nil, workspace.StrictCheckIsolationProof(),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return result
-}
-
 func TestFinalHistoryVerifierAcceptsOnlyConfiguredFinalSequence(t *testing.T) {
 	t.Parallel()
 
 	fixture := newFinalHistoryFixture(t)
 	git := &finalHistoryGitStub{inspections: fixture.inspections}
-	runner := &finalHistoryCheckRunnerStub{result: passingFinalHistoryCheckResult(t)}
+	runner := &finalHistoryCheckRunnerStub{}
 	verifier, err := workspace.NewFinalHistoryVerifier(git, runner)
 	if err != nil {
 		t.Fatal(err)
@@ -203,56 +186,33 @@ func TestFinalHistoryVerifierAcceptsOnlyConfiguredFinalSequence(t *testing.T) {
 	}
 }
 
-func TestFinalHistoryVerifierAcceptsExitZeroBinaryAndOversizedOutput(t *testing.T) {
+func TestFinalHistoryVerifierAcceptsExitZeroCheck(t *testing.T) {
 	t.Parallel()
 
-	for _, test := range []struct {
-		name   string
-		stdout []byte
-	}{
-		{name: "binary output", stdout: []byte{0xff, 0x00, 'o', 'k'}},
-		{name: "oversized output", stdout: bytes.Repeat([]byte("x"), 8*1024*1024+1)},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			result, err := workspace.NewCheckProcessResult(
-				workspace.CheckExited, 0, "", test.stdout, nil,
-				workspace.StrictCheckIsolationProof(),
-			)
-			if err != nil {
-				t.Fatalf("NewCheckProcessResult: %v", err)
-			}
-			fixture := newFinalHistoryFixture(t)
-			verifier, err := workspace.NewFinalHistoryVerifier(
-				&finalHistoryGitStub{inspections: fixture.inspections},
-				&finalHistoryCheckRunnerStub{result: result},
-			)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := verifier.Verify(
-				context.Background(), fixture.protocol, "/private/tmp/final-history", fixture.base, fixture.head,
-			); err != nil {
-				t.Fatalf("exit-zero diagnostic output rejected final history: %v", err)
-			}
-		})
+	fixture := newFinalHistoryFixture(t)
+	verifier, err := workspace.NewFinalHistoryVerifier(
+		&finalHistoryGitStub{inspections: fixture.inspections},
+		&finalHistoryCheckRunnerStub{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifier.Verify(
+		context.Background(), fixture.protocol, "/private/tmp/final-history", fixture.base, fixture.head,
+	); err != nil {
+		t.Fatalf("exit-zero check rejected final history: %v", err)
 	}
 }
 
 func TestFinalHistoryVerifierNamesViolations(t *testing.T) {
 	t.Parallel()
 
-	nonzero, err := workspace.NewCheckProcessResult(
-		workspace.CheckExited, 1, "", nil, nil, workspace.StrictCheckIsolationProof(),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	nonzero := errors.New("exit status 1")
 	tests := []struct {
-		name      string
-		mutate    func(*testing.T, *finalHistoryFixture)
-		result    workspace.CheckProcessResult
-		hasResult bool
-		wantErr   string
+		name     string
+		mutate   func(*testing.T, *finalHistoryFixture)
+		checkErr error
+		wantErr  string
 	}{
 		{
 			name: "checkpoint ordering",
@@ -317,7 +277,7 @@ func TestFinalHistoryVerifierNamesViolations(t *testing.T) {
 				t.Helper()
 				inspection, err := workspace.NewGitCommitInspection(
 					fixture.first, []workspace.GitObjectID{fixture.base}, fixture.firstTree,
-					"Add first checkpoint", "", finalHistoryAddedDiff(t, "other.go", mustGitObject(t, '2')),
+					"Add first checkpoint", "", finalHistoryAddedDiff(t, "other.go"),
 				)
 				if err != nil {
 					t.Fatal(err)
@@ -327,10 +287,9 @@ func TestFinalHistoryVerifierNamesViolations(t *testing.T) {
 			wantErr: "commit checkpoint first path policy",
 		},
 		{
-			name:      "nonzero configured check",
-			result:    nonzero,
-			hasResult: true,
-			wantErr:   "configured check first-check did not exit zero",
+			name:     "nonzero configured check",
+			checkErr: nonzero,
+			wantErr:  "configured check first-check did not exit zero",
 		},
 	}
 	for _, test := range tests {
@@ -339,13 +298,9 @@ func TestFinalHistoryVerifierNamesViolations(t *testing.T) {
 			if test.mutate != nil {
 				test.mutate(t, &fixture)
 			}
-			result := passingFinalHistoryCheckResult(t)
-			if test.hasResult {
-				result = test.result
-			}
 			verifier, err := workspace.NewFinalHistoryVerifier(
 				&finalHistoryGitStub{inspections: fixture.inspections},
-				&finalHistoryCheckRunnerStub{result: result},
+				&finalHistoryCheckRunnerStub{err: test.checkErr},
 			)
 			if err != nil {
 				t.Fatal(err)

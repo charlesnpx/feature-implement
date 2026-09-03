@@ -38,5 +38,5 @@ func (invocation CommitCheckInvocation) validate() error {
 // CommitCheckRunnerPort materializes the invocation's exact final commit in
 // isolated storage and executes its configured command.
 type CommitCheckRunnerPort interface {
-	RunConfiguredCheck(context.Context, CommitCheckInvocation) (CheckProcessResult, error)
+	RunConfiguredCheck(context.Context, CommitCheckInvocation) error
 }
