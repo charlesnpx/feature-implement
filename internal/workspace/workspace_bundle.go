@@ -11,7 +11,6 @@ import (
 const (
 	WorkspaceBundleFileName      = "feature.workspace.bundle.json"
 	WorkspaceLockFileName        = "feature.workspace.lock.json"
-	WorkspaceGeneratedDirectory  = "generated"
 	MaxWorkspaceBundleBytes      = 1 << 20
 	WorkspaceBundleSchemaVersion = 2
 )
@@ -260,11 +259,8 @@ func normalizeBundleSourcePath(field, value string) (string, error) {
 			return "", fmt.Errorf("workspace bundle %s cannot reference hidden path %s", field, path)
 		}
 	}
-	if path == WorkspaceBundleFileName {
+	if path == WorkspaceBundleFileName || path == WorkspaceLockFileName {
 		return "", fmt.Errorf("workspace bundle %s cannot reference its descriptor", field)
-	}
-	if strings.Split(filepath.ToSlash(path), "/")[0] == WorkspaceGeneratedDirectory {
-		return "", fmt.Errorf("workspace bundle %s cannot reference tool-owned generated path %s", field, path)
 	}
 	return path, nil
 }
@@ -312,32 +308,4 @@ func WorkspaceBundleSchema() map[string]any {
 			"execution_config": map[string]any{"type": "string", "minLength": 1},
 		},
 	}
-}
-
-func WorkspaceBundleLockArtifacts(bundle WorkspaceBundle) ([]MaterializationArtifact, error) {
-	if bundle.definition.generation.IsZero() || bundle.root == "" {
-		return nil, fmt.Errorf("validated workspace bundle is required")
-	}
-	workspaceLock, err := json.Marshal(ProjectWorkspaceLock(bundle.definition))
-	if err != nil {
-		return nil, err
-	}
-	workspaceArtifact, err := NewMaterializationArtifact("workspace-lock", WorkspaceLockFileName, append(workspaceLock, '\n'))
-	if err != nil {
-		return nil, err
-	}
-	artifacts := []MaterializationArtifact{workspaceArtifact}
-	for _, lock := range ProjectPlanLocks(bundle.definition) {
-		content, err := json.Marshal(lock)
-		if err != nil {
-			return nil, err
-		}
-		path := filepath.ToSlash(filepath.Join("plans", lock.PlanID().String()+".lock.json"))
-		artifact, err := NewMaterializationArtifact("plan-lock-"+lock.PlanID().String(), path, append(content, '\n'))
-		if err != nil {
-			return nil, err
-		}
-		artifacts = append(artifacts, artifact)
-	}
-	return artifacts, nil
 }

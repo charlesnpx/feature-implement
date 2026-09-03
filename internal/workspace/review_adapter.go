@@ -127,10 +127,11 @@ func resolveReviewAdapterDispatch(
 	if !configured || !config.bound() || !reviewGateDispatchMatchesConfig(dispatch, config) {
 		return reviewAdapterDispatch{}, fmt.Errorf("review gate dispatch no longer matches configured adapter policy")
 	}
-	if projection.core.worktreeRoot.IsZero() {
-		return reviewAdapterDispatch{}, fmt.Errorf("review gate dispatch has no verified frozen-copy root")
+	worktreeRoot, err := derivedWorkspaceWorktreeRootForJournal(journal)
+	if err != nil {
+		return reviewAdapterDispatch{}, err
 	}
-	frozenCopy, err := reviewGateFrozenCopyPath(projection.core.worktreeRoot.Path(), dispatch.digest)
+	frozenCopy, err := reviewGateFrozenCopyPath(worktreeRoot, dispatch.digest)
 	if err != nil {
 		return reviewAdapterDispatch{}, err
 	}
@@ -409,7 +410,7 @@ func RecordAttemptReviewDocument(
 		if !dispatchExists {
 			return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("review gate dispatch %s is unknown", request.DispatchDigest)
 		}
-		if err := discardReviewGateFrozenCopy(projection.core.worktreeRoot, dispatch); err != nil {
+		if err := discardReviewGateFrozenCopyForJournal(journal, dispatch); err != nil {
 			return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("discard terminal review gate frozen copy: %w", err)
 		}
 		return recorded, record, nil
@@ -456,7 +457,7 @@ func RecordAttemptReviewDocument(
 	journalRecord, err := appendReviewJournalEvent(journal, snapshot, event, request.OccurredAt)
 	if err != nil {
 		if recovered, existingRecord, exists, lookupErr := recheckRecordedReviewDocument(journal, request); lookupErr == nil && exists {
-			if cleanupErr := discardReviewGateFrozenCopy(projection.core.worktreeRoot, dispatch); cleanupErr != nil {
+			if cleanupErr := discardReviewGateFrozenCopyForJournal(journal, dispatch); cleanupErr != nil {
 				return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("discard terminal review gate frozen copy: %w", cleanupErr)
 			}
 			return recovered, existingRecord, nil
@@ -468,7 +469,7 @@ func RecordAttemptReviewDocument(
 		}
 		return RecordedReviewDocument{}, JournalRecord{}, err
 	}
-	if err := discardReviewGateFrozenCopy(projection.core.worktreeRoot, dispatch); err != nil {
+	if err := discardReviewGateFrozenCopyForJournal(journal, dispatch); err != nil {
 		return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("discard terminal review gate frozen copy: %w", err)
 	}
 	return RecordedReviewDocument{gateRecord: gateRecord, artifact: artifact}, journalRecord, nil

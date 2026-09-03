@@ -106,27 +106,21 @@ func IntegrateMergeUnit(
 		if err != nil {
 			return MergeUnitIntegrationResult{}, err
 		}
-		expectedFeatureMarker, err := expectedLocalTargetReflogMarker(
-			runtime, target,
-		)
-		if err != nil {
-			return MergeUnitIntegrationResult{}, err
-		}
 		intent, err := NewMergeUnitIntegrationIntent(
 			MergeUnitIntegrationIntentOptions{
-				WorkspaceID:            runtime.workspaceID,
-				Generation:             runtime.activeGeneration,
-				AttemptID:              attempt.attemptID,
-				MergeUnit:              attempt.mergeUnit,
-				FeatureRef:             binding.featureRef,
-				ExpectedFeatureHead:    target.createdHead,
-				ExpectedFeatureMarker:  expectedFeatureMarker,
-				AttemptWorktreeBinding: attemptInspection.worktreeBinding,
-				AcceptedHead:           evidence.head,
-				AcceptedTree:           evidence.tree,
-				ReviewReadinessDigest:  evidence.reviewReadiness,
-				AdoptedHeadEventDigest: evidence.adoptedHeadEvent,
-				OccurredAt:             request.OccurredAt,
+				WorkspaceID:              runtime.workspaceID,
+				Generation:               runtime.activeGeneration,
+				AttemptID:                attempt.attemptID,
+				MergeUnit:                attempt.mergeUnit,
+				FeatureRef:               binding.featureRef,
+				ExpectedFeatureHead:      target.createdHead,
+				ExpectedFeatureRefAbsent: target.headRecord == target.createdRecord,
+				AttemptWorktreeBinding:   attemptInspection.worktreeBinding,
+				AcceptedHead:             evidence.head,
+				AcceptedTree:             evidence.tree,
+				ReviewReadinessDigest:    evidence.reviewReadiness,
+				AdoptedHeadEventDigest:   evidence.adoptedHeadEvent,
+				OccurredAt:               request.OccurredAt,
 			},
 		)
 		if err != nil {
@@ -138,7 +132,11 @@ func IntegrateMergeUnit(
 		if err != nil {
 			return MergeUnitIntegrationResult{}, err
 		}
-		if inspection.refState != IntegrationRefExpectedHead {
+		expectedState := IntegrationRefExpectedHead
+		if intent.expectedFeatureRefAbsent {
+			expectedState = IntegrationRefExpectedAbsent
+		}
+		if inspection.refState != expectedState {
 			return MergeUnitIntegrationResult{},
 				integrationDriftError(inspection)
 		}
@@ -222,7 +220,7 @@ func IntegrateMergeUnit(
 		return MergeUnitIntegrationResult{}, err
 	}
 	switch inspection.refState {
-	case IntegrationRefExpectedHead:
+	case IntegrationRefExpectedAbsent, IntegrationRefExpectedHead:
 		if !inspection.expectedCommit {
 			if err := injectIntegrationLifecycleFault(
 				request.Fault,
@@ -529,12 +527,6 @@ func readIntegrationRuntime(
 		return JournalSnapshot{}, ReviewRuntimeProjection{},
 			WorkspaceRuntimeProjection{}, err
 	}
-	if err := verifyWorkspaceWorktreeRootBinding(
-		runtime.worktreeRoot,
-	); err != nil {
-		return JournalSnapshot{}, ReviewRuntimeProjection{},
-			WorkspaceRuntimeProjection{}, err
-	}
 	return snapshot, reviews, runtime, nil
 }
 
@@ -640,7 +632,19 @@ func confirmIntegrationAcceptance(
 				attempt.attemptID,
 			)
 		}
-		evidence.adoptedHeadEvent = record.eventHash
+		adoption, ok := record.event.(ReviewHeadAdoptedJournalEvent)
+		if !ok {
+			return integrationAcceptanceEvidence{}, fmt.Errorf(
+				"attempt %s adopted-head record has the wrong event type",
+				attempt.attemptID,
+			)
+		}
+		evidence.adoptedHeadEvent, err = adoption.EvidenceDigest()
+		if err != nil {
+			return integrationAcceptanceEvidence{}, fmt.Errorf(
+				"digest exact adopted-head evidence: %w", err,
+			)
+		}
 	}
 	if pendingIntent {
 		intent := attempt.integration.intent

@@ -3,14 +3,13 @@ package workspace
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
-const WorkspaceRuntimeProjectionFileName = "runtime-projection.v5.json"
+const WorkspaceRuntimeProjectionFileName = "runtime-projection.v6.json"
 
 type WorkspaceInitializationResult struct {
 	storedGeneration StoredGeneration
@@ -35,7 +34,6 @@ func WorkspaceRuntimeProjectionPath(workspaceDir string) string {
 type WorkspaceInitializationOptions struct {
 	PlanCheckpoint *VerifiedPlanLockCheckpoint
 	TargetGit      *LocalTargetGitAdapter
-	TargetFault    LocalTargetInitializationFaultInjector
 	WorktreeRoot   string
 }
 
@@ -54,9 +52,7 @@ func InitializeWorkspaceV2WithOptions(
 	if definition.generation.IsZero() || occurredAt.IsZero() {
 		return WorkspaceInitializationResult{}, fmt.Errorf("workspace initialization requires an effective definition and occurrence time")
 	}
-	worktreeRoot, err := resolveInitializationWorktreeRoot(
-		options.WorktreeRoot,
-	)
+	workspaceDir, err := absoluteWorkspaceRuntimeDirectory(workspaceDir)
 	if err != nil {
 		return WorkspaceInitializationResult{}, err
 	}
@@ -97,29 +93,11 @@ func InitializeWorkspaceV2WithOptions(
 	if hasPlanCheckpoint {
 		planRoot = checkpoint.root
 	}
-	roots, err := OpenWorkspaceInitializationRootGuard(
+	if err := verifyDerivedInitializationLayout(
 		planRoot, workspaceDir, definition.workspace.target.root,
-		worktreeRoot,
-	)
-	if err != nil {
+	); err != nil {
 		return WorkspaceInitializationResult{}, err
 	}
-	defer roots.Close()
-	if err := roots.VerifyBeforeRuntimeCreation(); err != nil {
-		return WorkspaceInitializationResult{}, err
-	}
-	defer func() {
-		var verifyErr error
-		if resultErr == nil {
-			verifyErr = roots.VerifyAfterRuntimeCreation()
-		} else {
-			verifyErr = roots.VerifyAfterEffects()
-		}
-		if verifyErr != nil {
-			result = WorkspaceInitializationResult{}
-			resultErr = errors.Join(resultErr, verifyErr)
-		}
-	}()
 	targetGit := DefaultLocalTargetGitAdapter()
 	if options.TargetGit != nil {
 		targetGit = *options.TargetGit
@@ -131,23 +109,14 @@ func InitializeWorkspaceV2WithOptions(
 	}
 	preflightSnapshot := JournalSnapshot{}
 	preflightSnapshotKnown := false
-	runtimeInitialized := false
-	if roots.runtime != nil {
-		_, runtimeInitialized, err = roots.runtime.adapter.inspectExact(
-			RuntimeFormatFileName,
-		)
-		if err != nil {
-			return WorkspaceInitializationResult{}, fmt.Errorf(
-				"inspect workspace runtime initialization marker: %w", err,
-			)
-		}
-	}
-	if runtimeInitialized {
+	if _, statErr := os.Lstat(filepath.Join(workspaceDir, RuntimeFormatFileName)); statErr == nil {
 		preflightSnapshot, err = ReadWorkspaceJournalSnapshot(workspaceDir)
 		if err != nil {
 			return WorkspaceInitializationResult{}, err
 		}
 		preflightSnapshotKnown = true
+	} else if !os.IsNotExist(statErr) {
+		return WorkspaceInitializationResult{}, fmt.Errorf("inspect derived runtime marker: %w", statErr)
 	}
 	targetInspection, err := inspectLocalTargetForInitializationAdmission(
 		ctx,
@@ -158,20 +127,11 @@ func InitializeWorkspaceV2WithOptions(
 	if err != nil {
 		return WorkspaceInitializationResult{}, err
 	}
-	if err := roots.bindLocalTarget(ctx, targetGit, targetInspection); err != nil {
-		return WorkspaceInitializationResult{}, err
-	}
-	if err := roots.VerifyBeforeRuntimeCreation(); err != nil {
-		return WorkspaceInitializationResult{}, err
-	}
 	store, err := OpenGenerationStore(workspaceDir)
 	if err != nil {
 		return WorkspaceInitializationResult{}, err
 	}
 	defer store.Close()
-	if err := roots.VerifyAfterEffects(); err != nil {
-		return WorkspaceInitializationResult{}, err
-	}
 	journal, err := OpenWorkspaceJournal(workspaceDir, JournalReadWrite)
 	if err != nil {
 		return WorkspaceInitializationResult{}, err
@@ -220,17 +180,6 @@ func InitializeWorkspaceV2WithOptions(
 				"workspace is already initialized at plan checkpoint %s",
 				existing.planCheckpoint,
 			)
-		} else {
-			worktreeBinding, bindingErr := roots.WorktreeRootBinding()
-			if bindingErr != nil {
-				return WorkspaceInitializationResult{}, bindingErr
-			}
-			if existing.worktreeRoot != worktreeBinding {
-				return WorkspaceInitializationResult{}, fmt.Errorf(
-					"workspace is already initialized with worktree root %s",
-					existing.worktreeRoot.Path(),
-				)
-			}
 		}
 	}
 	stored, err := store.Store(definition)
@@ -238,21 +187,17 @@ func InitializeWorkspaceV2WithOptions(
 		return WorkspaceInitializationResult{}, err
 	}
 	if needsInitialization {
-		worktreeBinding, err := roots.WorktreeRootBinding()
-		if err != nil {
-			return WorkspaceInitializationResult{}, err
-		}
 		eventCheckpoint := []PlanCheckpointJournalBinding(nil)
 		if hasPlanCheckpoint {
 			eventCheckpoint = append(eventCheckpoint, PlanCheckpointJournalBinding{
 				CheckpointID: checkpointID, ArtifactDigest: checkpointArtifactDigest,
 			})
 		}
-		event, err := NewWorkspaceInitializedJournalEvent(
+		event, err := NewWorkspaceInitializedJournalEventWithTarget(
 			definition.workspace.id,
 			definition.generation,
 			stored.definitionDigest,
-			worktreeBinding,
+			targetInspection.binding,
 			eventCheckpoint...,
 		)
 		if err != nil {
@@ -272,26 +217,6 @@ func InitializeWorkspaceV2WithOptions(
 			return WorkspaceInitializationResult{}, err
 		}
 	}
-	targetFault := func(point LocalTargetInitializationFaultPoint) error {
-		if options.TargetFault != nil {
-			if err := options.TargetFault(point); err != nil {
-				return err
-			}
-		}
-		return roots.VerifyAfterEffects()
-	}
-	snapshot, err = initializeLocalTarget(
-		ctx,
-		journal,
-		snapshot,
-		definition,
-		occurredAt,
-		targetGit,
-		targetFault,
-	)
-	if err != nil {
-		return WorkspaceInitializationResult{}, err
-	}
 	runtime, err := RebuildWorkspaceRuntime(snapshot)
 	if err != nil {
 		return WorkspaceInitializationResult{}, err
@@ -304,15 +229,6 @@ func InitializeWorkspaceV2WithOptions(
 	}
 	if requiresCheckpoint && runtime.planCheckpointArtifactDigest != checkpointArtifactDigest {
 		return WorkspaceInitializationResult{}, fmt.Errorf("initialized runtime does not match the verified plan checkpoint artifact")
-	}
-	worktreeBinding, err := roots.WorktreeRootBinding()
-	if err != nil {
-		return WorkspaceInitializationResult{}, err
-	}
-	if runtime.worktreeRoot != worktreeBinding {
-		return WorkspaceInitializationResult{}, fmt.Errorf(
-			"initialized runtime does not match the verified worktree root",
-		)
 	}
 	targetRuntime, ok := runtime.LocalTarget()
 	if !ok || !targetRuntime.Created() ||
@@ -346,21 +262,47 @@ func InitializeWorkspaceV2WithOptions(
 	return result, nil
 }
 
-func resolveInitializationWorktreeRoot(
-	configured string,
-) (string, error) {
-	configured = strings.TrimSpace(configured)
-	if configured == "" {
-		return "", fmt.Errorf(
-			"workspace initialization requires an explicit worktree root",
-		)
+func absoluteWorkspaceRuntimeDirectory(value string) (string, error) {
+	value = filepath.Clean(value)
+	if !filepath.IsAbs(value) {
+		return "", fmt.Errorf("workspace initialization requires an absolute runtime directory")
 	}
-	if !filepath.IsAbs(configured) {
-		return "", fmt.Errorf("worktree root must be absolute")
+	return canonicalizeTrustedRootPath(value)
+}
+
+func verifyDerivedInitializationLayout(planRoot, runtimeRoot, targetRoot string) error {
+	runtimeRoot, err := canonicalizeTrustedRootPath(runtimeRoot)
+	if err != nil {
+		return err
 	}
-	return normalizeInitializationRootPath(
-		RootRoleWorktree, configured,
-	)
+	targetRoot, err = canonicalizeTrustedRootPath(targetRoot)
+	if err != nil {
+		return err
+	}
+	worktreeRoot, err := DerivedWorkspaceWorktreeRoot(runtimeRoot)
+	if err != nil {
+		return err
+	}
+	for _, protected := range []struct {
+		name string
+		path string
+	}{
+		{name: "target", path: targetRoot},
+		{name: "plan", path: planRoot},
+	} {
+		if protected.path == "" {
+			continue
+		}
+		protectedPath, pathErr := canonicalizeTrustedRootPath(protected.path)
+		if pathErr != nil {
+			return pathErr
+		}
+		if pathContains(protectedPath, runtimeRoot) || pathContains(runtimeRoot, protectedPath) ||
+			pathContains(protectedPath, worktreeRoot) || pathContains(worktreeRoot, protectedPath) {
+			return fmt.Errorf("derived runtime or worktree root overlaps the %s root", protected.name)
+		}
+	}
+	return nil
 }
 
 func inspectLocalTargetForInitializationAdmission(
@@ -394,20 +336,11 @@ func inspectLocalTargetForInitializationAdmission(
 			"durable local target binding does not match the active workspace definition",
 		)
 	}
-	if target.Created() {
-		expectedMarker, err := expectedLocalTargetReflogMarker(
-			runtime, target,
-		)
-		if err != nil {
-			return LocalTargetInspection{}, err
-		}
-		return adapter.verifyOwnedFeatureRefAt(
-			ctx, target.binding, target.createdHead,
-			expectedMarker,
-		)
+	if target.headRecord == target.createdRecord {
+		return adapter.verifyFeatureRefAbsent(ctx, target.binding)
 	}
-	return adapter.inspectIntendedTarget(
-		ctx, target.binding, target.intentDigest,
+	return adapter.verifyOwnedFeatureRefAt(
+		ctx, target.binding, target.createdHead,
 	)
 }
 

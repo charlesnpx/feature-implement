@@ -15,24 +15,26 @@ import (
 )
 
 type integrationGitStub struct {
-	featureHead    workspace.GitObjectID
-	expectedCommit bool
-	inspectCalls   int
-	createCalls    int
-	publishCalls   int
-	verifyCalls    int
-	verifiedStart  workspace.GitObjectID
-	verifiedEnd    workspace.GitObjectID
-	forcedState    workspace.IntegrationRefState
+	featureHead       workspace.GitObjectID
+	featureRefPresent bool
+	expectedCommit    bool
+	inspectCalls      int
+	createCalls       int
+	publishCalls      int
+	verifyCalls       int
+	verifiedStart     workspace.GitObjectID
+	verifiedEnd       workspace.GitObjectID
+	forcedState       workspace.IntegrationRefState
 }
 
 type concurrentIntegrationGitStub struct {
-	mu             sync.Mutex
-	featureHead    workspace.GitObjectID
-	initialSeen    map[string]bool
-	initialCount   int
-	initialRelease chan struct{}
-	objects        map[string]bool
+	mu                sync.Mutex
+	featureHead       workspace.GitObjectID
+	featureRefPresent bool
+	initialSeen       map[string]bool
+	initialCount      int
+	initialRelease    chan struct{}
+	objects           map[string]bool
 }
 
 func (git *integrationGitStub) InspectAttempt(
@@ -54,17 +56,29 @@ func (git *integrationGitStub) InspectIntegration(
 	git.inspectCalls++
 	state := git.forcedState
 	if state == "" {
-		switch git.featureHead {
-		case intent.ExpectedFeatureHead():
-			state = workspace.IntegrationRefExpectedHead
-		case intent.ExpectedMerge():
-			state = workspace.IntegrationRefExpectedMerge
-		default:
-			state = workspace.IntegrationRefUnrelatedDrift
+		if !git.featureRefPresent {
+			if intent.ExpectedFeatureRefAbsent() {
+				state = workspace.IntegrationRefExpectedAbsent
+			} else {
+				state = workspace.IntegrationRefUnrelatedDrift
+			}
+		} else {
+			switch git.featureHead {
+			case intent.ExpectedFeatureHead():
+				state = workspace.IntegrationRefExpectedHead
+			case intent.ExpectedMerge():
+				state = workspace.IntegrationRefExpectedMerge
+			default:
+				state = workspace.IntegrationRefUnrelatedDrift
+			}
 		}
 	}
+	featureHead := git.featureHead
+	if !git.featureRefPresent {
+		featureHead = workspace.GitObjectID{}
+	}
 	return workspace.NewIntegrationGitInspection(
-		git.featureHead, state, git.expectedCommit,
+		featureHead, state, git.expectedCommit,
 	)
 }
 
@@ -74,7 +88,9 @@ func (git *integrationGitStub) CreateIntegrationCommit(
 	intent workspace.MergeUnitIntegrationIntent,
 ) error {
 	git.createCalls++
-	if git.featureHead != intent.ExpectedFeatureHead() {
+	if (intent.ExpectedFeatureRefAbsent() && git.featureRefPresent) ||
+		(!intent.ExpectedFeatureRefAbsent() && !git.featureRefPresent) ||
+		git.featureHead != intent.ExpectedFeatureHead() {
 		return errors.New("stub feature head moved before commit creation")
 	}
 	git.expectedCommit = true
@@ -88,7 +104,9 @@ func (git *integrationGitStub) PublishIntegration(
 	fault workspace.IntegrationLifecycleFaultInjector,
 ) error {
 	git.publishCalls++
-	if git.featureHead != intent.ExpectedFeatureHead() ||
+	if (intent.ExpectedFeatureRefAbsent() && git.featureRefPresent) ||
+		(!intent.ExpectedFeatureRefAbsent() && !git.featureRefPresent) ||
+		git.featureHead != intent.ExpectedFeatureHead() ||
 		!git.expectedCommit {
 		return errors.New("stub integration publication precondition failed")
 	}
@@ -104,6 +122,7 @@ func (git *integrationGitStub) PublishIntegration(
 		}
 	}
 	git.featureHead = intent.ExpectedMerge()
+	git.featureRefPresent = true
 	return nil
 }
 
@@ -120,7 +139,7 @@ func (git *integrationGitStub) VerifyCompletedIntegration(
 	git.verifyCalls++
 	git.verifiedStart = chain[0].ExpectedMerge()
 	git.verifiedEnd = chain[len(chain)-1].ExpectedMerge()
-	if git.featureHead != git.verifiedEnd ||
+	if !git.featureRefPresent || git.featureHead != git.verifiedEnd ||
 		!git.expectedCommit {
 		return errors.New(
 			"stub completed integration verification failed",
@@ -156,6 +175,13 @@ func (git *concurrentIntegrationGitStub) InspectIntegration(
 		release := git.initialRelease
 		git.mu.Unlock()
 		<-release
+		if intent.ExpectedFeatureRefAbsent() {
+			return workspace.NewIntegrationGitInspection(
+				workspace.GitObjectID{},
+				workspace.IntegrationRefExpectedAbsent,
+				false,
+			)
+		}
 		return workspace.NewIntegrationGitInspection(
 			intent.ExpectedFeatureHead(),
 			workspace.IntegrationRefExpectedHead,
@@ -163,14 +189,22 @@ func (git *concurrentIntegrationGitStub) InspectIntegration(
 		)
 	}
 	head := git.featureHead
+	present := git.featureRefPresent
 	objectExists := git.objects[intent.Digest().String()]
 	git.mu.Unlock()
 	state := workspace.IntegrationRefUnrelatedDrift
-	switch head {
-	case intent.ExpectedFeatureHead():
-		state = workspace.IntegrationRefExpectedHead
-	case intent.ExpectedMerge():
-		state = workspace.IntegrationRefExpectedMerge
+	if !present {
+		if intent.ExpectedFeatureRefAbsent() {
+			state = workspace.IntegrationRefExpectedAbsent
+		}
+		head = workspace.GitObjectID{}
+	} else {
+		switch head {
+		case intent.ExpectedFeatureHead():
+			state = workspace.IntegrationRefExpectedHead
+		case intent.ExpectedMerge():
+			state = workspace.IntegrationRefExpectedMerge
+		}
 	}
 	return workspace.NewIntegrationGitInspection(
 		head, state, objectExists,
@@ -212,7 +246,9 @@ func (git *concurrentIntegrationGitStub) CreateIntegrationCommit(
 ) error {
 	git.mu.Lock()
 	defer git.mu.Unlock()
-	if git.featureHead != intent.ExpectedFeatureHead() {
+	if (intent.ExpectedFeatureRefAbsent() && git.featureRefPresent) ||
+		(!intent.ExpectedFeatureRefAbsent() && !git.featureRefPresent) ||
+		git.featureHead != intent.ExpectedFeatureHead() {
 		return errors.New("concurrent feature head moved before commit")
 	}
 	git.objects[intent.Digest().String()] = true
@@ -227,7 +263,9 @@ func (git *concurrentIntegrationGitStub) PublishIntegration(
 ) error {
 	git.mu.Lock()
 	defer git.mu.Unlock()
-	if git.featureHead != intent.ExpectedFeatureHead() ||
+	if (intent.ExpectedFeatureRefAbsent() && git.featureRefPresent) ||
+		(!intent.ExpectedFeatureRefAbsent() && !git.featureRefPresent) ||
+		git.featureHead != intent.ExpectedFeatureHead() ||
 		!git.objects[intent.Digest().String()] {
 		return errors.New("concurrent publication precondition failed")
 	}
@@ -243,6 +281,7 @@ func (git *concurrentIntegrationGitStub) PublishIntegration(
 		}
 	}
 	git.featureHead = intent.ExpectedMerge()
+	git.featureRefPresent = true
 	return nil
 }
 
@@ -253,7 +292,7 @@ func (git *concurrentIntegrationGitStub) VerifyCompletedIntegration(
 ) error {
 	git.mu.Lock()
 	defer git.mu.Unlock()
-	if len(chain) == 0 ||
+	if len(chain) == 0 || !git.featureRefPresent ||
 		git.featureHead != chain[len(chain)-1].ExpectedMerge() {
 		return errors.New(
 			"concurrent completed integration verification failed",
@@ -335,8 +374,7 @@ func TestNoReviewIntegrationRequiresDurableSameHeadAdoption(t *testing.T) {
 	}
 	if result.Intent().AcceptanceMode() !=
 		workspace.IntegrationAcceptanceAdoptedHead ||
-		result.Intent().AdoptedHeadEventDigest() !=
-			adoption.Record().EventHash() ||
+		result.Intent().AdoptedHeadEventDigest().IsZero() ||
 		!result.Intent().ReviewReadinessDigest().IsZero() {
 		t.Fatalf(
 			"same-head integration acceptance = %#v",

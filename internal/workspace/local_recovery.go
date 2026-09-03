@@ -10,7 +10,6 @@ type LocalRecoveryAction string
 
 const (
 	LocalRecoveryJournalTail          LocalRecoveryAction = "journal_tail"
-	LocalRecoveryFeatureRef           LocalRecoveryAction = "feature_ref"
 	LocalRecoveryAttemptMaterialized  LocalRecoveryAction = "attempt_materialized"
 	LocalRecoveryIntegrationCompleted LocalRecoveryAction = "integration_completed"
 	LocalRecoveryWorkspaceCompleted   LocalRecoveryAction = "workspace_completed"
@@ -18,7 +17,6 @@ const (
 
 type RecoverWorkspaceLocalEffectsRequest struct {
 	OccurredAt       time.Time
-	TargetFault      LocalTargetInitializationFaultInjector
 	AttemptFault     AttemptLifecycleFaultInjector
 	IntegrationFault IntegrationLifecycleFaultInjector
 	CompletionFault  CompletionLifecycleFaultInjector
@@ -40,7 +38,7 @@ func RecoverWorkspaceLocalEffects(
 	ctx context.Context,
 	journal *WorkspaceJournal,
 	definition EffectiveWorkspaceDefinition,
-	targetGit LocalTargetGitAdapter,
+	_ LocalTargetGitAdapter,
 	attemptGit AttemptGitPort,
 	repository ReviewRepositoryPort,
 	integrationGit IntegrationGitPort,
@@ -84,19 +82,10 @@ func RecoverWorkspaceLocalEffects(
 	}
 
 	if _, completed := runtime.Completion(); !completed {
-		target, exists := runtime.LocalTarget()
-		if !exists || !target.Created() {
-			if _, err := initializeLocalTarget(
-				ctx, journal, snapshot, definition,
-				request.OccurredAt, targetGit,
-				request.TargetFault,
-			); err != nil {
-				return WorkspaceLocalRecoveryResult{}, fmt.Errorf(
-					"recover pending feature-ref creation: %w", err,
-				)
-			}
-			result.actions = append(
-				result.actions, LocalRecoveryFeatureRef,
+		_, exists := runtime.LocalTarget()
+		if !exists {
+			return WorkspaceLocalRecoveryResult{}, fmt.Errorf(
+				"workspace runtime has no admitted local target; regenerate with the current runtime format",
 			)
 		}
 

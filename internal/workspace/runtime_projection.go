@@ -157,7 +157,6 @@ type WorkspaceRuntimeProjection struct {
 	activeGeneration             Digest
 	planCheckpoint               Digest
 	planCheckpointArtifactDigest Digest
-	worktreeRoot                 WorkspaceWorktreeRootBinding
 	localTarget                  RuntimeLocalTargetProjection
 	recoveries                   []RuntimeRecoveryProjection
 	attempts                     []RuntimeAttemptProjection
@@ -175,7 +174,9 @@ func (projection WorkspaceRuntimeProjection) PlanCheckpointArtifactDigest() Dige
 	return projection.planCheckpointArtifactDigest
 }
 func (projection WorkspaceRuntimeProjection) WorktreeRoot() WorkspaceWorktreeRootBinding {
-	return projection.worktreeRoot
+	// Scratch roots are derived from the runtime directory and intentionally
+	// have no durable journal binding.
+	return WorkspaceWorktreeRootBinding{}
 }
 func (projection WorkspaceRuntimeProjection) LocalTarget() (
 	RuntimeLocalTargetProjection,
@@ -227,15 +228,13 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 		target, hasTarget := current.LocalTarget()
 		ready := hasTarget && target.Created()
 		switch record.event.(type) {
-		case FeatureRefCreationIntendedJournalEvent,
-			FeatureRefCreatedJournalEvent,
-			JournalTailRecoveredEvent:
-			// Initialization and journal-tail recovery are the only transitions
-			// admitted before durable feature-ref completion.
+		case JournalTailRecoveredEvent:
+			// Journal-tail recovery is the only transition admitted before
+			// initialization is durable.
 		default:
 			if !ready {
 				return WorkspaceRuntimeProjection{}, fmt.Errorf(
-					"workspace runtime is not ready until feature_ref_created is durable",
+					"workspace runtime is not ready until local target admission is durable",
 				)
 			}
 		}
@@ -275,43 +274,14 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 		next.activeGeneration = event.generation
 		next.planCheckpoint = event.planCheckpoint
 		next.planCheckpointArtifactDigest = event.planCheckpointArtifactDigest
-		next.worktreeRoot = event.worktreeRoot
-	case FeatureRefCreationIntendedJournalEvent:
-		if current.workspaceID != event.workspaceID ||
-			current.activeGeneration != event.generation {
-			return WorkspaceRuntimeProjection{}, fmt.Errorf(
-				"feature-ref creation intent has stale workspace bindings",
-			)
+		if !event.localTarget.IsZero() {
+			next.localTarget = RuntimeLocalTargetProjection{
+				binding:       event.localTarget,
+				createdHead:   event.localTarget.baseCommit,
+				createdRecord: record.sequence,
+				headRecord:    record.sequence,
+			}
 		}
-		if !current.localTarget.IsZero() {
-			return WorkspaceRuntimeProjection{}, fmt.Errorf(
-				"feature-ref creation intent is already recorded",
-			)
-		}
-		next.localTarget = RuntimeLocalTargetProjection{
-			binding: event.binding, intentDigest: event.intentDigest,
-			intentRecord: record.sequence,
-		}
-	case FeatureRefCreatedJournalEvent:
-		if current.workspaceID != event.workspaceID ||
-			current.activeGeneration != event.generation ||
-			current.localTarget.IsZero() ||
-			current.localTarget.createdRecord != 0 {
-			return WorkspaceRuntimeProjection{}, fmt.Errorf(
-				"feature-ref creation completion has stale or duplicate workspace bindings",
-			)
-		}
-		target := current.localTarget
-		if target.intentDigest != event.intentDigest ||
-			target.binding.featureRef != event.featureRef ||
-			target.binding.baseCommit != event.head {
-			return WorkspaceRuntimeProjection{}, fmt.Errorf(
-				"feature-ref creation completion does not match its exact intent",
-			)
-		}
-		next.localTarget.createdHead = event.head
-		next.localTarget.createdRecord = record.sequence
-		next.localTarget.headRecord = record.sequence
 	case JournalTailRecoveredEvent:
 		if current.activeGeneration.IsZero() {
 			if current.workspaceID.IsZero() {
@@ -382,7 +352,7 @@ func requireReadyLocalTarget(runtime WorkspaceRuntimeProjection) error {
 	target, ok := runtime.LocalTarget()
 	if !ok || !target.Created() {
 		return fmt.Errorf(
-			"workspace runtime is not ready until feature_ref_created is durable",
+			"workspace runtime is not ready until local target admission is durable",
 		)
 	}
 	return nil
@@ -459,7 +429,6 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 		ActiveGeneration             string            `json:"active_generation"`
 		PlanCheckpoint               string            `json:"plan_checkpoint,omitempty"`
 		PlanCheckpointArtifactDigest string            `json:"plan_checkpoint_artifact_digest,omitempty"`
-		WorktreeRoot                 string            `json:"worktree_root"`
 		LocalTarget                  *localTargetJSON  `json:"local_target,omitempty"`
 		Recoveries                   []recoveryJSON    `json:"recoveries"`
 		Attempts                     []json.RawMessage `json:"attempts"`
@@ -470,7 +439,6 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 		ActiveGeneration:             projection.activeGeneration.String(),
 		PlanCheckpoint:               projection.planCheckpoint.String(),
 		PlanCheckpointArtifactDigest: projection.planCheckpointArtifactDigest.String(),
-		WorktreeRoot:                 projection.worktreeRoot.Path(),
 		Recoveries:                   make([]recoveryJSON, 0, len(projection.recoveries)),
 		Attempts:                     make([]json.RawMessage, 0, len(projection.attempts)),
 	}

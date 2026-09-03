@@ -348,19 +348,19 @@ func integrationIntentFromWire(
 	}
 	intent, err := NewMergeUnitIntegrationIntent(
 		MergeUnitIntegrationIntentOptions{
-			WorkspaceID:            workspaceID,
-			Generation:             generation,
-			AttemptID:              attemptID,
-			MergeUnit:              mergeUnit,
-			FeatureRef:             wire.FeatureRef,
-			ExpectedFeatureHead:    expectedFeatureHead,
-			ExpectedFeatureMarker:  wire.ExpectedFeatureMarker,
-			AttemptWorktreeBinding: attemptWorktreeBinding,
-			AcceptedHead:           acceptedHead,
-			AcceptedTree:           acceptedTree,
-			ReviewReadinessDigest:  reviewReadiness,
-			AdoptedHeadEventDigest: adoptedHead,
-			OccurredAt:             authorAt,
+			WorkspaceID:              workspaceID,
+			Generation:               generation,
+			AttemptID:                attemptID,
+			MergeUnit:                mergeUnit,
+			FeatureRef:               wire.FeatureRef,
+			ExpectedFeatureHead:      expectedFeatureHead,
+			ExpectedFeatureRefAbsent: wire.ExpectedFeatureRefAbsent,
+			AttemptWorktreeBinding:   attemptWorktreeBinding,
+			AcceptedHead:             acceptedHead,
+			AcceptedTree:             acceptedTree,
+			ReviewReadinessDigest:    reviewReadiness,
+			AdoptedHeadEventDigest:   adoptedHead,
+			OccurredAt:               authorAt,
 		},
 	)
 	if err != nil {

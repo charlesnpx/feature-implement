@@ -326,10 +326,8 @@ func assertLocalTargetInitializationJournal(
 ) {
 	t.Helper()
 	records := snapshot.Records()
-	if len(records) != 3 ||
-		records[0].EventType() != workspace.JournalEventWorkspaceInitialized ||
-		records[1].EventType() != workspace.JournalEventFeatureRefCreationIntended ||
-		records[2].EventType() != workspace.JournalEventFeatureRefCreated {
+	if len(records) != 1 ||
+		records[0].EventType() != workspace.JournalEventWorkspaceInitialized {
 		t.Fatalf("local target initialization journal = %#v", records)
 	}
 }

@@ -360,6 +360,38 @@ func prepareUnchainedJournal(t *testing.T) malformedJournalFixture {
 	); err != nil {
 		t.Fatal(err)
 	}
+	secondJournal, err := workspace.OpenWorkspaceJournal(
+		secondDir, workspace.JournalReadWrite,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goal, err := workspace.NewGoalBinding(
+		workspace.MustID("malformed-journal-goal"),
+		workspace.GoalScopeMergeUnit,
+	)
+	if err != nil {
+		_ = secondJournal.Close()
+		t.Fatal(err)
+	}
+	if _, err := workspace.StartAttempt(
+		context.Background(),
+		secondJournal,
+		definition,
+		&fakeAttemptGit{},
+		workspace.StartAttemptRequest{
+			MergeUnit:     mustMergeUnitReference(t, "alpha-plan", "unit-one"),
+			AttemptNumber: 1,
+			Goal:          goal,
+			OccurredAt:    mustTime(t, "2026-08-18T11:11:01Z"),
+		},
+	); err != nil {
+		_ = secondJournal.Close()
+		t.Fatal(err)
+	}
+	if err := secondJournal.Close(); err != nil {
+		t.Fatal(err)
+	}
 	firstLines := journalRecordLines(t, workspace.WorkspaceJournalPath(firstDir))
 	secondLines := journalRecordLines(t, workspace.WorkspaceJournalPath(secondDir))
 	if len(firstLines) < 1 || len(secondLines) < 2 {

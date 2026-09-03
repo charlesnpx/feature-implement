@@ -44,8 +44,8 @@ Workspace execution uses these version-two surfaces:
 feature workspace schema bundle|requests|reports [--json]
 feature workspace example
 feature workspace validate --bundle <bundle-root> [--write-locks] [--json]
-feature workspace init|recover --bundle <bundle-root> --workspace <runtime-root> --input <file|-> [--json]
-feature workspace status --bundle <bundle-root> --workspace <runtime-root> [--json]
+feature workspace init|recover --bundle <bundle-root> --input <file|-> [--json]
+feature workspace status --bundle <bundle-root> [--json]
 
 feature workspace attempt start|adopt-head|pause|resume|abandon ...
 feature workspace review dispatch|record|record-document|ready ...
@@ -74,7 +74,7 @@ sample-workspace/
 │   └── execution.yaml
 ├── policies/
 │   └── review.md
-└── generated/                  # tool-owned immutable lock projections
+└── feature.workspace.lock.json # one canonical normalized definition lock
 ```
 
 The descriptor contains only local source discovery:
@@ -88,9 +88,9 @@ The descriptor contains only local source discovery:
 }
 ```
 
-Every descriptor path is relative, non-hidden, outside `generated/`, uniquely
-owned by one source role, and rooted beneath the bundle. Source paths cannot
-traverse symlinks or collide across roles.
+Every descriptor path is relative, non-hidden, uniquely owned by one source
+role, and rooted beneath the bundle. Source paths cannot traverse symlinks or
+collide across roles.
 
 The workspace manifest binds one local target repository, a stable fully
 qualified base ref and exact base commit, an AI-selected feature branch, plan
@@ -226,30 +226,30 @@ Git history. After an accepted source change, regenerate locks with:
 feature workspace validate --bundle "$bundle_root" --write-locks --json
 ```
 
-Commit both the plan sources and generated locks, and keep the plan repository
+Commit both the plan sources and `feature.workspace.lock.json`, and keep the plan repository
 clean before initializing a runtime. `workspace init` verifies that the clean
 plan `HEAD` contains the exact source and lock bytes, then derives the runtime
 plan checkpoint artifact from that committed state.
 
-The generated ownership inventory permits replacement only while each existing
-generated file still matches its last generated hash. Modified projections,
-hidden paths, symlink traversal, missing inventory, and unowned conflicts fail
-closed. Do not edit `generated/` by hand.
+The lock is one canonical JSON file. It is written through a synced temporary
+file and atomic rename; a lock whose current bytes differ from its committed
+value is refused rather than replaced. Do not edit
+`feature.workspace.lock.json` by hand.
 
-Keep runtime state and attempt worktrees outside the source bundle and the
-target repository. Initialization records the verified worktree root and the
-derived plan checkpoint:
+Runtime state is derived as the sibling
+`<bundle-root>.feature-runtime`; its attempt and review-copy root is derived as
+`<bundle-root>.feature-runtime-attempt-worktrees`. Initialization records the
+derived plan checkpoint and needs no root paths in its request:
 
 ```json
 {
   "schema_version": 2,
-  "occurred_at": "2026-07-24T12:00:00Z",
-  "worktree_root": "/absolute/path/to/attempt-worktrees"
+  "occurred_at": "2026-07-24T12:00:00Z"
 }
 ```
 
 Runtime state is append-only under `<runtime-root>/state/`. A runtime without
-the local v7 format marker is rejected with a regeneration diagnostic; it is
+the local v8 format marker is rejected with a regeneration diagnostic; it is
 not interpreted or migrated.
 
 ## Local execution
@@ -303,21 +303,19 @@ completion proves the recorded Git topology and workflow state only.
 ### Operations and migration
 
 Workspace v2 is a local-only execution model. Operators commit exact plan
-sources and generated lock bytes in a clean plan repository, initialize a fresh
-local v7 runtime, recover before each work cycle, and use journal-derived
+sources and canonical lock bytes in a clean plan repository, initialize a fresh
+local v8 runtime, recover before each work cycle, and use journal-derived
 reports as the source of truth. Earlier draft runtime state is intentionally not
-migrated; a runtime without the local v7 marker must be regenerated from the
+migrated; a runtime without the local v8 marker must be regenerated from the
 committed plan and current lock.
 
 ### Supported repository profile
 
-The target must be a local non-bare Git repository with a complete object
-database, SHA-1 or SHA-256 objects, ordinary ref and reflog storage, and no
-active partial-clone, promisor, shallow, submodule, external object-storage,
-repository-attribute, configured-filter, configured-signature-verifier, or
-replacement-history profile. Linked worktrees are supported when their
-administration and common directories remain exactly bound to the verified
-target repository.
+The target must be a primary local non-bare Git worktree with the exact pinned
+base commit present, SHA-1 or SHA-256 objects, an initially absent feature ref
+or the exact recorded integrated head, and no checked-out feature branch.
+Required operations run with isolated configuration, hooks and signing disabled,
+replacement refs disabled, and external diff or text conversion disabled.
 
 ### Stable-base policy
 
@@ -329,7 +327,7 @@ base, or mutates the primary checkout to make the base match.
 ### Threat model
 
 The implementation defends local state against malformed source bundles,
-generated-file drift, journal tail corruption, stale compare-and-swap inputs,
+lock drift, journal tail corruption, stale compare-and-swap inputs,
 symlink traversal, unsafe Git configuration, repository hooks, ambient helper
 programs, and write-capable network use by configured checks. It does not
 authenticate operators, reviewers, or owners; detect same-user replacement of

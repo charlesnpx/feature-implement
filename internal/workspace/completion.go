@@ -278,10 +278,20 @@ func validateCompletionAttempt(
 	adopted, exists := exactAdoptedHeadRecord(
 		snapshot, attempt.attemptID, repository,
 	)
-	if !exists ||
-		intent.acceptanceMode !=
-			IntegrationAcceptanceAdoptedHead ||
-		intent.adoptedHeadEventDigest != adopted.eventHash ||
+	if !exists {
+		return fmt.Errorf("adopted_head_evidence_mismatch")
+	}
+	adoption, ok := adopted.Event().(ReviewHeadAdoptedJournalEvent)
+	if !ok {
+		return fmt.Errorf("adopted_head_evidence_mismatch")
+	}
+	evidenceDigest, err := adoption.EvidenceDigest()
+	if err != nil {
+		return fmt.Errorf("adopted_head_evidence_mismatch")
+	}
+	if intent.acceptanceMode !=
+		IntegrationAcceptanceAdoptedHead ||
+		intent.adoptedHeadEventDigest != evidenceDigest ||
 		!intent.reviewReadinessDigest.IsZero() {
 		return fmt.Errorf("adopted_head_evidence_mismatch")
 	}

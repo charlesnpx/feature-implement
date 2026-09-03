@@ -174,7 +174,6 @@ func TestFeatureRefCASRejectsDriftWithoutChangingTheRef(t *testing.T) {
 		"update-ref",
 		featureRef,
 		rawGitObject(drift),
-		rawGitObject(scenario.base),
 	)
 	beforeRecords := journalRecordCount(t, scenario.journal)
 	_, err := workspace.IntegrateMergeUnit(

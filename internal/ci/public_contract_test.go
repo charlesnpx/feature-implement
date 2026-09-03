@@ -41,9 +41,9 @@ func TestPublishedPublicContractIncludesLicenseOperationsAndNotices(t *testing.T
 		"### Deferred GitHub design",
 		"### License and third-party notices",
 		"Local completion is not",
-		"runtime without the local v7 marker must",
+		"runtime without the local v8 marker must",
 		"committed plan and current lock",
-		"The target must be a local non-bare Git repository",
+		"The target must be a primary local non-bare Git worktree",
 	} {
 		if !strings.Contains(readme, required) {
 			t.Fatalf("README public contract omits %q", required)

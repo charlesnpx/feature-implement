@@ -21,13 +21,13 @@ func TestLocalCommandDecodersRequireExactReceiptFreeFields(t *testing.T) {
 		want   string
 	}{
 		{
-			name: "init requires worktree root",
+			name: "init accepts derived roots",
 			source: `{
   "schema_version": 2,
   "occurred_at": "2026-07-22T10:00:00Z"
 }`,
 			target: func() any { return &initializeRequest{} },
-			want:   "worktree_root",
+			want:   "",
 		},
 		{
 			name: "reserve rejects caller base",
@@ -80,6 +80,9 @@ func TestLocalCommandDecodersRequireExactReceiptFreeFields(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			err := decodeRequest([]byte(test.source), test.target())
+			if test.want == "" && err == nil {
+				return
+			}
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("decode error = %v, want %q", err, test.want)
 			}
@@ -376,16 +379,14 @@ merge_units:
 		t.Fatal(err)
 	}
 	workspaceDir := canonicalWorkspaceCommandTempDir(t)
-	worktreeRoot := canonicalWorkspaceCommandTempDir(t)
 	if _, err := initializeWorkspace(
 		context.Background(), bundle,
 		Options{
 			WorkspaceDir: workspaceDir,
-			Input: []byte(fmt.Sprintf(`{
+			Input: []byte(`{
   "schema_version": 2,
-  "occurred_at": "2026-07-25T18:00:00Z",
-  "worktree_root": %q
-}`, worktreeRoot)),
+	  "occurred_at": "2026-07-25T18:00:00Z"
+}`),
 		},
 	); err != nil {
 		t.Fatal(err)

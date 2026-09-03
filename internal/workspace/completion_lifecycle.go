@@ -219,12 +219,6 @@ func readCompletionRuntime(
 				"completion definition does not match the active workspace generation",
 			)
 	}
-	if err := verifyWorkspaceWorktreeRootBinding(
-		runtime.worktreeRoot,
-	); err != nil {
-		return JournalSnapshot{}, ReviewRuntimeProjection{},
-			WorkspaceRuntimeProjection{}, err
-	}
 	return snapshot, reviews, runtime, nil
 }
 

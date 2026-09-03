@@ -183,7 +183,7 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"workspace-v2 bundle",
 			"feature.workspace.bundle.json",
 			"feature workspace validate --bundle <bundle-dir> --write-locks --json",
-			"dedicated `<runtime-dir>` and `<worktree-root>` outside the primary",
+			"CLI derives the runtime as a sibling of `<bundle-dir>`",
 			"primary checkout may be dirty",
 			"feature workspace schema requests --json",
 			"feature workspace recover",

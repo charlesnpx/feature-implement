@@ -41,10 +41,17 @@ func TestWorkspaceBundleRejectsHiddenDuplicateAndAmbiguousSources(t *testing.T) 
 		}
 	})
 
-	t.Run("generated source", func(t *testing.T) {
+	t.Run("ordinary generated-named source", func(t *testing.T) {
 		root := writeDefinitionBundle(t, fixture, map[string]any{"workspace": "generated/workspace.yaml"})
-		if _, err := workspace.LoadWorkspaceBundle(root); err == nil || !strings.Contains(err.Error(), "tool-owned generated path") {
-			t.Fatalf("generated source error = %v", err)
+		path := filepath.Join(root, "generated", "workspace.yaml")
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, fixture.sources.Workspace.Bytes, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := workspace.LoadWorkspaceBundle(root); err != nil {
+			t.Fatalf("ordinary generated-named source error = %v", err)
 		}
 	})
 
@@ -75,7 +82,7 @@ func TestWorkspaceBundleRejectsHiddenDuplicateAndAmbiguousSources(t *testing.T) 
 	})
 }
 
-func TestWorkspaceBundleGeneratedLocksAreImmutableOwnedProjections(t *testing.T) {
+func TestWorkspaceBundleWritesOneAtomicCanonicalLock(t *testing.T) {
 	t.Parallel()
 
 	fixture := newDefinitionFixture(t)
@@ -84,19 +91,16 @@ func TestWorkspaceBundleGeneratedLocksAreImmutableOwnedProjections(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	artifacts, err := workspace.WorkspaceBundleLockArtifacts(bundle)
+	first, err := workspace.WriteWorkspaceBundleLock(
+		bundle, workspace.WorkspaceLockWriteOptions{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	generated := filepath.Join(root, workspace.WorkspaceGeneratedDirectory)
-	first, err := workspace.SynchronizeMaterialization(generated, "bundle-test/v2", artifacts, workspace.MaterializationOptions{})
-	if err != nil {
-		t.Fatal(err)
+	if !first.Created() || first.Updated() {
+		t.Fatalf("initial workspace lock result = %#v", first)
 	}
-	if len(first.Created()) != 2 || len(first.Updated()) != 0 || len(first.Deleted()) != 0 {
-		t.Fatalf("initial generated lock result = created %v updated %v deleted %v", first.Created(), first.Updated(), first.Deleted())
-	}
-	workspaceLock := filepath.Join(generated, workspace.WorkspaceLockFileName)
+	workspaceLock := filepath.Join(root, workspace.WorkspaceLockFileName)
 	content, err := os.ReadFile(workspaceLock)
 	if err != nil {
 		t.Fatal(err)
@@ -108,29 +112,85 @@ func TestWorkspaceBundleGeneratedLocksAreImmutableOwnedProjections(t *testing.T)
 	if _, exists := document["state"]; exists {
 		t.Fatalf("generated workspace lock contains mutable runtime state: %s", content)
 	}
-	second, err := workspace.SynchronizeMaterialization(generated, "bundle-test/v2", artifacts, workspace.MaterializationOptions{})
+	second, err := workspace.WriteWorkspaceBundleLock(
+		bundle, workspace.WorkspaceLockWriteOptions{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(second.Created()) != 0 || len(second.Updated()) != 0 || len(second.Deleted()) != 0 {
-		t.Fatalf("idempotent generated lock result = created %v updated %v deleted %v", second.Created(), second.Updated(), second.Deleted())
+	if second.Created() || second.Updated() {
+		t.Fatalf("idempotent workspace lock result = %#v", second)
 	}
 
 	modified := append(append([]byte(nil), content...), '\n')
 	if err := os.WriteFile(workspaceLock, modified, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err = workspace.SynchronizeMaterialization(generated, "bundle-test/v2", artifacts, workspace.MaterializationOptions{})
-	var conflicts workspace.MaterializationConflictError
-	if !errors.As(err, &conflicts) {
-		t.Fatalf("modified generated lock error = %T %v", err, err)
+	_, err = workspace.WriteWorkspaceBundleLock(
+		bundle, workspace.WorkspaceLockWriteOptions{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "committed workspace lock authority") {
+		t.Fatalf("modified workspace lock error = %v", err)
 	}
 	after, readErr := os.ReadFile(workspaceLock)
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
 	if string(after) != string(modified) {
-		t.Fatalf("modified generated lock was overwritten:\n%s", after)
+		t.Fatalf("modified workspace lock was overwritten:\n%s", after)
+	}
+}
+
+func TestWorkspaceBundleLockTornWriteRetainsPriorReadableLock(t *testing.T) {
+	t.Parallel()
+
+	fixture := newDefinitionFixture(t)
+	root := writeDefinitionBundle(t, fixture, nil)
+	bundle, err := workspace.LoadWorkspaceBundle(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.WriteWorkspaceBundleLock(
+		bundle, workspace.WorkspaceLockWriteOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	runTargetGitTest(t, root, "init", "--quiet", "--initial-branch=main")
+	runTargetGitTest(t, root, "config", "user.name", "Workspace Lock Test")
+	runTargetGitTest(t, root, "config", "user.email", "workspace-lock@example.test")
+	runTargetGitTest(t, root, "add", ".")
+	runTargetGitTest(t, root, "commit", "--quiet", "-m", "Commit canonical workspace lock")
+	before, err := workspace.ReadWorkspaceBundleLock(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planPath := filepath.Join(root, "plans", "alpha.yaml")
+	plan, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(planPath, append(plan, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err = workspace.LoadWorkspaceBundle(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fault := errors.New("simulated torn write")
+	_, err = workspace.WriteWorkspaceBundleLock(bundle, workspace.WorkspaceLockWriteOptions{
+		FaultInjector: func(point workspace.WorkspaceLockWriteFaultPoint) error {
+			if point == workspace.WorkspaceLockFaultAfterTemporarySync {
+				return fault
+			}
+			return nil
+		},
+	})
+	if !errors.Is(err, fault) {
+		t.Fatalf("simulated workspace lock tear = %v", err)
+	}
+	after, err := workspace.ReadWorkspaceBundleLock(bundle)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("readable lock after simulated tear = %q, %v", after, err)
 	}
 }
 
