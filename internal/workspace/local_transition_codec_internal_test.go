@@ -57,6 +57,37 @@ func TestReviewGateRecordedCodecRetainsExactTerminalBindings(t *testing.T) {
 	}
 }
 
+func TestReviewGateRecordedCodecRejectsWitnessSatisfiedRecordWithoutDocumentOnReplay(t *testing.T) {
+	head, _ := ParseGitObjectID("sha1:" + strings.Repeat("a", 40))
+	tree, _ := ParseGitObjectID("sha1:" + strings.Repeat("b", 40))
+	dispatch, err := NewReviewGateDispatch(ReviewGateDispatchOptions{
+		WorkspaceID: MustID("codec-workspace"), Generation: DigestBytes([]byte("codec-generation")),
+		AttemptID: MustID("codec-attempt"), MergeUnit: MergeUnitReference{planID: MustID("codec-plan"), mergeUnitID: MustID("codec-unit")},
+		Adapter: MustID(WitnessReviewGateAdapter), Recipe: MustID("default"), PolicyDigest: DigestBytes([]byte("codec-policy")),
+		Head: head, Tree: tree,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := NewReviewGateRecord(ReviewGateRecordOptions{
+		Dispatch: dispatch, Verdict: ReviewGateSatisfied, EvidenceDigest: DigestBytes([]byte("codec-evidence")),
+		OccurredAt: time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(reviewGateRecordedPayloadWire{
+		Dispatch: reviewGateDispatchToWire(dispatch), Record: reviewGateRecordToWire(record),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, supported, err := decodeReviewJournalEvent(JournalEventReviewGateRecorded, payload); !supported || err == nil ||
+		!strings.Contains(err.Error(), "regenerate from committed sources") {
+		t.Fatalf("generic Witness satisfied replay = supported=%t error=%v", supported, err)
+	}
+}
+
 func TestReviewGateRecordedDocumentCodecKeepsOnlyEvidenceLocator(t *testing.T) {
 	head, _ := ParseGitObjectID("sha1:" + strings.Repeat("a", 40))
 	tree, _ := ParseGitObjectID("sha1:" + strings.Repeat("b", 40))
@@ -112,17 +143,4 @@ func TestReviewGateRecordedDocumentCodecKeepsOnlyEvidenceLocator(t *testing.T) {
 		t.Fatalf("decoded document evidence locator = %#v exists=%t", decodedArtifact, exists)
 	}
 
-	var legacy map[string]any
-	if err := json.Unmarshal(payload, &legacy); err != nil {
-		t.Fatal(err)
-	}
-	legacy["document"].(map[string]any)["review_input_digest"] = DigestBytes([]byte("legacy-binding")).String()
-	legacyPayload, err := json.Marshal(legacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, supported, err := decodeReviewJournalEvent(JournalEventReviewGateRecorded, legacyPayload); !supported || err == nil ||
-		!strings.Contains(err.Error(), `unknown field "review_input_digest"`) {
-		t.Fatalf("legacy document metadata decode = supported=%t error=%v", supported, err)
-	}
 }

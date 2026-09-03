@@ -172,7 +172,7 @@ func executeReview(ctx context.Context, bundle workspace.WorkspaceBundle, option
 		if err != nil {
 			return nil, err
 		}
-		return reviewCommandResult("review.record", reviewGateRecordView(recorded.GateRecord()), journal, definition)
+		return reviewCommandResult("review.record", reviewGateRecordView(recorded), journal, definition)
 	case "record-document":
 		var input recordReviewDocumentInput
 		if err := decodeRequest(options.Input, &input); err != nil {

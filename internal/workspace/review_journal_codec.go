@@ -19,17 +19,18 @@ type reviewHeadAdoptedPayloadWire struct {
 }
 
 type reviewGateDispatchPayloadWire struct {
-	WorkspaceID  string `json:"workspace_id"`
-	Generation   string `json:"generation"`
-	AttemptID    string `json:"attempt_id"`
-	PlanID       string `json:"plan_id"`
-	MergeUnitID  string `json:"merge_unit_id"`
-	Adapter      string `json:"adapter"`
-	Recipe       string `json:"recipe"`
-	PolicyDigest string `json:"policy_digest"`
-	Head         string `json:"head"`
-	Tree         string `json:"tree"`
-	Digest       string `json:"digest"`
+	WorkspaceID     string  `json:"workspace_id"`
+	Generation      string  `json:"generation"`
+	AttemptID       string  `json:"attempt_id"`
+	PlanID          string  `json:"plan_id"`
+	MergeUnitID     string  `json:"merge_unit_id"`
+	Adapter         string  `json:"adapter"`
+	Recipe          string  `json:"recipe"`
+	PolicyDigest    string  `json:"policy_digest"`
+	Head            string  `json:"head"`
+	Tree            string  `json:"tree"`
+	TerminalOrdinal *uint64 `json:"terminal_ordinal"`
+	Digest          string  `json:"digest"`
 }
 
 type reviewGateRecordPayloadWire struct {
@@ -157,12 +158,18 @@ func decodeReviewJournalEvent(
 			return nil, true, err
 		}
 		if wire.Document == nil {
+			if err := validateReviewGateRecordDocumentContract(dispatch, record, nil); err != nil {
+				return nil, true, err
+			}
 			event, eventErr := NewReviewGateRecordedJournalEvent(dispatch, record)
 			return event, true, eventErr
 		}
 		document, documentErr := reviewDocumentArtifactFromWire(*wire.Document, record.evidenceDigest)
 		if documentErr != nil {
 			return nil, true, documentErr
+		}
+		if err := validateReviewGateRecordDocumentContract(dispatch, record, &document); err != nil {
+			return nil, true, err
 		}
 		event, eventErr := NewReviewGateRecordedDocumentJournalEvent(dispatch, record, document)
 		return event, true, eventErr
@@ -172,12 +179,14 @@ func decodeReviewJournalEvent(
 }
 
 func reviewGateDispatchToWire(dispatch ReviewGateDispatch) reviewGateDispatchPayloadWire {
+	terminalOrdinal := dispatch.terminalOrdinal
 	return reviewGateDispatchPayloadWire{
 		WorkspaceID: dispatch.workspaceID.String(), Generation: dispatch.generation.String(),
 		AttemptID: dispatch.attemptID.String(), PlanID: dispatch.mergeUnit.planID.String(),
 		MergeUnitID: dispatch.mergeUnit.mergeUnitID.String(), Adapter: dispatch.adapter.String(),
 		Recipe: dispatch.recipe.String(), PolicyDigest: dispatch.policyDigest.String(),
-		Head: dispatch.head.String(), Tree: dispatch.tree.String(), Digest: dispatch.digest.String(),
+		Head: dispatch.head.String(), Tree: dispatch.tree.String(), TerminalOrdinal: &terminalOrdinal,
+		Digest: dispatch.digest.String(),
 	}
 }
 
@@ -218,9 +227,13 @@ func reviewGateDispatchFromWire(wire reviewGateDispatchPayloadWire) (ReviewGateD
 	if err != nil {
 		return ReviewGateDispatch{}, err
 	}
+	if wire.TerminalOrdinal == nil {
+		return ReviewGateDispatch{}, fmt.Errorf("review gate dispatch terminal ordinal is required; regenerate from committed sources")
+	}
 	dispatch, err := NewReviewGateDispatch(ReviewGateDispatchOptions{
 		WorkspaceID: workspaceID, Generation: generation, AttemptID: attemptID, MergeUnit: mergeUnit,
 		Adapter: adapter, Recipe: recipe, PolicyDigest: policyDigest, Head: head, Tree: tree,
+		TerminalOrdinal: *wire.TerminalOrdinal,
 	})
 	if err != nil {
 		return ReviewGateDispatch{}, err

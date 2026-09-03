@@ -163,7 +163,7 @@ func (harness *gatedReviewHarness) record(
 	if err != nil {
 		t.Fatal(err)
 	}
-	return result.GateRecord()
+	return result
 }
 
 func TestReviewGateDispatchUsesFrozenCopyAndOpaquePolicy(t *testing.T) {
@@ -328,7 +328,7 @@ func TestWitnessReviewTerminalRoutesAreExclusive(t *testing.T) {
 	}
 	recordRequest.Verdict = workspace.ReviewGateFailedToRun
 	recorded, err := workspace.RecordAttemptReviewGate(harness.journal, harness.definition, recordRequest)
-	if err != nil || recorded.GateRecord().Verdict() != workspace.ReviewGateFailedToRun {
+	if err != nil || recorded.Verdict() != workspace.ReviewGateFailedToRun {
 		t.Fatalf("generic failed-to-run Witness record = %#v error=%v", recorded, err)
 	}
 }
@@ -410,6 +410,25 @@ func TestFailedToRunIsTerminalGateFactWithoutChangingAttemptLifecycle(t *testing
 	}
 	if _, err := os.Stat(dispatched.FrozenCopy()); !os.IsNotExist(err) {
 		t.Fatalf("terminal gate left its frozen copy behind: %v", err)
+	}
+}
+
+func TestReviewGateDispatchGetsNewIdentityAfterTerminalRetry(t *testing.T) {
+	t.Parallel()
+
+	harness := newGatedReviewHarness(t)
+	first := harness.dispatch(t, "2026-09-03T12:00:01Z").Dispatch()
+	harness.record(t, first, workspace.ReviewGateFailedToRun, "2026-09-03T12:00:02Z")
+	second := harness.dispatch(t, "2026-09-03T12:00:03Z").Dispatch()
+	if second.Digest() == first.Digest() {
+		t.Fatalf("post-terminal dispatch reused digest %s", second.Digest())
+	}
+	snapshot, err := harness.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.RebuildReviewRuntime(snapshot, harness.definition); err != nil {
+		t.Fatalf("post-terminal dispatch poisoned the review projection: %v", err)
 	}
 }
 

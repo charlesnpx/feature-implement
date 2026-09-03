@@ -16,17 +16,6 @@ type ReviewRuntimeProjection struct {
 	core             WorkspaceRuntimeProjection
 }
 
-func (projection ReviewRuntimeProjection) WorkspaceID() ID { return projection.workspaceID }
-func (projection ReviewRuntimeProjection) ActiveGeneration() Digest {
-	return projection.activeGeneration
-}
-func (projection ReviewRuntimeProjection) States() []ReviewGateState {
-	result := make([]ReviewGateState, 0, len(projection.states))
-	for _, state := range projection.states {
-		result = append(result, cloneReviewGateState(state))
-	}
-	return result
-}
 func (projection ReviewRuntimeProjection) State(attemptID ID) (ReviewGateState, bool) {
 	if index := reviewGateStateIndex(projection.states, attemptID); index >= 0 {
 		return cloneReviewGateState(projection.states[index]), true
@@ -100,7 +89,6 @@ func reduceReviewRuntime(current ReviewRuntimeProjection, record JournalRecord) 
 	case ReviewHeadAdoptedJournalEvent:
 		// A head adoption changes what can satisfy readiness, but terminal facts
 		// about older artifacts remain useful crash-forensics records.
-		_ = event
 	case ReviewGateDispatchedJournalEvent:
 		dispatch := event.dispatch
 		attempt, exists := current.core.Attempt(dispatch.attemptID)
@@ -154,7 +142,13 @@ func reduceReviewRuntime(current ReviewRuntimeProjection, record JournalRecord) 
 		if gateRecord.occurredAt != record.occurredAt {
 			return ReviewRuntimeProjection{}, fmt.Errorf("review gate record occurrence time does not match its journal record")
 		}
+		if err := validateReviewGateRecordDocumentContract(dispatch, gateRecord, event.document); err != nil {
+			return ReviewRuntimeProjection{}, err
+		}
 		state.records = append(state.records, gateRecord)
+		if event.document != nil {
+			state.documentedDispatches = append(state.documentedDispatches, gateRecord.dispatchDigest)
+		}
 		next.states[index] = state
 	}
 	return next, nil
@@ -189,7 +183,8 @@ func canonicalReviewRuntime(projection ReviewRuntimeProjection) ([]byte, error) 
 		Digest string `json:"digest"`
 	}
 	type gateRecordJSON struct {
-		Digest string `json:"digest"`
+		Digest           string `json:"digest"`
+		DocumentArtifact bool   `json:"document_artifact"`
 	}
 	type stateJSON struct {
 		AttemptID   string           `json:"attempt_id"`
@@ -220,7 +215,9 @@ func canonicalReviewRuntime(projection ReviewRuntimeProjection) ([]byte, error) 
 			item.Dispatches = append(item.Dispatches, dispatchJSON{Digest: dispatch.digest.String()})
 		}
 		for _, gateRecord := range state.records {
-			item.Records = append(item.Records, gateRecordJSON{Digest: gateRecord.digest.String()})
+			item.Records = append(item.Records, gateRecordJSON{
+				Digest: gateRecord.digest.String(), DocumentArtifact: state.hasDocumentArtifact(gateRecord.dispatchDigest),
+			})
 		}
 		value.States = append(value.States, item)
 	}

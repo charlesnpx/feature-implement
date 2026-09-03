@@ -313,13 +313,11 @@ func RebuildWorkspaceView(snapshot JournalSnapshot, definition EffectiveWorkspac
 			reviewGate.Status, reviewGate.Reason = GatePassed, "not_configured"
 		default:
 			state, exists := reviews.State(attempt.attemptID)
-			if record, satisfied := satisfiedReviewGateForHead(state, exists, gateConfig, attempt.verifiedHead); satisfied {
+			if satisfiedReviewGateForHead(state, exists, gateConfig, attempt.verifiedHead) {
 				reviewGate.Status, reviewGate.Reason = GatePassed, "satisfied_exact_artifact"
-				_ = record
 			} else if exists {
-				if pending, pendingExists := state.Pending(); pendingExists {
+				if _, pendingExists := state.Pending(); pendingExists {
 					reviewGate.Status, reviewGate.Reason = GatePending, "gate_dispatched"
-					_ = pending
 				} else if record, recorded := latestReviewGateRecord(state); recorded {
 					reviewGate.Status, reviewGate.Reason = GateFailed, string(record.Verdict())
 				} else {
@@ -573,19 +571,19 @@ func workspaceAttemptViews(
 func workspaceReviewViews(
 	reviews ReviewRuntimeProjection,
 ) []WorkspaceReview {
-	states := reviews.States()
+	states := reviews.states
 	result := make([]WorkspaceReview, 0, len(states))
 	for _, state := range states {
-		dispatches := state.Dispatches()
+		dispatches := state.dispatches
 		if len(dispatches) == 0 {
 			continue
 		}
 		dispatch := dispatches[len(dispatches)-1]
 		view := WorkspaceReview{
-			AttemptID:      state.AttemptID().String(),
-			PlanID:         state.MergeUnit().PlanID().String(),
-			MergeUnitID:    state.MergeUnit().MergeUnitID().String(),
-			Generation:     state.Generation().String(),
+			AttemptID:      state.attemptID.String(),
+			PlanID:         state.mergeUnit.planID.String(),
+			MergeUnitID:    state.mergeUnit.mergeUnitID.String(),
+			Generation:     state.generation.String(),
 			DispatchDigest: dispatch.Digest().String(),
 			Adapter:        dispatch.Adapter().String(),
 			Recipe:         dispatch.Recipe().String(),
@@ -617,23 +615,23 @@ func satisfiedReviewGateForHead(
 	exists bool,
 	config ReviewGateConfig,
 	head GitObjectID,
-) (ReviewGateRecord, bool) {
+) bool {
 	if !exists {
-		return ReviewGateRecord{}, false
+		return false
 	}
-	for _, record := range state.Records() {
+	for _, record := range state.records {
 		if record.Verdict() != ReviewGateSatisfied || record.Head() != head {
 			continue
 		}
-		if satisfied, ok := state.Satisfied(config, head, record.Tree()); ok {
-			return satisfied, true
+		if _, ok := state.Satisfied(config, head, record.Tree()); ok {
+			return true
 		}
 	}
-	return ReviewGateRecord{}, false
+	return false
 }
 
 func latestReviewGateRecord(state ReviewGateState) (ReviewGateRecord, bool) {
-	records := state.Records()
+	records := state.records
 	if len(records) == 0 {
 		return ReviewGateRecord{}, false
 	}

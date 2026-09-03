@@ -31,28 +31,30 @@ func (verdict ReviewGateVerdict) valid() bool {
 // tree to an adapter. Its digest identifies one repeatable request, including
 // the policy bytes selected by the bundle.
 type ReviewGateDispatch struct {
-	workspaceID  ID
-	generation   Digest
-	attemptID    ID
-	mergeUnit    MergeUnitReference
-	adapter      ID
-	recipe       ID
-	policyDigest Digest
-	head         GitObjectID
-	tree         GitObjectID
-	digest       Digest
+	workspaceID     ID
+	generation      Digest
+	attemptID       ID
+	mergeUnit       MergeUnitReference
+	adapter         ID
+	recipe          ID
+	policyDigest    Digest
+	head            GitObjectID
+	tree            GitObjectID
+	terminalOrdinal uint64
+	digest          Digest
 }
 
 type ReviewGateDispatchOptions struct {
-	WorkspaceID  ID
-	Generation   Digest
-	AttemptID    ID
-	MergeUnit    MergeUnitReference
-	Adapter      ID
-	Recipe       ID
-	PolicyDigest Digest
-	Head         GitObjectID
-	Tree         GitObjectID
+	WorkspaceID     ID
+	Generation      Digest
+	AttemptID       ID
+	MergeUnit       MergeUnitReference
+	Adapter         ID
+	Recipe          ID
+	PolicyDigest    Digest
+	Head            GitObjectID
+	Tree            GitObjectID
+	TerminalOrdinal uint64
 }
 
 func NewReviewGateDispatch(options ReviewGateDispatchOptions) (ReviewGateDispatch, error) {
@@ -61,6 +63,7 @@ func NewReviewGateDispatch(options ReviewGateDispatchOptions) (ReviewGateDispatc
 		attemptID: options.AttemptID, mergeUnit: options.MergeUnit,
 		adapter: options.Adapter, recipe: options.Recipe,
 		policyDigest: options.PolicyDigest, head: options.Head, tree: options.Tree,
+		terminalOrdinal: options.TerminalOrdinal,
 	}
 	canonical, err := canonicalReviewGateDispatch(dispatch)
 	if err != nil {
@@ -89,23 +92,25 @@ func canonicalReviewGateDispatch(dispatch ReviewGateDispatch) ([]byte, error) {
 		return nil, fmt.Errorf("review gate dispatch requires exact workspace, adapter, policy, head, and tree bindings")
 	}
 	return json.Marshal(struct {
-		SchemaVersion int    `json:"schema_version"`
-		WorkspaceID   string `json:"workspace_id"`
-		Generation    string `json:"generation"`
-		AttemptID     string `json:"attempt_id"`
-		PlanID        string `json:"plan_id"`
-		MergeUnitID   string `json:"merge_unit_id"`
-		Adapter       string `json:"adapter"`
-		Recipe        string `json:"recipe"`
-		PolicyDigest  string `json:"policy_digest"`
-		Head          string `json:"head"`
-		Tree          string `json:"tree"`
+		SchemaVersion   int    `json:"schema_version"`
+		WorkspaceID     string `json:"workspace_id"`
+		Generation      string `json:"generation"`
+		AttemptID       string `json:"attempt_id"`
+		PlanID          string `json:"plan_id"`
+		MergeUnitID     string `json:"merge_unit_id"`
+		Adapter         string `json:"adapter"`
+		Recipe          string `json:"recipe"`
+		PolicyDigest    string `json:"policy_digest"`
+		Head            string `json:"head"`
+		Tree            string `json:"tree"`
+		TerminalOrdinal uint64 `json:"terminal_ordinal"`
 	}{
 		SchemaVersion: 2, WorkspaceID: dispatch.workspaceID.String(),
 		Generation: dispatch.generation.String(), AttemptID: dispatch.attemptID.String(),
 		PlanID: dispatch.mergeUnit.planID.String(), MergeUnitID: dispatch.mergeUnit.mergeUnitID.String(),
 		Adapter: dispatch.adapter.String(), Recipe: dispatch.recipe.String(),
 		PolicyDigest: dispatch.policyDigest.String(), Head: dispatch.head.String(), Tree: dispatch.tree.String(),
+		TerminalOrdinal: dispatch.terminalOrdinal,
 	})
 }
 
@@ -191,22 +196,13 @@ func canonicalReviewGateRecord(record ReviewGateRecord) ([]byte, error) {
 // ReviewGateState is a projection of durable requests and terminal records for
 // one attempt. It intentionally exposes no assessment details.
 type ReviewGateState struct {
-	workspaceID ID
-	generation  Digest
-	attemptID   ID
-	mergeUnit   MergeUnitReference
-	dispatches  []ReviewGateDispatch
-	records     []ReviewGateRecord
-}
-
-func (state ReviewGateState) Generation() Digest            { return state.generation }
-func (state ReviewGateState) AttemptID() ID                 { return state.attemptID }
-func (state ReviewGateState) MergeUnit() MergeUnitReference { return state.mergeUnit }
-func (state ReviewGateState) Dispatches() []ReviewGateDispatch {
-	return append([]ReviewGateDispatch(nil), state.dispatches...)
-}
-func (state ReviewGateState) Records() []ReviewGateRecord {
-	return append([]ReviewGateRecord(nil), state.records...)
+	workspaceID          ID
+	generation           Digest
+	attemptID            ID
+	mergeUnit            MergeUnitReference
+	dispatches           []ReviewGateDispatch
+	records              []ReviewGateRecord
+	documentedDispatches []Digest
 }
 
 func (state ReviewGateState) Dispatch(digest Digest) (ReviewGateDispatch, bool) {
@@ -250,6 +246,9 @@ func (state ReviewGateState) Satisfied(
 		dispatch, exists := state.Dispatch(record.dispatchDigest)
 		if exists && dispatch.adapter == record.adapter && dispatch.recipe == record.recipe &&
 			dispatch.policyDigest == record.policyDigest && dispatch.head == record.head && dispatch.tree == record.tree {
+			if reviewGateRecordRequiresDocumentArtifact(dispatch, record) && !state.hasDocumentArtifact(record.dispatchDigest) {
+				continue
+			}
 			return record, true
 		}
 	}
@@ -259,7 +258,17 @@ func (state ReviewGateState) Satisfied(
 func cloneReviewGateState(state ReviewGateState) ReviewGateState {
 	state.dispatches = append([]ReviewGateDispatch(nil), state.dispatches...)
 	state.records = append([]ReviewGateRecord(nil), state.records...)
+	state.documentedDispatches = append([]Digest(nil), state.documentedDispatches...)
 	return state
+}
+
+func (state ReviewGateState) hasDocumentArtifact(dispatchDigest Digest) bool {
+	for _, documented := range state.documentedDispatches {
+		if documented == dispatchDigest {
+			return true
+		}
+	}
+	return false
 }
 
 func sortReviewGateStates(states []ReviewGateState) {
@@ -296,6 +305,9 @@ func newReviewGateReadiness(
 	record, satisfied := state.Satisfied(config, head, tree)
 	if !satisfied {
 		return ReviewGateReadiness{}, fmt.Errorf("attempt %s has no satisfied review gate for the exact head and tree", attempt.attemptID)
+	}
+	if ReviewGateCarriesDocumentContract(record.adapter) && !state.hasDocumentArtifact(record.dispatchDigest) {
+		return ReviewGateReadiness{}, fmt.Errorf("attempt %s satisfied review gate lacks its required document artifact", attempt.attemptID)
 	}
 	readiness := ReviewGateReadiness{
 		workspaceID: definition.workspace.id, generation: definition.generation,

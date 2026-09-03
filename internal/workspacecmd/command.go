@@ -238,7 +238,7 @@ func RequestSchemas() map[string]any {
 			"occurred_at", "attempt_id", "dispatch_digest", "verdict", "document",
 		}, occurred(map[string]any{
 			"attempt_id": stringProperty(), "dispatch_digest": stringProperty(),
-			"verdict": enumProperty("satisfied", "not_satisfied", "failed_to_run"),
+			"verdict": enumProperty("satisfied", "not_satisfied"),
 			"document": map[string]any{
 				"type":        "object",
 				"description": "Raw review-report-v1 document; the Witness contract performs strict decoding and validation.",

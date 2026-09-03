@@ -152,11 +152,15 @@ func DispatchAttemptReviewGate(
 		}
 	}
 
+	terminalOrdinal := uint64(0)
+	if state, exists := projection.State(attempt.attemptID); exists {
+		terminalOrdinal = uint64(len(state.records))
+	}
 	dispatch, err := NewReviewGateDispatch(ReviewGateDispatchOptions{
 		WorkspaceID: definition.workspace.id, Generation: definition.generation,
 		AttemptID: attempt.attemptID, MergeUnit: attempt.mergeUnit,
 		Adapter: config.adapter, Recipe: config.recipe, PolicyDigest: config.policyDigest,
-		Head: artifact.head, Tree: artifact.tree,
+		Head: artifact.head, Tree: artifact.tree, TerminalOrdinal: terminalOrdinal,
 	})
 	if err != nil {
 		return ReviewGateDispatchResult{}, err
@@ -247,65 +251,59 @@ type RecordAttemptReviewGateRequest struct {
 	OccurredAt     time.Time
 }
 
-type ReviewGateRecordResult struct {
-	record ReviewGateRecord
-}
-
-func (result ReviewGateRecordResult) GateRecord() ReviewGateRecord { return result.record }
-
 // RecordAttemptReviewGate stores an opaque terminal result. Dispatches with a
 // document contract use this route only to record a failed-to-run outcome.
 func RecordAttemptReviewGate(
 	journal *WorkspaceJournal,
 	definition EffectiveWorkspaceDefinition,
 	request RecordAttemptReviewGateRequest,
-) (ReviewGateRecordResult, error) {
+) (ReviewGateRecord, error) {
 	if journal == nil || request.AttemptID.IsZero() || request.DispatchDigest.IsZero() ||
 		!request.Verdict.valid() || request.EvidenceDigest.IsZero() || request.OccurredAt.IsZero() {
-		return ReviewGateRecordResult{}, fmt.Errorf("review gate record requires journal, attempt, dispatch, verdict, evidence, and occurrence time")
+		return ReviewGateRecord{}, fmt.Errorf("review gate record requires journal, attempt, dispatch, verdict, evidence, and occurrence time")
 	}
 	snapshot, projection, err := readReviewRuntime(journal, definition)
 	if err != nil {
-		return ReviewGateRecordResult{}, err
+		return ReviewGateRecord{}, err
 	}
 	state, exists := projection.State(request.AttemptID)
 	if !exists {
-		return ReviewGateRecordResult{}, fmt.Errorf("attempt %s has no review gate dispatch", request.AttemptID)
+		return ReviewGateRecord{}, fmt.Errorf("attempt %s has no review gate dispatch", request.AttemptID)
 	}
 	dispatch, exists := state.Dispatch(request.DispatchDigest)
 	if !exists {
-		return ReviewGateRecordResult{}, fmt.Errorf("review gate dispatch %s is unknown for attempt %s", request.DispatchDigest, request.AttemptID)
+		return ReviewGateRecord{}, fmt.Errorf("review gate dispatch %s is unknown for attempt %s", request.DispatchDigest, request.AttemptID)
 	}
 	if ReviewGateCarriesDocumentContract(dispatch.adapter) && request.Verdict != ReviewGateFailedToRun {
-		return ReviewGateRecordResult{}, fmt.Errorf("review gate dispatch %s requires a review document for %s", request.DispatchDigest, request.Verdict)
+		return ReviewGateRecord{}, fmt.Errorf("review gate dispatch %s requires a review document for %s", request.DispatchDigest, request.Verdict)
 	}
 	if existing, recorded := state.Record(request.DispatchDigest); recorded {
 		if existing.verdict == request.Verdict && existing.evidenceDigest == request.EvidenceDigest {
 			if err := discardReviewGateFrozenCopy(projection.core.worktreeRoot, dispatch); err != nil {
-				return ReviewGateRecordResult{}, err
+				return ReviewGateRecord{}, err
 			}
-			return ReviewGateRecordResult{record: existing}, nil
+			return existing, nil
 		}
-		return ReviewGateRecordResult{}, fmt.Errorf("review gate dispatch %s already has a different terminal record", request.DispatchDigest)
+		return ReviewGateRecord{}, fmt.Errorf("review gate dispatch %s already has a different terminal record", request.DispatchDigest)
 	}
 	gateRecord, err := NewReviewGateRecord(ReviewGateRecordOptions{
 		Dispatch: dispatch, Verdict: request.Verdict, EvidenceDigest: request.EvidenceDigest,
 		OccurredAt: request.OccurredAt,
 	})
 	if err != nil {
-		return ReviewGateRecordResult{}, err
+		return ReviewGateRecord{}, err
 	}
 	event, err := NewReviewGateRecordedJournalEvent(dispatch, gateRecord)
 	if err != nil {
-		return ReviewGateRecordResult{}, err
+		return ReviewGateRecord{}, err
 	}
 	if _, err := appendReviewJournalEvent(journal, snapshot, event, request.OccurredAt); err != nil {
-		return ReviewGateRecordResult{}, err
+		return ReviewGateRecord{}, err
 	}
 	if err := discardReviewGateFrozenCopy(projection.core.worktreeRoot, dispatch); err != nil {
-		return ReviewGateRecordResult{}, fmt.Errorf("discard terminal review gate frozen copy: %w", err)
+		return ReviewGateRecord{}, fmt.Errorf("discard terminal review gate frozen copy: %w", err)
 	}
-	return ReviewGateRecordResult{record: gateRecord}, nil
+	return gateRecord, nil
 }
 
 // discardReviewGateFrozenCopy removes only the deterministic top-level copy
