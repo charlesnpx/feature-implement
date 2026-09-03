@@ -124,6 +124,9 @@ func DispatchAttemptReviewGate(
 	if !artifact.clean {
 		return ReviewGateDispatchResult{}, fmt.Errorf("review gate dispatch requires an exact committed attempt artifact")
 	}
+	if err := verifyAttemptFinalHistory(ctx, repository, unit, attempt, artifact.head); err != nil {
+		return ReviewGateDispatchResult{}, fmt.Errorf("verify final history before review gate dispatch: %w", err)
+	}
 	if artifact.head != attempt.verifiedHead {
 		adoption, adoptionErr := NewReviewHeadAdoptedJournalEvent(
 			definition.workspace.id, definition.generation, attempt.attemptID, attempt.mergeUnit,

@@ -50,12 +50,7 @@ type reviewGateDispatchedPayloadWire struct {
 }
 
 type reviewDocumentArtifactPayloadWire struct {
-	RawDocumentDigest string `json:"raw_document_digest"`
-	ReportDigest      string `json:"report_digest"`
-	RequestDigest     string `json:"request_digest"`
-	ReviewInputDigest string `json:"review_input_digest"`
-	CharterHash       string `json:"charter_hash"`
-	Path              string `json:"path"`
+	Path string `json:"path"`
 }
 
 type reviewGateRecordedPayloadWire struct {
@@ -165,7 +160,7 @@ func decodeReviewJournalEvent(
 			event, eventErr := NewReviewGateRecordedJournalEvent(dispatch, record)
 			return event, true, eventErr
 		}
-		document, documentErr := reviewDocumentArtifactFromWire(*wire.Document)
+		document, documentErr := reviewDocumentArtifactFromWire(*wire.Document, record.evidenceDigest)
 		if documentErr != nil {
 			return nil, true, documentErr
 		}
@@ -293,38 +288,11 @@ func reviewGateRecordFromWire(wire reviewGateRecordPayloadWire, dispatch ReviewG
 }
 
 func reviewDocumentArtifactToWire(artifact ReviewDocumentArtifact) reviewDocumentArtifactPayloadWire {
-	return reviewDocumentArtifactPayloadWire{
-		RawDocumentDigest: artifact.rawDocumentDigest.String(), ReportDigest: artifact.reportDigest.String(),
-		RequestDigest: artifact.requestDigest.String(), ReviewInputDigest: artifact.reviewInputDigest.String(),
-		CharterHash: artifact.charterHash.String(), Path: artifact.path,
-	}
+	return reviewDocumentArtifactPayloadWire{Path: artifact.path}
 }
 
-func reviewDocumentArtifactFromWire(wire reviewDocumentArtifactPayloadWire) (ReviewDocumentArtifact, error) {
-	rawDocumentDigest, err := ParseDigest(wire.RawDocumentDigest)
-	if err != nil {
-		return ReviewDocumentArtifact{}, err
-	}
-	reportDigest, err := ParseDigest(wire.ReportDigest)
-	if err != nil {
-		return ReviewDocumentArtifact{}, err
-	}
-	requestDigest, err := ParseDigest(wire.RequestDigest)
-	if err != nil {
-		return ReviewDocumentArtifact{}, err
-	}
-	reviewInputDigest, err := ParseDigest(wire.ReviewInputDigest)
-	if err != nil {
-		return ReviewDocumentArtifact{}, err
-	}
-	charterHash, err := ParseDigest(wire.CharterHash)
-	if err != nil {
-		return ReviewDocumentArtifact{}, err
-	}
-	artifact := ReviewDocumentArtifact{
-		rawDocumentDigest: rawDocumentDigest, reportDigest: reportDigest, requestDigest: requestDigest,
-		reviewInputDigest: reviewInputDigest, charterHash: charterHash, path: wire.Path,
-	}
+func reviewDocumentArtifactFromWire(wire reviewDocumentArtifactPayloadWire, evidenceDigest Digest) (ReviewDocumentArtifact, error) {
+	artifact := ReviewDocumentArtifact{rawDocumentDigest: evidenceDigest, path: wire.Path}
 	if err := artifact.validate(); err != nil {
 		return ReviewDocumentArtifact{}, err
 	}

@@ -287,24 +287,17 @@ func requireMatchingReviewConsumerIdentity(reportIdentity, requestIdentity witne
 }
 
 // ReviewDocumentArtifact identifies raw report bytes retained under the
-// runtime state directory. The gate record refers to RawDocumentDigest.
+// runtime state directory. Report bindings belong to the dispatch packet; the
+// terminal record needs only the raw evidence locator.
 type ReviewDocumentArtifact struct {
 	rawDocumentDigest Digest
-	reportDigest      Digest
-	requestDigest     Digest
-	reviewInputDigest Digest
-	charterHash       Digest
 	path              string
 }
 
-func NewReviewDocumentArtifact(rawDocument []byte, reportDigest, requestDigest, reviewInputDigest, charterHash Digest) (ReviewDocumentArtifact, error) {
-	artifact := ReviewDocumentArtifact{
-		rawDocumentDigest: DigestBytes(rawDocument), reportDigest: reportDigest, requestDigest: requestDigest,
-		reviewInputDigest: reviewInputDigest, charterHash: charterHash,
-	}
-	if artifact.rawDocumentDigest.IsZero() || len(rawDocument) == 0 || len(rawDocument) > MaxArtifactBytes ||
-		reportDigest.IsZero() || requestDigest.IsZero() || reviewInputDigest.IsZero() || charterHash.IsZero() {
-		return ReviewDocumentArtifact{}, fmt.Errorf("review document artifact requires bounded raw bytes and complete digests")
+func NewReviewDocumentArtifact(rawDocument []byte) (ReviewDocumentArtifact, error) {
+	artifact := ReviewDocumentArtifact{rawDocumentDigest: DigestBytes(rawDocument)}
+	if artifact.rawDocumentDigest.IsZero() || len(rawDocument) == 0 || len(rawDocument) > MaxArtifactBytes {
+		return ReviewDocumentArtifact{}, fmt.Errorf("review document artifact requires bounded raw bytes")
 	}
 	artifact.path = reviewDocumentArtifactRelativePath(artifact.rawDocumentDigest)
 	if err := artifact.validate(); err != nil {
@@ -314,16 +307,10 @@ func NewReviewDocumentArtifact(rawDocument []byte, reportDigest, requestDigest, 
 }
 
 func (artifact ReviewDocumentArtifact) RawDocumentDigest() Digest { return artifact.rawDocumentDigest }
-func (artifact ReviewDocumentArtifact) ReportDigest() Digest      { return artifact.reportDigest }
-func (artifact ReviewDocumentArtifact) RequestDigest() Digest     { return artifact.requestDigest }
-func (artifact ReviewDocumentArtifact) ReviewInputDigest() Digest { return artifact.reviewInputDigest }
-func (artifact ReviewDocumentArtifact) CharterHash() Digest       { return artifact.charterHash }
 func (artifact ReviewDocumentArtifact) Path() string              { return artifact.path }
 
 func (artifact ReviewDocumentArtifact) validate() error {
-	if artifact.rawDocumentDigest.IsZero() || artifact.reportDigest.IsZero() || artifact.requestDigest.IsZero() ||
-		artifact.reviewInputDigest.IsZero() || artifact.charterHash.IsZero() ||
-		artifact.path != reviewDocumentArtifactRelativePath(artifact.rawDocumentDigest) {
+	if artifact.rawDocumentDigest.IsZero() || artifact.path != reviewDocumentArtifactRelativePath(artifact.rawDocumentDigest) {
 		return fmt.Errorf("review document artifact bindings are incomplete")
 	}
 	return nil
@@ -492,15 +479,7 @@ func RecordAttemptReviewDocument(
 	if err := requireMatchingReviewConsumerIdentity(document.ConsumerIdentity, reviewAdapterConsumerIdentity(materialization.Dispatch().WorkspaceID())); err != nil {
 		return RecordedReviewDocument{}, JournalRecord{}, err
 	}
-	reportDigestText, err := witnessreview.ReviewReportDigest(document)
-	if err != nil {
-		return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("digest validated review report document: %w", err)
-	}
-	reportDigest, err := ParseDigest(reportDigestText)
-	if err != nil {
-		return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("parse validated review report digest: %w", err)
-	}
-	artifact, err := NewReviewDocumentArtifact(request.Document, reportDigest, materialization.RequestDocumentDigest(), materialization.ReviewInputDigest(), materialization.CharterHash())
+	artifact, err := NewReviewDocumentArtifact(request.Document)
 	if err != nil {
 		return RecordedReviewDocument{}, JournalRecord{}, err
 	}

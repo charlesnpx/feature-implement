@@ -91,9 +91,9 @@ func TestWitnessAdapterBuildsFromFrozenCopyAndRetainsRawGateEvidence(t *testing.
 	if !ok || event.Record().EvidenceDigest() != artifact.RawDocumentDigest() {
 		t.Fatalf("recorded event lost raw evidence binding: %#v", record.Event())
 	}
-	if document, exists := event.DocumentArtifact(); !exists || document.RequestDigest() != first.RequestDocumentDigest() ||
-		document.ReviewInputDigest() != first.ReviewInputDigest() || document.CharterHash() != first.CharterHash() {
-		t.Fatalf("document binding = %#v exists=%t", document, exists)
+	if document, exists := event.DocumentArtifact(); !exists ||
+		document.RawDocumentDigest() != workspace.DigestBytes(raw) || document.Path() == "" {
+		t.Fatalf("document evidence locator = %#v exists=%t", document, exists)
 	}
 }
 

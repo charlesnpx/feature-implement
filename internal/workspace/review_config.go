@@ -1,14 +1,10 @@
 package workspace
 
 import (
-	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
 	"unicode/utf8"
 )
-
-const DefaultReviewGateAdapter = "natural-language"
 
 // ReviewGateConfig names an adapter and recipe and binds them to exactly one
 // policy source. The policy is opaque prose to this package; it is retained so
@@ -59,33 +55,6 @@ func (config ReviewGateConfig) complete() bool {
 
 func (config ReviewGateConfig) bound() bool {
 	return config.complete() && len(config.policy) != 0 && !config.policyDigest.IsZero()
-}
-
-func (config ReviewGateConfig) canonicalBytes() ([]byte, error) {
-	if !config.bound() {
-		return nil, fmt.Errorf("review gate configuration is not bound to its policy source")
-	}
-	return json.Marshal(struct {
-		SchemaVersion int    `json:"schema_version"`
-		Adapter       string `json:"adapter"`
-		Recipe        string `json:"recipe"`
-		PolicyFile    string `json:"policy_file"`
-		PolicyDigest  string `json:"policy_digest"`
-	}{
-		SchemaVersion: 2,
-		Adapter:       config.adapter.String(),
-		Recipe:        config.recipe.String(),
-		PolicyFile:    config.policyPath,
-		PolicyDigest:  config.policyDigest.String(),
-	})
-}
-
-func (config ReviewGateConfig) Digest() Digest {
-	canonical, err := config.canonicalBytes()
-	if err != nil {
-		return Digest{}
-	}
-	return DigestBytes(canonical)
 }
 
 func cloneReviewGateConfig(config ReviewGateConfig) ReviewGateConfig {
@@ -175,14 +144,4 @@ func bindExecutionReviewGatePolicies(config ExecutionConfig, policies []SourceAr
 		}
 	}
 	return config, nil
-}
-
-func reviewGateConfigEqual(left, right ReviewGateConfig) bool {
-	return left.adapter == right.adapter && left.recipe == right.recipe &&
-		left.policyPath == right.policyPath && left.policyDigest == right.policyDigest &&
-		string(left.policy) == string(right.policy)
-}
-
-func isNaturalLanguageReviewGate(config ReviewGateConfig) bool {
-	return strings.EqualFold(config.adapter.String(), DefaultReviewGateAdapter)
 }

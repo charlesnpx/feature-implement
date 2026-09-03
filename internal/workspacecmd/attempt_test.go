@@ -19,7 +19,7 @@ type attemptBoundaryCommandFixture struct {
 }
 
 func TestExecuteAttemptPauseRequiresKindAndRecordsPause(t *testing.T) {
-	fixture := newAttemptBoundaryCommandFixture(t)
+	fixture := newAttemptBoundaryCommandFixture(t, false)
 	options := Options{
 		Action:       "attempt",
 		Subaction:    "pause",
@@ -92,14 +92,22 @@ func TestExecuteAttemptPauseRequiresKindAndRecordsPause(t *testing.T) {
 	}
 }
 
-func newAttemptBoundaryCommandFixture(t *testing.T) attemptBoundaryCommandFixture {
+func newAttemptBoundaryCommandFixture(t *testing.T, witnessGate bool) attemptBoundaryCommandFixture {
 	t.Helper()
 	repositoryRoot := canonicalWorkspaceCommandTempDir(t)
 	runGitTest(t, repositoryRoot, "init", "-b", "main")
 	runGitTest(t, repositoryRoot, "config", "user.name", "Feature Test")
 	runGitTest(t, repositoryRoot, "config", "user.email", "feature@example.test")
+	tracked := filepath.Join(repositoryRoot, "tracked.txt")
+	if witnessGate {
+		if err := os.WriteFile(tracked, []byte("seed\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runGitTest(t, repositoryRoot, "add", "tracked.txt")
+		runGitTest(t, repositoryRoot, "commit", "-m", "Seed")
+	}
 	if err := os.WriteFile(
-		filepath.Join(repositoryRoot, "tracked.txt"),
+		tracked,
 		[]byte("base\n"), 0o600,
 	); err != nil {
 		t.Fatal(err)
@@ -111,7 +119,11 @@ func newAttemptBoundaryCommandFixture(t *testing.T) attemptBoundaryCommandFixtur
 	)
 
 	bundleRoot := canonicalWorkspaceCommandTempDir(t)
-	for _, directory := range []string{"plans", "config"} {
+	directories := []string{"plans", "config"}
+	if witnessGate {
+		directories = append(directories, "policies")
+	}
+	for _, directory := range directories {
 		if err := os.MkdirAll(filepath.Join(bundleRoot, directory), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -163,7 +175,7 @@ merge_units:
     story_ids:
       - story-one
 `)
-	write("config/execution.yaml", `schema_version: 2
+	executionConfig := `schema_version: 2
 policy:
   require_passing_checks: true
   allow_write_network: false
@@ -187,7 +199,21 @@ merge_units:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 2
-`)
+`
+	if witnessGate {
+		updated := strings.Replace(
+			executionConfig,
+			"    profile: standard\n    boundary:",
+			"    profile: standard\n    review_gate:\n      adapter: witness\n      recipe: default\n      policy_file: policies/review.md\n    boundary:",
+			1,
+		)
+		if updated == executionConfig {
+			t.Fatal("failed to configure witness review gate")
+		}
+		executionConfig = updated
+		write("policies/review.md", "Review the exact artifact for the merge-unit acceptance criteria.\n")
+	}
+	write("config/execution.yaml", executionConfig)
 	if _, err := Execute(context.Background(), Options{
 		Action:           "validate",
 		BundleDir:        bundleRoot,

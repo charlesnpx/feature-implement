@@ -136,6 +136,9 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"feature_branch:",
 			"require_passing_checks",
 			"allow_write_network",
+			"max_attempts",
+			"review_gate",
+			"policy_file",
 			"feature workspace schema bundle --json",
 			"feature workspace schema requests --json",
 			"feature workspace example",
@@ -152,6 +155,8 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"repository:\n  identity:",
 			"require_signed_receipts",
 			"Repeat until a fresh review has no Critical or High findings",
+			"max_review_rounds",
+			"Review profiles declare",
 		})
 		assertInOrder(t, path, content, []string{
 			"Invocation guard",

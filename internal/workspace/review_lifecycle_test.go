@@ -2,6 +2,7 @@ package workspace_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,8 +70,11 @@ func newWitnessReviewHarness(t *testing.T) *gatedReviewHarness {
 }
 
 func newReviewGateHarness(t *testing.T, adapter string) *gatedReviewHarness {
+	return newReviewGateHarnessFromFixture(t, newDefinitionFixture(t), adapter)
+}
+
+func newReviewGateHarnessFromFixture(t *testing.T, fixture definitionFixture, adapter string) *gatedReviewHarness {
 	t.Helper()
-	fixture := newDefinitionFixture(t)
 	manifest, err := workspace.DecodeWorkspaceManifest(fixture.sources.Workspace.Bytes)
 	if err != nil {
 		t.Fatal(err)
@@ -175,6 +179,75 @@ func TestReviewGateDispatchUsesFrozenCopyAndOpaquePolicy(t *testing.T) {
 	}
 	if harness.repository.calls != 1 {
 		t.Fatalf("repository snapshot calls = %d, want 1", harness.repository.calls)
+	}
+}
+
+func TestReviewGateDispatchRejectsConfiguredFinalHistoryBeforeAdoptionOrJournal(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "wrong subject",
+			err:  errors.New("commit checkpoint implementation message: subject must equal \"Implement protocol\""),
+			want: "subject must equal",
+		},
+		{
+			name: "failing check",
+			err:  errors.New("configured check full-suite did not exit zero"),
+			want: "did not exit zero",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			harness := newReviewGateHarnessFromFixture(
+				t, configuredCommitProtocolFixture(t), "natural-language",
+			)
+			priorHead := harness.attempt.VerifiedHead()
+			inspected, err := workspace.NewReviewRepositorySnapshot(
+				mustGitObject(t, 'c'), mustGitObject(t, 'd'), true,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			harness.repository.snapshot = inspected
+			harness.repository.finalHistoryErr = test.err
+			before, err := harness.journal.ReadSnapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, err = workspace.DispatchAttemptReviewGate(
+				context.Background(), harness.journal, harness.definition, harness.repository,
+				workspace.DefaultLocalAttemptGitAdapter(), workspace.ReviewGateDispatchRequest{
+					AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-09-03T12:00:01Z"),
+				},
+			)
+			if err == nil || !strings.Contains(err.Error(), "verify final history before review gate dispatch") ||
+				!strings.Contains(err.Error(), test.want) {
+				t.Fatalf("dispatch error = %v", err)
+			}
+			if harness.repository.finalHistoryRuns != 1 {
+				t.Fatalf("final-history runs = %d, want 1", harness.repository.finalHistoryRuns)
+			}
+			after, err := harness.journal.ReadSnapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Head() != before.Head() {
+				t.Fatalf("invalid final history journaled a dispatch or adoption: before=%s after=%s", before.Head(), after.Head())
+			}
+			runtime, err := workspace.RebuildWorkspaceRuntime(after)
+			if err != nil {
+				t.Fatal(err)
+			}
+			attempt, exists := runtime.Attempt(harness.attempt.AttemptID())
+			if !exists || attempt.VerifiedHead() != priorHead {
+				t.Fatalf("invalid final history adopted inspected head: %#v exists=%t", attempt, exists)
+			}
+		})
 	}
 }
 

@@ -19,14 +19,27 @@ type ReviewCommandResult struct {
 }
 
 type ReviewGateDispatchView struct {
-	DispatchDigest string `json:"dispatch_digest"`
-	Adapter        string `json:"adapter"`
-	Recipe         string `json:"recipe"`
-	PolicyDigest   string `json:"policy_digest"`
-	Policy         string `json:"policy"`
-	Head           string `json:"head"`
-	Tree           string `json:"tree"`
-	FrozenCopy     string `json:"frozen_copy"`
+	DispatchDigest string                           `json:"dispatch_digest"`
+	Adapter        string                           `json:"adapter"`
+	Recipe         string                           `json:"recipe"`
+	PolicyDigest   string                           `json:"policy_digest"`
+	Policy         string                           `json:"policy"`
+	Head           string                           `json:"head"`
+	Tree           string                           `json:"tree"`
+	FrozenCopy     string                           `json:"frozen_copy"`
+	WitnessPacket  *WitnessReviewDispatchPacketView `json:"witness_packet,omitempty"`
+}
+
+// WitnessReviewDispatchPacketView is the deterministic handoff used to build
+// a review-report-v1 document from a witness dispatch alone.
+type WitnessReviewDispatchPacketView struct {
+	CharterDocument     json.RawMessage `json:"charter_document"`
+	RequestDocument     json.RawMessage `json:"request_document"`
+	ReviewInput         string          `json:"review_input"`
+	ReviewInputLocation string          `json:"review_input_location"`
+	CharterHash         string          `json:"charter_hash"`
+	ReviewInputDigest   string          `json:"review_input_digest"`
+	RequestDigest       string          `json:"request_digest"`
 }
 
 type ReviewGateRecordView struct {
@@ -80,13 +93,8 @@ type recordReviewDocumentInput struct {
 }
 
 type ReviewDocumentRecordDetail struct {
-	GateRecord          ReviewGateRecordView `json:"gate_record"`
-	RawDocumentDigest   string               `json:"raw_document_digest"`
-	ReportDigest        string               `json:"report_digest"`
-	ReviewRequestDigest string               `json:"review_request_digest"`
-	ReviewInputDigest   string               `json:"review_input_digest"`
-	CharterHash         string               `json:"charter_hash"`
-	RawDocumentPath     string               `json:"raw_document_path"`
+	GateRecord      ReviewGateRecordView `json:"gate_record"`
+	RawDocumentPath string               `json:"raw_document_path"`
 }
 
 func executeReview(ctx context.Context, bundle workspace.WorkspaceBundle, options Options) (any, error) {
@@ -118,7 +126,19 @@ func executeReview(ctx context.Context, bundle workspace.WorkspaceBundle, option
 		if err != nil {
 			return nil, err
 		}
-		return reviewCommandResult("review.dispatch", reviewGateDispatchView(dispatched), journal, definition)
+		detail := reviewGateDispatchView(dispatched)
+		if dispatched.Dispatch().Adapter().String() == workspace.WitnessReviewGateAdapter {
+			materialization, err := workspace.BuildReviewAdapterRequest(
+				ctx, journal, definition, repository, workspace.ReviewAdapterBuildRequest{
+					AttemptID: attemptID, DispatchDigest: dispatched.Dispatch().Digest(),
+				},
+			)
+			if err != nil {
+				return nil, err
+			}
+			detail.WitnessPacket = witnessReviewDispatchPacketView(materialization)
+		}
+		return reviewCommandResult("review.dispatch", detail, journal, definition)
 	case "record":
 		var input recordReviewGateInput
 		if err := decodeRequest(options.Input, &input); err != nil {
@@ -200,13 +220,8 @@ func executeReview(ctx context.Context, bundle workspace.WorkspaceBundle, option
 			return nil, err
 		}
 		return reviewCommandResult("review.record-document", ReviewDocumentRecordDetail{
-			GateRecord:          reviewGateRecordView(recorded.GateRecord()),
-			RawDocumentDigest:   recorded.Artifact().RawDocumentDigest().String(),
-			ReportDigest:        recorded.Artifact().ReportDigest().String(),
-			ReviewRequestDigest: recorded.Artifact().RequestDigest().String(),
-			ReviewInputDigest:   recorded.Artifact().ReviewInputDigest().String(),
-			CharterHash:         recorded.Artifact().CharterHash().String(),
-			RawDocumentPath:     artifactPath,
+			GateRecord:      reviewGateRecordView(recorded.GateRecord()),
+			RawDocumentPath: artifactPath,
 		}, journal, definition)
 	case "ready":
 		var input struct {
@@ -272,6 +287,18 @@ func reviewGateDispatchView(result workspace.ReviewGateDispatchResult) ReviewGat
 		DispatchDigest: dispatch.Digest().String(), Adapter: dispatch.Adapter().String(), Recipe: dispatch.Recipe().String(),
 		PolicyDigest: dispatch.PolicyDigest().String(), Policy: string(result.Policy()),
 		Head: dispatch.Head().String(), Tree: dispatch.Tree().String(), FrozenCopy: result.FrozenCopy(),
+	}
+}
+
+func witnessReviewDispatchPacketView(materialization workspace.ReviewAdapterMaterialization) *WitnessReviewDispatchPacketView {
+	return &WitnessReviewDispatchPacketView{
+		CharterDocument:     json.RawMessage(materialization.CharterJSON()),
+		RequestDocument:     json.RawMessage(materialization.RequestJSON()),
+		ReviewInput:         string(materialization.ReviewInput()),
+		ReviewInputLocation: materialization.FrozenCopy(),
+		CharterHash:         materialization.CharterHash().String(),
+		ReviewInputDigest:   materialization.ReviewInputDigest().String(),
+		RequestDigest:       materialization.RequestDocumentDigest().String(),
 	}
 }
 

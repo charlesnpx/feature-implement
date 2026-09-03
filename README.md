@@ -203,10 +203,9 @@ unit either inherits the complete root gate or names another complete gate; a
 partial override is rejected. The policy file is ordinary bundle source text:
 its exact bytes are digested, retained in the generation, and handed to the
 adapter without interpretation by `feature-implement`. The natural-language
-adapter is a normal implementation, not a fallback. Its policy can prescribe
-two parallel passes (for example, general and economy), one initial pass, and
-at most one additional pass when its own criteria call for one. That policy is
-the adapter's concern, not local scheduling logic.
+adapter is the default implementation. Its policy specifies any iteration the
+adapter performs; that policy is the adapter's concern, not local scheduling
+logic.
 
 Each dispatch records intent before a frozen copy is materialized. Its terminal
 record is exactly one of `satisfied`, `not_satisfied`, or `failed_to_run`, and
