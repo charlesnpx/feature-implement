@@ -19,7 +19,7 @@ const (
 
 // CommitBodyPolicy controls the body independently from the exact subject.
 // Exact bodies are useful when a commit is itself a protocol checkpoint;
-// required and optional bodies are supplied to the imperative transaction.
+// the other policies constrain bodies observed in final history.
 type CommitBodyPolicy string
 
 const (
@@ -69,33 +69,6 @@ func NewCommitMessagePolicy(subject string, body CommitBodyPolicy, exactBody *st
 func (policy CommitMessagePolicy) Subject() string              { return policy.subject }
 func (policy CommitMessagePolicy) BodyPolicy() CommitBodyPolicy { return policy.body }
 func (policy CommitMessagePolicy) ExactBody() string            { return policy.exactBody }
-
-func (policy CommitMessagePolicy) ResolveBody(supplied string) (string, error) {
-	if err := validateCommitBody(supplied); err != nil {
-		return "", err
-	}
-	switch policy.body {
-	case CommitBodyForbidden:
-		if supplied != "" {
-			return "", fmt.Errorf("commit body is forbidden")
-		}
-		return "", nil
-	case CommitBodyOptional:
-		return supplied, nil
-	case CommitBodyRequired:
-		if supplied == "" {
-			return "", fmt.Errorf("commit body is required")
-		}
-		return supplied, nil
-	case CommitBodyExact:
-		if supplied != "" && supplied != policy.exactBody {
-			return "", fmt.Errorf("supplied commit body does not match exact_body")
-		}
-		return policy.exactBody, nil
-	default:
-		return "", fmt.Errorf("invalid commit body policy %q", policy.body)
-	}
-}
 
 func (policy CommitMessagePolicy) Validate(subject, body string) error {
 	if subject != policy.subject {

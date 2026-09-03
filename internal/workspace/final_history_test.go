@@ -10,10 +10,12 @@ import (
 )
 
 type finalHistoryGitStub struct {
-	inspections []workspace.GitCommitInspection
-	inspectErr  error
-	cleanErr    error
-	cleanHeads  []workspace.GitObjectID
+	inspections            []workspace.GitCommitInspection
+	inspectErr             error
+	cleanErr               error
+	cleanHeads             []workspace.GitObjectID
+	mutateDuringInspection bool
+	dirty                  bool
 }
 
 func (stub *finalHistoryGitStub) InspectFirstParentRange(
@@ -22,6 +24,9 @@ func (stub *finalHistoryGitStub) InspectFirstParentRange(
 	workspace.GitObjectID,
 	workspace.GitObjectID,
 ) ([]workspace.GitCommitInspection, error) {
+	if stub.mutateDuringInspection {
+		stub.dirty = true
+	}
 	if stub.inspectErr != nil {
 		return nil, stub.inspectErr
 	}
@@ -34,6 +39,9 @@ func (stub *finalHistoryGitStub) VerifyCleanWorktree(
 	head workspace.GitObjectID,
 ) error {
 	stub.cleanHeads = append(stub.cleanHeads, head)
+	if stub.dirty {
+		return errors.New("worktree changed during history inspection")
+	}
 	return stub.cleanErr
 }
 
@@ -181,26 +189,45 @@ func TestFinalHistoryVerifierAcceptsOnlyConfiguredFinalSequence(t *testing.T) {
 			t.Fatalf("configured check was not bound to final head/tree: %#v", invocation)
 		}
 	}
-	if len(git.cleanHeads) != 3 {
-		t.Fatalf("clean worktree checks = %d, want 3", len(git.cleanHeads))
+	if len(git.cleanHeads) != 4 {
+		t.Fatalf("clean worktree checks = %d, want 4", len(git.cleanHeads))
 	}
 }
 
-func TestFinalHistoryVerifierAcceptsExitZeroCheck(t *testing.T) {
+func TestFinalHistoryVerifierRejectsRangeInspectionMutationWithoutChecks(t *testing.T) {
 	t.Parallel()
 
 	fixture := newFinalHistoryFixture(t)
+	steps := fixture.protocol.Steps()
+	unchecked := make([]workspace.CommitStep, 0, len(steps))
+	for _, step := range steps {
+		updated, err := workspace.NewCommitStep(step.ID(), step.Message(), step.Paths(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		unchecked = append(unchecked, updated)
+	}
+	protocol, err := workspace.NewCommitProtocol(unchecked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	git := &finalHistoryGitStub{
+		inspections: fixture.inspections, mutateDuringInspection: true,
+	}
 	verifier, err := workspace.NewFinalHistoryVerifier(
-		&finalHistoryGitStub{inspections: fixture.inspections},
-		&finalHistoryCheckRunnerStub{},
+		git, nil,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := verifier.Verify(
-		context.Background(), fixture.protocol, "/private/tmp/final-history", fixture.base, fixture.head,
-	); err != nil {
-		t.Fatalf("exit-zero check rejected final history: %v", err)
+	err = verifier.Verify(
+		context.Background(), protocol, "/private/tmp/final-history", fixture.base, fixture.head,
+	)
+	if err == nil || !strings.Contains(err.Error(), "verify final clean worktree") {
+		t.Fatalf("range inspection mutation error = %v", err)
+	}
+	if len(git.cleanHeads) != 2 {
+		t.Fatalf("clean worktree checks = %d, want 2", len(git.cleanHeads))
 	}
 }
 

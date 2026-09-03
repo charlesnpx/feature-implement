@@ -73,24 +73,27 @@ func (verifier FinalHistoryVerifier) Verify(
 				return fmt.Errorf("configured check %s requires an isolated runner", step.checks[0].id)
 			}
 		}
-		return nil
-	}
-	finalTree := inspections[len(inspections)-1].tree
-	for _, step := range steps {
-		for _, check := range step.checks {
-			invocation, err := NewFinalCommitCheckInvocation(check, head, finalTree, worktree)
-			if err != nil {
-				return err
-			}
-			if err := verifier.checks.RunConfiguredCheck(ctx, invocation); err != nil {
-				return fmt.Errorf(
-					"configured check %s did not exit zero: %w", check.id, err,
-				)
-			}
-			if err := verifier.git.VerifyCleanWorktree(ctx, worktree, head); err != nil {
-				return fmt.Errorf("configured check %s changed Git state: %w", check.id, err)
+	} else {
+		finalTree := inspections[len(inspections)-1].tree
+		for _, step := range steps {
+			for _, check := range step.checks {
+				invocation, err := NewFinalCommitCheckInvocation(check, head, finalTree, worktree)
+				if err != nil {
+					return err
+				}
+				if err := verifier.checks.RunConfiguredCheck(ctx, invocation); err != nil {
+					return fmt.Errorf(
+						"configured check %s did not exit zero: %w", check.id, err,
+					)
+				}
+				if err := verifier.git.VerifyCleanWorktree(ctx, worktree, head); err != nil {
+					return fmt.Errorf("configured check %s changed Git state: %w", check.id, err)
+				}
 			}
 		}
+	}
+	if err := verifier.git.VerifyCleanWorktree(ctx, worktree, head); err != nil {
+		return fmt.Errorf("verify final clean worktree: %w", err)
 	}
 	return nil
 }
