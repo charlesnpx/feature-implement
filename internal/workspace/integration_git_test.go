@@ -41,6 +41,19 @@ func (repository localIntegrationReviewRepository) InspectReviewSnapshot(
 	)
 }
 
+func (repository localIntegrationReviewRepository) VerifyFinalHistory(
+	ctx context.Context,
+	protocol workspace.CommitProtocol,
+	worktree string,
+	base, head workspace.GitObjectID,
+) error {
+	verifier, err := workspace.NewFinalHistoryVerifier(repository.git, nil)
+	if err != nil {
+		return err
+	}
+	return verifier.Verify(ctx, protocol, worktree, base, head)
+}
+
 func TestLocalGitIntegrationCreatesExactTwoParentCommitForSHA1AndSHA256(
 	t *testing.T,
 ) {

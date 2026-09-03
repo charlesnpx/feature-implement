@@ -3,7 +3,6 @@ package workspace_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -12,10 +11,13 @@ import (
 )
 
 type reviewRepositoryStub struct {
-	snapshot workspace.ReviewRepositorySnapshot
-	sequence []workspace.ReviewRepositorySnapshot
-	err      error
-	calls    int
+	snapshot         workspace.ReviewRepositorySnapshot
+	sequence         []workspace.ReviewRepositorySnapshot
+	err              error
+	calls            int
+	finalHistoryErr  error
+	finalHistory     func(int) error
+	finalHistoryRuns int
 }
 
 func (repository *reviewRepositoryStub) InspectReviewSnapshot(
@@ -34,15 +36,18 @@ func (repository *reviewRepositoryStub) InspectReviewSnapshot(
 	return repository.snapshot, nil
 }
 
-type reviewRunnerStub struct {
-	run func(workspace.ReviewInvocation) (workspace.ReviewRunnerOutput, error)
-}
-
-func (runner reviewRunnerStub) RunReview(
-	_ context.Context,
-	invocation workspace.ReviewInvocation,
-) (workspace.ReviewRunnerOutput, error) {
-	return runner.run(invocation)
+func (repository *reviewRepositoryStub) VerifyFinalHistory(
+	context.Context,
+	workspace.CommitProtocol,
+	string,
+	workspace.GitObjectID,
+	workspace.GitObjectID,
+) error {
+	repository.finalHistoryRuns++
+	if repository.finalHistory != nil {
+		return repository.finalHistory(repository.finalHistoryRuns)
+	}
+	return repository.finalHistoryErr
 }
 
 type reviewHarness struct {
@@ -76,7 +81,7 @@ func TestReviewConfigurationPreservesLoopOrderAndRejectsUnsafeSchemas(t *testing
 		ordered[1].ReviewerPolicy() != workspace.ReviewReviewerFreshEachInvocation {
 		t.Fatalf("configured review order = %#v", ordered)
 	}
-	if loop.MaxRounds() != 3 || loop.MaxFixes() != 2 || loop.MaxInfrastructureRetries() != 2 ||
+	if loop.MaxRounds() != 3 || loop.MaxInfrastructureRetries() != 2 ||
 		loop.Digest().IsZero() {
 		t.Fatalf("review loop budgets/digest = %#v", loop)
 	}
@@ -125,23 +130,6 @@ func TestReviewConfigurationPreservesLoopOrderAndRejectsUnsafeSchemas(t *testing
 		})
 	}
 
-	withoutFixProtocol := strings.Replace(
-		valid,
-		`    review_fix_protocol:
-      subject_prefix: Review fix
-      body_policy: required
-      allowed_paths:
-        - src/**
-      frozen_paths: []
-      checks: []
-`,
-		"",
-		1,
-	)
-	if _, err := workspace.DecodeExecutionConfig([]byte(withoutFixProtocol)); err == nil ||
-		!strings.Contains(err.Error(), "requires review_fix_protocol") {
-		t.Fatalf("review loop without fix protocol error = %v", err)
-	}
 }
 
 func TestReviewResultRejectsAggregatePayloadThatCannotFitJournal(t *testing.T) {
@@ -262,7 +250,7 @@ func TestReviewReducerEnforcesOrderedProfilesExactHeadAndReviewerIdentity(t *tes
 	}
 }
 
-func TestReviewReducerSeparatesInfrastructureRoundAndFixBudgets(t *testing.T) {
+func TestReviewReducerSeparatesInfrastructureAndRoundBudgets(t *testing.T) {
 	t.Parallel()
 
 	definition := mustDefinition(t, configuredReviewFixture(t).sources)
@@ -285,11 +273,10 @@ func TestReviewReducerSeparatesInfrastructureRoundAndFixBudgets(t *testing.T) {
 				}
 			}
 		}
-		directive, exhausted := state.Exhaustion()
-		if !exhausted || directive.Reason() != workspace.ReviewExhaustedInfrastructure ||
-			directive.InfrastructureRetriesUsed() != 2 || directive.RoundsUsed() != 1 ||
-			len(directive.Choices()) != 1 || directive.Choices()[0] != workspace.ReviewExhaustionStop {
-			t.Fatalf("infrastructure exhaustion = %#v exhausted=%v", directive, exhausted)
+		reason, exhausted := state.Exhaustion()
+		if !exhausted || reason != workspace.ReviewExhaustedInfrastructure ||
+			state.InfrastructureRetriesUsed() != 2 || state.RoundsUsed() != 1 {
+			t.Fatalf("infrastructure exhaustion = %q exhausted=%v state=%#v", reason, exhausted, state)
 		}
 	})
 
@@ -304,56 +291,121 @@ func TestReviewReducerSeparatesInfrastructureRoundAndFixBudgets(t *testing.T) {
 				state = startNextDomainReviewRound(t, state, state.Head(), state.Tree())
 			}
 		}
-		directive, exhausted := state.Exhaustion()
-		if !exhausted || directive.Reason() != workspace.ReviewExhaustedRounds || directive.RoundsUsed() != 3 {
-			t.Fatalf("round exhaustion = %#v exhausted=%v", directive, exhausted)
+		reason, exhausted := state.Exhaustion()
+		if !exhausted || reason != workspace.ReviewExhaustedRounds || state.RoundsUsed() != 3 {
+			t.Fatalf("round exhaustion = %q exhausted=%v state=%#v", reason, exhausted, state)
 		}
 	})
 
-	t.Run("fixes have an independent durable budget", func(t *testing.T) {
-		state := startDomainReview(t, loop, definition.Generation())
-		state, finding := completeBlockingDomainRound(t, state, 1)
-		for fixOrdinal, objects := range []struct{ head, tree byte }{{'c', 'd'}, {'e', 'f'}} {
-			ordinal := uint16(fixOrdinal + 1)
-			reservation, err := workspace.NewReviewFixReservation(
-				state.WorkspaceID(), state.Generation(), state.AttemptID(), state.Loop().Digest(),
-				ordinal, state.RoundsUsed(), state.Head(), state.Tree(), []workspace.Digest{finding.ID()},
-			)
-			if err != nil {
-				t.Fatal(err)
-			}
-			reserve, err := workspace.NewReserveReviewFindingFix(reservation)
-			if err != nil {
-				t.Fatal(err)
-			}
-			state, err = workspace.ReduceReview(state, reserve)
-			if err != nil {
-				t.Fatal(err)
-			}
-			fix, err := workspace.NewApplyReviewFix(
-				ordinal, reservation.Digest(), state.Head(), state.Tree(),
-				mustGitObject(t, objects.head), mustGitObject(t, objects.tree),
-				workspace.DigestBytes([]byte(fmt.Sprintf("fix-evidence-%d", ordinal))), []workspace.Digest{finding.ID()},
-			)
-			if err != nil {
-				t.Fatal(err)
-			}
-			state, err = workspace.ReduceReview(state, fix)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if state.MergeReady() || state.FixesUsed() != ordinal {
-				t.Fatalf("fix %d failed to invalidate readiness: %#v", ordinal, state)
-			}
-			state = startNextDomainReviewRound(t, state, state.Head(), state.Tree())
-			state, finding = completeBlockingDomainRound(t, state, int(ordinal)+1)
+}
+
+func TestReviewRoundBudgetRejectsFourthBlockingReviewAcrossHeadChanges(t *testing.T) {
+	t.Parallel()
+
+	harness := newReviewHarness(t)
+	headTrees := []struct {
+		head workspace.GitObjectID
+		tree workspace.GitObjectID
+	}{
+		{head: harness.attempt.VerifiedHead(), tree: harness.tree},
+		{head: mustGitObject(t, 'c'), tree: mustGitObject(t, 'd')},
+		{head: mustGitObject(t, 'e'), tree: mustGitObject(t, 'f')},
+	}
+	for index, headTree := range headTrees {
+		snapshot, err := workspace.NewReviewRepositorySnapshot(
+			headTree.head, headTree.tree, true,
+		)
+		if err != nil {
+			t.Fatal(err)
 		}
-		directive, exhausted := state.Exhaustion()
-		if !exhausted || directive.Reason() != workspace.ReviewExhaustedFixes ||
-			directive.FixesUsed() != 2 || directive.RoundsUsed() != 3 {
-			t.Fatalf("fix exhaustion = %#v exhausted=%v", directive, exhausted)
+		harness.repository.snapshot = snapshot
+		started, err := workspace.StartAttemptReviewRound(
+			context.Background(), harness.journal, harness.definition, harness.repository,
+			workspace.StartAttemptReviewRoundRequest{
+				AttemptID:  harness.attempt.AttemptID(),
+				OccurredAt: mustTime(t, fmt.Sprintf("2026-07-21T12:00:%02dZ", index*3+1)),
+			},
+		)
+		if err != nil {
+			t.Fatalf("start blocking review round %d: %v", index+1, err)
 		}
-	})
+		finding := mustReviewFinding(
+			t, workspace.ReviewSeverityHigh,
+			fmt.Sprintf("blocking review round %d", index+1),
+		)
+		first := reviewSubmission(
+			t, started.Request(), workspace.MustID("security-one"),
+			workspace.ReviewResultCompleted, []workspace.ReviewFinding{finding}, workspace.Digest{},
+		)
+		harness.record(
+			t, started.Request(), first,
+			fmt.Sprintf("2026-07-21T12:00:%02dZ", index*3+2),
+		)
+		state := mustReviewState(
+			t, harness.journal, harness.definition, harness.attempt.AttemptID(),
+		)
+		second, ok, err := state.NextRequest()
+		if err != nil || !ok || second.Profile().ID().String() != "correctness" {
+			t.Fatalf("second request for review round %d = %#v ok=%v err=%v", index+1, second, ok, err)
+		}
+		secondSubmission := reviewSubmission(
+			t, second, workspace.MustID(fmt.Sprintf("correctness-%d", index+1)),
+			workspace.ReviewResultCompleted, nil, workspace.Digest{},
+		)
+		harness.record(
+			t, second, secondSubmission,
+			fmt.Sprintf("2026-07-21T12:00:%02dZ", index*3+3),
+		)
+	}
+
+	snapshot, err := harness.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviews, err := workspace.RebuildReviewRuntime(snapshot, harness.definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reviews.RoundsUsed(harness.attempt.AttemptID()) != 3 {
+		t.Fatalf("aggregate review rounds = %d, want 3", reviews.RoundsUsed(harness.attempt.AttemptID()))
+	}
+	state, exists := reviews.State(harness.attempt.AttemptID())
+	reason, exhausted := state.Exhaustion()
+	if !exists || !exhausted || reason != workspace.ReviewExhaustedRounds {
+		t.Fatalf("cross-head review exhaustion = %q exists=%v exhausted=%v", reason, exists, exhausted)
+	}
+	view, err := workspace.RebuildWorkspaceView(snapshot, harness.definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Reviews) != 1 || view.Reviews[0].RoundsUsed != 3 || view.Reviews[0].Status != "exhausted" {
+		t.Fatalf("operator review view = %#v", view.Reviews)
+	}
+
+	fourth, err := workspace.NewReviewRepositorySnapshot(
+		mustGitObject(t, '1'), mustGitObject(t, '2'), true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness.repository.snapshot = fourth
+	_, err = workspace.StartAttemptReviewRound(
+		context.Background(), harness.journal, harness.definition, harness.repository,
+		workspace.StartAttemptReviewRoundRequest{
+			AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T12:00:10Z"),
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "review round budget exhausted") ||
+		!strings.Contains(err.Error(), "max_review_rounds=3 per attempt") {
+		t.Fatalf("fourth review round error = %v", err)
+	}
+	after, err := harness.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Records()) != len(snapshot.Records()) {
+		t.Fatalf("exhausted fourth review changed the journal: before=%d after=%d", len(snapshot.Records()), len(after.Records()))
+	}
 }
 
 func TestReviewLifecycleVerifiesLocalExactHeadEvidenceAndBoundaryReadiness(t *testing.T) {
@@ -558,404 +610,160 @@ func TestReviewLifecycleVerifiesLocalExactHeadEvidenceAndBoundaryReadiness(t *te
 	}
 }
 
-func TestReviewRunnerRejectsRepositoryMutationAndWeakIsolation(t *testing.T) {
+func TestOrdinaryCommitInvalidatesPriorReview(t *testing.T) {
 	t.Parallel()
 
 	harness := newReviewHarness(t)
 	start, err := workspace.StartAttemptReviewRound(
-		context.Background(), harness.journal, harness.definition, harness.repository,
-		workspace.StartAttemptReviewRoundRequest{
-			AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T11:10:00Z"),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := start.Request()
-	submission := reviewSubmission(
-		t, request, workspace.MustID("security-one"), workspace.ReviewResultCompleted, nil, workspace.Digest{},
-	)
-	runner := reviewRunnerStub{run: func(invocation workspace.ReviewInvocation) (workspace.ReviewRunnerOutput, error) {
-		if invocation.Request().Digest() != request.Digest() ||
-			invocation.Worktree() != harness.attempt.Worktree() {
-			t.Fatalf("review invocation changed immutable inputs: %#v", invocation)
-		}
-		return workspace.NewReviewRunnerOutput(submission)
-	}}
-	exact := harness.repository.snapshot
-	mutated, _ := workspace.NewReviewRepositorySnapshot(request.Head(), mustGitObject(t, 'c'), true)
-	harness.repository.sequence = []workspace.ReviewRepositorySnapshot{exact, mutated}
-	if _, _, err := workspace.ExecuteNextReviewProfile(
-		context.Background(), harness.journal, harness.definition, harness.repository, runner,
-		workspace.ExecuteNextReviewProfileRequest{
-			AttemptID: harness.attempt.AttemptID(), ReviewerInstance: workspace.MustID("security-one"),
-			IdempotencyKey: workspace.DigestBytes([]byte("mutating-reviewer-1")),
-			OccurredAt:     mustTime(t, "2026-07-21T11:10:01Z"),
-		},
-	); err == nil || !strings.Contains(err.Error(), "mutated or changed") {
-		t.Fatalf("reviewer mutation error = %v", err)
-	}
-	state := mustReviewState(t, harness.journal, harness.definition, harness.attempt.AttemptID())
-	pending, ok, _ := state.NextRequest()
-	if !ok || pending.Invocation() != 2 {
-		t.Fatalf("mutating reviewer changed durable state: %#v", state)
-	}
-	runnerFailure := errors.New("review process crashed")
-	harness.repository.sequence = []workspace.ReviewRepositorySnapshot{exact, mutated}
-	if _, _, err := workspace.ExecuteNextReviewProfile(
-		context.Background(), harness.journal, harness.definition, harness.repository,
-		reviewRunnerStub{run: func(workspace.ReviewInvocation) (workspace.ReviewRunnerOutput, error) {
-			return workspace.ReviewRunnerOutput{}, runnerFailure
-		}},
-		workspace.ExecuteNextReviewProfileRequest{
-			AttemptID: harness.attempt.AttemptID(), ReviewerInstance: workspace.MustID("security-one"),
-			IdempotencyKey: workspace.DigestBytes([]byte("mutating-reviewer-2")),
-			OccurredAt:     mustTime(t, "2026-07-21T11:10:01.5Z"),
-		},
-	); err == nil || !strings.Contains(err.Error(), "mutated or changed") {
-		t.Fatalf("runner-error mutation was not detected: %v", err)
-	}
-
-	state = mustReviewState(t, harness.journal, harness.definition, harness.attempt.AttemptID())
-	weakRequest, ok, err := state.NextRequest()
-	if err != nil || !ok || weakRequest.Invocation() != 3 {
-		t.Fatalf("weak-isolation retry request = %#v ok=%v err=%v", weakRequest, ok, err)
-	}
-	weakIsolation := workspace.NewReviewIsolationProof(true, true, false, true, false)
-	weakSubmission, err := workspace.NewReviewResultSubmission(workspace.ReviewResultSubmissionOptions{
-		RequestDigest: weakRequest.Digest(), ReviewerInstance: workspace.MustID("security-one"),
-		Status: workspace.ReviewResultCompleted, Isolation: weakIsolation,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	weakRunner := reviewRunnerStub{run: func(workspace.ReviewInvocation) (workspace.ReviewRunnerOutput, error) {
-		return workspace.NewReviewRunnerOutput(weakSubmission)
-	}}
-	harness.repository.sequence = nil
-	if _, _, err := workspace.ExecuteNextReviewProfile(
-		context.Background(), harness.journal, harness.definition, harness.repository, weakRunner,
-		workspace.ExecuteNextReviewProfileRequest{
-			AttemptID: harness.attempt.AttemptID(), ReviewerInstance: workspace.MustID("security-one"),
-			IdempotencyKey: workspace.DigestBytes([]byte("weak-isolation-reviewer-3")),
-			OccurredAt:     mustTime(t, "2026-07-21T11:10:02Z"),
-		},
-	); err == nil || !strings.Contains(err.Error(), "strict read-only isolation") {
-		t.Fatalf("weak review isolation error = %v", err)
-	}
-}
-
-func TestReviewInvocationReservationSerializesRunnerAndCountsRawFailureIdentity(t *testing.T) {
-	t.Parallel()
-
-	t.Run("only the durable reservation may invoke the runner", func(t *testing.T) {
-		harness := newReviewHarness(t)
-		start, err := workspace.StartAttemptReviewRound(
-			context.Background(), harness.journal, harness.definition, harness.repository,
-			workspace.StartAttemptReviewRoundRequest{
-				AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T11:15:00Z"),
-			},
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		submission := reviewSubmission(
-			t, start.Request(), workspace.MustID("security-one"), workspace.ReviewResultCompleted, nil, workspace.Digest{},
-		)
-		output, err := workspace.NewReviewRunnerOutput(submission)
-		if err != nil {
-			t.Fatal(err)
-		}
-		entered, release := make(chan struct{}), make(chan struct{})
-		firstErr := make(chan error, 1)
-		idempotencyKey := workspace.DigestBytes([]byte("serialized-review-one"))
-		go func() {
-			_, _, err := workspace.ExecuteNextReviewProfile(
-				context.Background(), harness.journal, harness.definition, harness.repository,
-				reviewRunnerStub{run: func(workspace.ReviewInvocation) (workspace.ReviewRunnerOutput, error) {
-					close(entered)
-					<-release
-					return output, nil
-				}},
-				workspace.ExecuteNextReviewProfileRequest{
-					AttemptID: harness.attempt.AttemptID(), ReviewerInstance: workspace.MustID("security-one"),
-					IdempotencyKey: idempotencyKey,
-					OccurredAt:     mustTime(t, "2026-07-21T11:15:01Z"),
-				},
-			)
-			firstErr <- err
-		}()
-		<-entered
-		sameKeyRunnerCalled := false
-		if _, _, err := workspace.ExecuteNextReviewProfile(
-			context.Background(), harness.journal, harness.definition, harness.repository,
-			reviewRunnerStub{run: func(workspace.ReviewInvocation) (workspace.ReviewRunnerOutput, error) {
-				sameKeyRunnerCalled = true
-				return workspace.ReviewRunnerOutput{}, errors.New("same-key runner was invoked")
-			}},
-			workspace.ExecuteNextReviewProfileRequest{
-				AttemptID: harness.attempt.AttemptID(), ReviewerInstance: workspace.MustID("security-one"),
-				IdempotencyKey: idempotencyKey,
-				OccurredAt:     mustTime(t, "2026-07-21T11:15:01.5Z"),
-			},
-		); err == nil || !strings.Contains(err.Error(), "durable executor claim") {
-			t.Fatalf("same-key pending review invocation error = %v", err)
-		}
-		if sameKeyRunnerCalled {
-			t.Fatal("same-key retry invoked a second reviewer")
-		}
-		if _, _, err := workspace.ExecuteNextReviewProfile(
-			context.Background(), harness.journal, harness.definition, harness.repository,
-			reviewRunnerStub{run: func(workspace.ReviewInvocation) (workspace.ReviewRunnerOutput, error) {
-				return workspace.ReviewRunnerOutput{}, errors.New("second runner was invoked")
-			}},
-			workspace.ExecuteNextReviewProfileRequest{
-				AttemptID: harness.attempt.AttemptID(), ReviewerInstance: workspace.MustID("security-one"),
-				IdempotencyKey: workspace.DigestBytes([]byte("serialized-review-two")),
-				OccurredAt:     mustTime(t, "2026-07-21T11:15:02Z"),
-			},
-		); err == nil || !strings.Contains(err.Error(), "already reserved") {
-			t.Fatalf("competing review invocation error = %v", err)
-		}
-		close(release)
-		if err := <-firstErr; err != nil {
-			t.Fatalf("durably reserved review invocation: %v", err)
-		}
-		retryRunnerCalled := false
-		retried, retryRecord, err := workspace.ExecuteNextReviewProfile(
-			context.Background(), harness.journal, harness.definition, harness.repository,
-			reviewRunnerStub{run: func(workspace.ReviewInvocation) (workspace.ReviewRunnerOutput, error) {
-				retryRunnerCalled = true
-				return workspace.ReviewRunnerOutput{}, errors.New("completed retry runner was invoked")
-			}},
-			workspace.ExecuteNextReviewProfileRequest{
-				AttemptID: harness.attempt.AttemptID(), ReviewerInstance: workspace.MustID("security-one"),
-				IdempotencyKey: idempotencyKey,
-				OccurredAt:     mustTime(t, "2026-07-21T11:15:03Z"),
-			},
-		)
-		if err != nil || retryRecord.Sequence() != 0 ||
-			retried.Submission().Digest() != submission.Digest() || retryRunnerCalled {
-			t.Fatalf("completed exact retry = %#v record=%#v runner=%v error=%v", retried, retryRecord, retryRunnerCalled, err)
-		}
-	})
-
-	t.Run("raw failure consumes fresh reviewer identity", func(t *testing.T) {
-		harness := newReviewHarness(t)
-		start, err := workspace.StartAttemptReviewRound(
-			context.Background(), harness.journal, harness.definition, harness.repository,
-			workspace.StartAttemptReviewRoundRequest{
-				AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T11:16:00Z"),
-			},
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		security := reviewSubmission(
-			t, start.Request(), workspace.MustID("security-one"), workspace.ReviewResultCompleted, nil, workspace.Digest{},
-		)
-		harness.record(t, start.Request(), security, "2026-07-21T11:16:01Z")
-		state := mustReviewState(t, harness.journal, harness.definition, harness.attempt.AttemptID())
-		correctness, ok, err := state.NextRequest()
-		if err != nil || !ok || correctness.Profile().ReviewerPolicy() != workspace.ReviewReviewerFreshEachInvocation {
-			t.Fatalf("fresh review request = %#v ok=%v err=%v", correctness, ok, err)
-		}
-		rawFailure := errors.New("reviewer process disappeared")
-		rawFailureKey := workspace.DigestBytes([]byte("raw-failure-one"))
-		if _, _, err := workspace.ExecuteNextReviewProfile(
-			context.Background(), harness.journal, harness.definition, harness.repository,
-			reviewRunnerStub{run: func(workspace.ReviewInvocation) (workspace.ReviewRunnerOutput, error) {
-				return workspace.ReviewRunnerOutput{}, rawFailure
-			}},
-			workspace.ExecuteNextReviewProfileRequest{
-				AttemptID: harness.attempt.AttemptID(), ReviewerInstance: workspace.MustID("correctness-one"),
-				IdempotencyKey: rawFailureKey,
-				OccurredAt:     mustTime(t, "2026-07-21T11:16:02Z"),
-			},
-		); !errors.Is(err, rawFailure) {
-			t.Fatalf("raw runner failure = %v", err)
-		}
-		failedRetryRunnerCalled := false
-		if _, _, err := workspace.ExecuteNextReviewProfile(
-			context.Background(), harness.journal, harness.definition, harness.repository,
-			reviewRunnerStub{run: func(workspace.ReviewInvocation) (workspace.ReviewRunnerOutput, error) {
-				failedRetryRunnerCalled = true
-				return workspace.ReviewRunnerOutput{}, errors.New("failed retry runner was invoked")
-			}},
-			workspace.ExecuteNextReviewProfileRequest{
-				AttemptID: harness.attempt.AttemptID(), ReviewerInstance: workspace.MustID("correctness-one"),
-				IdempotencyKey: rawFailureKey,
-				OccurredAt:     mustTime(t, "2026-07-21T11:16:02.5Z"),
-			},
-		); err == nil || !strings.Contains(err.Error(), "already failed with digest") {
-			t.Fatalf("failed exact retry error = %v", err)
-		}
-		if failedRetryRunnerCalled {
-			t.Fatal("failed exact retry invoked a second reviewer")
-		}
-		state = mustReviewState(t, harness.journal, harness.definition, harness.attempt.AttemptID())
-		retry, ok, err := state.NextRequest()
-		if err != nil || !ok || retry.Invocation() != 2 || len(state.Rounds()[0].Failures()) != 1 {
-			t.Fatalf("durable raw-failure retry = %#v state=%#v ok=%v err=%v", retry, state, ok, err)
-		}
-		if _, err := workspace.ReserveAttemptReviewInvocation(
-			harness.journal, harness.definition, workspace.ReserveAttemptReviewInvocationRequest{
-				AttemptID: harness.attempt.AttemptID(), ReviewerInstance: workspace.MustID("correctness-one"),
-				IdempotencyKey: workspace.DigestBytes([]byte("raw-failure-two")),
-				OccurredAt:     mustTime(t, "2026-07-21T11:16:03Z"),
-			},
-		); err == nil || !strings.Contains(err.Error(), "fresh reviewer") {
-			t.Fatalf("reused crashed reviewer identity error = %v", err)
-		}
-	})
-}
-
-func TestReviewRunnerReturnsFailureJournalError(t *testing.T) {
-	t.Parallel()
-
-	harness := newReviewHarness(t)
-	start, err := workspace.StartAttemptReviewRound(
-		context.Background(), harness.journal, harness.definition, harness.repository,
-		workspace.StartAttemptReviewRoundRequest{
-			AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T11:17:00Z"),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = start
-	rawFailure := errors.New("runner failed after journal became unavailable")
-	if _, _, err := workspace.ExecuteNextReviewProfile(
-		context.Background(), harness.journal, harness.definition, harness.repository,
-		reviewRunnerStub{run: func(workspace.ReviewInvocation) (workspace.ReviewRunnerOutput, error) {
-			if err := harness.journal.Close(); err != nil {
-				return workspace.ReviewRunnerOutput{}, err
-			}
-			return workspace.ReviewRunnerOutput{}, rawFailure
-		}},
-		workspace.ExecuteNextReviewProfileRequest{
-			AttemptID: harness.attempt.AttemptID(), ReviewerInstance: workspace.MustID("security-one"),
-			IdempotencyKey: workspace.DigestBytes([]byte("failure-journal-error")),
-			OccurredAt:     mustTime(t, "2026-07-21T11:17:01Z"),
-		},
-	); err == nil || !strings.Contains(err.Error(), "record durable review runner failure") {
-		t.Fatalf("failure-journaling error = %v", err)
-	}
-}
-
-func TestReviewFixExecutionRequiresACompletedReviewRoundBeforeGitMutation(t *testing.T) {
-	t.Parallel()
-
-	harness := newReviewHarness(t)
-	if _, err := workspace.StartAttemptReviewRound(
 		context.Background(), harness.journal, harness.definition, harness.repository,
 		workspace.StartAttemptReviewRoundRequest{
 			AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T11:18:00Z"),
 		},
-	); err != nil {
-		t.Fatal(err)
-	}
-	git := &journalCommitGit{head: harness.attempt.VerifiedHead()}
-	shell, err := workspace.NewCommitProtocolShell(git, nil)
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := workspace.ExecuteAttemptReviewFix(
-		context.Background(), harness.journal, harness.definition, shell,
-		workspace.ExecuteAttemptReviewFixRequest{
-			AttemptID: harness.attempt.AttemptID(), Ordinal: 1, Body: "premature fix",
-			AcceptedFindingIDs: []workspace.Digest{workspace.DigestBytes([]byte("not-yet-reviewed"))},
-			OccurredAt:         mustTime(t, "2026-07-21T11:18:01Z"),
-		},
-	); err == nil || !strings.Contains(err.Error(), "fully completed review round") {
-		t.Fatalf("premature review-fix execution error = %v", err)
-	}
-	if git.createCalls != 0 || git.publishes != 0 {
-		t.Fatalf("premature review fix mutated Git: creates=%d publishes=%d", git.createCalls, git.publishes)
-	}
+	harness.record(t, start.Request(), reviewSubmission(
+		t, start.Request(), workspace.MustID("security-one"), workspace.ReviewResultCompleted, nil, workspace.Digest{},
+	), "2026-07-21T11:18:01Z")
 	state := mustReviewState(t, harness.journal, harness.definition, harness.attempt.AttemptID())
-	if _, pending := state.PendingFix(); pending {
-		t.Fatalf("premature review fix left a durable reservation: %#v", state)
+	next, ok, err := state.NextRequest()
+	if err != nil || !ok {
+		t.Fatalf("second review request = %#v ok=%t err=%v", next, ok, err)
+	}
+	harness.record(t, next, reviewSubmission(
+		t, next, workspace.MustID("correctness-one"), workspace.ReviewResultCompleted, nil, workspace.Digest{},
+	), "2026-07-21T11:18:02Z")
+	if _, err := workspace.ConfirmReviewMergeReadiness(
+		context.Background(), harness.journal, harness.definition, harness.repository, harness.attempt.AttemptID(),
+	); err != nil {
+		t.Fatalf("initial review readiness: %v", err)
+	}
+
+	newHead, newTree := mustGitObject(t, 'c'), mustGitObject(t, 'd')
+	harness.repository.snapshot, _ = workspace.NewReviewRepositorySnapshot(newHead, newTree, true)
+	fresh, err := workspace.StartAttemptReviewRound(
+		context.Background(), harness.journal, harness.definition, harness.repository,
+		workspace.StartAttemptReviewRoundRequest{
+			AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T11:18:03Z"),
+		},
+	)
+	if err != nil || fresh.Request().Head() != newHead || fresh.Request().Tree() != newTree || fresh.Request().Round() != 1 {
+		t.Fatalf("fresh review after ordinary commit = %#v error=%v", fresh, err)
+	}
+	if _, err := workspace.ConfirmReviewMergeReadiness(
+		context.Background(), harness.journal, harness.definition, harness.repository, harness.attempt.AttemptID(),
+	); err == nil {
+		t.Fatal("prior review remained valid after an ordinary commit")
 	}
 }
 
-func TestReviewFixOnFinalRoundRequiresReconfirmationCapacity(t *testing.T) {
+func TestAttemptWideReviewConstraintsSurviveOrdinaryHeadAdoption(t *testing.T) {
 	t.Parallel()
 
-	fixture := configuredReviewFixture(t)
-	configuration := strings.ReplaceAll(string(fixture.sources.ExecutionConfig.Bytes), "max_review_fixes: 2", "max_review_fixes: 4")
-	configuration = strings.ReplaceAll(configuration, "max_review_fixes: 3", "max_review_fixes: 4")
-	fixture.sources.ExecutionConfig.Bytes = []byte(configuration)
-	definition := mustDefinition(t, fixture.sources)
-	loop := reviewLoopForDefinition(t, definition)
-	if loop.MaxRounds() != 3 || loop.MaxFixes() != 4 {
-		t.Fatalf("review loop budgets = rounds %d fixes %d", loop.MaxRounds(), loop.MaxFixes())
+	harness := newReviewHarness(t)
+	first, err := workspace.StartAttemptReviewRound(
+		context.Background(), harness.journal, harness.definition, harness.repository,
+		workspace.StartAttemptReviewRoundRequest{
+			AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T11:20:00Z"),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
 	}
-	state := startDomainReview(t, loop, definition.Generation())
-	applyFix := func(finding workspace.ReviewFinding, head, tree byte) {
-		ordinal := state.FixesUsed() + 1
-		reservation, err := workspace.NewReviewFixReservation(
-			state.WorkspaceID(), state.Generation(), state.AttemptID(), state.Loop().Digest(),
-			ordinal, state.RoundsUsed(), state.Head(), state.Tree(), []workspace.Digest{finding.ID()},
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		reserve, err := workspace.NewReserveReviewFindingFix(reservation)
-		if err != nil {
-			t.Fatal(err)
-		}
-		state, err = workspace.ReduceReview(state, reserve)
-		if err != nil {
-			t.Fatal(err)
-		}
-		fix, err := workspace.NewApplyReviewFix(
-			ordinal, reservation.Digest(), state.Head(), state.Tree(), mustGitObject(t, head), mustGitObject(t, tree),
-			workspace.DigestBytes([]byte(fmt.Sprintf("final-round-fix-%d", ordinal))), []workspace.Digest{finding.ID()},
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		state, err = workspace.ReduceReview(state, fix)
-		if err != nil {
-			t.Fatal(err)
-		}
+	harness.record(t, first.Request(), reviewSubmission(
+		t, first.Request(), workspace.MustID("security-one"), workspace.ReviewResultCompleted, nil, workspace.Digest{},
+	), "2026-07-21T11:20:01Z")
+
+	state := mustReviewState(t, harness.journal, harness.definition, harness.attempt.AttemptID())
+	correctness, ok, err := state.NextRequest()
+	if err != nil || !ok || correctness.Profile().ID().String() != "correctness" {
+		t.Fatalf("H1 correctness request = %#v ok=%t err=%v", correctness, ok, err)
+	}
+	harness.record(t, correctness, reviewSubmission(
+		t, correctness, workspace.MustID("correctness-one"), workspace.ReviewResultInfrastructureFailure,
+		nil, workspace.DigestBytes([]byte("H1 correctness unavailable")),
+	), "2026-07-21T11:20:02Z")
+	state = mustReviewState(t, harness.journal, harness.definition, harness.attempt.AttemptID())
+	correctnessRetry, ok, err := state.NextRequest()
+	if err != nil || !ok || correctnessRetry.Invocation() != 2 {
+		t.Fatalf("H1 correctness retry = %#v ok=%t err=%v", correctnessRetry, ok, err)
+	}
+	harness.record(t, correctnessRetry, reviewSubmission(
+		t, correctnessRetry, workspace.MustID("correctness-two"), workspace.ReviewResultCompleted, nil, workspace.Digest{},
+	), "2026-07-21T11:20:03Z")
+
+	secondHead, secondTree := mustGitObject(t, 'c'), mustGitObject(t, 'd')
+	harness.repository.snapshot, err = workspace.NewReviewRepositorySnapshot(secondHead, secondTree, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := workspace.StartAttemptReviewRound(
+		context.Background(), harness.journal, harness.definition, harness.repository,
+		workspace.StartAttemptReviewRoundRequest{
+			AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T11:20:04Z"),
+		},
+	)
+	if err != nil || second.Request().Head() != secondHead || second.Request().Round() != 1 {
+		t.Fatalf("H2 review after ordinary commit = %#v error=%v", second, err)
+	}
+	harness.record(t, second.Request(), reviewSubmission(
+		t, second.Request(), workspace.MustID("security-one"), workspace.ReviewResultCompleted, nil, workspace.Digest{},
+	), "2026-07-21T11:20:05Z")
+	state = mustReviewState(t, harness.journal, harness.definition, harness.attempt.AttemptID())
+	secondCorrectness, ok, err := state.NextRequest()
+	if err != nil || !ok || secondCorrectness.Profile().ID().String() != "correctness" {
+		t.Fatalf("H2 correctness request = %#v ok=%t err=%v", secondCorrectness, ok, err)
+	}
+	if _, err := workspace.ReserveAttemptReviewInvocation(
+		harness.journal, harness.definition, workspace.ReserveAttemptReviewInvocationRequest{
+			AttemptID: harness.attempt.AttemptID(), ReviewerInstance: workspace.MustID("correctness-three"),
+			IdempotencyKey: workspace.DigestBytes([]byte("review-invocation:" + correctnessRetry.Digest().String())),
+			OccurredAt:     mustTime(t, "2026-07-21T11:20:06Z"),
+		},
+	); err == nil || !strings.Contains(err.Error(), "idempotency key") {
+		t.Fatalf("H2 reused idempotency key error = %v", err)
+	}
+	if _, err := workspace.ReserveAttemptReviewInvocation(
+		harness.journal, harness.definition, workspace.ReserveAttemptReviewInvocationRequest{
+			AttemptID: harness.attempt.AttemptID(), ReviewerInstance: workspace.MustID("correctness-two"),
+			IdempotencyKey: workspace.DigestBytes([]byte("H2 reused completed reviewer")),
+			OccurredAt:     mustTime(t, "2026-07-21T11:20:06Z"),
+		},
+	); err == nil || !strings.Contains(err.Error(), "fresh reviewer") {
+		t.Fatalf("H2 reused completed reviewer error = %v", err)
 	}
 
-	var finding workspace.ReviewFinding
-	state, finding = completeBlockingDomainRound(t, state, 1)
-	applyFix(finding, 'c', 'd')
-	state = startNextDomainReviewRound(t, state, state.Head(), state.Tree())
-	state, finding = completeBlockingDomainRound(t, state, 2)
-	applyFix(finding, 'e', 'f')
-	state = startNextDomainReviewRound(t, state, state.Head(), state.Tree())
-	medium := mustReviewFinding(t, workspace.ReviewSeverityMedium, "worthwhile but final-round feedback")
-	security, _, _ := state.NextRequest()
-	state = reduceReviewSubmission(
-		t, state, security, workspace.MustID("security-one"), workspace.ReviewResultCompleted,
-		[]workspace.ReviewFinding{medium}, workspace.Digest{},
-	)
-	correctness, _, _ := state.NextRequest()
-	state = reduceReviewSubmission(
-		t, state, correctness, workspace.MustID("correctness-three"), workspace.ReviewResultCompleted,
-		nil, workspace.Digest{},
-	)
-	if !state.MergeReady() || state.RoundsUsed() != state.Loop().MaxRounds() {
-		t.Fatalf("final nonblocking round state = %#v", state)
+	harness.record(t, secondCorrectness, reviewSubmission(
+		t, secondCorrectness, workspace.MustID("correctness-three"), workspace.ReviewResultInfrastructureFailure,
+		nil, workspace.DigestBytes([]byte("H2 correctness unavailable")),
+	), "2026-07-21T11:20:07Z")
+	state = mustReviewState(t, harness.journal, harness.definition, harness.attempt.AttemptID())
+	secondRetry, ok, err := state.NextRequest()
+	if err != nil || !ok || secondRetry.Invocation() != 2 {
+		t.Fatalf("H2 remaining retry = %#v ok=%t err=%v", secondRetry, ok, err)
 	}
-	reservation, err := workspace.NewReviewFixReservation(
-		state.WorkspaceID(), state.Generation(), state.AttemptID(), state.Loop().Digest(),
-		state.FixesUsed()+1, state.RoundsUsed(), state.Head(), state.Tree(), []workspace.Digest{medium.ID()},
-	)
+	harness.record(t, secondRetry, reviewSubmission(
+		t, secondRetry, workspace.MustID("correctness-four"), workspace.ReviewResultInfrastructureFailure,
+		nil, workspace.DigestBytes([]byte("H2 retry unavailable")),
+	), "2026-07-21T11:20:08Z")
+
+	snapshot, err := harness.journal.ReadSnapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
-	reserve, err := workspace.NewReserveReviewFindingFix(reservation)
+	reviews, err := workspace.RebuildReviewRuntime(snapshot, harness.definition)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := workspace.ReduceReview(state, reserve); err == nil || !strings.Contains(err.Error(), "remaining round budget") {
-		t.Fatalf("final-round review-fix reservation error = %v", err)
+	state, exists := reviews.State(harness.attempt.AttemptID())
+	reason, exhausted := state.Exhaustion()
+	if !exists || !exhausted || reason != workspace.ReviewExhaustedInfrastructure ||
+		reviews.InfrastructureRetriesUsed(harness.attempt.AttemptID()) != 2 {
+		t.Fatalf("attempt-wide review history = reason=%q exhausted=%t retries=%d", reason, exhausted, reviews.InfrastructureRetriesUsed(harness.attempt.AttemptID()))
+	}
+	if next, ok, err := state.NextRequest(); err != nil || ok {
+		t.Fatalf("retry budget reset after head adoption: next=%#v ok=%t err=%v", next, ok, err)
 	}
 }
 
@@ -1050,417 +858,6 @@ func TestProtocolFreeAttemptAdoptsOrdinaryHeadWithoutReviewLoop(t *testing.T) {
 	}
 }
 
-func TestReviewFixCommitInvalidatesReadinessUntilAllProfilesReconfirm(t *testing.T) {
-	t.Parallel()
-
-	harness := newReviewHarness(t)
-	start, err := workspace.StartAttemptReviewRound(
-		context.Background(), harness.journal, harness.definition, harness.repository,
-		workspace.StartAttemptReviewRoundRequest{
-			AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T11:20:00Z"),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	medium := mustReviewFinding(t, workspace.ReviewSeverityMedium, "worthwhile cleanup")
-	firstSubmission := reviewSubmission(
-		t, start.Request(), workspace.MustID("security-one"), workspace.ReviewResultCompleted,
-		[]workspace.ReviewFinding{medium}, workspace.Digest{},
-	)
-	harness.record(t, start.Request(), firstSubmission, "2026-07-21T11:20:01Z")
-	state := mustReviewState(t, harness.journal, harness.definition, harness.attempt.AttemptID())
-	second, _, _ := state.NextRequest()
-	secondSubmission := reviewSubmission(
-		t, second, workspace.MustID("correctness-one"), workspace.ReviewResultCompleted, nil, workspace.Digest{},
-	)
-	harness.record(t, second, secondSubmission, "2026-07-21T11:20:02Z")
-	if _, err := workspace.ConfirmReviewMergeReadiness(
-		context.Background(), harness.journal, harness.definition, harness.repository, harness.attempt.AttemptID(),
-	); err != nil {
-		t.Fatalf("initial nonblocking review readiness: %v", err)
-	}
-
-	protocol := configuredReviewFixProtocol(t, harness.definition)
-	step, err := protocol.Step(1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	newTree, newHead, changed := mustGitObject(t, 'c'), mustGitObject(t, 'd'), mustGitObject(t, 'e')
-	diff := addedDiff(t, "src/review.go", changed)
-	staged, err := workspace.NewStagedCommitInspection(harness.attempt.VerifiedHead(), newTree, diff, nil, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	commit, err := workspace.NewGitCommitInspection(
-		newHead, []workspace.GitObjectID{harness.attempt.VerifiedHead()}, newTree,
-		step.Message().Subject(), "accepted medium-severity review feedback", diff,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	commitGit := &journalCommitGit{
-		head: harness.attempt.VerifiedHead(), staged: staged, commit: commit,
-	}
-	checkRunner := &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())}
-	shell, err := workspace.NewCommitProtocolShell(commitGit, checkRunner)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixResult, err := workspace.ExecuteAttemptReviewFix(
-		context.Background(), harness.journal, harness.definition, shell,
-		workspace.ExecuteAttemptReviewFixRequest{
-			AttemptID: harness.attempt.AttemptID(), Ordinal: 1,
-			Body: "accepted medium-severity review feedback", AcceptedFindingIDs: []workspace.Digest{medium.ID()},
-			OccurredAt: mustTime(t, "2026-07-21T11:20:03Z"),
-		},
-	)
-	if err != nil || fixResult.Attempt().VerifiedHead() != newHead {
-		t.Fatalf("durable review-fix commit = %#v error=%v", fixResult, err)
-	}
-	harness.git.setHead(
-		t, harness.attempt.Worktree(), newHead, true,
-	)
-	harness.repository.snapshot, _ = workspace.NewReviewRepositorySnapshot(newHead, newTree, true)
-	if _, err := workspace.RecordAttemptReviewFixRebase(
-		context.Background(), harness.journal, harness.definition, shell, harness.attempt.AttemptID(),
-		mustGitObject(t, 'f'), mustGitObject(t, '1'), mustTime(t, "2026-07-21T11:20:03.25Z"), nil,
-	); err == nil || !strings.Contains(err.Error(), "reserved review fix") {
-		t.Fatalf("rebase with pending review-fix application error = %v", err)
-	}
-	if _, err := workspace.StartAttemptReviewRound(
-		context.Background(), harness.journal, harness.definition, harness.repository,
-		workspace.StartAttemptReviewRoundRequest{
-			AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T11:20:03.5Z"),
-		},
-	); err == nil || !strings.Contains(err.Error(), "durable review-fix counters") {
-		t.Fatalf("unrecorded review-fix counter error = %v", err)
-	}
-	updated, _, err := workspace.RecordReviewFixApplication(
-		harness.journal, harness.definition,
-		workspace.RecordReviewFixApplicationRequest{
-			AttemptID: harness.attempt.AttemptID(), Ordinal: 1,
-			AcceptedFindingIDs: []workspace.Digest{medium.ID()},
-			OccurredAt:         mustTime(t, "2026-07-21T11:20:04Z"),
-		},
-	)
-	if err != nil || updated.Head() != newHead || updated.Tree() != newTree || updated.FixesUsed() != 1 {
-		t.Fatalf("record review-fix application = %#v error=%v", updated, err)
-	}
-	retried, retryRecord, err := workspace.RecordReviewFixApplication(
-		harness.journal, harness.definition,
-		workspace.RecordReviewFixApplicationRequest{
-			AttemptID: harness.attempt.AttemptID(), Ordinal: 1,
-			AcceptedFindingIDs: []workspace.Digest{medium.ID()},
-			OccurredAt:         mustTime(t, "2026-07-21T11:20:04.25Z"),
-		},
-	)
-	if err != nil || retryRecord.Sequence() != 0 || retried.Head() != newHead || retried.FixesUsed() != 1 {
-		t.Fatalf("idempotent review-fix application retry = %#v record=%#v error=%v", retried, retryRecord, err)
-	}
-	if _, _, err := workspace.RecordReviewFixApplication(
-		harness.journal, harness.definition,
-		workspace.RecordReviewFixApplicationRequest{
-			AttemptID: harness.attempt.AttemptID(), Ordinal: 1,
-			AcceptedFindingIDs: []workspace.Digest{workspace.DigestBytes([]byte("different-finding"))},
-			OccurredAt:         mustTime(t, "2026-07-21T11:20:04.5Z"),
-		},
-	); err == nil || !strings.Contains(err.Error(), "retry differs") {
-		t.Fatalf("different review-fix application retry error = %v", err)
-	}
-	if _, err := workspace.ConfirmReviewMergeReadiness(
-		context.Background(), harness.journal, harness.definition, harness.repository, harness.attempt.AttemptID(),
-	); err == nil || !strings.Contains(err.Error(), "no exact-head clean review confirmation") {
-		t.Fatalf("stale pre-fix readiness error = %v", err)
-	}
-	if _, err := workspace.RecordAttemptBoundary(
-		context.Background(), harness.journal, harness.definition, harness.git,
-		workspace.RecordAttemptBoundaryRequest{
-			AttemptID: harness.attempt.AttemptID(), Kind: workspace.AttemptBoundaryKindCheckpoint,
-			Evidence:   boundaryEvidence(t, "unconfirmed-fix"),
-			OccurredAt: mustTime(t, "2026-07-21T11:20:05Z"),
-		},
-	); err == nil || !strings.Contains(err.Error(), "every configured review profile") {
-		t.Fatalf("boundary after unconfirmed fix error = %v", err)
-	}
-
-	nextRound, err := workspace.StartAttemptReviewRound(
-		context.Background(), harness.journal, harness.definition, harness.repository,
-		workspace.StartAttemptReviewRoundRequest{
-			AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T11:20:06Z"),
-		},
-	)
-	if err != nil || nextRound.Request().Round() != 2 || nextRound.Request().Head() != newHead ||
-		nextRound.Request().Tree() != newTree {
-		t.Fatalf("post-fix round = %#v error=%v", nextRound, err)
-	}
-	if _, err := workspace.RecordAttemptReviewFixRebase(
-		context.Background(), harness.journal, harness.definition, shell, harness.attempt.AttemptID(),
-		mustGitObject(t, 'f'), mustGitObject(t, '1'), mustTime(t, "2026-07-21T11:20:06.25Z"), nil,
-	); err == nil || !strings.Contains(err.Error(), "incomplete review round") {
-		t.Fatalf("rebase during incomplete review round error = %v", err)
-	}
-	cleanSecurity := reviewSubmission(
-		t, nextRound.Request(), workspace.MustID("security-one"), workspace.ReviewResultCompleted, nil, workspace.Digest{},
-	)
-	harness.record(t, nextRound.Request(), cleanSecurity, "2026-07-21T11:20:07Z")
-	state = mustReviewState(t, harness.journal, harness.definition, harness.attempt.AttemptID())
-	cleanCorrectnessRequest, _, _ := state.NextRequest()
-	cleanCorrectness := reviewSubmission(
-		t, cleanCorrectnessRequest, workspace.MustID("correctness-two"),
-		workspace.ReviewResultCompleted, nil, workspace.Digest{},
-	)
-	harness.record(t, cleanCorrectnessRequest, cleanCorrectness, "2026-07-21T11:20:08Z")
-	readiness, err := workspace.ConfirmReviewMergeReadiness(
-		context.Background(), harness.journal, harness.definition, harness.repository, harness.attempt.AttemptID(),
-	)
-	if err != nil || readiness.Round() != 2 || readiness.Head() != newHead || readiness.Tree() != newTree {
-		t.Fatalf("post-fix readiness = %#v error=%v", readiness, err)
-	}
-	rebasedBase, rebasedTree, rebasedHead := mustGitObject(t, '2'), mustGitObject(t, '3'), mustGitObject(t, '4')
-	rebasedCommit, err := workspace.NewGitCommitInspection(
-		rebasedHead, []workspace.GitObjectID{rebasedBase}, rebasedTree,
-		step.Message().Subject(), "accepted medium-severity review feedback", diff,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	commitGit.head = rebasedHead
-	commitGit.rangeCommits = []workspace.GitCommitInspection{rebasedCommit}
-	rebased, err := workspace.RecordAttemptReviewFixRebase(
-		context.Background(), harness.journal, harness.definition, shell, harness.attempt.AttemptID(),
-		rebasedBase, rebasedHead, mustTime(t, "2026-07-21T11:20:08.25Z"), nil,
-	)
-	if err != nil || rebased.Attempt().VerifiedHead() != rebasedHead {
-		t.Fatalf("review-fix rebase after completed round = %#v error=%v", rebased, err)
-	}
-	snapshot, err := harness.journal.ReadSnapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	records := snapshot.Records()
-	if len(records) == 0 || records[len(records)-1].EventType() != workspace.JournalEventCommitProtocolRebased {
-		t.Fatalf("review-fix rebase journal tail = %#v", records)
-	}
-	harness.git.setHead(
-		t, harness.attempt.Worktree(), rebasedHead, true,
-	)
-	harness.repository.snapshot, _ = workspace.NewReviewRepositorySnapshot(rebasedHead, rebasedTree, true)
-	if _, record, err := workspace.RecordReviewFixApplication(
-		harness.journal, harness.definition,
-		workspace.RecordReviewFixApplicationRequest{
-			AttemptID: harness.attempt.AttemptID(), Ordinal: 1,
-			AcceptedFindingIDs: []workspace.Digest{medium.ID()},
-			OccurredAt:         mustTime(t, "2026-07-21T11:20:08.5Z"),
-		},
-	); err != nil || record.Sequence() != 0 {
-		t.Fatalf("idempotent application retry after rebase record=%#v error=%v", record, err)
-	}
-	if _, err := workspace.ConfirmReviewMergeReadiness(
-		context.Background(), harness.journal, harness.definition, harness.repository, harness.attempt.AttemptID(),
-	); err == nil || !strings.Contains(err.Error(), "stale") {
-		t.Fatalf("rebase did not invalidate exact-head review readiness: %v", err)
-	}
-	finalRound, err := workspace.StartAttemptReviewRound(
-		context.Background(), harness.journal, harness.definition, harness.repository,
-		workspace.StartAttemptReviewRoundRequest{
-			AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T11:20:09Z"),
-		},
-	)
-	if err != nil || finalRound.Request().Round() != 3 || finalRound.Request().Head() != rebasedHead ||
-		finalRound.Request().Tree() != rebasedTree {
-		t.Fatalf("post-rebase review round = %#v error=%v", finalRound, err)
-	}
-	finalSecurity := reviewSubmission(
-		t, finalRound.Request(), workspace.MustID("security-one"), workspace.ReviewResultCompleted, nil, workspace.Digest{},
-	)
-	harness.record(t, finalRound.Request(), finalSecurity, "2026-07-21T11:20:10Z")
-	state = mustReviewState(t, harness.journal, harness.definition, harness.attempt.AttemptID())
-	finalCorrectnessRequest, _, _ := state.NextRequest()
-	finalCorrectness := reviewSubmission(
-		t, finalCorrectnessRequest, workspace.MustID("correctness-three"),
-		workspace.ReviewResultCompleted, nil, workspace.Digest{},
-	)
-	harness.record(t, finalCorrectnessRequest, finalCorrectness, "2026-07-21T11:20:11Z")
-	readiness, err = workspace.ConfirmReviewMergeReadiness(
-		context.Background(), harness.journal, harness.definition, harness.repository, harness.attempt.AttemptID(),
-	)
-	if err != nil || readiness.Round() != 3 || readiness.Head() != rebasedHead || readiness.Tree() != rebasedTree {
-		t.Fatalf("post-rebase readiness = %#v error=%v", readiness, err)
-	}
-	if _, err := workspace.RecordAttemptBoundary(
-		context.Background(), harness.journal, harness.definition, harness.git,
-		workspace.RecordAttemptBoundaryRequest{
-			AttemptID: harness.attempt.AttemptID(), Kind: workspace.AttemptBoundaryKindCheckpoint,
-			Evidence:   boundaryEvidence(t, "confirmed-fix"),
-			OccurredAt: mustTime(t, "2026-07-21T11:20:12Z"),
-		},
-	); err != nil {
-		t.Fatalf("boundary after full reconfirmation: %v", err)
-	}
-}
-
-func TestReviewRebaseRejectsConcurrentFindingFixReservation(t *testing.T) {
-	t.Parallel()
-
-	harness := newReviewHarness(t)
-	start, err := workspace.StartAttemptReviewRound(
-		context.Background(), harness.journal, harness.definition, harness.repository,
-		workspace.StartAttemptReviewRoundRequest{
-			AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T11:30:00Z"),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	firstFinding := mustReviewFinding(t, workspace.ReviewSeverityMedium, "first worthwhile cleanup")
-	harness.record(t, start.Request(), reviewSubmission(
-		t, start.Request(), workspace.MustID("security-one"), workspace.ReviewResultCompleted,
-		[]workspace.ReviewFinding{firstFinding}, workspace.Digest{},
-	), "2026-07-21T11:30:01Z")
-	state := mustReviewState(t, harness.journal, harness.definition, harness.attempt.AttemptID())
-	secondRequest, _, err := state.NextRequest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	harness.record(t, secondRequest, reviewSubmission(
-		t, secondRequest, workspace.MustID("correctness-one"), workspace.ReviewResultCompleted,
-		nil, workspace.Digest{},
-	), "2026-07-21T11:30:02Z")
-
-	protocol := configuredReviewFixProtocol(t, harness.definition)
-	step, err := protocol.Step(1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixTree, fixHead, changed := mustGitObject(t, '5'), mustGitObject(t, '6'), mustGitObject(t, '7')
-	diff := addedDiff(t, "src/review.go", changed)
-	staged, err := workspace.NewStagedCommitInspection(harness.attempt.VerifiedHead(), fixTree, diff, nil, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixCommit, err := workspace.NewGitCommitInspection(
-		fixHead, []workspace.GitObjectID{harness.attempt.VerifiedHead()}, fixTree,
-		step.Message().Subject(), "first accepted review cleanup", diff,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	commitGit := &journalCommitGit{
-		head: harness.attempt.VerifiedHead(), staged: staged, commit: fixCommit,
-	}
-	shell, err := workspace.NewCommitProtocolShell(
-		commitGit, &protocolCheckRunner{result: passingCheckResult(t, workspace.StrictCheckIsolationProof())},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := workspace.ExecuteAttemptReviewFix(
-		context.Background(), harness.journal, harness.definition, shell,
-		workspace.ExecuteAttemptReviewFixRequest{
-			AttemptID: harness.attempt.AttemptID(), Ordinal: 1, Body: "first accepted review cleanup",
-			AcceptedFindingIDs: []workspace.Digest{firstFinding.ID()},
-			OccurredAt:         mustTime(t, "2026-07-21T11:30:03Z"),
-		},
-	); err != nil {
-		t.Fatalf("execute first review fix: %v", err)
-	}
-	if _, _, err := workspace.RecordReviewFixApplication(
-		harness.journal, harness.definition,
-		workspace.RecordReviewFixApplicationRequest{
-			AttemptID: harness.attempt.AttemptID(), Ordinal: 1,
-			AcceptedFindingIDs: []workspace.Digest{firstFinding.ID()},
-			OccurredAt:         mustTime(t, "2026-07-21T11:30:04Z"),
-		},
-	); err != nil {
-		t.Fatalf("apply first review fix: %v", err)
-	}
-	harness.git.setHead(
-		t, harness.attempt.Worktree(), fixHead, true,
-	)
-	harness.repository.snapshot, _ = workspace.NewReviewRepositorySnapshot(fixHead, fixTree, true)
-
-	confirmation, err := workspace.StartAttemptReviewRound(
-		context.Background(), harness.journal, harness.definition, harness.repository,
-		workspace.StartAttemptReviewRoundRequest{
-			AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T11:30:05Z"),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	concurrentFinding := mustReviewFinding(t, workspace.ReviewSeverityMedium, "second worthwhile cleanup")
-	harness.record(t, confirmation.Request(), reviewSubmission(
-		t, confirmation.Request(), workspace.MustID("security-one"), workspace.ReviewResultCompleted,
-		[]workspace.ReviewFinding{concurrentFinding}, workspace.Digest{},
-	), "2026-07-21T11:30:06Z")
-	state = mustReviewState(t, harness.journal, harness.definition, harness.attempt.AttemptID())
-	finalRequest, _, err := state.NextRequest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	harness.record(t, finalRequest, reviewSubmission(
-		t, finalRequest, workspace.MustID("correctness-two"), workspace.ReviewResultCompleted,
-		nil, workspace.Digest{},
-	), "2026-07-21T11:30:07Z")
-
-	rebasedBase, rebasedTree, rebasedHead := mustGitObject(t, '8'), mustGitObject(t, '9'), mustGitObject(t, 'a')
-	rebasedCommit, err := workspace.NewGitCommitInspection(
-		rebasedHead, []workspace.GitObjectID{rebasedBase}, rebasedTree,
-		step.Message().Subject(), "first accepted review cleanup", diff,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	commitGit.head = rebasedHead
-	commitGit.rangeCommits = []workspace.GitCommitInspection{rebasedCommit}
-	hookCalled := false
-	commitGit.beforeRange = func() error {
-		hookCalled = true
-		_, reserveErr := workspace.ReserveAttemptReviewFix(
-			harness.journal, harness.definition,
-			workspace.ReserveAttemptReviewFixRequest{
-				AttemptID: harness.attempt.AttemptID(), Ordinal: 2,
-				AcceptedFindingIDs: []workspace.Digest{concurrentFinding.ID()},
-				OccurredAt:         mustTime(t, "2026-07-21T11:30:08Z"),
-			},
-		)
-		return reserveErr
-	}
-	if _, err := workspace.RecordAttemptReviewFixRebase(
-		context.Background(), harness.journal, harness.definition, shell, harness.attempt.AttemptID(),
-		rebasedBase, rebasedHead, mustTime(t, "2026-07-21T11:30:09Z"), nil,
-	); err == nil || !strings.Contains(err.Error(), "stale journal head") {
-		t.Fatalf("rebase racing a review reservation error = %v", err)
-	}
-	if !hookCalled {
-		t.Fatal("concurrent review reservation hook was not called")
-	}
-
-	snapshot, err := harness.journal.ReadSnapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := workspace.RebuildWorkspaceRuntime(snapshot)
-	if err != nil {
-		t.Fatalf("rebuild core runtime after rejected rebase: %v", err)
-	}
-	attempt, exists := runtime.Attempt(harness.attempt.AttemptID())
-	if !exists || attempt.VerifiedHead() != fixHead {
-		t.Fatalf("rejected rebase changed durable attempt = %#v exists=%v", attempt, exists)
-	}
-	review, err := workspace.RebuildReviewRuntime(snapshot, harness.definition)
-	if err != nil {
-		t.Fatalf("rebuild review runtime after rejected rebase: %v", err)
-	}
-	state, exists = review.State(harness.attempt.AttemptID())
-	reservation, pending := state.PendingFix()
-	if !exists || !pending || reservation.Ordinal() != 2 || reservation.Head() != fixHead ||
-		state.Head() != fixHead {
-		t.Fatalf("concurrent review reservation was not preserved safely: state=%#v reservation=%#v", state, reservation)
-	}
-}
-
 func configuredReviewFixture(t *testing.T) definitionFixture {
 	t.Helper()
 	fixture := newDefinitionFixture(t)
@@ -1474,15 +871,8 @@ func configuredReviewFixture(t *testing.T) definitionFixture {
     reviewer_policy: fresh_each_invocation
 merge_units:
 `, 1)
-	needle := "      max_review_fixes: 2\n  - plan_id: alpha-plan\n    merge_unit_id: unit-two"
-	replacement := `      max_review_fixes: 2
-    review_fix_protocol:
-      subject_prefix: Review fix
-      body_policy: required
-      allowed_paths:
-        - src/**
-      frozen_paths: []
-      checks: []
+	needle := "      max_review_rounds: 3\n  - plan_id: alpha-plan\n    merge_unit_id: unit-two"
+	replacement := `      max_review_rounds: 3
     review_loop:
       profiles:
         - security
@@ -1746,4 +1136,3 @@ func mustReviewState(
 }
 
 var _ workspace.ReviewRepositoryPort = (*reviewRepositoryStub)(nil)
-var _ workspace.ReviewRunnerPort = reviewRunnerStub{}

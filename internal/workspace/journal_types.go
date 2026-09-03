@@ -21,22 +21,11 @@ const (
 	JournalEventAttemptBoundary              JournalEventType = "attempt.paused.v3"
 	JournalEventAttemptResumed               JournalEventType = "attempt.resumed.v3"
 	JournalEventAttemptAbandoned             JournalEventType = "attempt.abandoned.v3"
-	JournalEventCommitProtocolStarted        JournalEventType = "commit.protocol_started.v2"
-	JournalEventCommitStepIntended           JournalEventType = "commit.step_intended.v2"
-	JournalEventCommitStepRecorded           JournalEventType = "commit.step_recorded.v2"
-	JournalEventCommitCheckRecorded          JournalEventType = "commit.check_recorded.v2"
-	JournalEventCommitProtocolRebased        JournalEventType = "commit.protocol_rebased.v2"
-	JournalEventReviewFixReserved            JournalEventType = "review_fix.reserved.v2"
-	JournalEventReviewFixIntended            JournalEventType = "review_fix.intended.v2"
-	JournalEventReviewFixCommitRecorded      JournalEventType = "review_fix.commit_recorded.v2"
-	JournalEventReviewFixCheckRecorded       JournalEventType = "review_fix.check_recorded.v2"
 	JournalEventReviewRoundStarted           JournalEventType = "review.round_started.v2"
 	JournalEventReviewHeadAdopted            JournalEventType = "review.head_adopted.v2"
 	JournalEventReviewInvocationReserved     JournalEventType = "review.invocation_reserved.v2"
 	JournalEventReviewInvocationFailed       JournalEventType = "review.invocation_failed.v2"
 	JournalEventReviewResultRecorded         JournalEventType = "review.result_recorded.v2"
-	JournalEventReviewFindingFixReserved     JournalEventType = "review.finding_fix_reserved.v2"
-	JournalEventReviewFixApplied             JournalEventType = "review.fix_applied.v2"
 	JournalEventMergeUnitIntegrationIntended JournalEventType = "merge_unit_integration_intended"
 	JournalEventMergeUnitIntegrated          JournalEventType = "merge_unit_integrated"
 	JournalEventWorkspaceCompleted           JournalEventType = "workspace_completed"
@@ -211,16 +200,9 @@ func newJournalAppend(
 			return JournalAppend{}, fmt.Errorf("attempt boundary must use the atomic boundary workflow")
 		case AttemptAbandonedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("attempt abandonment must use the attempt lifecycle workflow")
-		case CommitProtocolStartedJournalEvent, CommitStepIntendedJournalEvent,
-			CommitStepRecordedJournalEvent, CommitCheckRecordedJournalEvent,
-			CommitProtocolRebasedJournalEvent, ReviewFixReservedJournalEvent,
-			ReviewFixIntendedJournalEvent, ReviewFixCommitRecordedJournalEvent,
-			ReviewFixCheckRecordedJournalEvent:
-			return JournalAppend{}, fmt.Errorf("commit protocol events must use the Git-verified commit workflow")
 		case ReviewHeadAdoptedJournalEvent, ReviewRoundStartedJournalEvent,
 			ReviewInvocationReservedJournalEvent, ReviewInvocationFailedJournalEvent,
-			ReviewResultRecordedJournalEvent, ReviewFindingFixReservedJournalEvent,
-			ReviewFixAppliedJournalEvent:
+			ReviewResultRecordedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("review events must use the exact-head review workflow")
 		case MergeUnitIntegrationIntendedJournalEvent, MergeUnitIntegratedJournalEvent:
 			return JournalAppend{}, fmt.Errorf(
@@ -252,8 +234,8 @@ func supportedWorkspaceJournalEvent(event WorkspaceJournalEvent) bool {
 		FeatureRefCreationIntendedJournalEvent, FeatureRefCreatedJournalEvent:
 		return true
 	default:
-		return isAttemptJournalEvent(event) || isCommitJournalEvent(event) ||
-			isReviewJournalEvent(event) || isIntegrationJournalEvent(event) ||
+		return isAttemptJournalEvent(event) || isReviewJournalEvent(event) ||
+			isIntegrationJournalEvent(event) ||
 			isCompletionJournalEvent(event)
 	}
 }
@@ -293,9 +275,6 @@ func cloneWorkspaceJournalEvent(event WorkspaceJournalEvent) WorkspaceJournalEve
 			return cloned
 		}
 		if cloned := cloneAttemptJournalEvent(event); cloned != nil {
-			return cloned
-		}
-		if cloned := cloneCommitJournalEvent(event); cloned != nil {
 			return cloned
 		}
 		if cloned := cloneReviewJournalEvent(event); cloned != nil {

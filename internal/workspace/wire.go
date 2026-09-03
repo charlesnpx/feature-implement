@@ -68,7 +68,6 @@ type executionPolicyWire struct {
 	AllowWriteNetwork    *bool   `yaml:"allow_write_network"`
 	MaxAttempts          *uint16 `yaml:"max_attempts"`
 	MaxReviewRounds      *uint16 `yaml:"max_review_rounds"`
-	MaxReviewFixes       *uint16 `yaml:"max_review_fixes"`
 }
 
 type executionProfileWire struct {
@@ -85,14 +84,13 @@ type reviewProfileWire struct {
 }
 
 type unitExecutionWire struct {
-	PlanID            string                     `yaml:"plan_id"`
-	MergeUnitID       string                     `yaml:"merge_unit_id"`
-	Profile           string                     `yaml:"profile"`
-	Policy            executionPolicyWire        `yaml:"policy"`
-	Boundary          *attemptBoundaryPolicyWire `yaml:"boundary"`
-	CommitProtocol    *commitProtocolWire        `yaml:"commit_protocol"`
-	ReviewFixProtocol *reviewFixProtocolWire     `yaml:"review_fix_protocol"`
-	ReviewLoop        *reviewLoopWire            `yaml:"review_loop"`
+	PlanID         string                     `yaml:"plan_id"`
+	MergeUnitID    string                     `yaml:"merge_unit_id"`
+	Profile        string                     `yaml:"profile"`
+	Policy         executionPolicyWire        `yaml:"policy"`
+	Boundary       *attemptBoundaryPolicyWire `yaml:"boundary"`
+	CommitProtocol *commitProtocolWire        `yaml:"commit_protocol"`
+	ReviewLoop     *reviewLoopWire            `yaml:"review_loop"`
 }
 
 type reviewLoopWire struct {
@@ -124,23 +122,8 @@ type commitStepWire struct {
 	Checks       *[]commitCheckWire `yaml:"checks"`
 }
 
-type reviewFixProtocolWire struct {
-	SubjectPrefix string             `yaml:"subject_prefix"`
-	BodyPolicy    string             `yaml:"body_policy"`
-	AllowedPaths  *[]string          `yaml:"allowed_paths"`
-	FrozenPaths   *[]string          `yaml:"frozen_paths"`
-	Checks        *[]commitCheckWire `yaml:"checks"`
-}
-
 type commitCheckWire struct {
-	ID          string               `yaml:"id"`
-	Runner      string               `yaml:"runner"`
-	Parser      string               `yaml:"parser"`
-	Command     []string             `yaml:"command"`
-	Expectation checkExpectationWire `yaml:"expectation"`
-}
-
-type checkExpectationWire struct {
-	Kind       string    `yaml:"kind"`
-	FailureIDs *[]string `yaml:"failure_ids"`
+	ID      string   `yaml:"id"`
+	Runner  string   `yaml:"runner"`
+	Command []string `yaml:"command"`
 }

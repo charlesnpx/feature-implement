@@ -300,101 +300,10 @@ func (event ReviewResultRecordedJournalEvent) DocumentArtifact() (ReviewDocument
 	return *event.document, true
 }
 
-type ReviewFindingFixReservedJournalEvent struct {
-	workspaceID ID
-	generation  Digest
-	attemptID   ID
-	loopDigest  Digest
-	reservation ReviewFixReservation
-}
-
-func NewReviewFindingFixReservedJournalEvent(
-	reservation ReviewFixReservation,
-) (ReviewFindingFixReservedJournalEvent, error) {
-	event := ReviewFindingFixReservedJournalEvent{
-		workspaceID: reservation.workspaceID, generation: reservation.generation,
-		attemptID: reservation.attemptID, loopDigest: reservation.loopDigest,
-		reservation: *cloneReviewFixReservation(&reservation),
-	}
-	if err := event.validate(); err != nil {
-		return ReviewFindingFixReservedJournalEvent{}, err
-	}
-	if err := validateReviewJournalRecordFootprint(event); err != nil {
-		return ReviewFindingFixReservedJournalEvent{}, err
-	}
-	return event, nil
-}
-
-func (ReviewFindingFixReservedJournalEvent) isWorkspaceJournalEvent() {}
-func (ReviewFindingFixReservedJournalEvent) eventType() JournalEventType {
-	return JournalEventReviewFindingFixReserved
-}
-func (event ReviewFindingFixReservedJournalEvent) boundGeneration() Digest { return event.generation }
-func (event ReviewFindingFixReservedJournalEvent) validate() error {
-	if event.workspaceID.IsZero() || event.generation.IsZero() || event.attemptID.IsZero() || event.loopDigest.IsZero() ||
-		event.reservation.workspaceID != event.workspaceID || event.reservation.generation != event.generation ||
-		event.reservation.attemptID != event.attemptID || event.reservation.loopDigest != event.loopDigest {
-		return fmt.Errorf("review finding-fix reservation event requires exact review bindings")
-	}
-	canonical, err := canonicalReviewFixReservation(event.reservation)
-	if err != nil || event.reservation.digest != DigestBytes(canonical) {
-		return fmt.Errorf("review finding-fix reservation event is not canonical")
-	}
-	return nil
-}
-
-func (event ReviewFindingFixReservedJournalEvent) Reservation() ReviewFixReservation {
-	return *cloneReviewFixReservation(&event.reservation)
-}
-
-type ReviewFixAppliedJournalEvent struct {
-	workspaceID ID
-	generation  Digest
-	attemptID   ID
-	loopDigest  Digest
-	fix         ApplyReviewFix
-}
-
-func NewReviewFixAppliedJournalEvent(
-	workspaceID ID, generation Digest, attemptID ID, loopDigest Digest, fix ApplyReviewFix,
-) (ReviewFixAppliedJournalEvent, error) {
-	event := ReviewFixAppliedJournalEvent{
-		workspaceID: workspaceID, generation: generation, attemptID: attemptID,
-		loopDigest: loopDigest, fix: cloneApplyReviewFix(fix),
-	}
-	if err := event.validate(); err != nil {
-		return ReviewFixAppliedJournalEvent{}, err
-	}
-	if err := validateReviewJournalRecordFootprint(event); err != nil {
-		return ReviewFixAppliedJournalEvent{}, err
-	}
-	return event, nil
-}
-
-func (ReviewFixAppliedJournalEvent) isWorkspaceJournalEvent()      {}
-func (ReviewFixAppliedJournalEvent) eventType() JournalEventType   { return JournalEventReviewFixApplied }
-func (event ReviewFixAppliedJournalEvent) boundGeneration() Digest { return event.generation }
-func (event ReviewFixAppliedJournalEvent) validate() error {
-	if event.workspaceID.IsZero() || event.generation.IsZero() || event.attemptID.IsZero() || event.loopDigest.IsZero() {
-		return fmt.Errorf("review fix event requires workspace, generation, attempt, and loop")
-	}
-	_, err := NewApplyReviewFix(
-		event.fix.ordinal, event.fix.reservationDigest, event.fix.priorHead, event.fix.priorTree,
-		event.fix.head, event.fix.tree, event.fix.evidence, event.fix.findings,
-	)
-	return err
-}
-func (event ReviewFixAppliedJournalEvent) WorkspaceID() ID     { return event.workspaceID }
-func (event ReviewFixAppliedJournalEvent) Generation() Digest  { return event.generation }
-func (event ReviewFixAppliedJournalEvent) AttemptID() ID       { return event.attemptID }
-func (event ReviewFixAppliedJournalEvent) LoopDigest() Digest  { return event.loopDigest }
-func (event ReviewFixAppliedJournalEvent) Fix() ApplyReviewFix { return cloneApplyReviewFix(event.fix) }
-
 func isReviewJournalEvent(event WorkspaceJournalEvent) bool {
 	switch event.(type) {
 	case ReviewHeadAdoptedJournalEvent, ReviewRoundStartedJournalEvent, ReviewInvocationReservedJournalEvent,
-		ReviewInvocationFailedJournalEvent, ReviewResultRecordedJournalEvent,
-		ReviewFindingFixReservedJournalEvent, ReviewFixAppliedJournalEvent:
+		ReviewInvocationFailedJournalEvent, ReviewResultRecordedJournalEvent:
 		return true
 	default:
 		return false
@@ -419,20 +328,9 @@ func cloneReviewJournalEvent(event WorkspaceJournalEvent) WorkspaceJournalEvent 
 			value.document = &document
 		}
 		return value
-	case ReviewFindingFixReservedJournalEvent:
-		value.reservation = *cloneReviewFixReservation(&value.reservation)
-		return value
-	case ReviewFixAppliedJournalEvent:
-		value.fix = cloneApplyReviewFix(value.fix)
-		return value
 	default:
 		return nil
 	}
-}
-
-func cloneApplyReviewFix(fix ApplyReviewFix) ApplyReviewFix {
-	fix.findings = append([]Digest(nil), fix.findings...)
-	return fix
 }
 
 func validateReviewJournalRecordFootprint(event WorkspaceJournalEvent) error {

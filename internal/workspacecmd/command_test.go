@@ -67,19 +67,6 @@ func TestLocalCommandDecodersRequireExactReceiptFreeFields(t *testing.T) {
 			want:   "unknown field",
 		},
 		{
-			name: "non-applying review fix rejects body",
-			source: `{
-  "schema_version": 2,
-  "occurred_at": "2026-07-22T10:00:00Z",
-  "attempt_id": "attempt-one",
-  "ordinal": 1,
-  "accepted_finding_ids": [],
-  "body": "ignored"
-}`,
-			target: func() any { return &reviewFixInput{} },
-			want:   "unknown field",
-		},
-		{
 			name: "integration requires attempt",
 			source: `{
   "schema_version": 2,
@@ -143,15 +130,11 @@ func TestRequestSchemasExposeOnlySupportedLocalMutations(t *testing.T) {
 		"attempt.pause",
 		"attempt.resume",
 		"attempt.abandon",
-		"commit.next",
 		"review.start",
 		"review.reserve",
 		"review.request",
 		"review.record",
 		"review.record-document",
-		"review.reserve-fix",
-		"review.apply-fix",
-		"review.record-fix",
 		"review.ready",
 		"integrate.merge-unit",
 		"complete.verify",
@@ -160,43 +143,38 @@ func TestRequestSchemasExposeOnlySupportedLocalMutations(t *testing.T) {
 			t.Fatalf("request schemas omit %s", required)
 		}
 	}
-	if len(schemas) != 19 {
+	if len(schemas) != 15 {
 		t.Fatalf("request schema count = %d: %+v", len(schemas), schemas)
 	}
-	for _, action := range []string{
-		"review.reserve-fix",
-		"review.record-fix",
+	for _, removed := range []string{
+		"commit.next", "review.reserve-fix", "review.apply-fix", "review.record-fix",
 	} {
-		properties := schemas[action].(map[string]any)["properties"].(map[string]any)
-		if _, exists := properties["body"]; exists {
-			t.Fatalf("%s schema accepts ignored body: %+v", action, properties)
+		if _, exists := schemas[removed]; exists {
+			t.Fatalf("request schemas retain removed action %s", removed)
 		}
-	}
-	applyProperties := schemas["review.apply-fix"].(map[string]any)["properties"].(map[string]any)
-	if _, exists := applyProperties["body"]; !exists {
-		t.Fatalf("review.apply-fix schema omits body: %+v", applyProperties)
 	}
 }
 
 func TestDecodeRequestKeepsSchemaOptionalFieldsOptional(t *testing.T) {
-	var input commitNextInput
-	if err := decodeRequest([]byte(`{
-  "schema_version": 2,
-  "occurred_at": "2026-07-22T10:00:00Z",
-  "attempt_id": "attempt-one"
-}`), &input); err != nil {
-		t.Fatalf("optional commit body was required: %v", err)
-	}
-	var reviewFix applyReviewFixInput
+	var input recordReviewInput
 	if err := decodeRequest([]byte(`{
   "schema_version": 2,
   "occurred_at": "2026-07-22T10:00:00Z",
   "attempt_id": "attempt-one",
-  "ordinal": 1,
-  "accepted_finding_ids": [],
-  "body": "apply the accepted fixes"
-}`), &reviewFix); err != nil {
-		t.Fatalf("valid review fix body: %v", err)
+  "reservation_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "request_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "reviewer_instance": "reviewer-one",
+  "status": "completed",
+  "findings": [],
+  "isolation": {
+    "repository_read_only": true,
+    "scratch_ephemeral": true,
+    "repository_hooks": false,
+    "write_network": false,
+    "external_write": false
+  }
+}`), &input); err != nil {
+		t.Fatalf("optional review infrastructure failure was required: %v", err)
 	}
 }
 
@@ -389,7 +367,6 @@ policy:
   allow_write_network: false
   max_attempts: 2
   max_review_rounds: 2
-  max_review_fixes: 1
 profiles:
   - id: standard
     runner: codex
@@ -398,7 +375,6 @@ profiles:
       allow_write_network: false
       max_attempts: 2
       max_review_rounds: 2
-      max_review_fixes: 1
 merge_units:
   - plan_id: alpha-plan
     merge_unit_id: unit-one
@@ -412,7 +388,6 @@ merge_units:
       allow_write_network: false
       max_attempts: 2
       max_review_rounds: 2
-      max_review_fixes: 1
 `)
 	if _, err := Execute(context.Background(), Options{
 		Action:           "validate",

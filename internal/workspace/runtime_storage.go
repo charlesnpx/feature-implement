@@ -13,9 +13,9 @@ import (
 )
 
 const (
-	RuntimeFormatSchemaVersion    = 6
-	RuntimeFormatFileName         = "feature.runtime.v6.json"
-	RuntimeInitializationLockName = "runtime-initialize.v6.lock"
+	RuntimeFormatSchemaVersion    = 7
+	RuntimeFormatFileName         = "feature.runtime.v7.json"
+	RuntimeInitializationLockName = "runtime-initialize.v7.lock"
 	MaxRuntimeFormatMarkerBytes   = 16 * 1024
 )
 

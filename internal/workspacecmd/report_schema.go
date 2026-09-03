@@ -199,7 +199,7 @@ func WorkspaceViewSchema() map[string]any {
 	review := object(
 		[]string{
 			"attempt_id", "plan_id", "merge_unit_id", "generation",
-			"head", "tree", "status", "rounds_used", "fixes_used",
+			"head", "tree", "status", "rounds_used",
 			"infrastructure_retries", "merge_ready",
 		},
 		map[string]any{
@@ -209,9 +209,8 @@ func WorkspaceViewSchema() map[string]any {
 			"generation":             nonEmptyText(),
 			"head":                   nonEmptyText(),
 			"tree":                   nonEmptyText(),
-			"status":                 enum("active", "ready", "exhausted", "fix_pending"),
+			"status":                 enum("active", "ready", "exhausted"),
 			"rounds_used":            integer(0),
-			"fixes_used":             integer(0),
 			"infrastructure_retries": integer(0),
 			"merge_ready":            boolean(),
 		},

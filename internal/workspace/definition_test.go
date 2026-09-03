@@ -83,7 +83,6 @@ policy:
   allow_write_network: false
   max_attempts: 5
   max_review_rounds: 4
-  max_review_fixes: 3
 profiles:
   - id: standard
     runner: codex
@@ -92,7 +91,6 @@ profiles:
       allow_write_network: false
       max_attempts: 4
       max_review_rounds: 3
-      max_review_fixes: 3
 merge_units:
   - plan_id: alpha-plan
     merge_unit_id: unit-one
@@ -106,7 +104,6 @@ merge_units:
       allow_write_network: false
       max_attempts: 3
       max_review_rounds: 3
-      max_review_fixes: 2
   - plan_id: alpha-plan
     merge_unit_id: unit-two
     profile: standard
@@ -118,7 +115,6 @@ merge_units:
       allow_write_network: false
       max_attempts: 2
       max_review_rounds: 2
-      max_review_fixes: 2
 `
 	return definitionFixture{
 		base: baseCommit,
@@ -355,7 +351,6 @@ merge_units:
       allow_write_network: false
       max_attempts: 2
       max_review_rounds: 2
-      max_review_fixes: 2
 `)...)
 	if _, err := workspace.ValidateDefinition(sources); err == nil || !strings.Contains(err.Error(), "unknown merge unit beta-plan/missing-unit") {
 		t.Fatalf("unknown cross-plan target error = %v", err)
@@ -393,7 +388,6 @@ func TestEffectiveDefinitionRejectsCombinedCrossPlanCycle(t *testing.T) {
       allow_write_network: false
       max_attempts: 2
       max_review_rounds: 2
-      max_review_fixes: 2
   - plan_id: beta-plan
     merge_unit_id: unit-two
     profile: standard
@@ -405,7 +399,6 @@ func TestEffectiveDefinitionRejectsCombinedCrossPlanCycle(t *testing.T) {
       allow_write_network: false
       max_attempts: 2
       max_review_rounds: 2
-      max_review_fixes: 2
 `)...)
 	if _, err := workspace.ValidateDefinition(sources); err == nil || !strings.Contains(err.Error(), "workspace merge-unit dependency cycle") {
 		t.Fatalf("combined cross-plan cycle error = %v", err)

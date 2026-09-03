@@ -55,20 +55,20 @@ source of truth.
 
 1. Implement the merge unit's stories and testing criteria in the attempt
    worktree.
-2. When a commit protocol is configured, stage only the next step's allowed
-   changes and use `feature workspace commit next`. The workspace shell owns
-   the exact commit and its structured checks.
-3. Without a commit protocol, ordinary local commits are allowed. Keep the
-   attempt worktree clean.
-4. Configured checks run against an isolated materialization of the recorded
-   commit with repository hooks disabled and write-capable network denied. A
-   host without a supported strict sandbox fails closed.
+2. Make ordinary local commits. When a commit protocol is configured, the
+   workspace validates final base-to-head history: ordered checkpoints, exact
+   messages, path constraints, and configured checks.
+3. You may amend and reorganize intermediate commits before final-history
+   validation. Keep the attempt worktree clean.
+4. Configured checks run against an isolated materialization of the final
+   accepted commit with repository hooks disabled and write-capable network
+   denied. A host without a supported strict sandbox fails closed.
 
 ## Review
 
 Run a broad read-only review loop for every merge unit.
 
-1. Treat each fresh broad audit as one review iteration and run at most three.
+1. Treat each fresh broad audit as one review iteration and run at most three per attempt, not per head.
    Use a fresh Claude subagent with the exact base-to-head diff, read-only
    repository access, ephemeral scratch, disabled repository hooks, no
    write-capable network, and no external-write permission.
@@ -82,8 +82,10 @@ Run a broad read-only review loop for every merge unit.
    `review record`. Preserve exact finding details, evidence digests, the
    descriptive reviewer label, request digest, head, tree, and isolation
    fields.
-5. Use `review reserve-fix`, `apply-fix`, and `record-fix` for accepted
-   findings. Seek `review ready` without exceeding configured budgets.
+5. Apply accepted findings as ordinary local commits, rerun validation, and
+   start a new review round when the head changes; a prior review is valid only
+   for its exact head and tree. When a configured review is clean, submit
+   `review ready` for that exact head and tree.
 6. Without a configured review loop, apply accepted fixes with ordinary local
    commits, rerun validation, then submit `attempt adopt-head` for the exact
    clean accepted head and tree.

@@ -10,7 +10,21 @@ type ReviewRuntimeProjection struct {
 	workspaceID      ID
 	activeGeneration Digest
 	states           []ReviewState
+	attemptHistory   []reviewAttemptHistory
 	core             WorkspaceRuntimeProjection
+}
+
+type reviewAttemptHistory struct {
+	attemptID                 ID
+	roundsUsed                uint16
+	infrastructureRetriesUsed uint16
+	reservations              []reviewAttemptReservation
+}
+
+type reviewAttemptReservation struct {
+	profileID        ID
+	reviewerInstance ID
+	idempotencyKey   Digest
 }
 
 func (projection ReviewRuntimeProjection) WorkspaceID() ID { return projection.workspaceID }
@@ -31,6 +45,26 @@ func (projection ReviewRuntimeProjection) State(attemptID ID) (ReviewState, bool
 		}
 	}
 	return ReviewState{}, false
+}
+func (projection ReviewRuntimeProjection) RoundsUsed(attemptID ID) uint16 {
+	if history, exists := projection.attemptHistoryFor(attemptID); exists {
+		return history.roundsUsed
+	}
+	return 0
+}
+
+func (projection ReviewRuntimeProjection) InfrastructureRetriesUsed(attemptID ID) uint16 {
+	if history, exists := projection.attemptHistoryFor(attemptID); exists {
+		return history.infrastructureRetriesUsed
+	}
+	return 0
+}
+
+func (projection ReviewRuntimeProjection) attemptHistoryFor(attemptID ID) (reviewAttemptHistory, bool) {
+	if index := reviewAttemptHistoryIndex(projection.attemptHistory, attemptID); index >= 0 {
+		return cloneReviewAttemptHistory(projection.attemptHistory[index]), true
+	}
+	return reviewAttemptHistory{}, false
 }
 
 func RebuildReviewRuntime(
@@ -57,56 +91,6 @@ func RebuildReviewRuntime(
 			return ReviewRuntimeProjection{}, fmt.Errorf(
 				"attempt %s review state does not match its effective configured loop",
 				state.attemptID,
-			)
-		}
-	}
-	for _, attempt := range projection.core.attempts {
-		if attempt.generation != definition.generation {
-			continue
-		}
-		unit, err := executionForMergeUnit(definition.execution, attempt.mergeUnit)
-		if err != nil {
-			return ReviewRuntimeProjection{}, err
-		}
-		if _, configured := unit.ReviewLoop(); !configured {
-			continue
-		}
-		index := reviewStateIndex(projection.states, attempt.attemptID)
-		if index < 0 {
-			if attempt.reviewFixes != nil {
-				return ReviewRuntimeProjection{}, fmt.Errorf(
-					"attempt %s has review-fix protocol state without a completed review round reservation",
-					attempt.attemptID,
-				)
-			}
-			continue
-		}
-		state := projection.states[index]
-		used := uint16(0)
-		if attempt.reviewFixes != nil {
-			protocol, configured := unit.ReviewFixProtocol()
-			if !configured || attempt.reviewFixes.generation != definition.generation ||
-				attempt.reviewFixes.protocol.digest != protocol.digest ||
-				attempt.reviewFixes.maximum != unit.policy.maxReviewFixes {
-				return ReviewRuntimeProjection{}, fmt.Errorf(
-					"attempt %s review-fix protocol state does not match effective review policy",
-					attempt.attemptID,
-				)
-			}
-			used = attempt.reviewFixes.Used()
-		}
-		if state.pendingFix == nil {
-			if used != state.FixesUsed() {
-				return ReviewRuntimeProjection{}, fmt.Errorf(
-					"attempt %s has review-fix protocol progress without an application reservation",
-					attempt.attemptID,
-				)
-			}
-		} else if state.pendingFix.ordinal != state.FixesUsed()+1 ||
-			(used != state.FixesUsed() && used != state.FixesUsed()+1) {
-			return ReviewRuntimeProjection{}, fmt.Errorf(
-				"attempt %s pending review fix does not match durable protocol progress",
-				attempt.attemptID,
 			)
 		}
 	}
@@ -142,16 +126,12 @@ func reduceReviewRuntime(current ReviewRuntimeProjection, record JournalRecord) 
 	}
 	next.core = core
 	next.workspaceID, next.activeGeneration = core.workspaceID, core.activeGeneration
-	if isReviewFixJournalEvent(record.event) {
-		if err := validateReviewFixJournalReservation(current, record.event); err != nil {
-			return ReviewRuntimeProjection{}, err
-		}
-	}
-
 	switch event := record.event.(type) {
 	case ReviewHeadAdoptedJournalEvent:
-		if reviewStateIndex(current.states, event.attemptID) >= 0 {
-			return ReviewRuntimeProjection{}, fmt.Errorf("review head adoption cannot follow durable review state")
+		if index := reviewStateIndex(current.states, event.attemptID); index >= 0 {
+			// A review is valid only for its exact head and tree. An ordinary
+			// follow-up commit replaces that head, so discard the old review state
+			next.states = append(next.states[:index:index], next.states[index+1:]...)
 		}
 	case ReviewRoundStartedJournalEvent:
 		attempt, exists := current.core.Attempt(event.attemptID)
@@ -159,6 +139,9 @@ func reduceReviewRuntime(current ReviewRuntimeProjection, record JournalRecord) 
 			attempt.mergeUnit != event.mergeUnit || attempt.verifiedHead != event.head ||
 			current.workspaceID != event.workspaceID || current.activeGeneration != event.generation {
 			return ReviewRuntimeProjection{}, fmt.Errorf("review round does not match an active exact-head attempt")
+		}
+		if current.RoundsUsed(event.attemptID) >= event.loop.maxRounds {
+			return ReviewRuntimeProjection{}, reviewRoundBudgetExhaustedError(event.loop.maxRounds)
 		}
 		start, err := NewStartReviewRound(
 			event.workspaceID, event.generation, event.attemptID, event.mergeUnit,
@@ -182,6 +165,7 @@ func reduceReviewRuntime(current ReviewRuntimeProjection, record JournalRecord) 
 		} else {
 			next.states[index] = state
 		}
+		next.attemptHistory = incrementReviewRoundCount(next.attemptHistory, event.attemptID)
 	case ReviewInvocationReservedJournalEvent:
 		index := reviewStateIndex(current.states, event.attemptID)
 		attempt, exists := current.core.Attempt(event.attemptID)
@@ -196,11 +180,19 @@ func reduceReviewRuntime(current ReviewRuntimeProjection, record JournalRecord) 
 		if err != nil {
 			return ReviewRuntimeProjection{}, err
 		}
+		if err := current.validateNewReviewInvocationReservation(
+			event.attemptID, current.states[index].loop, event.reservation,
+		); err != nil {
+			return ReviewRuntimeProjection{}, err
+		}
 		state, err := ReduceReview(current.states[index], domain)
 		if err != nil {
 			return ReviewRuntimeProjection{}, err
 		}
 		next.states[index] = state
+		next.attemptHistory = appendReviewInvocationReservation(
+			next.attemptHistory, event.attemptID, event.reservation,
+		)
 	case ReviewInvocationFailedJournalEvent:
 		index := reviewStateIndex(current.states, event.attemptID)
 		attempt, exists := current.core.Attempt(event.attemptID)
@@ -217,6 +209,10 @@ func reduceReviewRuntime(current ReviewRuntimeProjection, record JournalRecord) 
 		if err != nil {
 			return ReviewRuntimeProjection{}, err
 		}
+		state.exhaustion = deriveReviewExhaustionAtUsage(
+			state, current.RoundsUsed(event.attemptID),
+			current.InfrastructureRetriesUsed(event.attemptID),
+		)
 		next.states[index] = state
 	case ReviewResultRecordedJournalEvent:
 		index := reviewStateIndex(current.states, event.attemptID)
@@ -237,107 +233,13 @@ func reduceReviewRuntime(current ReviewRuntimeProjection, record JournalRecord) 
 		if err != nil {
 			return ReviewRuntimeProjection{}, err
 		}
-		next.states[index] = state
-	case ReviewFindingFixReservedJournalEvent:
-		index := reviewStateIndex(current.states, event.attemptID)
-		attempt, exists := current.core.Attempt(event.attemptID)
-		if index < 0 || !exists || attempt.phase != AttemptActive ||
-			attempt.verifiedHead != current.states[index].head || current.workspaceID != event.workspaceID ||
-			current.activeGeneration != event.generation || current.states[index].loop.digest != event.loopDigest {
-			return ReviewRuntimeProjection{}, fmt.Errorf("review finding-fix reservation does not match active exact-head review state")
-		}
-		usedFixes := uint16(0)
-		if attempt.reviewFixes != nil {
-			usedFixes = attempt.reviewFixes.Used()
-		}
-		if usedFixes != current.states[index].FixesUsed() {
-			return ReviewRuntimeProjection{}, fmt.Errorf("review finding-fix reservation does not match applied fix counters")
-		}
-		domain, err := NewReserveReviewFindingFix(event.reservation)
-		if err != nil {
-			return ReviewRuntimeProjection{}, err
-		}
-		state, err := ReduceReview(current.states[index], domain)
-		if err != nil {
-			return ReviewRuntimeProjection{}, err
-		}
-		next.states[index] = state
-	case ReviewFixAppliedJournalEvent:
-		index := reviewStateIndex(current.states, event.attemptID)
-		attempt, exists := current.core.Attempt(event.attemptID)
-		if index < 0 || !exists || attempt.phase != AttemptActive || attempt.reviewFixes == nil ||
-			attempt.verifiedHead != event.fix.head || current.workspaceID != event.workspaceID ||
-			current.activeGeneration != event.generation || current.states[index].loop.digest != event.loopDigest {
-			return ReviewRuntimeProjection{}, fmt.Errorf("review fix does not match the active attempt and durable review-fix protocol")
-		}
-		fixState := attempt.reviewFixes
-		if fixState.Used() != event.fix.ordinal || !fixState.Quiescent() || len(fixState.fixes) == 0 {
-			return ReviewRuntimeProjection{}, fmt.Errorf("review fix event does not match the completed review-fix ordinal")
-		}
-		commit := fixState.fixes[len(fixState.fixes)-1].commit
-		if commit.commit != event.fix.head || commit.tree != event.fix.tree || commit.parent != event.fix.priorHead ||
-			commit.evidence != event.fix.evidence {
-			return ReviewRuntimeProjection{}, fmt.Errorf("review fix event does not match durable commit evidence")
-		}
-		state, err := ReduceReview(current.states[index], event.fix)
-		if err != nil {
-			return ReviewRuntimeProjection{}, err
-		}
+		state.exhaustion = deriveReviewExhaustionAtUsage(
+			state, current.RoundsUsed(event.attemptID),
+			current.InfrastructureRetriesUsed(event.attemptID),
+		)
 		next.states[index] = state
 	}
 	return next, nil
-}
-
-func validateReviewFixJournalReservation(
-	current ReviewRuntimeProjection,
-	event WorkspaceJournalEvent,
-) error {
-	var workspaceID, attemptID ID
-	var generation Digest
-	var ordinal uint16
-	var parent GitObjectID
-	switch value := event.(type) {
-	case ReviewFixReservedJournalEvent:
-		workspaceID, generation, attemptID, ordinal, parent =
-			value.workspaceID, value.generation, value.attemptID, value.ordinal, value.parent
-	case ReviewFixIntendedJournalEvent:
-		workspaceID, generation, attemptID, ordinal, parent =
-			value.workspaceID, value.generation, value.attemptID, value.ordinal, value.parent
-	case ReviewFixCommitRecordedJournalEvent:
-		workspaceID, generation, attemptID, ordinal, parent =
-			value.workspaceID, value.generation, value.attemptID, value.ordinal, value.evidence.parent
-	case ReviewFixCheckRecordedJournalEvent:
-		workspaceID, generation, attemptID, ordinal =
-			value.workspaceID, value.generation, value.attemptID, value.ordinal
-	default:
-		return fmt.Errorf("unsupported review-fix reservation transition %T", event)
-	}
-	index := reviewStateIndex(current.states, attemptID)
-	if index < 0 {
-		return nil
-	}
-	state := current.states[index]
-	attempt, exists := current.core.Attempt(attemptID)
-	if !exists || attempt.phase != AttemptActive || current.workspaceID != workspaceID ||
-		current.activeGeneration != generation || state.workspaceID != workspaceID || state.generation != generation {
-		return fmt.Errorf("review-fix protocol transition does not match the active review attempt")
-	}
-	reservation := state.pendingFix
-	if reservation == nil {
-		_, isRebasedCheck := event.(ReviewFixCheckRecordedJournalEvent)
-		if isRebasedCheck && ordinal <= state.FixesUsed() && attempt.reviewFixes != nil &&
-			attempt.reviewFixes.rebaseEpoch > 0 && attempt.reviewFixes.checkingFix >= 0 {
-			return nil
-		}
-		return fmt.Errorf("review-fix protocol transition has no matching accepted-finding reservation")
-	}
-	if reservation.ordinal != ordinal || reservation.ordinal != state.FixesUsed()+1 {
-		return fmt.Errorf("review-fix protocol transition has no matching accepted-finding reservation")
-	}
-	if !parent.IsZero() && parent != reservation.head {
-		return fmt.Errorf("review-fix protocol transition does not match its exact reviewed parent")
-	}
-	return nil
 }
 
 func reviewStateIndex(states []ReviewState, attemptID ID) int {
@@ -349,11 +251,99 @@ func reviewStateIndex(states []ReviewState, attemptID ID) int {
 	return -1
 }
 
+func reviewAttemptHistoryIndex(history []reviewAttemptHistory, attemptID ID) int {
+	for index, item := range history {
+		if item.attemptID == attemptID {
+			return index
+		}
+	}
+	return -1
+}
+
+func incrementReviewRoundCount(
+	history []reviewAttemptHistory, attemptID ID,
+) []reviewAttemptHistory {
+	if index := reviewAttemptHistoryIndex(history, attemptID); index >= 0 {
+		history[index].roundsUsed++
+		return history
+	}
+	return append(history, reviewAttemptHistory{attemptID: attemptID, roundsUsed: 1})
+}
+
+func appendReviewInvocationReservation(
+	history []reviewAttemptHistory,
+	attemptID ID,
+	reservation ReviewInvocationReservation,
+) []reviewAttemptHistory {
+	index := reviewAttemptHistoryIndex(history, attemptID)
+	if index < 0 {
+		history = append(history, reviewAttemptHistory{attemptID: attemptID})
+		index = len(history) - 1
+	}
+	history[index].reservations = append(
+		history[index].reservations,
+		reviewAttemptReservation{
+			profileID:        reservation.request.profile.id,
+			reviewerInstance: reservation.reviewerInstance,
+			idempotencyKey:   reservation.idempotencyKey,
+		},
+	)
+	if reservation.request.invocation > 1 {
+		history[index].infrastructureRetriesUsed++
+	}
+	return history
+}
+
+func (projection ReviewRuntimeProjection) validateNewReviewInvocationReservation(
+	attemptID ID,
+	loop ReviewLoop,
+	reservation ReviewInvocationReservation,
+) error {
+	history, _ := projection.attemptHistoryFor(attemptID)
+	for _, prior := range history.reservations {
+		if prior.idempotencyKey == reservation.idempotencyKey {
+			return fmt.Errorf("review invocation idempotency key is already bound")
+		}
+	}
+	if reservation.request.invocation > 1 &&
+		history.infrastructureRetriesUsed >= loop.maxInfrastructureRetries {
+		return reviewInfrastructureRetryBudgetExhaustedError(loop.maxInfrastructureRetries)
+	}
+	return validateReviewInstancePolicy(
+		reservation.request.profile,
+		reservation.reviewerInstance,
+		reviewReviewerInstanceUsesFromHistory(history),
+	)
+}
+
+func reviewReviewerInstanceUsesFromHistory(
+	history reviewAttemptHistory,
+) []reviewReviewerInstanceUse {
+	uses := make([]reviewReviewerInstanceUse, 0, len(history.reservations))
+	for _, reservation := range history.reservations {
+		uses = append(uses, reviewReviewerInstanceUse{
+			profileID: reservation.profileID, instance: reservation.reviewerInstance,
+		})
+	}
+	return uses
+}
+
+func cloneReviewAttemptHistory(source reviewAttemptHistory) reviewAttemptHistory {
+	source.reservations = append(
+		[]reviewAttemptReservation(nil), source.reservations...,
+	)
+	return source
+}
+
 func cloneReviewRuntime(source ReviewRuntimeProjection) ReviewRuntimeProjection {
 	result := source
 	result.states = make([]ReviewState, 0, len(source.states))
 	for _, state := range source.states {
 		result.states = append(result.states, cloneReviewState(state))
+	}
+	result.attemptHistory = make([]reviewAttemptHistory, 0, len(source.attemptHistory))
+	for _, history := range source.attemptHistory {
+		result.attemptHistory = append(result.attemptHistory, cloneReviewAttemptHistory(history))
 	}
 	result.core = cloneWorkspaceRuntime(source.core)
 	return result
@@ -384,17 +374,6 @@ func canonicalReviewRuntime(projection ReviewRuntimeProjection) ([]byte, error) 
 		Attempts     []resultJSON      `json:"attempts"`
 		Results      []resultJSON      `json:"results"`
 	}
-	type fixJSON struct {
-		Ordinal     uint16   `json:"ordinal"`
-		Round       uint16   `json:"round"`
-		Reservation string   `json:"reservation_digest"`
-		PriorHead   string   `json:"prior_head"`
-		PriorTree   string   `json:"prior_tree"`
-		Head        string   `json:"head"`
-		Tree        string   `json:"tree"`
-		Evidence    string   `json:"evidence_digest"`
-		Findings    []string `json:"finding_ids"`
-	}
 	type stateJSON struct {
 		AttemptID   string      `json:"attempt_id"`
 		PlanID      string      `json:"plan_id"`
@@ -404,26 +383,36 @@ func canonicalReviewRuntime(projection ReviewRuntimeProjection) ([]byte, error) 
 		Head        string      `json:"head"`
 		Tree        string      `json:"tree"`
 		Rounds      []roundJSON `json:"rounds"`
-		Fixes       []fixJSON   `json:"fixes"`
-		PendingFix  string      `json:"pending_fix_reservation,omitempty"`
-		Exhaustion  string      `json:"exhaustion_directive,omitempty"`
+	}
+	type attemptReservationJSON struct {
+		Profile        string `json:"profile"`
+		Reviewer       string `json:"reviewer_instance"`
+		IdempotencyKey string `json:"idempotency_key"`
+	}
+	type attemptHistoryJSON struct {
+		AttemptID                 string                   `json:"attempt_id"`
+		RoundsUsed                uint16                   `json:"rounds_used"`
+		InfrastructureRetriesUsed uint16                   `json:"infrastructure_retries_used"`
+		Reservations              []attemptReservationJSON `json:"reservations"`
 	}
 	type runtimeJSON struct {
-		SchemaVersion    int         `json:"schema_version"`
-		WorkspaceID      string      `json:"workspace_id"`
-		ActiveGeneration string      `json:"active_generation"`
-		States           []stateJSON `json:"states"`
+		SchemaVersion    int                  `json:"schema_version"`
+		WorkspaceID      string               `json:"workspace_id"`
+		ActiveGeneration string               `json:"active_generation"`
+		States           []stateJSON          `json:"states"`
+		AttemptHistory   []attemptHistoryJSON `json:"attempt_history"`
 	}
 	value := runtimeJSON{
 		SchemaVersion: 2, WorkspaceID: projection.workspaceID.String(),
 		ActiveGeneration: projection.activeGeneration.String(), States: make([]stateJSON, 0, len(projection.states)),
+		AttemptHistory: make([]attemptHistoryJSON, 0, len(projection.attemptHistory)),
 	}
 	for _, state := range projection.states {
 		item := stateJSON{
 			AttemptID: state.attemptID.String(), PlanID: state.mergeUnit.planID.String(),
 			MergeUnitID: state.mergeUnit.mergeUnitID.String(), Generation: state.generation.String(),
 			Loop: state.loop.digest.String(), Head: state.head.String(), Tree: state.tree.String(),
-			Rounds: make([]roundJSON, 0, len(state.rounds)), Fixes: make([]fixJSON, 0, len(state.fixes)),
+			Rounds: make([]roundJSON, 0, len(state.rounds)),
 		}
 		for _, round := range state.rounds {
 			roundItem := roundJSON{
@@ -457,25 +446,25 @@ func canonicalReviewRuntime(projection ReviewRuntimeProjection) ([]byte, error) 
 			}
 			item.Rounds = append(item.Rounds, roundItem)
 		}
-		for _, fix := range state.fixes {
-			findingIDs := make([]string, 0, len(fix.findings))
-			for _, finding := range fix.findings {
-				findingIDs = append(findingIDs, finding.String())
-			}
-			item.Fixes = append(item.Fixes, fixJSON{
-				Ordinal: fix.ordinal, Round: fix.round, Reservation: fix.reservationDigest.String(),
-				PriorHead: fix.priorHead.String(), PriorTree: fix.priorTree.String(),
-				Head: fix.head.String(), Tree: fix.tree.String(), Evidence: fix.evidence.String(), Findings: findingIDs,
-			})
-		}
-		if state.pendingFix != nil {
-			item.PendingFix = state.pendingFix.digest.String()
-		}
-		if state.exhaustion != nil {
-			item.Exhaustion = state.exhaustion.digest.String()
-		}
 		value.States = append(value.States, item)
 	}
 	sort.Slice(value.States, func(i, j int) bool { return value.States[i].AttemptID < value.States[j].AttemptID })
+	for _, history := range projection.attemptHistory {
+		item := attemptHistoryJSON{
+			AttemptID: history.attemptID.String(), RoundsUsed: history.roundsUsed,
+			InfrastructureRetriesUsed: history.infrastructureRetriesUsed,
+			Reservations:              make([]attemptReservationJSON, 0, len(history.reservations)),
+		}
+		for _, reservation := range history.reservations {
+			item.Reservations = append(item.Reservations, attemptReservationJSON{
+				Profile: reservation.profileID.String(), Reviewer: reservation.reviewerInstance.String(),
+				IdempotencyKey: reservation.idempotencyKey.String(),
+			})
+		}
+		value.AttemptHistory = append(value.AttemptHistory, item)
+	}
+	sort.Slice(value.AttemptHistory, func(i, j int) bool {
+		return value.AttemptHistory[i].AttemptID < value.AttemptHistory[j].AttemptID
+	})
 	return json.Marshal(value)
 }

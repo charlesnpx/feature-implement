@@ -94,7 +94,7 @@ func IntegrateMergeUnit(
 	if attempt.integration == nil {
 		evidence, err := confirmIntegrationAcceptance(
 			ctx, snapshot, reviews, definition, repository,
-			attempt, false,
+			attempt, false, true,
 		)
 		if err != nil {
 			return MergeUnitIntegrationResult{}, err
@@ -211,7 +211,7 @@ func IntegrateMergeUnit(
 
 	if _, err := confirmIntegrationAcceptance(
 		ctx, snapshot, reviews, definition, repository,
-		attempt, true,
+		attempt, true, false,
 	); err != nil {
 		return MergeUnitIntegrationResult{}, err
 	}
@@ -258,7 +258,7 @@ func IntegrateMergeUnit(
 		}
 		if _, err := confirmIntegrationAcceptance(
 			ctx, snapshot, reviews, definition, repository,
-			attempt, true,
+			attempt, true, false,
 		); err != nil {
 			return MergeUnitIntegrationResult{}, err
 		}
@@ -343,7 +343,7 @@ func IntegrateMergeUnit(
 	}
 	if _, err := confirmIntegrationAcceptance(
 		ctx, snapshot, reviews, definition, repository,
-		attempt, true,
+		attempt, true, false,
 	); err != nil {
 		return MergeUnitIntegrationResult{}, err
 	}
@@ -546,6 +546,7 @@ func confirmIntegrationAcceptance(
 	repository ReviewRepositoryPort,
 	attempt RuntimeAttemptProjection,
 	pendingIntent bool,
+	verifyFinalHistory bool,
 ) (integrationAcceptanceEvidence, error) {
 	if attempt.phase != AttemptActive || attempt.verifiedHead.IsZero() {
 		return integrationAcceptanceEvidence{}, fmt.Errorf(
@@ -594,6 +595,16 @@ func confirmIntegrationAcceptance(
 			"integration requires the exact clean accepted attempt head",
 		)
 	}
+	// Configured checks are arbitrary commands. They must finish before the
+	// integration intent becomes durable; later confirmations compare only the
+	// immutable accepted Git and review evidence to that intent.
+	if verifyFinalHistory {
+		if err := verifyAttemptFinalHistory(
+			ctx, repository, unit, attempt, repositorySnapshot.head,
+		); err != nil {
+			return integrationAcceptanceEvidence{}, fmt.Errorf("integration final history: %w", err)
+		}
+	}
 	evidence := integrationAcceptanceEvidence{
 		head: repositorySnapshot.head,
 		tree: repositorySnapshot.tree,
@@ -625,22 +636,6 @@ func confirmIntegrationAcceptance(
 		if _, exists := reviews.State(attempt.attemptID); exists {
 			return integrationAcceptanceEvidence{}, fmt.Errorf(
 				"unconfigured review evidence cannot authorize integration",
-			)
-		}
-		if protocol, configured := unit.CommitProtocol(); configured {
-			if attempt.commitProtocol == nil ||
-				attempt.commitProtocol.protocol.digest != protocol.digest ||
-				attempt.commitProtocol.phase != CommitProtocolComplete ||
-				attempt.commitProtocol.Head() != attempt.verifiedHead {
-				return integrationAcceptanceEvidence{}, fmt.Errorf(
-					"attempt %s has not completed its configured commit protocol",
-					attempt.attemptID,
-				)
-			}
-		} else if attempt.commitProtocol != nil {
-			return integrationAcceptanceEvidence{}, fmt.Errorf(
-				"attempt %s has an unconfigured commit protocol",
-				attempt.attemptID,
 			)
 		}
 		record, exists := exactAdoptedHeadRecord(
@@ -683,7 +678,7 @@ func requireIntegrationGateReady(
 		if unit.PlanID == attempt.mergeUnit.planID.String() &&
 			unit.MergeUnitID == attempt.mergeUnit.mergeUnitID.String() {
 			if unit.AttemptID != attempt.attemptID.String() ||
-				!unit.MergeReady {
+				!integrationPreflightReady(unit) {
 				return fmt.Errorf(
 					"merge unit %s is not ready for local integration",
 					attempt.mergeUnit,
@@ -696,6 +691,37 @@ func requireIntegrationGateReady(
 		"merge unit %s is absent from integration gates",
 		attempt.mergeUnit,
 	)
+}
+
+// integrationPreflightReady admits the one declarative gate that is proved by
+// this integration operation itself. The check stays pending in the durable
+// view because final-history results are deliberately not journaled.
+func integrationPreflightReady(unit WorkspaceUnitGates) bool {
+	if unit.MergeReady {
+		return true
+	}
+	deferredCommit := false
+	for _, gate := range unit.Checks {
+		switch gate.Name {
+		case "commit":
+			if gate.Status == GatePending &&
+				gate.Reason == "final_history_validated_at_integration" {
+				deferredCommit = true
+				continue
+			}
+			return false
+		case "integration":
+			if gate.Status == GatePending && gate.Reason == "not_integrated" {
+				continue
+			}
+			return false
+		default:
+			if gate.Status != GatePassed {
+				return false
+			}
+		}
+	}
+	return deferredCommit
 }
 
 func appendIntegrationJournalEvent(

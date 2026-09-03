@@ -169,7 +169,6 @@ policy:
   allow_write_network: false
   max_attempts: 2
   max_review_rounds: 2
-  max_review_fixes: 1
 profiles:
   - id: standard
     runner: codex
@@ -178,7 +177,6 @@ profiles:
       allow_write_network: false
       max_attempts: 2
       max_review_rounds: 2
-      max_review_fixes: 1
 merge_units:
   - plan_id: alpha-plan
     merge_unit_id: unit-one
@@ -192,7 +190,6 @@ merge_units:
       allow_write_network: false
       max_attempts: 2
       max_review_rounds: 2
-      max_review_fixes: 1
 `)
 	if _, err := Execute(context.Background(), Options{
 		Action:           "validate",

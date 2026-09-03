@@ -45,17 +45,6 @@ type ReviewReservationView struct {
 	Request           ReviewRequestView `json:"request"`
 }
 
-type ReviewFixReservationView struct {
-	ReservationDigest string   `json:"reservation_digest"`
-	AttemptID         string   `json:"attempt_id"`
-	Generation        string   `json:"generation"`
-	Ordinal           uint16   `json:"ordinal"`
-	Round             uint16   `json:"round"`
-	Head              string   `json:"head"`
-	Tree              string   `json:"tree"`
-	FindingIDs        []string `json:"finding_ids"`
-}
-
 type ReviewReadinessView struct {
 	Digest      string `json:"digest"`
 	WorkspaceID string `json:"workspace_id"`
@@ -145,23 +134,6 @@ type ReviewDocumentRecordDetail struct {
 	ReviewInputDigest   string `json:"review_input_digest"`
 	CharterHash         string `json:"charter_hash"`
 	RawDocumentPath     string `json:"raw_document_path"`
-}
-
-type reviewFixInput struct {
-	SchemaVersion      int      `json:"schema_version"`
-	OccurredAt         string   `json:"occurred_at"`
-	AttemptID          string   `json:"attempt_id"`
-	Ordinal            uint16   `json:"ordinal"`
-	AcceptedFindingIDs []string `json:"accepted_finding_ids"`
-}
-
-type applyReviewFixInput struct {
-	SchemaVersion      int      `json:"schema_version"`
-	OccurredAt         string   `json:"occurred_at"`
-	AttemptID          string   `json:"attempt_id"`
-	Ordinal            uint16   `json:"ordinal"`
-	AcceptedFindingIDs []string `json:"accepted_finding_ids"`
-	Body               string   `json:"body,omitempty"`
 }
 
 func executeReview(ctx context.Context, bundle workspace.WorkspaceBundle, options Options) (any, error) {
@@ -327,65 +299,6 @@ func executeReview(ctx context.Context, bundle workspace.WorkspaceBundle, option
 			ReviewRequestDigest: artifact.RequestDigest().String(), ReviewInputDigest: artifact.ReviewInputDigest().String(),
 			CharterHash: artifact.CharterHash().String(), RawDocumentPath: artifactPath,
 		}, journal, definition)
-	case "reserve-fix", "apply-fix", "record-fix":
-		var input reviewFixInput
-		body := ""
-		if options.Subaction == "apply-fix" {
-			var applyInput applyReviewFixInput
-			if err := decodeRequest(options.Input, &applyInput); err != nil {
-				return nil, err
-			}
-			input = reviewFixInput{
-				SchemaVersion:      applyInput.SchemaVersion,
-				OccurredAt:         applyInput.OccurredAt,
-				AttemptID:          applyInput.AttemptID,
-				Ordinal:            applyInput.Ordinal,
-				AcceptedFindingIDs: applyInput.AcceptedFindingIDs,
-			}
-			body = applyInput.Body
-		} else if err := decodeRequest(options.Input, &input); err != nil {
-			return nil, err
-		}
-		occurredAt, err := parseOccurredAt(input.SchemaVersion, input.OccurredAt)
-		if err != nil {
-			return nil, err
-		}
-		attemptID, err := parseID(input.AttemptID, "attempt_id")
-		if err != nil {
-			return nil, err
-		}
-		findingIDs, err := parseDigestList(input.AcceptedFindingIDs, "accepted_finding_ids")
-		if err != nil {
-			return nil, err
-		}
-		if options.Subaction == "reserve-fix" {
-			reserved, err := workspace.ReserveAttemptReviewFix(journal, definition, workspace.ReserveAttemptReviewFixRequest{
-				AttemptID: attemptID, Ordinal: input.Ordinal, AcceptedFindingIDs: findingIDs, OccurredAt: occurredAt,
-			})
-			if err != nil {
-				return nil, err
-			}
-			return reviewCommandResult("review.reserve-fix", reviewFixReservationView(reserved.Reservation()), journal, definition)
-		}
-		if options.Subaction == "apply-fix" {
-			shell, err := workspace.NewCommitProtocolShell(workspace.DefaultLocalCommitGitAdapter(), defaultIsolatedCheckRunner())
-			if err != nil {
-				return nil, err
-			}
-			if _, err := workspace.ExecuteAttemptReviewFix(ctx, journal, definition, shell, workspace.ExecuteAttemptReviewFixRequest{
-				AttemptID: attemptID, Ordinal: input.Ordinal, Body: body,
-				AcceptedFindingIDs: findingIDs, OccurredAt: occurredAt,
-			}); err != nil {
-				return nil, err
-			}
-			return reviewCommandResult("review.apply-fix", nil, journal, definition)
-		}
-		if _, _, err := workspace.RecordReviewFixApplication(journal, definition, workspace.RecordReviewFixApplicationRequest{
-			AttemptID: attemptID, Ordinal: input.Ordinal, AcceptedFindingIDs: findingIDs, OccurredAt: occurredAt,
-		}); err != nil {
-			return nil, err
-		}
-		return reviewCommandResult("review.record-fix", nil, journal, definition)
 	case "ready":
 		var input struct {
 			SchemaVersion int    `json:"schema_version"`
@@ -666,29 +579,4 @@ func parseReviewFindings(inputs []reviewFindingInput) ([]workspace.ReviewFinding
 		result = append(result, finding)
 	}
 	return result, nil
-}
-
-func parseDigestList(values []string, label string) ([]workspace.Digest, error) {
-	result := make([]workspace.Digest, 0, len(values))
-	for index, value := range values {
-		digest, err := parseDigest(value, fmt.Sprintf("%s[%d]", label, index))
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, digest)
-	}
-	return result, nil
-}
-
-func reviewFixReservationView(reservation workspace.ReviewFixReservation) ReviewFixReservationView {
-	findings := reservation.FindingIDs()
-	ids := make([]string, 0, len(findings))
-	for _, finding := range findings {
-		ids = append(ids, finding.String())
-	}
-	return ReviewFixReservationView{
-		ReservationDigest: reservation.Digest().String(), AttemptID: reservation.AttemptID().String(),
-		Generation: reservation.Generation().String(), Ordinal: reservation.Ordinal(), Round: reservation.Round(),
-		Head: reservation.Head().String(), Tree: reservation.Tree().String(), FindingIDs: ids,
-	}
 }

@@ -80,15 +80,10 @@ func Execute(ctx context.Context, options Options) (any, error) {
 		return nil, removedWorkspaceCommand(action)
 	case "validate", "init", "status", "recover":
 		// handled below
-	case "attempt", "commit", "review", "integrate", "complete":
+	case "attempt", "review", "integrate", "complete":
 		// handled below
 	default:
 		return nil, fmt.Errorf("unsupported workspace command %q", action)
-	}
-	if action == "commit" && strings.TrimSpace(options.Subaction) == "rebase" {
-		return nil, fmt.Errorf(
-			"workspace commit rebase was removed; attempt bases are immutable",
-		)
 	}
 	if err := validateWorkspaceSubaction(action, options.Subaction); err != nil {
 		return nil, err
@@ -114,8 +109,6 @@ func Execute(ctx context.Context, options Options) (any, error) {
 		return recoverWorkspace(ctx, bundle, options)
 	case "attempt":
 		return executeAttempt(ctx, bundle, options)
-	case "commit":
-		return executeCommit(ctx, bundle, options)
 	case "review":
 		return executeReview(ctx, bundle, options)
 	case "integrate":
@@ -142,12 +135,9 @@ func validateWorkspaceSubaction(action, subaction string) error {
 		supported = stringSet(
 			"start", "adopt-head", "pause", "resume", "abandon",
 		)
-	case "commit":
-		supported = stringSet("next")
 	case "review":
 		supported = stringSet(
-			"start", "reserve", "request", "record", "record-document", "reserve-fix",
-			"apply-fix", "record-fix", "ready",
+			"start", "reserve", "request", "record", "record-document", "ready",
 		)
 	case "integrate":
 		supported = stringSet("merge-unit")
@@ -193,9 +183,6 @@ func RequestSchemas() map[string]any {
 	integerProperty := func(minimum int) map[string]any { return map[string]any{"type": "integer", "minimum": minimum} }
 	booleanProperty := func() map[string]any { return map[string]any{"type": "boolean"} }
 	enumProperty := func(values ...string) map[string]any { return map[string]any{"enum": values} }
-	arrayOfStrings := func() map[string]any {
-		return map[string]any{"type": "array", "uniqueItems": true, "items": stringProperty()}
-	}
 	request := func(required []string, properties map[string]any) map[string]any {
 		properties["schema_version"] = map[string]any{"const": requestSchemaVersion}
 		return map[string]any{
@@ -259,10 +246,7 @@ func RequestSchemas() map[string]any {
 		})),
 		"attempt.resume":  request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
 		"attempt.abandon": request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
-		"commit.next": request([]string{"occurred_at", "attempt_id"}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "body": optionalString(),
-		})),
-		"review.start": request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
+		"review.start":    request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
 		"review.reserve": request([]string{"occurred_at", "attempt_id", "reviewer_instance", "idempotency_key"}, occurred(map[string]any{
 			"attempt_id": stringProperty(),
 			"reviewer_instance": map[string]any{
@@ -304,15 +288,6 @@ func RequestSchemas() map[string]any {
 				"description": "Raw review-report-v1 document; the Witness contract performs strict decoding and validation.",
 			},
 			"isolation": isolation,
-		})),
-		"review.reserve-fix": request([]string{"occurred_at", "attempt_id", "ordinal", "accepted_finding_ids"}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "ordinal": integerProperty(1), "accepted_finding_ids": arrayOfStrings(),
-		})),
-		"review.apply-fix": request([]string{"occurred_at", "attempt_id", "ordinal", "accepted_finding_ids"}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "ordinal": integerProperty(1), "accepted_finding_ids": arrayOfStrings(), "body": optionalString(),
-		})),
-		"review.record-fix": request([]string{"occurred_at", "attempt_id", "ordinal", "accepted_finding_ids"}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "ordinal": integerProperty(1), "accepted_finding_ids": arrayOfStrings(),
 		})),
 		"review.ready": request([]string{"attempt_id"}, map[string]any{"attempt_id": stringProperty()}),
 		"integrate.merge-unit": request([]string{"occurred_at", "attempt_id"}, occurred(map[string]any{
