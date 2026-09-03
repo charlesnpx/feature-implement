@@ -95,7 +95,6 @@ func (adapter LocalAttemptGitAdapter) inspectRegisteredWorktrees(
 
 func (guard *attemptWorktreeRootGuard) Verify(
 	ctx context.Context,
-	adapter LocalAttemptGitAdapter,
 ) error {
 	if guard == nil {
 		return fmt.Errorf("attempt worktree root guard is closed")
@@ -120,22 +119,6 @@ func (guard *attemptWorktreeRootGuard) validateLayout() error {
 	}
 	if guard.worktree.Path() != filepath.Dir(guard.worktreePath) {
 		return fmt.Errorf("derived attempt worktree parent changed during admission")
-	}
-	for _, protected := range []struct {
-		label string
-		path  string
-	}{
-		{label: "target", path: guard.binding.root},
-		{label: "Git administration", path: guard.binding.commonDir},
-	} {
-		if pathContains(protected.path, guard.worktree.Path()) ||
-			pathContains(protected.path, guard.worktreePath) ||
-			pathContains(guard.worktreePath, protected.path) {
-			return fmt.Errorf(
-				"unsafe attempt worktree overlap: derived root %s (candidate %s) and %s path %s",
-				guard.worktree.Path(), guard.worktreePath, protected.label, protected.path,
-			)
-		}
 	}
 	return nil
 }

@@ -67,7 +67,7 @@ func StartAttempt(
 		return RuntimeAttemptProjection{}, err
 	}
 	target, ok := runtime.LocalTarget()
-	if !ok || !target.Created() || target.CreatedHead().IsZero() {
+	if !ok || target.CreatedHead().IsZero() {
 		return RuntimeAttemptProjection{}, fmt.Errorf("attempt start requires a durable local feature head")
 	}
 	base := target.CreatedHead()

@@ -377,7 +377,7 @@ func RebuildWorkspaceView(snapshot JournalSnapshot, definition EffectiveWorkspac
 	driftInput := workspaceIntegrationDriftInput{
 		chain: append([]MergeUnitIntegrationIntent(nil), assessment.chain...),
 	}
-	if target, exists := core.LocalTarget(); exists && target.Created() {
+	if target, exists := core.LocalTarget(); exists {
 		driftInput.target = target.Binding()
 	}
 	_, driftInput.completionRecorded = core.Completion()
@@ -497,10 +497,6 @@ func workspaceTargetView(
 		}, nil
 	}
 	binding := target.Binding()
-	featureHead := ""
-	if target.Created() {
-		featureHead = target.CreatedHead().String()
-	}
 	return WorkspaceTarget{
 		Root:          binding.Root(),
 		ObjectFormat:  string(binding.ObjectFormat()),
@@ -508,9 +504,9 @@ func workspaceTargetView(
 		BaseCommit:    binding.BaseCommit().String(),
 		FeatureBranch: binding.FeatureBranch(),
 		FeatureRef:    binding.FeatureRef(),
-		FeatureHead:   featureHead,
+		FeatureHead:   target.CreatedHead().String(),
 		BindingDigest: binding.Digest().String(),
-		Ready:         target.Created(),
+		Ready:         true,
 	}, nil
 }
 

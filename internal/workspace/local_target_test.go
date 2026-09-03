@@ -48,7 +48,7 @@ func TestLocalTargetInitializationLeavesFeatureRefAbsent(t *testing.T) {
 				t.Fatalf("initialization journal = %#v", records)
 			}
 			target, ok := result.Runtime().LocalTarget()
-			if !ok || !target.Created() || target.Binding().Digest() != binding.Digest() ||
+			if !ok || target.Binding().Digest() != binding.Digest() ||
 				target.CreatedHead() != base {
 				t.Fatalf("runtime local target = %#v", target)
 			}
@@ -58,6 +58,38 @@ func TestLocalTargetInitializationLeavesFeatureRefAbsent(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("accepts deleted base ref after initialization", func(t *testing.T) {
+		root, base := initializeTargetRepository(t, workspace.GitHashSHA1)
+		definition := localTargetDefinition(
+			t, root, base, "feature/deleted-base-ref",
+		)
+		runtimeRoot := canonicalTestDirectory(t)
+		if _, err := initializeWorkspaceV2(
+			t, runtimeRoot, definition,
+			mustTime(t, "2026-09-03T12:01:00Z"),
+		); err != nil {
+			t.Fatalf("initialize local target: %v", err)
+		}
+		runTargetGitTest(
+			t, root, "update-ref", "-d", definition.Workspace().BaseRef(),
+			baseObjectHex(base),
+		)
+		if err := exec.Command(
+			"git", "-C", root, "show-ref", "--verify", "--quiet",
+			definition.Workspace().BaseRef(),
+		).Run(); err == nil {
+			t.Fatalf("base ref %s still exists", definition.Workspace().BaseRef())
+		}
+		runTargetGitTest(
+			t, root, "cat-file", "-e", baseObjectHex(base)+"^{commit}",
+		)
+		if _, err := workspace.ValidateLocalTargetForWorkspaceRuntime(
+			context.Background(), runtimeRoot, definition,
+		); err != nil {
+			t.Fatalf("validate initialized target with deleted base ref: %v", err)
+		}
+	})
 }
 
 func TestLocalTargetInitializationRefusesPreexistingFeatureRef(t *testing.T) {

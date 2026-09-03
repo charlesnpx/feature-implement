@@ -25,6 +25,9 @@ func DerivedWorkspaceRuntimeDirectory(bundleRoot string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := rejectAncestorWorkspaceBundleRoot(canonical); err != nil {
+		return "", err
+	}
 	return filepath.Join(
 		filepath.Dir(canonical),
 		filepath.Base(canonical)+derivedRuntimeDirectorySuffix,
@@ -43,6 +46,9 @@ func DerivedWorkspaceWorktreeRoot(runtimeRoot string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := rejectAncestorWorkspaceBundleRoot(canonical); err != nil {
+		return "", err
+	}
 	return canonical + derivedAttemptRootSuffix, nil
 }
 
@@ -59,6 +65,14 @@ func ValidateWorkspaceRuntimeRoot(runtimeRoot string) error {
 	runtimeRoot = filepath.Clean(strings.TrimSpace(runtimeRoot))
 	if !filepath.IsAbs(runtimeRoot) {
 		return fmt.Errorf("workspace runtime root must be absolute")
+	}
+	canonical, err := canonicalizeTrustedRootPath(runtimeRoot)
+	if err != nil {
+		return err
+	}
+	runtimeRoot = canonical
+	if err := rejectAncestorWorkspaceBundleRoot(runtimeRoot); err != nil {
+		return err
 	}
 	if exists, err := rootedEntryExists(runtimeRoot, WorkspaceBundleFileName); err != nil {
 		return fmt.Errorf("inspect configured workspace runtime root: %w", err)
@@ -81,6 +95,24 @@ func ValidateWorkspaceRuntimeRoot(runtimeRoot string) error {
 		}
 	}
 	return fmt.Errorf("configured workspace runtime root is a Git repository")
+}
+
+func rejectAncestorWorkspaceBundleRoot(path string) error {
+	for ancestor := filepath.Dir(path); ; ancestor = filepath.Dir(ancestor) {
+		exists, err := rootedEntryExists(ancestor, WorkspaceBundleFileName)
+		if err != nil {
+			return fmt.Errorf("inspect ancestor workspace bundle root: %w", err)
+		}
+		if exists {
+			return fmt.Errorf(
+				"workspace root %s is beneath ancestor workspace bundle root %s",
+				path, ancestor,
+			)
+		}
+		if filepath.Dir(ancestor) == ancestor {
+			return nil
+		}
+	}
 }
 
 func rootedEntryExists(root, name string) (bool, error) {

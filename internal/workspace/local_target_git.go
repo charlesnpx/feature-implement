@@ -141,15 +141,19 @@ func (adapter LocalTargetGitAdapter) inspect(
 			target.baseCommit.Algorithm(), objectFormat,
 		)
 	}
-	baseHead, err := adapter.resolveCommitRef(ctx, root, target.baseRef, objectFormat)
-	if err != nil {
-		return LocalTargetBinding{}, err
-	}
-	if options.requireBaseAtPin && baseHead != target.baseCommit {
-		return LocalTargetBinding{}, fmt.Errorf(
-			"base_ref %s resolves to %s, not pinned base_commit %s",
-			target.baseRef, baseHead, target.baseCommit,
+	if options.requireBaseAtPin {
+		baseHead, err := adapter.resolveCommitRef(
+			ctx, root, target.baseRef, objectFormat,
 		)
+		if err != nil {
+			return LocalTargetBinding{}, err
+		}
+		if baseHead != target.baseCommit {
+			return LocalTargetBinding{}, fmt.Errorf(
+				"base_ref %s resolves to %s, not pinned base_commit %s",
+				target.baseRef, baseHead, target.baseCommit,
+			)
+		}
 	}
 	if err := adapter.verifyExactCommit(ctx, root, target.baseCommit); err != nil {
 		return LocalTargetBinding{}, err

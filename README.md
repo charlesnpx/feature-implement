@@ -112,10 +112,10 @@ plans:
 dependencies: []
 ```
 
-The pinned base commit must equal `base_ref` during validation and
-initialization. Later movement of that ref is reported as drift; an active
-workspace is never silently rebased. The primary checkout may be dirty and is
-never cleaned, stashed, switched, or used as an attempt worktree.
+The pinned base commit must equal `base_ref` during validation and initialization.
+Post-initialization validation requires the pinned base commit object to remain present; the base ref's movement or deletion after initialization is irrelevant and never fatal.
+The primary checkout may be dirty and is never cleaned, stashed, switched, or used
+as an attempt worktree.
 
 Plan sources own stories, story dependencies, and merge-unit composition:
 
@@ -320,9 +320,9 @@ replacement refs disabled, and external diff or text conversion disabled.
 ### Stable-base policy
 
 The fully qualified `base_ref` must point to the exact `base_commit` during
-validation and initialization. After initialization, movement of the base ref is
-reported as drift only. The runtime never rebases active work, adopts a moved
-base, or mutates the primary checkout to make the base match.
+validation and initialization. Post-initialization validation requires the pinned base commit object to remain present; the base ref's movement or deletion after initialization is irrelevant and never fatal.
+The runtime never rebases active work, adopts a moved base, or mutates the primary
+checkout to make the base match.
 
 ### Threat model
 

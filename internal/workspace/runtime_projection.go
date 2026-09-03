@@ -96,8 +96,6 @@ func (recovery RuntimeRecoveryProjection) ResultingHead() Digest { return recove
 
 type RuntimeLocalTargetProjection struct {
 	binding       LocalTargetBinding
-	intentDigest  Digest
-	intentRecord  uint64
 	createdHead   GitObjectID
 	createdRecord uint64
 	headRecord    uint64
@@ -105,15 +103,6 @@ type RuntimeLocalTargetProjection struct {
 
 func (projection RuntimeLocalTargetProjection) Binding() LocalTargetBinding {
 	return projection.binding
-}
-func (projection RuntimeLocalTargetProjection) IntentDigest() Digest {
-	return projection.intentDigest
-}
-func (projection RuntimeLocalTargetProjection) IntentRecord() uint64 {
-	return projection.intentRecord
-}
-func (projection RuntimeLocalTargetProjection) Created() bool {
-	return projection.createdRecord != 0
 }
 func (projection RuntimeLocalTargetProjection) CreatedHead() GitObjectID {
 	return projection.createdHead
@@ -223,8 +212,7 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 		}
 	}
 	if !current.activeGeneration.IsZero() {
-		target, hasTarget := current.LocalTarget()
-		ready := hasTarget && target.Created()
+		_, ready := current.LocalTarget()
 		switch record.event.(type) {
 		case JournalTailRecoveredEvent:
 			// Journal-tail recovery is the only transition admitted before
@@ -347,8 +335,7 @@ func journalEventTargetsAttempt(event WorkspaceJournalEvent, attemptID ID) bool 
 }
 
 func requireReadyLocalTarget(runtime WorkspaceRuntimeProjection) error {
-	target, ok := runtime.LocalTarget()
-	if !ok || !target.Created() {
+	if _, ok := runtime.LocalTarget(); !ok {
 		return fmt.Errorf(
 			"workspace runtime is not ready until local target admission is durable",
 		)
@@ -407,9 +394,6 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 	type localTargetJSON struct {
 		Binding       localTargetBindingWire `json:"binding"`
 		BindingDigest string                 `json:"binding_digest"`
-		IntentDigest  string                 `json:"intent_digest"`
-		IntentRecord  uint64                 `json:"intent_record"`
-		Created       bool                   `json:"created"`
 		CreatedHead   string                 `json:"created_head,omitempty"`
 		CreatedRecord uint64                 `json:"created_record,omitempty"`
 		HeadRecord    uint64                 `json:"head_record,omitempty"`
@@ -446,9 +430,6 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 				projection.localTarget.binding,
 			),
 			BindingDigest: projection.localTarget.binding.digest.String(),
-			IntentDigest:  projection.localTarget.intentDigest.String(),
-			IntentRecord:  projection.localTarget.intentRecord,
-			Created:       projection.localTarget.createdRecord != 0,
 			CreatedHead:   projection.localTarget.createdHead.String(),
 			CreatedRecord: projection.localTarget.createdRecord,
 			HeadRecord:    projection.localTarget.headRecord,

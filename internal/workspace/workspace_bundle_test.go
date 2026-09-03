@@ -143,6 +143,62 @@ func TestConfiguredWorkspaceRuntimeRootRejectsBundleAndGitRepository(t *testing.
 	}
 }
 
+func TestWorkspaceBundleRejectsNestedBundleRuntimeAndAttemptRoots(t *testing.T) {
+	t.Parallel()
+
+	fixture := newDefinitionFixture(t)
+	outerRoot := writeDefinitionBundle(t, fixture, nil)
+	outer, err := workspace.LoadWorkspaceBundle(outerRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition := mustDefinition(t, fixture.sources)
+	stagedNestedRoot := writeDefinitionBundle(t, newDefinitionFixture(t), nil)
+	nestedRoot := filepath.Join(outer.Root(), "nested", "inner")
+	if err := os.MkdirAll(filepath.Dir(nestedRoot), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(stagedNestedRoot, nestedRoot); err != nil {
+		t.Fatal(err)
+	}
+	expectAncestorRejection := func(subject string, err error) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), "ancestor workspace bundle root") ||
+			!strings.Contains(err.Error(), outer.Root()) {
+			t.Fatalf("%s nested-bundle error = %v", subject, err)
+		}
+	}
+
+	_, err = workspace.LoadWorkspaceBundle(nestedRoot)
+	expectAncestorRejection("nested bundle", err)
+	_, err = workspace.DerivedWorkspaceRuntimeDirectory(nestedRoot)
+	expectAncestorRejection("nested derived runtime", err)
+
+	runtimeRoot := filepath.Join(
+		filepath.Dir(nestedRoot), filepath.Base(nestedRoot)+".feature-runtime",
+	)
+	_, err = initializeWorkspaceV2(
+		t, runtimeRoot, definition, mustTime(t, "2026-09-03T12:02:00Z"),
+	)
+	expectAncestorRejection("nested runtime initialization", err)
+	if _, statErr := os.Lstat(runtimeRoot); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("nested runtime was created: %v", statErr)
+	}
+
+	attemptRoot := runtimeRoot + "-attempt-worktrees"
+	destination := filepath.Join(attemptRoot, "attempt")
+	_, err = workspace.DefaultLocalAttemptGitAdapter().MaterializeAttemptTree(
+		context.Background(),
+		definition.Workspace().RepositoryRoot(),
+		definition.Workspace().BaseCommit(),
+		destination,
+	)
+	expectAncestorRejection("nested attempt root", err)
+	if _, statErr := os.Lstat(destination); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("nested attempt was created: %v", statErr)
+	}
+}
+
 func TestAttemptCannotMaterializeUnderAnotherWorkspaceBundleRoot(t *testing.T) {
 	t.Parallel()
 

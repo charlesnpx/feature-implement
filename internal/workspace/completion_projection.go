@@ -25,7 +25,7 @@ func reduceCompletionRuntime(
 		)
 	}
 	target, exists := current.LocalTarget()
-	if !exists || !target.Created() ||
+	if !exists ||
 		target.binding.featureRef != event.featureRef ||
 		target.createdHead != event.featureHead {
 		return fmt.Errorf(

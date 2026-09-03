@@ -178,7 +178,7 @@ func (adapter LocalAttemptGitAdapter) MaterializeAttemptTree(
 	if base.Algorithm() != algorithm {
 		return AttemptGitInspection{}, fmt.Errorf("attempt base does not match the repository object format")
 	}
-	if err := guard.Verify(ctx, adapter); err != nil {
+	if err := guard.Verify(ctx); err != nil {
 		return AttemptGitInspection{}, fmt.Errorf("verify attempt roots before materialization: %w", err)
 	}
 
@@ -238,7 +238,7 @@ func (adapter LocalAttemptGitAdapter) MaterializeAttemptTree(
 	if err := initializeDetachedAttemptRepository(ctx, adapter, source, root, base, algorithm, rollback); err != nil {
 		return AttemptGitInspection{}, err
 	}
-	if err := guard.Verify(ctx, adapter); err != nil {
+	if err := guard.Verify(ctx); err != nil {
 		return AttemptGitInspection{}, fmt.Errorf("verify attempt roots after materialization: %w", err)
 	}
 	inspection, err = adapter.inspectScratchAttemptWorktree(ctx, source, worktree)

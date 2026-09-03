@@ -64,7 +64,7 @@ func CompleteWorkspace(
 			}
 	}
 	target, exists := runtime.LocalTarget()
-	if !exists || !target.Created() {
+	if !exists {
 		return WorkspaceCompletionResult{}, fmt.Errorf(
 			"workspace completion requires a durable local target",
 		)

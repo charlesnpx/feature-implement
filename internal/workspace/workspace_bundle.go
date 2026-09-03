@@ -73,6 +73,9 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 	if err := rejectReservedDerivedBundleRoot(bundleRoot); err != nil {
 		return WorkspaceBundle{}, err
 	}
+	if err := rejectAncestorWorkspaceBundleRoot(bundleRoot); err != nil {
+		return WorkspaceBundle{}, err
+	}
 	filesystem, err := OpenVerifiedRoot(RootRolePlan, bundleRoot, false)
 	if err != nil {
 		return WorkspaceBundle{}, fmt.Errorf("open workspace bundle: %w", err)

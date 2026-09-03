@@ -84,7 +84,7 @@ func IntegrateMergeUnit(
 		)
 	}
 	target, ok := runtime.LocalTarget()
-	if !ok || !target.Created() {
+	if !ok {
 		return MergeUnitIntegrationResult{}, fmt.Errorf(
 			"integration requires a durable local target",
 		)

@@ -306,10 +306,7 @@ func TestIntegrationCompletionReducerRequiresExactLeaseAndSerialSegment(
 		workspaceID:      intent.workspaceID,
 		activeGeneration: intent.generation,
 		localTarget: RuntimeLocalTargetProjection{
-			binding: targetBinding, intentDigest: DigestBytes(
-				[]byte("target intent"),
-			),
-			intentRecord: 1, createdHead: intent.expectedFeatureHead,
+			binding: targetBinding, createdHead: intent.expectedFeatureHead,
 			createdRecord: 2, headRecord: 2,
 		},
 		attempts: []RuntimeAttemptProjection{

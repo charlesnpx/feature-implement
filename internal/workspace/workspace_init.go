@@ -231,7 +231,7 @@ func InitializeWorkspaceV2WithOptions(
 		return WorkspaceInitializationResult{}, fmt.Errorf("initialized runtime does not match the verified plan checkpoint artifact")
 	}
 	targetRuntime, ok := runtime.LocalTarget()
-	if !ok || !targetRuntime.Created() ||
+	if !ok ||
 		targetRuntime.binding.root != definition.workspace.target.root ||
 		targetRuntime.binding.baseRef != definition.workspace.target.baseRef ||
 		targetRuntime.binding.baseCommit != definition.workspace.target.baseCommit ||
@@ -274,6 +274,9 @@ func verifyDerivedInitializationLayout(planRoot, runtimeRoot, targetRoot string)
 	runtimeRoot, err := canonicalizeTrustedRootPath(runtimeRoot)
 	if err != nil {
 		return err
+	}
+	if err := rejectAncestorWorkspaceBundleRoot(runtimeRoot); err != nil {
+		return fmt.Errorf("reject derived runtime root: %w", err)
 	}
 	targetRoot, err = canonicalizeTrustedRootPath(targetRoot)
 	if err != nil {
