@@ -248,17 +248,6 @@ func validateCompletionAttempt(
 		return fmt.Errorf("execution_missing")
 	}
 	loop, reviewConfigured := unit.ReviewLoop()
-	if protocol, configured := unit.CommitProtocol(); configured {
-		if attempt.commitProtocol == nil ||
-			attempt.commitProtocol.protocol.digest != protocol.digest ||
-			attempt.commitProtocol.phase != CommitProtocolComplete ||
-			(!reviewConfigured &&
-				attempt.commitProtocol.Head() != intent.acceptedHead) {
-			return fmt.Errorf("commit_protocol_incomplete")
-		}
-	} else if attempt.commitProtocol != nil {
-		return fmt.Errorf("unconfigured_commit_protocol")
-	}
 	if reviewConfigured {
 		state, exists := reviews.State(attempt.attemptID)
 		if !exists || !state.MergeReady() ||

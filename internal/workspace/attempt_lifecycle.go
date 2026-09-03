@@ -221,9 +221,8 @@ func (result AttemptHeadAdoptionResult) Record() JournalRecord { return result.r
 func (result AttemptHeadAdoptionResult) Adopted() bool         { return result.adopted }
 
 // AdoptAttemptHead records exact clean-head acceptance for an active attempt
-// without a review loop. Protocol-free attempts may advance to an ordinary
-// local commit; configured commit protocols record a same-head confirmation
-// after their durable protocol has completed.
+// without a review loop. Configured commit constraints are proved from the
+// final history immediately before this durable adoption.
 func AdoptAttemptHead(
 	ctx context.Context,
 	journal *WorkspaceJournal,
@@ -273,26 +272,10 @@ func AdoptAttemptHead(
 	); exists {
 		return result, nil
 	}
-	if protocol, configured := unit.CommitProtocol(); configured {
-		if attempt.commitProtocol == nil ||
-			attempt.commitProtocol.protocol.digest != protocol.digest ||
-			attempt.commitProtocol.phase != CommitProtocolComplete ||
-			attempt.commitProtocol.Head() != repositorySnapshot.head ||
-			attempt.verifiedHead != repositorySnapshot.head {
-			return AttemptHeadAdoptionResult{}, fmt.Errorf(
-				"head adoption requires the completed configured commit protocol at the exact clean head",
-			)
-		}
-	} else if attempt.commitProtocol != nil {
-		return AttemptHeadAdoptionResult{}, fmt.Errorf(
-			"head adoption found an unconfigured commit protocol",
-		)
-	}
-	if repositorySnapshot.head != attempt.verifiedHead &&
-		(attempt.commitProtocol != nil || attempt.reviewFixes != nil) {
-		return AttemptHeadAdoptionResult{}, fmt.Errorf(
-			"ordinary head adoption cannot advance a durable commit protocol",
-		)
+	if err := verifyAttemptFinalHistory(
+		ctx, repository, unit, attempt, repositorySnapshot.head,
+	); err != nil {
+		return AttemptHeadAdoptionResult{}, fmt.Errorf("adopt final history: %w", err)
 	}
 	adoption, err := NewReviewHeadAdoptedJournalEvent(
 		definition.workspace.id, definition.generation, attempt.attemptID, attempt.mergeUnit,
@@ -465,53 +448,13 @@ func RecordAttemptBoundary(
 			)
 		}
 	}
-	var configuredProtocolHead GitObjectID
-	if configured, required := unitExecution.CommitProtocol(); required {
-		if attempt.commitProtocol == nil || attempt.commitProtocol.protocol.digest != configured.digest ||
-			attempt.commitProtocol.phase != CommitProtocolComplete {
-			return AttemptBoundaryResult{}, fmt.Errorf("attempt %s cannot reach a boundary before its configured commit protocol completes", attempt.attemptID)
-		}
-		configuredProtocolHead = attempt.commitProtocol.Head()
-	}
-	expectedCommittedHead := configuredProtocolHead
-	if reviewProtocol, configured := unitExecution.ReviewFixProtocol(); configured {
-		if attempt.reviewFixes != nil {
-			state := attempt.reviewFixes
-			if err := validateReviewFixState(*state); err != nil {
-				return AttemptBoundaryResult{}, fmt.Errorf("attempt %s review-fix state: %w", attempt.attemptID, err)
-			}
-			if state.generation != definition.generation || state.protocol.digest != reviewProtocol.digest ||
-				state.maximum != unitExecution.policy.maxReviewFixes {
-				return AttemptBoundaryResult{}, fmt.Errorf("attempt %s review-fix state does not match effective policy", attempt.attemptID)
-			}
-			if !state.Quiescent() {
-				return AttemptBoundaryResult{}, fmt.Errorf("attempt %s cannot reach a boundary with an in-flight review fix", attempt.attemptID)
-			}
-			if !configuredProtocolHead.IsZero() && state.base != configuredProtocolHead {
-				return AttemptBoundaryResult{}, fmt.Errorf("attempt %s review-fix chain does not follow its implementation protocol", attempt.attemptID)
-			}
-			expectedCommittedHead = state.Head()
-		}
-	} else if attempt.reviewFixes != nil {
-		return AttemptBoundaryResult{}, fmt.Errorf("attempt %s has review-fix state without an effective protocol", attempt.attemptID)
-	}
-	if !expectedCommittedHead.IsZero() && attempt.verifiedHead != expectedCommittedHead {
-		return AttemptBoundaryResult{}, fmt.Errorf(
-			"attempt %s completed implementation-plus-review-fix head does not match its verified head",
-			attempt.attemptID,
-		)
-	}
 	inspection, err := git.InspectAttemptWorktree(
 		ctx, definition.workspace.target.root, attempt.worktree,
 	)
 	if err != nil {
 		return AttemptBoundaryResult{}, err
 	}
-	expectedHead := inspection.worktreeHead
-	if !expectedCommittedHead.IsZero() {
-		expectedHead = expectedCommittedHead
-	}
-	if err := verifyAttemptGitInspection(attempt, inspection, expectedHead); err != nil {
+	if err := verifyAttemptGitInspection(attempt, inspection, inspection.worktreeHead); err != nil {
 		return AttemptBoundaryResult{}, err
 	}
 	event, err := NewAttemptBoundaryReachedJournalEvent(

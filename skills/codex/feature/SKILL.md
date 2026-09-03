@@ -33,8 +33,7 @@ can execute locally.
    dependency and review boundaries genuinely belong together.
 5. Assign every merge unit exactly one execution profile, effective policy,
    and explicit boundary. Default to `pause_only` with a stable serial segment.
-   Add a review loop and matching review-fix protocol only when governed review
-   is required.
+   Add a review loop only when governed review is required.
 6. Treat commit protocols as optional. Add one only when exact subjects, path
    constraints, ordered commits, or structured check checkpoints are part of
    the contract.
@@ -104,11 +103,9 @@ Every policy level explicitly defines:
 - `allow_write_network`
 - `max_attempts`
 - `max_review_rounds`
-- `max_review_fixes`
 
 Child policies may only narrow their parent. Review profiles declare an ID,
-runner, and `retain` or `fresh_each_invocation` reviewer policy. A configured
-review loop requires a matching review-fix protocol.
+runner, and `retain` or `fresh_each_invocation` reviewer policy.
 
 Use `feature workspace schema bundle --json`,
 `feature workspace schema requests --json`, and `feature workspace example` as

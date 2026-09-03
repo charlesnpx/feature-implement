@@ -140,7 +140,6 @@ type WorkspaceReview struct {
 	Tree                  string `json:"tree"`
 	Status                string `json:"status"`
 	RoundsUsed            uint16 `json:"rounds_used"`
-	FixesUsed             uint16 `json:"fixes_used"`
 	InfrastructureRetries uint16 `json:"infrastructure_retries"`
 	MergeReady            bool   `json:"merge_ready"`
 }
@@ -301,10 +300,8 @@ func RebuildWorkspaceView(snapshot JournalSnapshot, definition EffectiveWorkspac
 			commitGate.Status, commitGate.Reason = GatePending, "no_attempt"
 		case !commitConfigured:
 			commitGate.Status, commitGate.Reason = GatePassed, "not_configured"
-		case attempt.commitProtocol != nil && attempt.commitProtocol.Phase() == CommitProtocolComplete:
-			commitGate.Status, commitGate.Reason = GatePassed, "protocol_complete"
 		default:
-			commitGate.Status, commitGate.Reason = GatePending, "protocol_incomplete"
+			commitGate.Status, commitGate.Reason = GatePending, "final_history_validated_at_integration"
 		}
 		unitGates.Checks = append(unitGates.Checks, commitGate)
 
@@ -581,8 +578,6 @@ func workspaceReviewViews(
 			status = "ready"
 		} else if _, exhausted := state.Exhaustion(); exhausted {
 			status = "exhausted"
-		} else if _, pending := state.PendingFix(); pending {
-			status = "fix_pending"
 		}
 		result = append(result, WorkspaceReview{
 			AttemptID:             state.AttemptID().String(),
@@ -593,7 +588,6 @@ func workspaceReviewViews(
 			Tree:                  state.Tree().String(),
 			Status:                status,
 			RoundsUsed:            state.RoundsUsed(),
-			FixesUsed:             state.FixesUsed(),
 			InfrastructureRetries: state.InfrastructureRetriesUsed(),
 			MergeReady:            state.MergeReady(),
 		})

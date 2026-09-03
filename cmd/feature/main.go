@@ -215,6 +215,12 @@ func workspaceCommand(args []string) error {
 	action := args[0]
 	remaining := args[1:]
 	subaction := ""
+	if action == "commit" {
+		return fmt.Errorf(
+			"workspace %s was removed from the local-only workflow",
+			action,
+		)
+	}
 	switch action {
 	case "queue", "receipts", "reconcile", "control", "provider":
 		return fmt.Errorf(
@@ -234,11 +240,6 @@ func workspaceCommand(args []string) error {
 	}
 	if action == "schema" && len(remaining) > 0 && !strings.HasPrefix(remaining[0], "-") {
 		subaction, remaining = remaining[0], remaining[1:]
-	}
-	if action == "commit" && subaction == "rebase" {
-		return fmt.Errorf(
-			"workspace commit rebase was removed; attempt bases are immutable",
-		)
 	}
 	fs := flag.NewFlagSet("workspace "+action, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -276,7 +277,7 @@ func workspaceCommand(args []string) error {
 
 func workspaceActionRequiresSubaction(action string) bool {
 	switch action {
-	case "attempt", "commit", "review", "integrate", "complete":
+	case "attempt", "review", "integrate", "complete":
 		return true
 	default:
 		return false
@@ -420,8 +421,7 @@ func usageWorkspace(w io.Writer) {
   feature workspace init|recover --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
   feature workspace status --bundle <dir> --workspace <dir> [--json]
   feature workspace attempt start|adopt-head|pause|resume|abandon --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
-  feature workspace commit next --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
-  feature workspace review start|reserve|request|record|record-document|reserve-fix|apply-fix|record-fix|ready --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
+  feature workspace review start|reserve|request|record|record-document|ready --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
   feature workspace integrate merge-unit --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
   feature workspace complete verify --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
 

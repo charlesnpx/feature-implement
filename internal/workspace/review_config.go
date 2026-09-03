@@ -35,7 +35,6 @@ func (profile ReviewProfile) ReviewerPolicy() ReviewReviewerPolicy { return prof
 type ReviewLoop struct {
 	profiles                 []ReviewProfile
 	maxRounds                uint16
-	maxFixes                 uint16
 	maxInfrastructureRetries uint16
 	digest                   Digest
 }
@@ -44,7 +43,6 @@ func (loop ReviewLoop) Profiles() []ReviewProfile {
 	return append([]ReviewProfile(nil), loop.profiles...)
 }
 func (loop ReviewLoop) MaxRounds() uint16                { return loop.maxRounds }
-func (loop ReviewLoop) MaxFixes() uint16                 { return loop.maxFixes }
 func (loop ReviewLoop) MaxInfrastructureRetries() uint16 { return loop.maxInfrastructureRetries }
 func (loop ReviewLoop) Digest() Digest                   { return loop.digest }
 
@@ -90,8 +88,8 @@ func normalizeReviewLoop(
 		return nil, fmt.Errorf("%s requires ordered profiles and a positive infrastructure retry budget below 65535", location)
 	}
 	loop := ReviewLoop{
-		profiles:  make([]ReviewProfile, 0, len(wire.Profiles)),
-		maxRounds: policy.maxReviewRounds, maxFixes: policy.maxReviewFixes,
+		profiles:                 make([]ReviewProfile, 0, len(wire.Profiles)),
+		maxRounds:                policy.maxReviewRounds,
 		maxInfrastructureRetries: *wire.MaxInfrastructureRetries,
 	}
 	seen := make(map[string]struct{}, len(wire.Profiles))
@@ -119,7 +117,7 @@ func normalizeReviewLoop(
 }
 
 func canonicalReviewLoopBytes(loop ReviewLoop) ([]byte, error) {
-	if len(loop.profiles) == 0 || loop.maxRounds == 0 || loop.maxFixes == 0 ||
+	if len(loop.profiles) == 0 || loop.maxRounds == 0 ||
 		loop.maxInfrastructureRetries == 0 || loop.maxInfrastructureRetries > maxReviewInfrastructureRetries {
 		return nil, fmt.Errorf("review loop is incomplete")
 	}
@@ -132,12 +130,11 @@ func canonicalReviewLoopBytes(loop ReviewLoop) ([]byte, error) {
 		SchemaVersion            int           `json:"schema_version"`
 		Profiles                 []profileJSON `json:"profiles"`
 		MaxReviewRounds          uint16        `json:"max_review_rounds"`
-		MaxReviewFixes           uint16        `json:"max_review_fixes"`
 		MaxInfrastructureRetries uint16        `json:"max_infrastructure_retries"`
 	}
 	value := loopJSON{
 		SchemaVersion: 2, Profiles: make([]profileJSON, 0, len(loop.profiles)),
-		MaxReviewRounds: loop.maxRounds, MaxReviewFixes: loop.maxFixes,
+		MaxReviewRounds:          loop.maxRounds,
 		MaxInfrastructureRetries: loop.maxInfrastructureRetries,
 	}
 	for _, profile := range loop.profiles {

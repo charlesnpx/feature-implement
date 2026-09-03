@@ -360,7 +360,6 @@ type canonicalPolicy struct {
 	AllowWriteNetwork    bool   `json:"allow_write_network"`
 	MaxAttempts          uint16 `json:"max_attempts"`
 	MaxReviewRounds      uint16 `json:"max_review_rounds"`
-	MaxReviewFixes       uint16 `json:"max_review_fixes"`
 }
 
 type canonicalAttemptBoundaryPolicy struct {
@@ -385,20 +384,18 @@ type canonicalReviewProfile struct {
 	ReviewerPolicy ReviewReviewerPolicy `json:"reviewer_policy"`
 }
 type canonicalUnitExecution struct {
-	PlanID            string                         `json:"plan_id"`
-	MergeUnitID       string                         `json:"merge_unit_id"`
-	Profile           string                         `json:"profile"`
-	Policy            canonicalPolicy                `json:"policy"`
-	Boundary          canonicalAttemptBoundaryPolicy `json:"boundary"`
-	CommitProtocol    *canonicalCommitProtocol       `json:"commit_protocol,omitempty"`
-	ReviewFixProtocol *canonicalReviewFixProtocol    `json:"review_fix_protocol,omitempty"`
-	ReviewLoop        *canonicalReviewLoop           `json:"review_loop,omitempty"`
+	PlanID         string                         `json:"plan_id"`
+	MergeUnitID    string                         `json:"merge_unit_id"`
+	Profile        string                         `json:"profile"`
+	Policy         canonicalPolicy                `json:"policy"`
+	Boundary       canonicalAttemptBoundaryPolicy `json:"boundary"`
+	CommitProtocol *canonicalCommitProtocol       `json:"commit_protocol,omitempty"`
+	ReviewLoop     *canonicalReviewLoop           `json:"review_loop,omitempty"`
 }
 
 type canonicalReviewLoop struct {
 	Profiles                 []string `json:"profiles"`
 	MaxReviewRounds          uint16   `json:"max_review_rounds"`
-	MaxReviewFixes           uint16   `json:"max_review_fixes"`
 	MaxInfrastructureRetries uint16   `json:"max_infrastructure_retries"`
 }
 
@@ -417,20 +414,9 @@ type canonicalCommitStep struct {
 }
 
 type canonicalCommitCheck struct {
-	ID          string               `json:"id"`
-	Runner      string               `json:"runner"`
-	Parser      CheckParserKind      `json:"parser"`
-	Command     []string             `json:"command"`
-	Expectation CheckExpectationKind `json:"expectation"`
-	FailureIDs  []string             `json:"failure_ids"`
-}
-
-type canonicalReviewFixProtocol struct {
-	SubjectPrefix string                 `json:"subject_prefix"`
-	BodyPolicy    CommitBodyPolicy       `json:"body_policy"`
-	AllowedPaths  []string               `json:"allowed_paths"`
-	FrozenPaths   []string               `json:"frozen_paths"`
-	Checks        []canonicalCommitCheck `json:"checks"`
+	ID      string   `json:"id"`
+	Runner  string   `json:"runner"`
+	Command []string `json:"command"`
 }
 
 func canonicalExecutionBytes(config ExecutionConfig) ([]byte, error) {
@@ -459,14 +445,10 @@ func canonicalExecutionBytes(config ExecutionConfig) ([]byte, error) {
 			protocol := canonicalizeCommitProtocol(*unit.commitProtocol)
 			canonicalUnit.CommitProtocol = &protocol
 		}
-		if unit.reviewFixProtocol != nil {
-			protocol := canonicalizeReviewFixProtocol(*unit.reviewFixProtocol)
-			canonicalUnit.ReviewFixProtocol = &protocol
-		}
 		if unit.reviewLoop != nil {
 			loop := canonicalReviewLoop{
-				Profiles:        make([]string, 0, len(unit.reviewLoop.profiles)),
-				MaxReviewRounds: unit.reviewLoop.maxRounds, MaxReviewFixes: unit.reviewLoop.maxFixes,
+				Profiles:                 make([]string, 0, len(unit.reviewLoop.profiles)),
+				MaxReviewRounds:          unit.reviewLoop.maxRounds,
 				MaxInfrastructureRetries: unit.reviewLoop.maxInfrastructureRetries,
 			}
 			for _, profile := range unit.reviewLoop.profiles {
@@ -518,34 +500,17 @@ func canonicalizeCommitChecks(checks []CommitCheck) []canonicalCommitCheck {
 	result := make([]canonicalCommitCheck, 0, len(checks))
 	for _, check := range checks {
 		result = append(result, canonicalCommitCheck{
-			ID: check.id.String(), Runner: check.runner.String(), Parser: check.parser,
-			Command: check.command.Values(), Expectation: check.expectation.kind,
-			FailureIDs: check.expectation.FailureIDs(),
+			ID: check.id.String(), Runner: check.runner.String(), Command: check.command.Values(),
 		})
 	}
 	return result
-}
-
-func canonicalizeReviewFixProtocol(protocol ReviewFixProtocol) canonicalReviewFixProtocol {
-	allowed := make([]string, 0, len(protocol.paths.allowed))
-	for _, pattern := range protocol.paths.allowed {
-		allowed = append(allowed, pattern.value)
-	}
-	frozen := make([]string, 0, len(protocol.paths.frozen))
-	for _, pattern := range protocol.paths.frozen {
-		frozen = append(frozen, pattern.value)
-	}
-	return canonicalReviewFixProtocol{
-		SubjectPrefix: protocol.subjectPrefix, BodyPolicy: protocol.body,
-		AllowedPaths: allowed, FrozenPaths: frozen, Checks: canonicalizeCommitChecks(protocol.checks),
-	}
 }
 
 func canonicalizePolicy(policy ExecutionPolicy) canonicalPolicy {
 	return canonicalPolicy{
 		RequirePassingChecks: policy.requirePassingChecks,
 		AllowWriteNetwork:    policy.allowWriteNetwork, MaxAttempts: policy.maxAttempts,
-		MaxReviewRounds: policy.maxReviewRounds, MaxReviewFixes: policy.maxReviewFixes,
+		MaxReviewRounds: policy.maxReviewRounds,
 	}
 }
 

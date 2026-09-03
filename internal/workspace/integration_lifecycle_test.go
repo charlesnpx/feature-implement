@@ -418,79 +418,50 @@ func TestIntegrationCompletionAccountsForAndReleasesLeaseAndSerialSegment(
 	}
 }
 
-func TestConfiguredCommitProtocolRequiresDurableSameHeadAdoption(
-	t *testing.T,
-) {
+func TestIntegrationRerunsConfiguredFinalHistoryAtAcceptedHead(t *testing.T) {
 	t.Parallel()
 
-	scenario := newJournalCommitScenario(t)
-	committed, err := workspace.ExecuteAttemptCommitStep(
-		context.Background(),
-		scenario.harness.journal,
-		scenario.harness.definition,
-		scenario.shell,
-		scenario.request,
-	)
+	core := newAttemptHarnessFromFixture(t, configuredCommitProtocolFixture(t), "unit-one")
+	attempt := core.reserve(t, "2026-07-25T10:30:00Z")
+	tree := mustGitObject(t, 'b')
+	snapshot, err := workspace.NewReviewRepositorySnapshot(attempt.VerifiedHead(), tree, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	attempt := committed.Attempt()
-	protocol, configured := committed.Protocol()
-	if !configured ||
-		protocol.Phase() != workspace.CommitProtocolComplete ||
-		attempt.VerifiedHead() != scenario.commit {
-		t.Fatalf(
-			"completed configured protocol = %#v configured=%t attempt=%#v",
-			protocol, configured, attempt,
-		)
-	}
-	repositorySnapshot, err := workspace.NewReviewRepositorySnapshot(
-		scenario.commit, scenario.git.commit.Tree(), true,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository := &reviewRepositoryStub{snapshot: repositorySnapshot}
-	adoption, err := workspace.AdoptAttemptHead(
-		context.Background(),
-		scenario.harness.journal,
-		scenario.harness.definition,
-		repository,
+	repository := &reviewRepositoryStub{snapshot: snapshot}
+	if _, err := workspace.AdoptAttemptHead(
+		context.Background(), core.journal, core.definition, repository,
 		workspace.AdoptAttemptHeadRequest{
-			AttemptID:  attempt.AttemptID(),
-			OccurredAt: mustTime(t, "2026-07-25T10:30:00Z"),
+			AttemptID: attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-25T10:30:01Z"),
 		},
-	)
-	if err != nil || !adoption.Adopted() ||
-		adoption.Head() != scenario.commit ||
-		adoption.Record().Sequence() == 0 {
-		t.Fatalf(
-			"configured-protocol same-head adoption = %#v error=%v",
-			adoption, err,
-		)
+	); err != nil {
+		t.Fatalf("adopt configured final history: %v", err)
 	}
-	git := &integrationGitStub{featureHead: scenario.harness.base}
-	result, err := workspace.IntegrateMergeUnit(
-		context.Background(),
-		scenario.harness.journal,
-		scenario.harness.definition,
-		repository,
-		git,
+	if repository.finalHistoryRuns != 1 {
+		t.Fatalf("head adoption final-history runs = %d, want 1", repository.finalHistoryRuns)
+	}
+
+	repository.finalHistoryErr = errors.New("configured check full-suite did not exit zero")
+	git := &integrationGitStub{featureHead: core.base}
+	before := journalRecordCount(t, core.journal)
+	_, err = workspace.IntegrateMergeUnit(
+		context.Background(), core.journal, core.definition, repository, git,
 		workspace.IntegrateMergeUnitRequest{
-			AttemptID:  attempt.AttemptID(),
-			OccurredAt: mustTime(t, "2026-07-25T10:30:01Z"),
+			AttemptID: attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-25T10:30:02Z"),
 		},
 	)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !strings.Contains(err.Error(), "integration final history") ||
+		!strings.Contains(err.Error(), "full-suite") {
+		t.Fatalf("configured final-history integration error = %v", err)
 	}
-	if result.Intent().AdoptedHeadEventDigest() !=
-		adoption.Record().EventHash() ||
-		result.Intent().AcceptedHead() != scenario.commit {
+	if repository.finalHistoryRuns != 2 || git.createCalls != 0 || git.publishCalls != 0 {
 		t.Fatalf(
-			"configured-protocol integration acceptance = %#v",
-			result.Intent(),
+			"failed final-history integration ran=%d creates=%d publishes=%d",
+			repository.finalHistoryRuns, git.createCalls, git.publishCalls,
 		)
+	}
+	if after := journalRecordCount(t, core.journal); after != before {
+		t.Fatalf("failed final-history integration changed journal: before=%d after=%d", before, after)
 	}
 }
 
@@ -1407,6 +1378,37 @@ func adoptedIntegrationRepository(
 		t.Fatal(err)
 	}
 	return repository
+}
+
+func configuredCommitProtocolFixture(t *testing.T) definitionFixture {
+	t.Helper()
+	fixture := newDefinitionFixture(t)
+	configuration := string(fixture.sources.ExecutionConfig.Bytes)
+	needle := "      max_review_rounds: 3\n  - plan_id: alpha-plan\n    merge_unit_id: unit-two"
+	replacement := `      max_review_rounds: 3
+    commit_protocol:
+      steps:
+        - id: implementation
+          subject: Implement protocol
+          body_policy: forbidden
+          allowed_paths:
+            - src/**
+          frozen_paths: []
+          checks:
+            - id: full-suite
+              runner: codex
+              command:
+                - go
+                - test
+                - ./...
+  - plan_id: alpha-plan
+    merge_unit_id: unit-two`
+	updated := strings.Replace(configuration, needle, replacement, 1)
+	if updated == configuration {
+		t.Fatal("failed to configure final-history fixture")
+	}
+	fixture.sources.ExecutionConfig.Bytes = []byte(updated)
+	return fixture
 }
 
 func newNoReviewIntegrationHarness(

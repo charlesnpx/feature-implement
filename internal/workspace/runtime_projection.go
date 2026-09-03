@@ -360,13 +360,8 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 			if err := reduceAttemptRuntime(current, &next, record); err != nil {
 				return WorkspaceRuntimeProjection{}, err
 			}
-		} else if isCommitJournalEvent(record.event) {
-			if err := reduceCommitRuntime(current, &next, record); err != nil {
-				return WorkspaceRuntimeProjection{}, err
-			}
 		} else if isReviewJournalEvent(record.event) {
-			// Review has its own definition-aware projection. The core attempt
-			// runtime remains the Git and review-fix source of truth.
+			// Review has its own definition-aware projection.
 		} else {
 			return WorkspaceRuntimeProjection{}, fmt.Errorf("unsupported runtime event %T", record.event)
 		}
@@ -381,8 +376,6 @@ func journalEventTargetsAttempt(event WorkspaceJournalEvent, attemptID ID) bool 
 	case ReviewInvocationReservedJournalEvent:
 		return event.attemptID == attemptID
 	case ReviewInvocationFailedJournalEvent:
-		return event.attemptID == attemptID
-	case ReviewFindingFixReservedJournalEvent:
 		return event.attemptID == attemptID
 	}
 	bound, ok := event.(interface{ AttemptID() ID })
@@ -420,26 +413,6 @@ func reduceReviewHeadAdoption(
 	if attempt.phase != AttemptActive || attempt.mergeUnit != event.mergeUnit ||
 		attempt.verifiedHead != event.priorHead {
 		return fmt.Errorf("review head adoption does not match the active attempt and prior head")
-	}
-	if event.head != event.priorHead &&
-		(attempt.commitProtocol != nil || attempt.reviewFixes != nil) {
-		return fmt.Errorf("review head adoption is only allowed without durable commit protocols")
-	}
-	if event.head == event.priorHead {
-		if attempt.commitProtocol != nil &&
-			(attempt.commitProtocol.phase != CommitProtocolComplete ||
-				attempt.commitProtocol.Head() != event.head) {
-			return fmt.Errorf(
-				"same-head adoption does not match the completed commit protocol",
-			)
-		}
-		if attempt.reviewFixes != nil &&
-			(!attempt.reviewFixes.Quiescent() ||
-				attempt.reviewFixes.Head() != event.head) {
-			return fmt.Errorf(
-				"same-head adoption does not match completed review fixes",
-			)
-		}
 	}
 	updated := &next.attempts[index]
 	updated.verifiedHead = event.head

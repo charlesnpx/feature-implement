@@ -53,10 +53,11 @@ func (snapshot ReviewRepositorySnapshot) Tree() GitObjectID { return snapshot.tr
 func (snapshot ReviewRepositorySnapshot) Clean() bool       { return snapshot.clean }
 func (snapshot ReviewRepositorySnapshot) Digest() Digest    { return snapshot.digest }
 
-// ReviewRepositoryPort is deliberately read-only. It can inspect and confirm
-// an exact clean head/tree but has no mutation or process-execution method.
+// ReviewRepositoryPort observes an exact clean head/tree and validates a
+// configured final history without mutating the attempt worktree.
 type ReviewRepositoryPort interface {
 	InspectReviewSnapshot(context.Context, ReviewRepositoryRequest) (ReviewRepositorySnapshot, error)
+	VerifyFinalHistory(context.Context, CommitProtocol, string, GitObjectID, GitObjectID) error
 }
 
 type ReviewInvocation struct {
@@ -175,10 +176,12 @@ func StartAttemptReviewRound(
 	if !repositorySnapshot.clean {
 		return ReviewRoundStartResult{}, fmt.Errorf("review requires a clean exact attempt head")
 	}
+	if err := verifyAttemptFinalHistory(
+		ctx, repository, unit, attempt, repositorySnapshot.head,
+	); err != nil {
+		return ReviewRoundStartResult{}, fmt.Errorf("review final history: %w", err)
+	}
 	if repositorySnapshot.head != attempt.verifiedHead {
-		if _, configured := unit.CommitProtocol(); configured || hasState || attempt.reviewFixes != nil {
-			return ReviewRoundStartResult{}, fmt.Errorf("review cannot adopt a changed head after durable commit or review state")
-		}
 		adoption, err := NewReviewHeadAdoptedJournalEvent(
 			definition.workspace.id, definition.generation, attempt.attemptID, attempt.mergeUnit,
 			attempt.verifiedHead, repositorySnapshot.head, repositorySnapshot.tree, repositorySnapshot.digest,
@@ -198,9 +201,6 @@ func StartAttemptReviewRound(
 			return ReviewRoundStartResult{}, fmt.Errorf("review head adoption did not rebuild to the inspected head")
 		}
 		state, hasState = projection.State(request.AttemptID)
-		if hasState {
-			return ReviewRoundStartResult{}, fmt.Errorf("review head adoption unexpectedly found prior review state")
-		}
 		if err := validateAttemptReviewProtocolState(definition, unit, attempt, state, false, true); err != nil {
 			return ReviewRoundStartResult{}, err
 		}
@@ -735,210 +735,6 @@ func recordReviewRunnerFailure(
 	return nil
 }
 
-type ReserveAttemptReviewFixRequest struct {
-	AttemptID          ID
-	Ordinal            uint16
-	AcceptedFindingIDs []Digest
-	OccurredAt         time.Time
-}
-
-type ReviewFixReservationResult struct {
-	state       ReviewState
-	reservation ReviewFixReservation
-	record      JournalRecord
-}
-
-func (result ReviewFixReservationResult) State() ReviewState { return cloneReviewState(result.state) }
-func (result ReviewFixReservationResult) Reservation() ReviewFixReservation {
-	return *cloneReviewFixReservation(&result.reservation)
-}
-func (result ReviewFixReservationResult) Record() JournalRecord { return result.record }
-
-func ReserveAttemptReviewFix(
-	journal *WorkspaceJournal,
-	definition EffectiveWorkspaceDefinition,
-	request ReserveAttemptReviewFixRequest,
-) (ReviewFixReservationResult, error) {
-	if journal == nil || request.AttemptID.IsZero() || request.Ordinal == 0 ||
-		len(request.AcceptedFindingIDs) == 0 || request.OccurredAt.IsZero() {
-		return ReviewFixReservationResult{}, fmt.Errorf("reserve review fix requires journal, attempt, ordinal, findings, and occurrence time")
-	}
-	snapshot, projection, err := readReviewRuntime(journal, definition)
-	if err != nil {
-		return ReviewFixReservationResult{}, err
-	}
-	state, exists := projection.State(request.AttemptID)
-	if !exists {
-		return ReviewFixReservationResult{}, fmt.Errorf("attempt %s cannot execute a review fix before a completed review round", request.AttemptID)
-	}
-	attempt, exists := projection.core.Attempt(request.AttemptID)
-	if !exists || attempt.phase != AttemptActive {
-		return ReviewFixReservationResult{}, fmt.Errorf("review fix reservation attempt is stale or inactive")
-	}
-	unit, err := executionForMergeUnit(definition.execution, attempt.mergeUnit)
-	if err != nil {
-		return ReviewFixReservationResult{}, err
-	}
-	loop, configured := unit.ReviewLoop()
-	if !configured || loop.digest != state.loop.digest {
-		return ReviewFixReservationResult{}, fmt.Errorf("attempt %s has no matching configured review loop", request.AttemptID)
-	}
-	normalizedFindings, err := normalizeReviewFindingIDs(request.AcceptedFindingIDs)
-	if err != nil {
-		return ReviewFixReservationResult{}, err
-	}
-	if request.Ordinal <= state.FixesUsed() {
-		existing := state.fixes[request.Ordinal-1]
-		if !equalDigestSlices(existing.findings, normalizedFindings) {
-			return ReviewFixReservationResult{}, fmt.Errorf("review fix reservation retry differs from durable application")
-		}
-		reservation, err := NewReviewFixReservation(
-			state.workspaceID, state.generation, state.attemptID, state.loop.digest,
-			existing.ordinal, existing.round, existing.priorHead, existing.priorTree, existing.findings,
-		)
-		if err != nil || reservation.digest != existing.reservationDigest {
-			return ReviewFixReservationResult{}, fmt.Errorf("review fix application has an invalid durable reservation binding")
-		}
-		if err := validateAttemptReviewProtocolState(definition, unit, attempt, state, true, true); err != nil {
-			return ReviewFixReservationResult{}, err
-		}
-		return ReviewFixReservationResult{state: state, reservation: reservation}, nil
-	}
-	if attempt.verifiedHead != state.head {
-		return ReviewFixReservationResult{}, fmt.Errorf("review fix reservation attempt is stale against the reviewed head")
-	}
-	reservation, err := NewReviewFixReservation(
-		state.workspaceID, state.generation, state.attemptID, state.loop.digest,
-		request.Ordinal, state.RoundsUsed(), state.head, state.tree, normalizedFindings,
-	)
-	if err != nil {
-		return ReviewFixReservationResult{}, err
-	}
-	if state.pendingFix != nil {
-		if state.pendingFix.digest != reservation.digest {
-			return ReviewFixReservationResult{}, fmt.Errorf("a different review fix is already reserved")
-		}
-		return ReviewFixReservationResult{state: state, reservation: reservation}, nil
-	}
-	if err := validateAttemptReviewProtocolState(definition, unit, attempt, state, true, false); err != nil {
-		return ReviewFixReservationResult{}, err
-	}
-	domain, err := NewReserveReviewFindingFix(reservation)
-	if err != nil {
-		return ReviewFixReservationResult{}, err
-	}
-	if _, err := ReduceReview(state, domain); err != nil {
-		return ReviewFixReservationResult{}, err
-	}
-	event, err := NewReviewFindingFixReservedJournalEvent(reservation)
-	if err != nil {
-		return ReviewFixReservationResult{}, err
-	}
-	record, err := appendReviewJournalEvent(journal, snapshot, event, request.OccurredAt)
-	if err != nil {
-		return ReviewFixReservationResult{}, err
-	}
-	_, rebuilt, err := readReviewRuntime(journal, definition)
-	if err != nil {
-		return ReviewFixReservationResult{}, err
-	}
-	state, _ = rebuilt.State(request.AttemptID)
-	return ReviewFixReservationResult{state: state, reservation: reservation, record: record}, nil
-}
-
-type RecordReviewFixApplicationRequest struct {
-	AttemptID          ID
-	Ordinal            uint16
-	AcceptedFindingIDs []Digest
-	OccurredAt         time.Time
-}
-
-func RecordReviewFixApplication(
-	journal *WorkspaceJournal,
-	definition EffectiveWorkspaceDefinition,
-	request RecordReviewFixApplicationRequest,
-) (ReviewState, JournalRecord, error) {
-	if journal == nil || request.AttemptID.IsZero() || request.Ordinal == 0 ||
-		len(request.AcceptedFindingIDs) == 0 || request.OccurredAt.IsZero() {
-		return ReviewState{}, JournalRecord{}, fmt.Errorf("record review fix application requires journal, attempt, findings, and occurrence time")
-	}
-	snapshot, projection, err := readReviewRuntime(journal, definition)
-	if err != nil {
-		return ReviewState{}, JournalRecord{}, err
-	}
-	state, exists := projection.State(request.AttemptID)
-	if !exists {
-		return ReviewState{}, JournalRecord{}, fmt.Errorf("attempt %s has no review state", request.AttemptID)
-	}
-	attempt, exists := projection.core.Attempt(request.AttemptID)
-	if !exists || attempt.phase != AttemptActive || attempt.reviewFixes == nil {
-		return ReviewState{}, JournalRecord{}, fmt.Errorf("attempt %s has no completed review-fix protocol state", request.AttemptID)
-	}
-	normalizedFindings, err := normalizeReviewFindingIDs(request.AcceptedFindingIDs)
-	if err != nil {
-		return ReviewState{}, JournalRecord{}, err
-	}
-	fixState := attempt.reviewFixes
-	if request.Ordinal <= state.FixesUsed() {
-		existing := state.fixes[request.Ordinal-1]
-		if !equalDigestSlices(existing.findings, normalizedFindings) {
-			return ReviewState{}, JournalRecord{}, fmt.Errorf("review fix application retry differs from durable state")
-		}
-		unit, err := executionForMergeUnit(definition.execution, attempt.mergeUnit)
-		if err != nil {
-			return ReviewState{}, JournalRecord{}, err
-		}
-		if err := validateAttemptReviewProtocolState(definition, unit, attempt, state, true, true); err != nil {
-			return ReviewState{}, JournalRecord{}, err
-		}
-		return state, JournalRecord{}, nil
-	}
-	expectedOrdinal := state.FixesUsed() + 1
-	if request.Ordinal != expectedOrdinal || fixState.Used() != expectedOrdinal ||
-		!fixState.Quiescent() || len(fixState.fixes) < int(expectedOrdinal) {
-		return ReviewState{}, JournalRecord{}, fmt.Errorf("review-fix protocol has not completed the next durable ordinal")
-	}
-	reservation := state.pendingFix
-	if reservation == nil || reservation.ordinal != expectedOrdinal ||
-		!equalDigestSlices(reservation.findings, normalizedFindings) {
-		return ReviewState{}, JournalRecord{}, fmt.Errorf("review-fix protocol has no matching accepted-finding reservation")
-	}
-	commit := fixState.fixes[expectedOrdinal-1].commit
-	if commit.parent != reservation.head || commit.parent != state.head || commit.tree.IsZero() || commit.evidence.IsZero() {
-		return ReviewState{}, JournalRecord{}, fmt.Errorf("review-fix commit does not match its exact reserved parent and evidence")
-	}
-	fix, err := NewApplyReviewFix(
-		expectedOrdinal, reservation.digest, state.head, state.tree, commit.commit, commit.tree,
-		commit.evidence, normalizedFindings,
-	)
-	if err != nil {
-		return ReviewState{}, JournalRecord{}, err
-	}
-	updated, err := ReduceReview(state, fix)
-	if err != nil {
-		return ReviewState{}, JournalRecord{}, err
-	}
-	event, err := NewReviewFixAppliedJournalEvent(
-		definition.workspace.id, definition.generation, request.AttemptID, state.loop.digest, fix,
-	)
-	if err != nil {
-		return ReviewState{}, JournalRecord{}, err
-	}
-	record, err := appendReviewJournalEvent(journal, snapshot, event, request.OccurredAt)
-	if err != nil {
-		return ReviewState{}, JournalRecord{}, err
-	}
-	_, rebuilt, err := readReviewRuntime(journal, definition)
-	if err != nil {
-		return ReviewState{}, JournalRecord{}, err
-	}
-	updated, exists = rebuilt.State(request.AttemptID)
-	if !exists || updated.FixesUsed() != expectedOrdinal || updated.pendingFix != nil {
-		return ReviewState{}, JournalRecord{}, fmt.Errorf("review fix application did not rebuild to the expected durable state")
-	}
-	return updated, record, nil
-}
-
 const ReviewMergeReadinessPurpose = "review_merge_readiness"
 
 type ReviewReadiness struct {
@@ -1043,104 +839,26 @@ func newReviewMergeReadiness(
 	return readiness, nil
 }
 
-func validateAttemptReviewRebase(
-	snapshot JournalSnapshot,
-	definition EffectiveWorkspaceDefinition,
-	unit UnitExecution,
-	attempt RuntimeAttemptProjection,
-	newHead GitObjectID,
-) error {
-	loop, configured := unit.ReviewLoop()
-	if !configured || newHead == attempt.verifiedHead {
-		return nil
-	}
-	projection, err := RebuildReviewRuntime(snapshot, definition)
-	if err != nil {
-		return err
-	}
-	state, exists := projection.State(attempt.attemptID)
-	if !exists {
-		return nil
-	}
-	if state.loop.digest != loop.digest {
-		return fmt.Errorf("attempt %s review state does not match the configured loop", attempt.attemptID)
-	}
-	if state.pendingFix != nil || state.FixesUsed() != func() uint16 {
-		if attempt.reviewFixes == nil {
-			return 0
-		}
-		return attempt.reviewFixes.Used()
-	}() {
-		return fmt.Errorf("attempt %s cannot rebase before its reserved review fix is applied", attempt.attemptID)
-	}
-	if len(state.rounds) == 0 {
-		return nil
-	}
-	latest := state.rounds[len(state.rounds)-1]
-	if _, pending := pendingReviewInvocation(latest); pending || !latest.Complete(len(state.loop.profiles)) {
-		return fmt.Errorf("attempt %s cannot rebase during an incomplete review round", attempt.attemptID)
-	}
-	if state.RoundsUsed() >= state.loop.maxRounds {
-		return fmt.Errorf("attempt %s cannot rebase without remaining review round budget", attempt.attemptID)
-	}
-	return nil
-}
-
 func validateAttemptReviewProtocolState(
-	definition EffectiveWorkspaceDefinition,
+	_ EffectiveWorkspaceDefinition,
 	unit UnitExecution,
 	attempt RuntimeAttemptProjection,
 	review ReviewState,
 	hasReview bool,
 	allowStaleReviewHead bool,
 ) error {
-	expectedHead := attempt.verifiedHead
-	if protocol, configured := unit.CommitProtocol(); configured {
-		if attempt.commitProtocol == nil || attempt.commitProtocol.protocol.digest != protocol.digest ||
-			attempt.commitProtocol.phase != CommitProtocolComplete {
-			return fmt.Errorf("attempt %s cannot review before its configured commit protocol completes", attempt.attemptID)
-		}
-		expectedHead = attempt.commitProtocol.Head()
-	} else if attempt.commitProtocol != nil {
-		return fmt.Errorf("attempt %s has an unconfigured implementation commit protocol", attempt.attemptID)
-	} else if attempt.reviewFixes != nil {
-		expectedHead = attempt.reviewFixes.base
-	}
-
-	reviewFixProtocol, configured := unit.ReviewFixProtocol()
-	if !configured {
-		return fmt.Errorf("attempt %s configured review loop has no review-fix protocol", attempt.attemptID)
-	}
-	usedFixes := uint16(0)
-	if attempt.reviewFixes != nil {
-		state := attempt.reviewFixes
-		if err := validateReviewFixState(*state); err != nil {
-			return fmt.Errorf("attempt %s review-fix state: %w", attempt.attemptID, err)
-		}
-		if state.generation != definition.generation || state.protocol.digest != reviewFixProtocol.digest ||
-			state.maximum != unit.policy.maxReviewFixes || state.base != expectedHead {
-			return fmt.Errorf("attempt %s review-fix state does not match effective review policy", attempt.attemptID)
-		}
-		if !state.Quiescent() {
-			return fmt.Errorf("attempt %s cannot review with an in-flight review fix", attempt.attemptID)
-		}
-		usedFixes = state.Used()
-		expectedHead = state.Head()
-	}
-	if attempt.verifiedHead != expectedHead {
-		return fmt.Errorf("attempt %s review head does not match its durable commit protocols", attempt.attemptID)
+	loop, configured := unit.ReviewLoop()
+	if !configured || attempt.verifiedHead.IsZero() {
+		return fmt.Errorf("attempt %s has no configured review loop at an accepted head", attempt.attemptID)
 	}
 	if !hasReview {
-		if usedFixes != 0 {
-			return fmt.Errorf("attempt %s cannot start review after unrecorded review fixes", attempt.attemptID)
-		}
 		return nil
 	}
-	if review.loop.digest.IsZero() || review.FixesUsed() != usedFixes {
-		return fmt.Errorf("attempt %s review state does not match durable review-fix counters", attempt.attemptID)
+	if review.loop.digest != loop.digest {
+		return fmt.Errorf("attempt %s review state does not match its configured loop", attempt.attemptID)
 	}
-	if review.head != expectedHead && !allowStaleReviewHead {
-		return fmt.Errorf("attempt %s review state does not match its durable review-fix head", attempt.attemptID)
+	if review.head != attempt.verifiedHead && !allowStaleReviewHead {
+		return fmt.Errorf("attempt %s review state no longer matches the accepted head", attempt.attemptID)
 	}
 	return nil
 }

@@ -48,8 +48,7 @@ feature workspace init|recover --bundle <bundle-root> --workspace <runtime-root>
 feature workspace status --bundle <bundle-root> --workspace <runtime-root> [--json]
 
 feature workspace attempt start|adopt-head|pause|resume|abandon ...
-feature workspace commit next ...
-feature workspace review start|reserve|request|record|record-document|reserve-fix|apply-fix|record-fix|ready ...
+feature workspace review start|reserve|request|record|record-document|ready ...
 feature workspace integrate merge-unit ...
 feature workspace complete verify ...
 ```
@@ -149,7 +148,6 @@ policy:
   allow_write_network: false
   max_attempts: 3
   max_review_rounds: 3
-  max_review_fixes: 2
 profiles:
   - id: standard
     runner: codex
@@ -158,7 +156,6 @@ profiles:
       allow_write_network: false
       max_attempts: 3
       max_review_rounds: 3
-      max_review_fixes: 2
     boundary:
       escalation: allowed
 merge_units:
@@ -174,7 +171,6 @@ merge_units:
       allow_write_network: false
       max_attempts: 3
       max_review_rounds: 3
-      max_review_fixes: 2
 ```
 
 `checkpoint` is the owner's planned gate; `escalation` is the agent's
@@ -193,11 +189,12 @@ A merge unit may narrow `allowed` to `forbidden`, but never widen `forbidden`
 to `allowed`. Profiles deliberately do not declare `checkpoint`; planned
 checkpoints remain on individual merge units.
 
-Commit protocols, review-fix protocols, and review loops are optional strict
-schemas within each merge-unit entry. Without a commit protocol, ordinary
-local commits are allowed. Without a configured review loop,
-`attempt adopt-head` records the exact clean accepted head and tree before
-integration.
+Commit protocols and review loops are optional strict schemas within each
+merge-unit entry. A configured commit protocol validates the final clean
+base-to-head history—ordered checkpoints, exact messages, path constraints,
+and isolated checks that exit zero—before review or integration. Without a
+configured review loop, `attempt adopt-head` records the exact clean accepted
+head and tree before integration.
 
 Agent-driven broad review is capped at three iterations. Start another
 iteration only when the preceding review found a Critical or High issue.
@@ -236,7 +233,7 @@ derived plan checkpoint:
 ```
 
 Runtime state is append-only under `<runtime-root>/state/`. A runtime without
-the local v6 format marker is rejected with a regeneration diagnostic; it is
+the local v7 format marker is rejected with a regeneration diagnostic; it is
 not interpreted or migrated.
 
 ## Local execution
@@ -247,15 +244,18 @@ not interpreted or migrated.
    worktree are derived from locked runtime state.
 3. Work only in the returned detached worktree. Its working history is scratch
    until an exact clean head is selected for integration.
-4. Use `commit next` for a configured commit step. Otherwise make ordinary
-   local commits and keep the worktree clean.
+4. Make ordinary local commits and keep the worktree clean. When a
+   `commit_protocol` is configured, the final base-to-head history is checked
+   against its ordered checkpoints and configured checks before review or
+   integration.
 5. For configured review, use `review start`, `reserve`, `request`,
-   `record-document`, bounded fix actions, and `ready`; `record` remains the
-	   path for an infrastructure failure. The request and report documents use
-	   the Witness review contract, while `record-document` strictly validates the
-	   report against the exact charter and patch and retains its raw bytes. Reviewer labels are
-	   descriptive local metadata, and every result binds the exact request, head,
-   tree, and evidence.
+   `record-document`, and `ready`; `record` remains the path for an
+   infrastructure failure. Apply review feedback as ordinary local commits;
+   a changed head requires a new review. The request and report documents use
+   the Witness review contract, while `record-document` strictly validates the
+   report against the exact charter and patch and retains its raw bytes. Reviewer
+   labels are descriptive local metadata, and every result binds the exact
+   request, head, tree, and evidence.
 6. Without configured review, submit `attempt adopt-head` for the exact clean
    descendant selected for integration.
 7. Before integration, submit `attempt pause` only when the merge unit
@@ -285,9 +285,9 @@ completion proves the recorded Git topology and workflow state only.
 
 Workspace v2 is a local-only execution model. Operators commit exact plan
 sources and generated lock bytes in a clean plan repository, initialize a fresh
-local v6 runtime, recover before each work cycle, and use journal-derived
+local v7 runtime, recover before each work cycle, and use journal-derived
 reports as the source of truth. Earlier draft runtime state is intentionally not
-migrated; a runtime without the local v6 marker must be regenerated from the
+migrated; a runtime without the local v7 marker must be regenerated from the
 committed plan and current lock.
 
 ### Supported repository profile

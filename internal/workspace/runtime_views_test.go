@@ -244,7 +244,7 @@ func TestWorkspaceReviewViewSerializationMatchesPreAdapterSchema(t *testing.T) {
 	}
 	want := map[string]struct{}{
 		"attempt_id": {}, "plan_id": {}, "merge_unit_id": {}, "generation": {},
-		"head": {}, "tree": {}, "status": {}, "rounds_used": {}, "fixes_used": {},
+		"head": {}, "tree": {}, "status": {}, "rounds_used": {},
 		"infrastructure_retries": {}, "merge_ready": {},
 	}
 	if len(fields) != len(want) {

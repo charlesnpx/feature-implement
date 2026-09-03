@@ -73,6 +73,22 @@ func (adapter localReviewRepository) ReadReviewInput(
 	return adapter.git.ReadReviewInput(ctx, worktree, base, head)
 }
 
+func (adapter localReviewRepository) VerifyFinalHistory(
+	ctx context.Context,
+	protocol workspace.CommitProtocol,
+	worktree string,
+	base, head workspace.GitObjectID,
+) error {
+	verifier, err := workspace.NewFinalHistoryVerifier(
+		adapter.git,
+		defaultIsolatedCheckRunner(),
+	)
+	if err != nil {
+		return err
+	}
+	return verifier.Verify(ctx, protocol, worktree, base, head)
+}
+
 func executeAttempt(ctx context.Context, bundle workspace.WorkspaceBundle, options Options) (MutationResult, error) {
 	journal, _, err := openWritableJournal(options)
 	if err != nil {

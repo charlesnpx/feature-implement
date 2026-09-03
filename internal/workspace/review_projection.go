@@ -60,56 +60,6 @@ func RebuildReviewRuntime(
 			)
 		}
 	}
-	for _, attempt := range projection.core.attempts {
-		if attempt.generation != definition.generation {
-			continue
-		}
-		unit, err := executionForMergeUnit(definition.execution, attempt.mergeUnit)
-		if err != nil {
-			return ReviewRuntimeProjection{}, err
-		}
-		if _, configured := unit.ReviewLoop(); !configured {
-			continue
-		}
-		index := reviewStateIndex(projection.states, attempt.attemptID)
-		if index < 0 {
-			if attempt.reviewFixes != nil {
-				return ReviewRuntimeProjection{}, fmt.Errorf(
-					"attempt %s has review-fix protocol state without a completed review round reservation",
-					attempt.attemptID,
-				)
-			}
-			continue
-		}
-		state := projection.states[index]
-		used := uint16(0)
-		if attempt.reviewFixes != nil {
-			protocol, configured := unit.ReviewFixProtocol()
-			if !configured || attempt.reviewFixes.generation != definition.generation ||
-				attempt.reviewFixes.protocol.digest != protocol.digest ||
-				attempt.reviewFixes.maximum != unit.policy.maxReviewFixes {
-				return ReviewRuntimeProjection{}, fmt.Errorf(
-					"attempt %s review-fix protocol state does not match effective review policy",
-					attempt.attemptID,
-				)
-			}
-			used = attempt.reviewFixes.Used()
-		}
-		if state.pendingFix == nil {
-			if used != state.FixesUsed() {
-				return ReviewRuntimeProjection{}, fmt.Errorf(
-					"attempt %s has review-fix protocol progress without an application reservation",
-					attempt.attemptID,
-				)
-			}
-		} else if state.pendingFix.ordinal != state.FixesUsed()+1 ||
-			(used != state.FixesUsed() && used != state.FixesUsed()+1) {
-			return ReviewRuntimeProjection{}, fmt.Errorf(
-				"attempt %s pending review fix does not match durable protocol progress",
-				attempt.attemptID,
-			)
-		}
-	}
 	return projection, nil
 }
 
@@ -142,16 +92,13 @@ func reduceReviewRuntime(current ReviewRuntimeProjection, record JournalRecord) 
 	}
 	next.core = core
 	next.workspaceID, next.activeGeneration = core.workspaceID, core.activeGeneration
-	if isReviewFixJournalEvent(record.event) {
-		if err := validateReviewFixJournalReservation(current, record.event); err != nil {
-			return ReviewRuntimeProjection{}, err
-		}
-	}
-
 	switch event := record.event.(type) {
 	case ReviewHeadAdoptedJournalEvent:
-		if reviewStateIndex(current.states, event.attemptID) >= 0 {
-			return ReviewRuntimeProjection{}, fmt.Errorf("review head adoption cannot follow durable review state")
+		if index := reviewStateIndex(current.states, event.attemptID); index >= 0 {
+			// A review is valid only for its exact head and tree. An ordinary
+			// follow-up commit replaces that head, so discard the old review state
+			// rather than carrying a review-fix reservation or budget forward.
+			next.states = append(next.states[:index:index], next.states[index+1:]...)
 		}
 	case ReviewRoundStartedJournalEvent:
 		attempt, exists := current.core.Attempt(event.attemptID)
@@ -238,106 +185,8 @@ func reduceReviewRuntime(current ReviewRuntimeProjection, record JournalRecord) 
 			return ReviewRuntimeProjection{}, err
 		}
 		next.states[index] = state
-	case ReviewFindingFixReservedJournalEvent:
-		index := reviewStateIndex(current.states, event.attemptID)
-		attempt, exists := current.core.Attempt(event.attemptID)
-		if index < 0 || !exists || attempt.phase != AttemptActive ||
-			attempt.verifiedHead != current.states[index].head || current.workspaceID != event.workspaceID ||
-			current.activeGeneration != event.generation || current.states[index].loop.digest != event.loopDigest {
-			return ReviewRuntimeProjection{}, fmt.Errorf("review finding-fix reservation does not match active exact-head review state")
-		}
-		usedFixes := uint16(0)
-		if attempt.reviewFixes != nil {
-			usedFixes = attempt.reviewFixes.Used()
-		}
-		if usedFixes != current.states[index].FixesUsed() {
-			return ReviewRuntimeProjection{}, fmt.Errorf("review finding-fix reservation does not match applied fix counters")
-		}
-		domain, err := NewReserveReviewFindingFix(event.reservation)
-		if err != nil {
-			return ReviewRuntimeProjection{}, err
-		}
-		state, err := ReduceReview(current.states[index], domain)
-		if err != nil {
-			return ReviewRuntimeProjection{}, err
-		}
-		next.states[index] = state
-	case ReviewFixAppliedJournalEvent:
-		index := reviewStateIndex(current.states, event.attemptID)
-		attempt, exists := current.core.Attempt(event.attemptID)
-		if index < 0 || !exists || attempt.phase != AttemptActive || attempt.reviewFixes == nil ||
-			attempt.verifiedHead != event.fix.head || current.workspaceID != event.workspaceID ||
-			current.activeGeneration != event.generation || current.states[index].loop.digest != event.loopDigest {
-			return ReviewRuntimeProjection{}, fmt.Errorf("review fix does not match the active attempt and durable review-fix protocol")
-		}
-		fixState := attempt.reviewFixes
-		if fixState.Used() != event.fix.ordinal || !fixState.Quiescent() || len(fixState.fixes) == 0 {
-			return ReviewRuntimeProjection{}, fmt.Errorf("review fix event does not match the completed review-fix ordinal")
-		}
-		commit := fixState.fixes[len(fixState.fixes)-1].commit
-		if commit.commit != event.fix.head || commit.tree != event.fix.tree || commit.parent != event.fix.priorHead ||
-			commit.evidence != event.fix.evidence {
-			return ReviewRuntimeProjection{}, fmt.Errorf("review fix event does not match durable commit evidence")
-		}
-		state, err := ReduceReview(current.states[index], event.fix)
-		if err != nil {
-			return ReviewRuntimeProjection{}, err
-		}
-		next.states[index] = state
 	}
 	return next, nil
-}
-
-func validateReviewFixJournalReservation(
-	current ReviewRuntimeProjection,
-	event WorkspaceJournalEvent,
-) error {
-	var workspaceID, attemptID ID
-	var generation Digest
-	var ordinal uint16
-	var parent GitObjectID
-	switch value := event.(type) {
-	case ReviewFixReservedJournalEvent:
-		workspaceID, generation, attemptID, ordinal, parent =
-			value.workspaceID, value.generation, value.attemptID, value.ordinal, value.parent
-	case ReviewFixIntendedJournalEvent:
-		workspaceID, generation, attemptID, ordinal, parent =
-			value.workspaceID, value.generation, value.attemptID, value.ordinal, value.parent
-	case ReviewFixCommitRecordedJournalEvent:
-		workspaceID, generation, attemptID, ordinal, parent =
-			value.workspaceID, value.generation, value.attemptID, value.ordinal, value.evidence.parent
-	case ReviewFixCheckRecordedJournalEvent:
-		workspaceID, generation, attemptID, ordinal =
-			value.workspaceID, value.generation, value.attemptID, value.ordinal
-	default:
-		return fmt.Errorf("unsupported review-fix reservation transition %T", event)
-	}
-	index := reviewStateIndex(current.states, attemptID)
-	if index < 0 {
-		return nil
-	}
-	state := current.states[index]
-	attempt, exists := current.core.Attempt(attemptID)
-	if !exists || attempt.phase != AttemptActive || current.workspaceID != workspaceID ||
-		current.activeGeneration != generation || state.workspaceID != workspaceID || state.generation != generation {
-		return fmt.Errorf("review-fix protocol transition does not match the active review attempt")
-	}
-	reservation := state.pendingFix
-	if reservation == nil {
-		_, isRebasedCheck := event.(ReviewFixCheckRecordedJournalEvent)
-		if isRebasedCheck && ordinal <= state.FixesUsed() && attempt.reviewFixes != nil &&
-			attempt.reviewFixes.rebaseEpoch > 0 && attempt.reviewFixes.checkingFix >= 0 {
-			return nil
-		}
-		return fmt.Errorf("review-fix protocol transition has no matching accepted-finding reservation")
-	}
-	if reservation.ordinal != ordinal || reservation.ordinal != state.FixesUsed()+1 {
-		return fmt.Errorf("review-fix protocol transition has no matching accepted-finding reservation")
-	}
-	if !parent.IsZero() && parent != reservation.head {
-		return fmt.Errorf("review-fix protocol transition does not match its exact reviewed parent")
-	}
-	return nil
 }
 
 func reviewStateIndex(states []ReviewState, attemptID ID) int {
@@ -384,17 +233,6 @@ func canonicalReviewRuntime(projection ReviewRuntimeProjection) ([]byte, error) 
 		Attempts     []resultJSON      `json:"attempts"`
 		Results      []resultJSON      `json:"results"`
 	}
-	type fixJSON struct {
-		Ordinal     uint16   `json:"ordinal"`
-		Round       uint16   `json:"round"`
-		Reservation string   `json:"reservation_digest"`
-		PriorHead   string   `json:"prior_head"`
-		PriorTree   string   `json:"prior_tree"`
-		Head        string   `json:"head"`
-		Tree        string   `json:"tree"`
-		Evidence    string   `json:"evidence_digest"`
-		Findings    []string `json:"finding_ids"`
-	}
 	type stateJSON struct {
 		AttemptID   string      `json:"attempt_id"`
 		PlanID      string      `json:"plan_id"`
@@ -404,9 +242,6 @@ func canonicalReviewRuntime(projection ReviewRuntimeProjection) ([]byte, error) 
 		Head        string      `json:"head"`
 		Tree        string      `json:"tree"`
 		Rounds      []roundJSON `json:"rounds"`
-		Fixes       []fixJSON   `json:"fixes"`
-		PendingFix  string      `json:"pending_fix_reservation,omitempty"`
-		Exhaustion  string      `json:"exhaustion_directive,omitempty"`
 	}
 	type runtimeJSON struct {
 		SchemaVersion    int         `json:"schema_version"`
@@ -423,7 +258,7 @@ func canonicalReviewRuntime(projection ReviewRuntimeProjection) ([]byte, error) 
 			AttemptID: state.attemptID.String(), PlanID: state.mergeUnit.planID.String(),
 			MergeUnitID: state.mergeUnit.mergeUnitID.String(), Generation: state.generation.String(),
 			Loop: state.loop.digest.String(), Head: state.head.String(), Tree: state.tree.String(),
-			Rounds: make([]roundJSON, 0, len(state.rounds)), Fixes: make([]fixJSON, 0, len(state.fixes)),
+			Rounds: make([]roundJSON, 0, len(state.rounds)),
 		}
 		for _, round := range state.rounds {
 			roundItem := roundJSON{
@@ -456,23 +291,6 @@ func canonicalReviewRuntime(projection ReviewRuntimeProjection) ([]byte, error) 
 				})
 			}
 			item.Rounds = append(item.Rounds, roundItem)
-		}
-		for _, fix := range state.fixes {
-			findingIDs := make([]string, 0, len(fix.findings))
-			for _, finding := range fix.findings {
-				findingIDs = append(findingIDs, finding.String())
-			}
-			item.Fixes = append(item.Fixes, fixJSON{
-				Ordinal: fix.ordinal, Round: fix.round, Reservation: fix.reservationDigest.String(),
-				PriorHead: fix.priorHead.String(), PriorTree: fix.priorTree.String(),
-				Head: fix.head.String(), Tree: fix.tree.String(), Evidence: fix.evidence.String(), Findings: findingIDs,
-			})
-		}
-		if state.pendingFix != nil {
-			item.PendingFix = state.pendingFix.digest.String()
-		}
-		if state.exhaustion != nil {
-			item.Exhaustion = state.exhaustion.digest.String()
 		}
 		value.States = append(value.States, item)
 	}

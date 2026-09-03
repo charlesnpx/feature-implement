@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-func TestRuntimeStorageCreatesV6MarkerAndRejectsLegacyWithoutMutation(t *testing.T) {
+func TestRuntimeStorageCreatesV7MarkerAndRejectsLegacyWithoutMutation(t *testing.T) {
 	parent := canonicalRuntimeTestTempDir(t)
 	legacy := filepath.Join(parent, "legacy")
 	if err := os.MkdirAll(filepath.Join(legacy, WorkspaceStateDirectoryName), 0o700); err != nil {
@@ -34,7 +34,7 @@ func TestRuntimeStorageCreatesV6MarkerAndRejectsLegacyWithoutMutation(t *testing
 		t.Fatalf("legacy runtime changed: %q, %v", content, err)
 	}
 	if _, err := os.Lstat(filepath.Join(legacy, RuntimeFormatFileName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("legacy runtime acquired v6 marker: %v", err)
+		t.Fatalf("legacy runtime acquired v7 marker: %v", err)
 	}
 
 	fresh := filepath.Join(parent, "fresh")
@@ -58,11 +58,11 @@ func TestRuntimeStorageCreatesV6MarkerAndRejectsLegacyWithoutMutation(t *testing
 	}
 	marker, err := os.ReadFile(filepath.Join(fresh, RuntimeFormatFileName))
 	if err != nil {
-		t.Fatalf("read v6 runtime marker: %v", err)
+		t.Fatalf("read v7 runtime marker: %v", err)
 	}
 	var wire runtimeFormatMarkerWire
 	if err := json.Unmarshal(marker, &wire); err != nil {
-		t.Fatalf("decode v6 runtime marker: %v", err)
+		t.Fatalf("decode v7 runtime marker: %v", err)
 	}
 	if wire.SchemaVersion != RuntimeFormatSchemaVersion {
 		t.Fatalf(
@@ -99,7 +99,7 @@ func TestRuntimeStorageRejectsV4MarkerAtFormatGate(t *testing.T) {
 		t.Fatalf("v4 runtime format gate error = %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(runtimePath, RuntimeFormatFileName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("v4 runtime acquired v6 marker: %v", err)
+		t.Fatalf("v4 runtime acquired v7 marker: %v", err)
 	}
 }
 
@@ -160,11 +160,11 @@ func TestRuntimeInitializationRejectsUnknownNonEmptyState(t *testing.T) {
 		t.Fatalf("unknown state error = %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(runtimePath, RuntimeFormatFileName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("unknown state acquired v6 marker: %v", err)
+		t.Fatalf("unknown state acquired v7 marker: %v", err)
 	}
 }
 
-func TestConcurrentRuntimeInitializationPublishesOneV6Runtime(t *testing.T) {
+func TestConcurrentRuntimeInitializationPublishesOneV7Runtime(t *testing.T) {
 	runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "runtime")
 	const contenders = 8
 	start := make(chan struct{})

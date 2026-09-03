@@ -14,7 +14,6 @@ type reviewProfilePayloadWire struct {
 type reviewLoopPayloadWire struct {
 	Profiles                 []reviewProfilePayloadWire `json:"profiles"`
 	MaxReviewRounds          uint16                     `json:"max_review_rounds"`
-	MaxReviewFixes           uint16                     `json:"max_review_fixes"`
 	MaxInfrastructureRetries uint16                     `json:"max_infrastructure_retries"`
 	Digest                   string                     `json:"digest"`
 }
@@ -136,34 +135,6 @@ type reviewInvocationFailedPayloadWire struct {
 	FailureDigest     string `json:"failure_digest"`
 }
 
-type reviewFindingFixReservedPayloadWire struct {
-	WorkspaceID       string   `json:"workspace_id"`
-	Generation        string   `json:"generation"`
-	AttemptID         string   `json:"attempt_id"`
-	LoopDigest        string   `json:"loop_digest"`
-	Ordinal           uint16   `json:"ordinal"`
-	Round             uint16   `json:"round"`
-	Head              string   `json:"head"`
-	Tree              string   `json:"tree"`
-	Findings          []string `json:"finding_ids"`
-	ReservationDigest string   `json:"reservation_digest"`
-}
-
-type reviewFixAppliedPayloadWire struct {
-	WorkspaceID string   `json:"workspace_id"`
-	Generation  string   `json:"generation"`
-	AttemptID   string   `json:"attempt_id"`
-	LoopDigest  string   `json:"loop_digest"`
-	Ordinal     uint16   `json:"ordinal"`
-	Reservation string   `json:"reservation_digest"`
-	PriorHead   string   `json:"prior_head"`
-	PriorTree   string   `json:"prior_tree"`
-	Head        string   `json:"head"`
-	Tree        string   `json:"tree"`
-	Evidence    string   `json:"evidence_digest"`
-	Findings    []string `json:"finding_ids"`
-}
-
 func marshalReviewJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, bool, error) {
 	var value any
 	switch event := event.(type) {
@@ -207,31 +178,6 @@ func marshalReviewJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, bo
 			AttemptID: event.attemptID.String(), LoopDigest: event.loopDigest.String(),
 			Round: event.round, ProfileOrdinal: event.profileOrdinal, Invocation: event.invocation,
 			Reservation: event.reservationDigest.String(), Result: reviewResultToWire(event.result), Document: document,
-		}
-	case ReviewFindingFixReservedJournalEvent:
-		findings := make([]string, 0, len(event.reservation.findings))
-		for _, finding := range event.reservation.findings {
-			findings = append(findings, finding.String())
-		}
-		value = reviewFindingFixReservedPayloadWire{
-			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
-			AttemptID: event.attemptID.String(), LoopDigest: event.loopDigest.String(),
-			Ordinal: event.reservation.ordinal, Round: event.reservation.round,
-			Head: event.reservation.head.String(), Tree: event.reservation.tree.String(), Findings: findings,
-			ReservationDigest: event.reservation.digest.String(),
-		}
-	case ReviewFixAppliedJournalEvent:
-		findings := make([]string, 0, len(event.fix.findings))
-		for _, finding := range event.fix.findings {
-			findings = append(findings, finding.String())
-		}
-		value = reviewFixAppliedPayloadWire{
-			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
-			AttemptID: event.attemptID.String(), LoopDigest: event.loopDigest.String(),
-			Ordinal: event.fix.ordinal, Reservation: event.fix.reservationDigest.String(),
-			PriorHead: event.fix.priorHead.String(), PriorTree: event.fix.priorTree.String(),
-			Head: event.fix.head.String(), Tree: event.fix.tree.String(), Evidence: event.fix.evidence.String(),
-			Findings: findings,
 		}
 	default:
 		return nil, false, nil
@@ -420,84 +366,6 @@ func decodeReviewJournalEvent(
 		}
 		event, err := NewReviewResultRecordedJournalEvent(workspaceID, generation, attemptID, loopDigest, record)
 		return event, true, err
-	case JournalEventReviewFindingFixReserved:
-		var wire reviewFindingFixReservedPayloadWire
-		if err := decodeStrictJSON(payload, &wire); err != nil {
-			return nil, true, fmt.Errorf("decode review finding-fix reservation: %w", err)
-		}
-		workspaceID, generation, attemptID, err := parseReviewEnvelope(wire.WorkspaceID, wire.Generation, wire.AttemptID)
-		if err != nil {
-			return nil, true, err
-		}
-		loopDigest, err := ParseDigest(wire.LoopDigest)
-		if err != nil {
-			return nil, true, err
-		}
-		head, err := ParseGitObjectID(wire.Head)
-		if err != nil {
-			return nil, true, err
-		}
-		tree, err := ParseGitObjectID(wire.Tree)
-		if err != nil {
-			return nil, true, err
-		}
-		findings, err := parseReviewFindingDigests(wire.Findings)
-		if err != nil {
-			return nil, true, err
-		}
-		reservation, err := NewReviewFixReservation(
-			workspaceID, generation, attemptID, loopDigest, wire.Ordinal, wire.Round, head, tree, findings,
-		)
-		if err != nil {
-			return nil, true, err
-		}
-		stored, err := ParseDigest(wire.ReservationDigest)
-		if err != nil || stored != reservation.digest {
-			return nil, true, fmt.Errorf("review finding-fix reservation digest mismatch")
-		}
-		event, err := NewReviewFindingFixReservedJournalEvent(reservation)
-		return event, true, err
-	case JournalEventReviewFixApplied:
-		var wire reviewFixAppliedPayloadWire
-		if err := decodeStrictJSON(payload, &wire); err != nil {
-			return nil, true, fmt.Errorf("decode review fix: %w", err)
-		}
-		workspaceID, generation, attemptID, err := parseReviewEnvelope(wire.WorkspaceID, wire.Generation, wire.AttemptID)
-		if err != nil {
-			return nil, true, err
-		}
-		loopDigest, err := ParseDigest(wire.LoopDigest)
-		if err != nil {
-			return nil, true, err
-		}
-		objects := make([]GitObjectID, 0, 4)
-		for _, raw := range []string{wire.PriorHead, wire.PriorTree, wire.Head, wire.Tree} {
-			object, err := ParseGitObjectID(raw)
-			if err != nil {
-				return nil, true, err
-			}
-			objects = append(objects, object)
-		}
-		evidence, err := ParseDigest(wire.Evidence)
-		if err != nil {
-			return nil, true, err
-		}
-		findings, err := parseReviewFindingDigests(wire.Findings)
-		if err != nil {
-			return nil, true, err
-		}
-		reservation, err := ParseDigest(wire.Reservation)
-		if err != nil {
-			return nil, true, err
-		}
-		fix, err := NewApplyReviewFix(
-			wire.Ordinal, reservation, objects[0], objects[1], objects[2], objects[3], evidence, findings,
-		)
-		if err != nil {
-			return nil, true, err
-		}
-		event, err := NewReviewFixAppliedJournalEvent(workspaceID, generation, attemptID, loopDigest, fix)
-		return event, true, err
 	default:
 		return nil, false, nil
 	}
@@ -620,22 +488,10 @@ func reviewRequestFromWire(wire reviewRequestPayloadWire) (ReviewRequest, error)
 	return request, nil
 }
 
-func parseReviewFindingDigests(values []string) ([]Digest, error) {
-	findings := make([]Digest, 0, len(values))
-	for _, raw := range values {
-		finding, err := ParseDigest(raw)
-		if err != nil {
-			return nil, err
-		}
-		findings = append(findings, finding)
-	}
-	return findings, nil
-}
-
 func reviewLoopToWire(loop ReviewLoop) reviewLoopPayloadWire {
 	wire := reviewLoopPayloadWire{
-		Profiles:        make([]reviewProfilePayloadWire, 0, len(loop.profiles)),
-		MaxReviewRounds: loop.maxRounds, MaxReviewFixes: loop.maxFixes,
+		Profiles:                 make([]reviewProfilePayloadWire, 0, len(loop.profiles)),
+		MaxReviewRounds:          loop.maxRounds,
 		MaxInfrastructureRetries: loop.maxInfrastructureRetries, Digest: loop.digest.String(),
 	}
 	for _, profile := range loop.profiles {
@@ -652,7 +508,7 @@ func reviewLoopFromWire(wire reviewLoopPayloadWire) (ReviewLoop, error) {
 	}
 	loop := ReviewLoop{
 		profiles: make([]ReviewProfile, 0, len(wire.Profiles)), maxRounds: wire.MaxReviewRounds,
-		maxFixes: wire.MaxReviewFixes, maxInfrastructureRetries: wire.MaxInfrastructureRetries,
+		maxInfrastructureRetries: wire.MaxInfrastructureRetries,
 	}
 	seen := make(map[string]struct{}, len(wire.Profiles))
 	for _, item := range wire.Profiles {

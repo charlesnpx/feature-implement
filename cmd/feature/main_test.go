@@ -116,6 +116,7 @@ func TestRemovedWorkspaceCommandsAndWrongSubactionsFailClearly(
 		{"workspace", "reconcile", "stage"},
 		{"workspace", "control", "grant"},
 		{"workspace", "provider", "dispatch"},
+		{"workspace", "commit", "next"},
 		{"workspace", "commit", "rebase"},
 	} {
 		stdout, stderr, err := runFeature(t, args...)
@@ -274,6 +275,7 @@ func TestWorkspaceSchemaExampleAndJournalBackedStatus(t *testing.T) {
 	}
 	for _, removed := range []string{
 		`provider`, `receipt`, `authorization`, `queue`, `reconciliation`,
+		`fixes_used`, `fix_pending`,
 	} {
 		if strings.Contains(viewSchema, removed) {
 			t.Fatalf("workspace view schema exposes removed term %q: %s", removed, viewSchema)
@@ -483,7 +485,6 @@ policy:
   allow_write_network: false
   max_attempts: 3
   max_review_rounds: 3
-  max_review_fixes: 2
 profiles:
   - id: standard
     runner: codex
@@ -492,7 +493,6 @@ profiles:
       allow_write_network: false
       max_attempts: 3
       max_review_rounds: 3
-      max_review_fixes: 2
 merge_units:
   - plan_id: alpha-plan
     merge_unit_id: unit-one
@@ -506,7 +506,6 @@ merge_units:
       allow_write_network: false
       max_attempts: 3
       max_review_rounds: 3
-      max_review_fixes: 2
 `,
 	}
 	for relative, content := range files {

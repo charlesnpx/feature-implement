@@ -137,10 +137,6 @@ func marshalWorkspaceJournalEvent(event WorkspaceJournalEvent) (json.RawMessage,
 		if supported {
 			return payload, err
 		}
-		payload, supported, err = marshalCommitJournalEvent(event)
-		if supported {
-			return payload, err
-		}
 		payload, supported, err = marshalReviewJournalEvent(event)
 		if supported {
 			return payload, err
@@ -287,10 +283,6 @@ func decodeWorkspaceJournalEvent(eventType JournalEventType, payload json.RawMes
 		if supported {
 			return event, err
 		}
-		event, supported, err = decodeCommitJournalEvent(eventType, payload)
-		if supported {
-			return event, err
-		}
 		event, supported, err = decodeReviewJournalEvent(eventType, payload)
 		if supported {
 			return event, err
@@ -342,6 +334,78 @@ func decodeStrictJSON(source []byte, target any) error {
 			return fmt.Errorf("trailing JSON value")
 		}
 		return err
+	}
+	return nil
+}
+
+// rejectDuplicateJSONObjectKeys rejects ambiguous JSON before decoding it
+// into a durable record or materialization document. The standard decoder
+// accepts duplicate keys by choosing one, which is unsuitable for data whose
+// bytes participate in integrity checks.
+func rejectDuplicateJSONObjectKeys(content []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.UseNumber()
+	if err := consumeUniqueJSONValue(decoder, 0); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("JSON contains trailing data")
+		}
+		return err
+	}
+	return nil
+}
+
+func consumeUniqueJSONValue(decoder *json.Decoder, depth uint8) error {
+	if depth > 64 {
+		return fmt.Errorf("JSON exceeds its nesting bound")
+	}
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, composite := token.(json.Delim)
+	if !composite {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return fmt.Errorf("JSON object key is not a string")
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return fmt.Errorf("JSON contains duplicate key %q", key)
+			}
+			seen[key] = struct{}{}
+			if err := consumeUniqueJSONValue(decoder, depth+1); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim('}') {
+			return fmt.Errorf("JSON object is incomplete")
+		}
+	case '[':
+		for decoder.More() {
+			if err := consumeUniqueJSONValue(decoder, depth+1); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim(']') {
+			return fmt.Errorf("JSON array is incomplete")
+		}
+	default:
+		return fmt.Errorf("JSON contains an invalid delimiter")
 	}
 	return nil
 }
