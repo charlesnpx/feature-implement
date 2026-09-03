@@ -77,9 +77,10 @@ interprets a policy.
    according to its own policy; this workflow does not prescribe an iteration
    scheme.
 3. After the adapter creates durable evidence, submit `review record` with its
-   evidence digest. For the Witness adapter, use `review record-document` with
-   its strict `review-report-v1` document instead. The raw document is retained
-   as the gate evidence.
+   evidence digest. For a completed Witness run, use `review record-document`
+   with its strict `review-report-v1` document instead; for Witness
+   `failed_to_run`, use `review record` with the durable failure-evidence
+   digest. The raw document is retained as the gate evidence.
 4. Record exactly one terminal verdict: `satisfied`, `not_satisfied`, or
    `failed_to_run`. A failure to run is not a negative verdict and does not
    alter the attempt phase; use ordinary attempt lifecycle actions if the owner

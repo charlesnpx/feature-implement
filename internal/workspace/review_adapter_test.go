@@ -58,8 +58,9 @@ func TestWitnessAdapterBuildsFromFrozenCopyAndRetainsRawGateEvidence(t *testing.
 	if repository.lastWorktree != dispatched.FrozenCopy() || repository.lastWorktree == harness.attempt.Worktree() {
 		t.Fatalf("adapter input worktree = %q, frozen=%q, attempt=%q", repository.lastWorktree, dispatched.FrozenCopy(), harness.attempt.Worktree())
 	}
-	if first.CharterHash() != second.CharterHash() || first.RequestDocumentDigest() != second.RequestDocumentDigest() ||
-		!bytes.Equal(first.CharterJSON(), second.CharterJSON()) || !bytes.Equal(first.RequestJSON(), second.RequestJSON()) {
+	if !bytes.Equal(first.CharterJSON(), second.CharterJSON()) ||
+		!bytes.Equal(first.RequestJSON(), second.RequestJSON()) ||
+		!bytes.Equal(first.ReviewInput(), second.ReviewInput()) {
 		t.Fatalf("same gate dispatch generated non-deterministic documents: first=%#v second=%#v", first, second)
 	}
 	raw := validReviewAdapterReportBytes(t, first)
@@ -168,15 +169,17 @@ func validReviewAdapterReportBytes(t *testing.T, materialization workspace.Revie
 	if len(goals) == 0 {
 		t.Fatal("adapter charter has no goals")
 	}
+	var request witnessreview.ReviewRequestDocument
+	if err := json.Unmarshal(materialization.RequestJSON(), &request); err != nil {
+		t.Fatalf("adapter request = %q error=%v", materialization.RequestJSON(), err)
+	}
 	document := witnessreview.ReviewReportDocument{
 		SchemaVersion:     witnessreview.ReviewReportV1,
 		Role:              witnessreview.RoleDefect,
-		CharterHash:       materialization.CharterHash().String(),
-		ReviewInputDigest: materialization.ReviewInputDigest().String(),
+		CharterHash:       request.CharterHash,
+		ReviewInputDigest: request.ReviewInputDigest,
 		SourceIdentity:    witnessreview.Identity{Kind: "test-reviewer", ID: "adapter-test"},
-		ConsumerIdentity: witnessreview.Identity{
-			Kind: "feature-implement", ID: materialization.Dispatch().WorkspaceID().String(),
-		},
+		ConsumerIdentity:  request.ConsumerIdentity,
 		Findings: []witnessreview.ReportFinding{{
 			ID: "adapter-finding", Title: "Adapter retains raw gate evidence", ClaimedSeverity: witnessreview.SeverityHigh,
 			CharterGoalIDs: []string{goals[0].ID},

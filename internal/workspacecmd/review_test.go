@@ -113,9 +113,21 @@ func TestWitnessReviewDispatchPacketRoundTripsThroughRecordDocument(t *testing.T
 		t.Fatalf("witness dispatch detail = %#v", dispatched.Detail)
 	}
 	packet := dispatch.WitnessPacket
-	if packet.ReviewInputLocation != dispatch.FrozenCopy || !filepath.IsAbs(packet.ReviewInputLocation) ||
-		packet.ReviewInputDigest != workspace.DigestBytes([]byte(packet.ReviewInput)).String() {
-		t.Fatalf("witness packet input binding = %#v", packet)
+	packetJSON, err := json.Marshal(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var packetFields map[string]json.RawMessage
+	if err := json.Unmarshal(packetJSON, &packetFields); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"charter_document", "request_document", "review_input"} {
+		if _, exists := packetFields[field]; !exists {
+			t.Fatalf("witness packet omits %q: %s", field, packetJSON)
+		}
+	}
+	if len(packetFields) != 3 {
+		t.Fatalf("witness packet duplicates request bindings: %s", packetJSON)
 	}
 	var charter witnesscharter.Charter
 	if err := json.Unmarshal(packet.CharterDocument, &charter); err != nil || len(charter.Goals) == 0 {
@@ -125,31 +137,18 @@ func TestWitnessReviewDispatchPacketRoundTripsThroughRecordDocument(t *testing.T
 	if err := json.Unmarshal(packet.RequestDocument, &request); err != nil {
 		t.Fatal(err)
 	}
-	requestDigest, err := witnessreview.ReviewRequestDigest(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if request.CharterHash != packet.CharterHash || request.ReviewInputDigest != packet.ReviewInputDigest ||
-		requestDigest != packet.RequestDigest {
-		t.Fatalf("dispatch request packet = %#v request_digest=%q", packet, requestDigest)
+	if request.ReviewInputDigest != workspace.DigestBytes([]byte(packet.ReviewInput)).String() {
+		t.Fatalf("dispatch request input binding = %#v", request)
 	}
 
 	report := witnessreview.ReviewReportDocument{
 		SchemaVersion:     witnessreview.ReviewReportV1,
 		Role:              witnessreview.RoleDefect,
-		CharterHash:       packet.CharterHash,
-		ReviewInputDigest: packet.ReviewInputDigest,
+		CharterHash:       request.CharterHash,
+		ReviewInputDigest: request.ReviewInputDigest,
 		SourceIdentity:    witnessreview.Identity{Kind: "test-reviewer", ID: "cli-round-trip"},
 		ConsumerIdentity:  request.ConsumerIdentity,
-		Findings: []witnessreview.ReportFinding{{
-			ID: "cli-finding", Title: "Dispatch packet supports a conforming report", ClaimedSeverity: witnessreview.SeverityHigh,
-			CharterGoalIDs: []string{charter.Goals[0].ID},
-			Witness: witnessreview.ReportWitness{
-				Kind: witnessreview.WitnessKindDefect, Strength: witnessreview.WitnessStrengthConstructed,
-				Content: "The command exposes all document bindings needed by the Witness report.",
-			},
-			Annotation: &witnessreview.FindingAnnotation{Path: "src/review.go", Line: 12, Category: "contract"},
-		}},
+		Findings:          []witnessreview.ReportFinding{},
 		Evaluation: &witnessreview.ReportEvaluation{
 			EvaluatedPaths: []string{"src/review.go"}, EvaluatedGoalIDs: []string{charter.Goals[0].ID},
 		},

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type ReviewRepositoryRequest struct {
@@ -127,6 +128,11 @@ func DispatchAttemptReviewGate(
 	if err := verifyAttemptFinalHistory(ctx, repository, unit, attempt, artifact.head); err != nil {
 		return ReviewGateDispatchResult{}, fmt.Errorf("verify final history before review gate dispatch: %w", err)
 	}
+	if config.adapter.String() == WitnessReviewGateAdapter {
+		if err := validateWitnessReviewInputTransport(ctx, repository, attempt, artifact.head); err != nil {
+			return ReviewGateDispatchResult{}, err
+		}
+	}
 	if artifact.head != attempt.verifiedHead {
 		adoption, adoptionErr := NewReviewHeadAdoptedJournalEvent(
 			definition.workspace.id, definition.generation, attempt.attemptID, attempt.mergeUnit,
@@ -174,6 +180,26 @@ func DispatchAttemptReviewGate(
 		return ReviewGateDispatchResult{}, err
 	}
 	return materializeReviewGateCopy(ctx, materializer, projection.core, attempt, dispatch, record, config.Policy())
+}
+
+func validateWitnessReviewInputTransport(
+	ctx context.Context,
+	repository ReviewRepositoryPort,
+	attempt RuntimeAttemptProjection,
+	head GitObjectID,
+) error {
+	reader, ok := repository.(ReviewAdapterRepositoryPort)
+	if !ok {
+		return fmt.Errorf("Witness review gate dispatch requires a review input reader")
+	}
+	reviewInput, err := reader.ReadReviewInput(ctx, attempt.worktree, attempt.base, head)
+	if err != nil {
+		return fmt.Errorf("read review input before review gate dispatch: %w", err)
+	}
+	if !utf8.Valid(reviewInput) {
+		return fmt.Errorf("review input is non-UTF-8")
+	}
+	return nil
 }
 
 func materializeReviewGateCopy(

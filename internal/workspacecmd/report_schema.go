@@ -186,7 +186,7 @@ func WorkspaceViewSchema() map[string]any {
 			"worktree":       nonEmptyText(),
 			"phase": enum(
 				"active", "paused",
-				"completed", "failed", "abandoned",
+				"superseded", "completed", "failed", "abandoned",
 			),
 			"head":               nonEmptyText(),
 			"goal_id":            nonEmptyText(),

@@ -22,6 +22,9 @@ type reviewRepositoryStub struct {
 	finalHistoryErr  error
 	finalHistory     func(int) error
 	finalHistoryRuns int
+	reviewInput      []byte
+	reviewInputErr   error
+	reviewInputRuns  int
 }
 
 func (repository *reviewRepositoryStub) InspectReviewSnapshot(
@@ -52,6 +55,19 @@ func (repository *reviewRepositoryStub) VerifyFinalHistory(
 		return repository.finalHistory(repository.finalHistoryRuns)
 	}
 	return repository.finalHistoryErr
+}
+
+func (repository *reviewRepositoryStub) ReadReviewInput(
+	context.Context,
+	string,
+	workspace.GitObjectID,
+	workspace.GitObjectID,
+) ([]byte, error) {
+	repository.reviewInputRuns++
+	if repository.reviewInputErr != nil {
+		return nil, repository.reviewInputErr
+	}
+	return append([]byte(nil), repository.reviewInput...), nil
 }
 
 type gatedReviewHarness struct {
@@ -248,6 +264,36 @@ func TestReviewGateDispatchRejectsConfiguredFinalHistoryBeforeAdoptionOrJournal(
 				t.Fatalf("invalid final history adopted inspected head: %#v exists=%t", attempt, exists)
 			}
 		})
+	}
+}
+
+func TestWitnessReviewDispatchRejectsNonUTF8ReviewInputBeforeJournal(t *testing.T) {
+	t.Parallel()
+
+	harness := newWitnessReviewHarness(t)
+	harness.repository.reviewInput = []byte("diff --git a/input b/input\n+invalid-\xff\n")
+	before, err := harness.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = workspace.DispatchAttemptReviewGate(
+		context.Background(), harness.journal, harness.definition, harness.repository,
+		workspace.DefaultLocalAttemptGitAdapter(), workspace.ReviewGateDispatchRequest{
+			AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-09-03T12:00:01Z"),
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "review input is non-UTF-8") {
+		t.Fatalf("invalid review input dispatch error = %v", err)
+	}
+	if harness.repository.reviewInputRuns != 1 {
+		t.Fatalf("review input reads = %d, want 1", harness.repository.reviewInputRuns)
+	}
+	after, err := harness.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Head() != before.Head() || len(after.Records()) != len(before.Records()) {
+		t.Fatalf("non-UTF-8 review input journaled a dispatch: before=%s/%d after=%s/%d", before.Head(), len(before.Records()), after.Head(), len(after.Records()))
 	}
 }
 

@@ -2,6 +2,7 @@ package workspace_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/charlesnpx/feature-implement/internal/workspace"
+	"github.com/charlesnpx/feature-implement/internal/workspacecmd"
 )
 
 type integrationGitStub struct {
@@ -848,6 +850,18 @@ func TestConcurrentIntegrationsPublishExactlyOneIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	viewHasSupersededAttempt := false
+	for _, candidate := range view.Attempts {
+		if candidate.AttemptID == loser.AttemptID().String() {
+			viewHasSupersededAttempt = candidate.Phase == workspace.AttemptSuperseded
+		}
+	}
+	if !viewHasSupersededAttempt {
+		t.Fatalf("workspace view omits superseded concurrent loser: %#v", view.Attempts)
+	}
+	if err := validatePublishedWorkspaceAttemptSchema(view, loser.AttemptID()); err != nil {
+		t.Fatalf("published workspace schema rejects reachable superseded view: %v", err)
+	}
 	scheduler := view.Scheduler
 	loserReady := false
 	for _, unit := range scheduler.Units {
@@ -888,6 +902,105 @@ func TestConcurrentIntegrationsPublishExactlyOneIntent(t *testing.T) {
 			replacement, err,
 		)
 	}
+}
+
+func validatePublishedWorkspaceAttemptSchema(view workspace.WorkspaceView, attemptID workspace.ID) error {
+	var selected *workspace.WorkspaceAttempt
+	for index := range view.Attempts {
+		if view.Attempts[index].AttemptID == attemptID.String() {
+			selected = &view.Attempts[index]
+			break
+		}
+	}
+	if selected == nil {
+		return fmt.Errorf("workspace view has no attempt %s", attemptID)
+	}
+	viewSchema := workspacecmd.WorkspaceViewSchema()
+	properties := viewSchema["properties"].(map[string]any)
+	attemptSchema := properties["attempts"].(map[string]any)["items"].(map[string]any)
+	encoded, err := json.Marshal(selected)
+	if err != nil {
+		return err
+	}
+	var value any
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		return err
+	}
+	return validatePublishedSchemaValue(attemptSchema, value, "attempt")
+}
+
+func validatePublishedSchemaValue(schema map[string]any, value any, path string) error {
+	if enum, exists := schema["enum"].([]string); exists {
+		actual, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("%s enum value is %T", path, value)
+		}
+		for _, allowed := range enum {
+			if actual == allowed {
+				break
+			}
+			if allowed == enum[len(enum)-1] {
+				return fmt.Errorf("%s value %q is outside enum %q", path, actual, enum)
+			}
+		}
+	}
+	switch schema["type"] {
+	case "object":
+		object, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s is %T, want object", path, value)
+		}
+		for _, required := range schema["required"].([]string) {
+			if _, exists := object[required]; !exists {
+				return fmt.Errorf("%s omits required field %q", path, required)
+			}
+		}
+		properties := schema["properties"].(map[string]any)
+		for name, field := range object {
+			fieldSchema, known := properties[name]
+			if !known {
+				if schema["additionalProperties"] == false {
+					return fmt.Errorf("%s has unknown field %q", path, name)
+				}
+				continue
+			}
+			if err := validatePublishedSchemaValue(fieldSchema.(map[string]any), field, path+"."+name); err != nil {
+				return err
+			}
+		}
+	case "array":
+		array, ok := value.([]any)
+		if !ok {
+			return fmt.Errorf("%s is %T, want array", path, value)
+		}
+		itemSchema := schema["items"].(map[string]any)
+		for index, item := range array {
+			if err := validatePublishedSchemaValue(itemSchema, item, fmt.Sprintf("%s[%d]", path, index)); err != nil {
+				return err
+			}
+		}
+	case "string":
+		text, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("%s is %T, want string", path, value)
+		}
+		if minimum, exists := schema["minLength"].(int); exists && len(text) < minimum {
+			return fmt.Errorf("%s length %d is below %d", path, len(text), minimum)
+		}
+	case "integer":
+		number, ok := value.(float64)
+		if !ok || number != float64(int(number)) {
+			return fmt.Errorf("%s is %v, want integer", path, value)
+		}
+		if minimum, exists := schema["minimum"].(int); exists && number < float64(minimum) {
+			return fmt.Errorf("%s value %v is below %d", path, number, minimum)
+		}
+	case "boolean":
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("%s is %T, want boolean", path, value)
+		}
+	}
+	return nil
 }
 
 func TestIntegrationMakesTerminalGateAttemptRetryableThroughGenericAbandonment(

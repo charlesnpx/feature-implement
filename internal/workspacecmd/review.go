@@ -33,13 +33,9 @@ type ReviewGateDispatchView struct {
 // WitnessReviewDispatchPacketView is the deterministic handoff used to build
 // a review-report-v1 document from a witness dispatch alone.
 type WitnessReviewDispatchPacketView struct {
-	CharterDocument     json.RawMessage `json:"charter_document"`
-	RequestDocument     json.RawMessage `json:"request_document"`
-	ReviewInput         string          `json:"review_input"`
-	ReviewInputLocation string          `json:"review_input_location"`
-	CharterHash         string          `json:"charter_hash"`
-	ReviewInputDigest   string          `json:"review_input_digest"`
-	RequestDigest       string          `json:"request_digest"`
+	CharterDocument json.RawMessage `json:"charter_document"`
+	RequestDocument json.RawMessage `json:"request_document"`
+	ReviewInput     string          `json:"review_input"`
 }
 
 type ReviewGateRecordView struct {
@@ -292,13 +288,9 @@ func reviewGateDispatchView(result workspace.ReviewGateDispatchResult) ReviewGat
 
 func witnessReviewDispatchPacketView(materialization workspace.ReviewAdapterMaterialization) *WitnessReviewDispatchPacketView {
 	return &WitnessReviewDispatchPacketView{
-		CharterDocument:     json.RawMessage(materialization.CharterJSON()),
-		RequestDocument:     json.RawMessage(materialization.RequestJSON()),
-		ReviewInput:         string(materialization.ReviewInput()),
-		ReviewInputLocation: materialization.FrozenCopy(),
-		CharterHash:         materialization.CharterHash().String(),
-		ReviewInputDigest:   materialization.ReviewInputDigest().String(),
-		RequestDigest:       materialization.RequestDocumentDigest().String(),
+		CharterDocument: json.RawMessage(materialization.CharterJSON()),
+		RequestDocument: json.RawMessage(materialization.RequestJSON()),
+		ReviewInput:     string(materialization.ReviewInput()),
 	}
 }
 

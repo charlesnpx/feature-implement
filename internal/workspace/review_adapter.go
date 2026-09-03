@@ -21,8 +21,8 @@ const (
 	WitnessReviewGateAdapter    = "witness"
 )
 
-// ReviewAdapterRepositoryPort reads an exact diff from the frozen copy. It has
-// no method that addresses an attempt worktree.
+// ReviewAdapterRepositoryPort reads an exact diff from a verified worktree.
+// BuildReviewAdapterRequest always supplies the adapter's frozen copy.
 type ReviewAdapterRepositoryPort interface {
 	ReadReviewInput(context.Context, string, GitObjectID, GitObjectID) ([]byte, error)
 }
@@ -33,18 +33,13 @@ type ReviewAdapterBuildRequest struct {
 }
 
 // ReviewAdapterMaterialization is the deterministic input handed to a
-// document-based adapter. FrozenCopy is separate from the attempt worktree.
+// document-based adapter.
 type ReviewAdapterMaterialization struct {
-	frozen                witnesscharter.FrozenCharter
-	charterJSON           []byte
-	requestJSON           []byte
-	reviewInput           []byte
-	charterHash           Digest
-	requestDocumentDigest Digest
-	reviewInputDigest     Digest
-	dispatch              ReviewGateDispatch
-	frozenCopy            string
-	policy                []byte
+	frozen            witnesscharter.FrozenCharter
+	charterJSON       []byte
+	requestJSON       []byte
+	reviewInput       []byte
+	reviewInputDigest Digest
 }
 
 func (materialization ReviewAdapterMaterialization) FrozenCharter() witnesscharter.FrozenCharter {
@@ -59,23 +54,8 @@ func (materialization ReviewAdapterMaterialization) RequestJSON() []byte {
 func (materialization ReviewAdapterMaterialization) ReviewInput() []byte {
 	return append([]byte(nil), materialization.reviewInput...)
 }
-func (materialization ReviewAdapterMaterialization) CharterHash() Digest {
-	return materialization.charterHash
-}
-func (materialization ReviewAdapterMaterialization) RequestDocumentDigest() Digest {
-	return materialization.requestDocumentDigest
-}
 func (materialization ReviewAdapterMaterialization) ReviewInputDigest() Digest {
 	return materialization.reviewInputDigest
-}
-func (materialization ReviewAdapterMaterialization) Dispatch() ReviewGateDispatch {
-	return materialization.dispatch
-}
-func (materialization ReviewAdapterMaterialization) FrozenCopy() string {
-	return materialization.frozenCopy
-}
-func (materialization ReviewAdapterMaterialization) Policy() []byte {
-	return append([]byte(nil), materialization.policy...)
 }
 
 // BuildReviewAdapterRequest builds input from an already durable dispatch and
@@ -107,7 +87,6 @@ func BuildReviewAdapterRequest(
 type reviewAdapterDispatch struct {
 	attempt    RuntimeAttemptProjection
 	dispatch   ReviewGateDispatch
-	config     ReviewGateConfig
 	frozenCopy string
 }
 
@@ -154,7 +133,7 @@ func resolveReviewAdapterDispatch(
 	if err != nil || !info.IsDir() {
 		return reviewAdapterDispatch{}, fmt.Errorf("review gate frozen copy is unavailable: %w", err)
 	}
-	return reviewAdapterDispatch{attempt: attempt, dispatch: dispatch, config: config, frozenCopy: frozenCopy}, nil
+	return reviewAdapterDispatch{attempt: attempt, dispatch: dispatch, frozenCopy: frozenCopy}, nil
 }
 
 func buildReviewAdapterMaterialization(
@@ -182,10 +161,6 @@ func buildReviewAdapterMaterialization(
 	if err != nil {
 		return ReviewAdapterMaterialization{}, fmt.Errorf("freeze review charter: %w", err)
 	}
-	charterHash, err := ParseDigest(frozen.CharterHash)
-	if err != nil {
-		return ReviewAdapterMaterialization{}, fmt.Errorf("parse frozen review charter hash: %w", err)
-	}
 	reviewInputDigest, err := ParseDigest(witnessdigest.RawBytes(reviewInput))
 	if err != nil {
 		return ReviewAdapterMaterialization{}, fmt.Errorf("parse review input digest: %w", err)
@@ -201,14 +176,6 @@ func buildReviewAdapterMaterialization(
 	if err := witnessreview.RequireValidReviewRequest(requestDocument); err != nil {
 		return ReviewAdapterMaterialization{}, fmt.Errorf("validate constructed review request: %w", err)
 	}
-	requestDocumentDigestText, err := witnessreview.ReviewRequestDigest(requestDocument)
-	if err != nil {
-		return ReviewAdapterMaterialization{}, fmt.Errorf("digest constructed review request: %w", err)
-	}
-	requestDocumentDigest, err := ParseDigest(requestDocumentDigestText)
-	if err != nil {
-		return ReviewAdapterMaterialization{}, fmt.Errorf("parse constructed review request digest: %w", err)
-	}
 	charterJSON, err := canonjson.Marshal(charter)
 	if err != nil {
 		return ReviewAdapterMaterialization{}, fmt.Errorf("canonicalize review charter: %w", err)
@@ -219,9 +186,7 @@ func buildReviewAdapterMaterialization(
 	}
 	return ReviewAdapterMaterialization{
 		frozen: frozen, charterJSON: charterJSON, requestJSON: requestJSON,
-		reviewInput: append([]byte(nil), reviewInput...), charterHash: charterHash,
-		requestDocumentDigest: requestDocumentDigest, reviewInputDigest: reviewInputDigest,
-		dispatch: resolved.dispatch, frozenCopy: resolved.frozenCopy, policy: resolved.config.Policy(),
+		reviewInput: append([]byte(nil), reviewInput...), reviewInputDigest: reviewInputDigest,
 	}, nil
 }
 
@@ -476,7 +441,7 @@ func RecordAttemptReviewDocument(
 	if err != nil {
 		return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("validate review report document: %w", err)
 	}
-	if err := requireMatchingReviewConsumerIdentity(document.ConsumerIdentity, reviewAdapterConsumerIdentity(materialization.Dispatch().WorkspaceID())); err != nil {
+	if err := requireMatchingReviewConsumerIdentity(document.ConsumerIdentity, reviewAdapterConsumerIdentity(dispatch.WorkspaceID())); err != nil {
 		return RecordedReviewDocument{}, JournalRecord{}, err
 	}
 	artifact, err := NewReviewDocumentArtifact(request.Document)

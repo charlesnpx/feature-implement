@@ -214,6 +214,9 @@ than special scheduler paths. Without a configured review gate,
 `attempt adopt-head` records the exact clean accepted head and tree before
 integration.
 
+Witness review input is transported as a JSON string, so dispatch rejects
+non-UTF-8 review input.
+
 ## Locks and runtime state
 
 The bundle root is also the plan repository root. Keep plan sources in ordinary
