@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type ReviewRepositoryRequest struct {
@@ -14,9 +16,7 @@ type ReviewRepositoryRequest struct {
 	head     GitObjectID
 }
 
-func NewReviewRepositoryRequest(
-	worktree string, head GitObjectID,
-) (ReviewRepositoryRequest, error) {
+func NewReviewRepositoryRequest(worktree string, head GitObjectID) (ReviewRepositoryRequest, error) {
 	worktree = filepath.Clean(strings.TrimSpace(worktree))
 	if !filepath.IsAbs(worktree) || head.IsZero() {
 		return ReviewRepositoryRequest{}, fmt.Errorf("review repository request requires absolute worktree and head")
@@ -38,13 +38,15 @@ func NewReviewRepositorySnapshot(head, tree GitObjectID, clean bool) (ReviewRepo
 	if head.IsZero() || tree.IsZero() || head.Algorithm() != tree.Algorithm() {
 		return ReviewRepositorySnapshot{}, fmt.Errorf("review repository snapshot requires algorithm-matched head and tree")
 	}
-	type snapshotJSON struct {
+	canonical, err := json.Marshal(struct {
 		SchemaVersion int    `json:"schema_version"`
 		Head          string `json:"head"`
 		Tree          string `json:"tree"`
 		Clean         bool   `json:"clean"`
+	}{SchemaVersion: 2, Head: head.String(), Tree: tree.String(), Clean: clean})
+	if err != nil {
+		return ReviewRepositorySnapshot{}, err
 	}
-	canonical, _ := json.Marshal(snapshotJSON{SchemaVersion: 2, Head: head.String(), Tree: tree.String(), Clean: clean})
 	return ReviewRepositorySnapshot{head: head, tree: tree, clean: clean, digest: DigestBytes(canonical)}, nil
 }
 
@@ -53,630 +55,348 @@ func (snapshot ReviewRepositorySnapshot) Tree() GitObjectID { return snapshot.tr
 func (snapshot ReviewRepositorySnapshot) Clean() bool       { return snapshot.clean }
 func (snapshot ReviewRepositorySnapshot) Digest() Digest    { return snapshot.digest }
 
-// ReviewRepositoryPort observes an exact clean head/tree and validates a
-// configured final history without mutating the attempt worktree.
+// ReviewRepositoryPort observes an exact attempt artifact and validates the
+// separately configured final-history protocol. Gate adapters never receive
+// this port or the attempt worktree it addresses.
 type ReviewRepositoryPort interface {
 	InspectReviewSnapshot(context.Context, ReviewRepositoryRequest) (ReviewRepositorySnapshot, error)
 	VerifyFinalHistory(context.Context, CommitProtocol, string, GitObjectID, GitObjectID) error
 }
 
-type ReviewRoundStartResult struct {
-	state   ReviewState
-	request ReviewRequest
-	record  JournalRecord
-}
-
-func (result ReviewRoundStartResult) State() ReviewState     { return cloneReviewState(result.state) }
-func (result ReviewRoundStartResult) Request() ReviewRequest { return result.request }
-func (result ReviewRoundStartResult) Record() JournalRecord  { return result.record }
-
-type StartAttemptReviewRoundRequest struct {
+type ReviewGateDispatchRequest struct {
 	AttemptID  ID
 	OccurredAt time.Time
 }
 
-func StartAttemptReviewRound(
+type ReviewGateDispatchResult struct {
+	dispatch   ReviewGateDispatch
+	frozenCopy string
+	policy     []byte
+}
+
+func (result ReviewGateDispatchResult) Dispatch() ReviewGateDispatch { return result.dispatch }
+func (result ReviewGateDispatchResult) FrozenCopy() string           { return result.frozenCopy }
+func (result ReviewGateDispatchResult) Policy() []byte {
+	return append([]byte(nil), result.policy...)
+}
+
+// DispatchAttemptReviewGate records the request before materializing a fresh
+// detached copy at its exact head and tree. The adapter gets only that copy.
+// A materialization failure leaves the intent durable so a resumed caller can
+// distinguish it from a request that was never made.
+func DispatchAttemptReviewGate(
 	ctx context.Context,
 	journal *WorkspaceJournal,
 	definition EffectiveWorkspaceDefinition,
 	repository ReviewRepositoryPort,
-	request StartAttemptReviewRoundRequest,
-) (ReviewRoundStartResult, error) {
-	if journal == nil || repository == nil || request.AttemptID.IsZero() || request.OccurredAt.IsZero() {
-		return ReviewRoundStartResult{}, fmt.Errorf("start review round requires journal, repository inspector, attempt, and occurrence time")
+	materializer AttemptGitPort,
+	request ReviewGateDispatchRequest,
+) (ReviewGateDispatchResult, error) {
+	if ctx == nil || journal == nil || repository == nil || materializer == nil ||
+		request.AttemptID.IsZero() || request.OccurredAt.IsZero() {
+		return ReviewGateDispatchResult{}, fmt.Errorf("review gate dispatch requires context, journal, repository, materializer, attempt, and occurrence time")
 	}
 	snapshot, projection, err := readReviewRuntime(journal, definition)
 	if err != nil {
-		return ReviewRoundStartResult{}, err
+		return ReviewGateDispatchResult{}, err
 	}
 	attempt, exists := projection.core.Attempt(request.AttemptID)
 	if !exists || attempt.phase != AttemptActive {
-		return ReviewRoundStartResult{}, fmt.Errorf("attempt %s must be active for review", request.AttemptID)
+		return ReviewGateDispatchResult{}, fmt.Errorf("attempt %s must be active for review gate dispatch", request.AttemptID)
 	}
 	unit, err := executionForMergeUnit(definition.execution, attempt.mergeUnit)
 	if err != nil {
-		return ReviewRoundStartResult{}, err
+		return ReviewGateDispatchResult{}, err
 	}
-	loop, configured := unit.ReviewLoop()
-	if !configured {
-		return ReviewRoundStartResult{}, fmt.Errorf("attempt %s has no configured review loop", request.AttemptID)
+	config, configured := unit.ReviewGate()
+	if !configured || !config.bound() {
+		return ReviewGateDispatchResult{}, fmt.Errorf("attempt %s has no configured review gate", request.AttemptID)
 	}
-	state, hasState := projection.State(request.AttemptID)
-	if err := validateAttemptReviewProtocolState(definition, unit, attempt, state, hasState, true); err != nil {
-		return ReviewRoundStartResult{}, err
-	}
-	repositoryRequest, err := NewReviewRepositoryRequest(
-		attempt.worktree, attempt.verifiedHead,
-	)
+	repositoryRequest, err := NewReviewRepositoryRequest(attempt.worktree, attempt.verifiedHead)
 	if err != nil {
-		return ReviewRoundStartResult{}, err
+		return ReviewGateDispatchResult{}, err
 	}
-	repositorySnapshot, err := repository.InspectReviewSnapshot(ctx, repositoryRequest)
+	artifact, err := repository.InspectReviewSnapshot(ctx, repositoryRequest)
 	if err != nil {
-		return ReviewRoundStartResult{}, err
+		return ReviewGateDispatchResult{}, err
 	}
-	if !repositorySnapshot.clean {
-		return ReviewRoundStartResult{}, fmt.Errorf("review requires a clean exact attempt head")
+	if !artifact.clean {
+		return ReviewGateDispatchResult{}, fmt.Errorf("review gate dispatch requires an exact committed attempt artifact")
 	}
-	if (repositorySnapshot.head != attempt.verifiedHead || !hasState) &&
-		projection.RoundsUsed(request.AttemptID) >= loop.MaxRounds() {
-		return ReviewRoundStartResult{}, reviewRoundBudgetExhaustedError(loop.MaxRounds())
+	if err := verifyAttemptFinalHistory(ctx, repository, unit, attempt, artifact.head); err != nil {
+		return ReviewGateDispatchResult{}, fmt.Errorf("verify final history before review gate dispatch: %w", err)
 	}
-	if err := verifyAttemptFinalHistory(
-		ctx, repository, unit, attempt, repositorySnapshot.head,
-	); err != nil {
-		return ReviewRoundStartResult{}, fmt.Errorf("review final history: %w", err)
-	}
-	if repositorySnapshot.head != attempt.verifiedHead {
-		adoption, err := NewReviewHeadAdoptedJournalEvent(
-			definition.workspace.id, definition.generation, attempt.attemptID, attempt.mergeUnit,
-			attempt.verifiedHead, repositorySnapshot.head, repositorySnapshot.tree, repositorySnapshot.digest,
-		)
-		if err != nil {
-			return ReviewRoundStartResult{}, err
+	if ReviewGateCarriesDocumentContract(config.adapter) {
+		if err := validateWitnessReviewInputTransport(ctx, repository, attempt, artifact.head); err != nil {
+			return ReviewGateDispatchResult{}, err
 		}
-		if _, err := appendReviewJournalEvent(journal, snapshot, adoption, request.OccurredAt); err != nil {
-			return ReviewRoundStartResult{}, err
+	}
+	if artifact.head != attempt.verifiedHead {
+		adoption, adoptionErr := NewReviewHeadAdoptedJournalEvent(
+			definition.workspace.id, definition.generation, attempt.attemptID, attempt.mergeUnit,
+			attempt.verifiedHead, artifact.head, artifact.tree, artifact.digest,
+		)
+		if adoptionErr != nil {
+			return ReviewGateDispatchResult{}, adoptionErr
+		}
+		if _, appendErr := appendReviewJournalEvent(journal, snapshot, adoption, request.OccurredAt); appendErr != nil {
+			return ReviewGateDispatchResult{}, appendErr
 		}
 		snapshot, projection, err = readReviewRuntime(journal, definition)
 		if err != nil {
-			return ReviewRoundStartResult{}, err
+			return ReviewGateDispatchResult{}, err
 		}
 		attempt, exists = projection.core.Attempt(request.AttemptID)
-		if !exists || attempt.phase != AttemptActive || attempt.verifiedHead != repositorySnapshot.head {
-			return ReviewRoundStartResult{}, fmt.Errorf("review head adoption did not rebuild to the inspected head")
-		}
-		state, hasState = projection.State(request.AttemptID)
-		if err := validateAttemptReviewProtocolState(definition, unit, attempt, state, false, true); err != nil {
-			return ReviewRoundStartResult{}, err
+		if !exists || attempt.phase != AttemptActive || attempt.verifiedHead != artifact.head {
+			return ReviewGateDispatchResult{}, fmt.Errorf("review gate head adoption did not rebuild to the inspected artifact")
 		}
 	}
-	ordinal := uint16(1)
-	if hasState {
-		if state.loop.digest != loop.digest || state.generation != definition.generation {
-			return ReviewRoundStartResult{}, fmt.Errorf("review configuration cannot reset durable counters")
-		}
-		if exhaustion, exhausted := state.Exhaustion(); exhausted {
-			if exhaustion == ReviewExhaustedRounds {
-				return ReviewRoundStartResult{}, reviewRoundBudgetExhaustedError(loop.MaxRounds())
+
+	terminalOrdinal := uint64(0)
+	if state, exists := projection.State(attempt.attemptID); exists {
+		terminalOrdinal = uint64(len(state.records))
+	}
+	dispatch, err := NewReviewGateDispatch(ReviewGateDispatchOptions{
+		WorkspaceID: definition.workspace.id, Generation: definition.generation,
+		AttemptID: attempt.attemptID, MergeUnit: attempt.mergeUnit,
+		Adapter: config.adapter, Recipe: config.recipe, PolicyDigest: config.policyDigest,
+		Head: artifact.head, Tree: artifact.tree, TerminalOrdinal: terminalOrdinal,
+	})
+	if err != nil {
+		return ReviewGateDispatchResult{}, err
+	}
+	if state, exists := projection.State(attempt.attemptID); exists {
+		if pending, pendingExists := state.Pending(); pendingExists {
+			if pending != dispatch {
+				return ReviewGateDispatchResult{}, fmt.Errorf("attempt %s has an unresolved review gate dispatch", attempt.attemptID)
 			}
-			return ReviewRoundStartResult{}, fmt.Errorf("review loop is exhausted")
-		}
-		if pending, ok, err := state.NextRequest(); err != nil {
-			return ReviewRoundStartResult{}, err
-		} else if ok {
-			return ReviewRoundStartResult{state: state, request: pending}, nil
-		}
-		if state.MergeReady() && state.head == attempt.verifiedHead {
-			return ReviewRoundStartResult{}, fmt.Errorf("review is already clean on exact head %s", state.head)
-		}
-		ordinal = state.RoundsUsed() + 1
-	}
-	if projection.RoundsUsed(request.AttemptID) >= loop.MaxRounds() {
-		return ReviewRoundStartResult{}, reviewRoundBudgetExhaustedError(loop.MaxRounds())
-	}
-	if !repositorySnapshot.clean || repositorySnapshot.head != attempt.verifiedHead {
-		return ReviewRoundStartResult{}, fmt.Errorf("review requires a clean exact attempt head")
-	}
-	start, err := NewStartReviewRound(
-		definition.workspace.id, definition.generation, attempt.attemptID, attempt.mergeUnit,
-		loop, ordinal, repositorySnapshot.head, repositorySnapshot.tree,
-	)
-	if err != nil {
-		return ReviewRoundStartResult{}, err
-	}
-	if _, err := ReduceReview(state, start); err != nil {
-		return ReviewRoundStartResult{}, err
-	}
-	event, err := NewReviewRoundStartedJournalEvent(start)
-	if err != nil {
-		return ReviewRoundStartResult{}, err
-	}
-	record, err := appendReviewJournalEvent(journal, snapshot, event, request.OccurredAt)
-	if err != nil {
-		return ReviewRoundStartResult{}, err
-	}
-	_, updated, err := readReviewRuntime(journal, definition)
-	if err != nil {
-		return ReviewRoundStartResult{}, err
-	}
-	state, _ = updated.State(request.AttemptID)
-	pending, ok, err := state.NextRequest()
-	if err != nil || !ok {
-		return ReviewRoundStartResult{}, fmt.Errorf("started review round has no first profile request")
-	}
-	return ReviewRoundStartResult{state: state, request: pending, record: record}, nil
-}
-
-type ReserveAttemptReviewInvocationRequest struct {
-	AttemptID        ID
-	ReviewerInstance ID
-	IdempotencyKey   Digest
-	OccurredAt       time.Time
-}
-
-type ReviewInvocationReservationResult struct {
-	state       ReviewState
-	reservation ReviewInvocationReservation
-	record      JournalRecord
-	acquired    bool
-}
-
-func (result ReviewInvocationReservationResult) State() ReviewState {
-	return cloneReviewState(result.state)
-}
-func (result ReviewInvocationReservationResult) Reservation() ReviewInvocationReservation {
-	return result.reservation
-}
-func (result ReviewInvocationReservationResult) Record() JournalRecord { return result.record }
-func (result ReviewInvocationReservationResult) Acquired() bool        { return result.acquired }
-
-type reviewInvocationOutcome struct {
-	reservation ReviewInvocationReservation
-	result      VerifiedReviewResult
-	failure     ReviewInvocationFailure
-	hasResult   bool
-	hasFailure  bool
-}
-
-func findReviewInvocationOutcome(state ReviewState, idempotencyKey Digest) (reviewInvocationOutcome, bool) {
-	for _, round := range state.rounds {
-		for _, reservation := range round.reservations {
-			if reservation.idempotencyKey != idempotencyKey {
-				continue
-			}
-			outcome := reviewInvocationOutcome{reservation: reservation}
-			for _, result := range round.attempts {
-				if result.reservationDigest == reservation.digest {
-					outcome.result, outcome.hasResult = result, true
-					return outcome, true
-				}
-			}
-			for _, failure := range round.failures {
-				if failure.reservationDigest == reservation.digest {
-					outcome.failure, outcome.hasFailure = failure, true
-					return outcome, true
-				}
-			}
-			return outcome, true
+			return materializeReviewGateCopy(ctx, materializer, projection.core, attempt, pending, config.Policy())
 		}
 	}
-	return reviewInvocationOutcome{}, false
+	event, err := NewReviewGateDispatchedJournalEvent(dispatch)
+	if err != nil {
+		return ReviewGateDispatchResult{}, err
+	}
+	if _, err := appendReviewJournalEvent(journal, snapshot, event, request.OccurredAt); err != nil {
+		return ReviewGateDispatchResult{}, err
+	}
+	return materializeReviewGateCopy(ctx, materializer, projection.core, attempt, dispatch, config.Policy())
 }
 
-func ReserveAttemptReviewInvocation(
-	journal *WorkspaceJournal,
-	definition EffectiveWorkspaceDefinition,
-	request ReserveAttemptReviewInvocationRequest,
-) (ReviewInvocationReservationResult, error) {
-	if journal == nil || request.AttemptID.IsZero() || request.ReviewerInstance.IsZero() ||
-		request.IdempotencyKey.IsZero() || request.OccurredAt.IsZero() {
-		return ReviewInvocationReservationResult{}, fmt.Errorf("reserve review invocation requires journal, attempt, reviewer, idempotency, and occurrence time")
+func validateWitnessReviewInputTransport(
+	ctx context.Context,
+	repository ReviewRepositoryPort,
+	attempt RuntimeAttemptProjection,
+	head GitObjectID,
+) error {
+	reader, ok := repository.(ReviewAdapterRepositoryPort)
+	if !ok {
+		return fmt.Errorf("Witness review gate dispatch requires a review input reader")
 	}
-	snapshot, projection, err := readReviewRuntime(journal, definition)
+	reviewInput, err := reader.ReadReviewInput(ctx, attempt.worktree, attempt.base, head)
 	if err != nil {
-		return ReviewInvocationReservationResult{}, err
+		return fmt.Errorf("read review input before review gate dispatch: %w", err)
 	}
-	state, exists := projection.State(request.AttemptID)
-	if !exists {
-		return ReviewInvocationReservationResult{}, fmt.Errorf("attempt %s has no active review state", request.AttemptID)
+	if !utf8.Valid(reviewInput) {
+		return fmt.Errorf("review input is non-UTF-8")
 	}
-	attempt, exists := projection.core.Attempt(request.AttemptID)
-	if !exists || attempt.phase != AttemptActive || attempt.verifiedHead != state.head {
-		return ReviewInvocationReservationResult{}, fmt.Errorf("review invocation attempt is stale or inactive")
+	return nil
+}
+
+func materializeReviewGateCopy(
+	ctx context.Context,
+	materializer AttemptGitPort,
+	runtime WorkspaceRuntimeProjection,
+	attempt RuntimeAttemptProjection,
+	dispatch ReviewGateDispatch,
+	policy []byte,
+) (ReviewGateDispatchResult, error) {
+	if runtime.worktreeRoot.IsZero() {
+		return ReviewGateDispatchResult{}, fmt.Errorf("review gate dispatch has no verified frozen-copy root")
 	}
-	unit, err := executionForMergeUnit(definition.execution, attempt.mergeUnit)
+	frozenCopy, err := reviewGateFrozenCopyPath(runtime.worktreeRoot.Path(), dispatch.digest)
 	if err != nil {
-		return ReviewInvocationReservationResult{}, err
+		return ReviewGateDispatchResult{}, err
 	}
-	if err := validateAttemptReviewProtocolState(definition, unit, attempt, state, true, false); err != nil {
-		return ReviewInvocationReservationResult{}, err
-	}
-	if outcome, exists := findReviewInvocationOutcome(state, request.IdempotencyKey); exists {
-		if outcome.reservation.reviewerInstance != request.ReviewerInstance {
-			return ReviewInvocationReservationResult{}, fmt.Errorf("review invocation idempotency key is already bound to another reviewer")
-		}
-		return ReviewInvocationReservationResult{
-			state: state, reservation: outcome.reservation,
-		}, nil
-	}
-	pending, ok, err := state.NextRequest()
-	if err != nil || !ok {
-		return ReviewInvocationReservationResult{}, fmt.Errorf("review round has no pending profile")
-	}
-	reservation, err := NewReviewInvocationReservation(
-		pending, request.ReviewerInstance, request.IdempotencyKey,
-	)
+	inspection, err := materializer.MaterializeAttemptTree(ctx, attempt.worktree, dispatch.head, frozenCopy)
 	if err != nil {
-		return ReviewInvocationReservationResult{}, err
+		return ReviewGateDispatchResult{}, fmt.Errorf("materialize frozen review gate copy: %w", err)
 	}
-	if err := projection.validateNewReviewInvocationReservation(
-		request.AttemptID, state.loop, reservation,
-	); err != nil {
-		return ReviewInvocationReservationResult{}, err
+	if !inspection.WorktreeExists() || !inspection.Clean() || inspection.WorktreeHead() != dispatch.head ||
+		inspection.WorktreeTree() != dispatch.tree {
+		return ReviewGateDispatchResult{}, fmt.Errorf("frozen review gate copy is not the dispatched exact head and tree")
 	}
-	latestRound := state.rounds[len(state.rounds)-1]
-	if existing, reserved := pendingReviewInvocation(latestRound); reserved {
-		if existing.digest != reservation.digest {
-			return ReviewInvocationReservationResult{}, fmt.Errorf("review request is already reserved by a different invocation")
-		}
-		return ReviewInvocationReservationResult{state: state, reservation: existing}, nil
-	}
-	domain, err := NewReserveReviewInvocation(pending, request.ReviewerInstance, request.IdempotencyKey)
-	if err != nil {
-		return ReviewInvocationReservationResult{}, err
-	}
-	if _, err := ReduceReview(state, domain); err != nil {
-		return ReviewInvocationReservationResult{}, err
-	}
-	event, err := NewReviewInvocationReservedJournalEvent(
-		definition.workspace.id, definition.generation, request.AttemptID, state.loop.digest, reservation,
-	)
-	if err != nil {
-		return ReviewInvocationReservationResult{}, err
-	}
-	record, err := appendReviewJournalEvent(journal, snapshot, event, request.OccurredAt)
-	if err != nil {
-		return ReviewInvocationReservationResult{}, err
-	}
-	_, updated, err := readReviewRuntime(journal, definition)
-	if err != nil {
-		return ReviewInvocationReservationResult{}, err
-	}
-	state, _ = updated.State(request.AttemptID)
-	return ReviewInvocationReservationResult{
-		state: state, reservation: reservation, record: record, acquired: true,
+	return ReviewGateDispatchResult{
+		dispatch: dispatch, frozenCopy: frozenCopy, policy: append([]byte(nil), policy...),
 	}, nil
 }
 
-type RecordAttemptReviewResultRequest struct {
-	AttemptID         ID
-	ReservationDigest Digest
-	Submission        ReviewResultSubmission
-	OccurredAt        time.Time
+func reviewGateFrozenCopyPath(root string, dispatchDigest Digest) (string, error) {
+	root = filepath.Clean(strings.TrimSpace(root))
+	if !filepath.IsAbs(root) || dispatchDigest.IsZero() {
+		return "", fmt.Errorf("review gate frozen copy requires an absolute root and dispatch digest")
+	}
+	hex := strings.TrimPrefix(dispatchDigest.String(), "sha256:")
+	if len(hex) != 64 {
+		return "", fmt.Errorf("review gate dispatch digest has no content-addressed path")
+	}
+	return filepath.Join(root, "review-gate-"+hex), nil
 }
 
-func RecordAttemptReviewResult(
-	ctx context.Context,
+type RecordAttemptReviewGateRequest struct {
+	AttemptID      ID
+	DispatchDigest Digest
+	Verdict        ReviewGateVerdict
+	EvidenceDigest Digest
+	OccurredAt     time.Time
+}
+
+// RecordAttemptReviewGate stores an opaque terminal result. Dispatches with a
+// document contract use this route only to record a failed-to-run outcome.
+func RecordAttemptReviewGate(
 	journal *WorkspaceJournal,
 	definition EffectiveWorkspaceDefinition,
-	repository ReviewRepositoryPort,
-	request RecordAttemptReviewResultRequest,
-) (VerifiedReviewResult, JournalRecord, error) {
-	prepared, err := prepareAttemptReviewResult(ctx, journal, definition, repository, request)
-	if err != nil {
-		return VerifiedReviewResult{}, JournalRecord{}, err
-	}
-	if prepared.alreadyRecorded {
-		return prepared.verified, JournalRecord{}, nil
-	}
-	event, err := NewReviewResultRecordedJournalEvent(
-		definition.workspace.id, definition.generation, request.AttemptID, prepared.state.loop.digest, prepared.domain,
-	)
-	if err != nil {
-		return VerifiedReviewResult{}, JournalRecord{}, err
-	}
-	record, err := appendReviewJournalEvent(journal, prepared.snapshot, event, request.OccurredAt)
-	if err != nil {
-		return VerifiedReviewResult{}, JournalRecord{}, err
-	}
-	return prepared.verified, record, nil
-}
-
-// preparedReviewResult contains a fully validated result transition before it
-// is made durable. Document-backed review uses this seam so its raw report is
-// retained only after all legacy lifecycle checks have passed, and immediately
-// before the journal event that references it is appended.
-type preparedReviewResult struct {
-	snapshot        JournalSnapshot
-	state           ReviewState
-	domain          RecordReviewResult
-	verified        VerifiedReviewResult
-	alreadyRecorded bool
-}
-
-func prepareAttemptReviewResult(
-	ctx context.Context,
-	journal *WorkspaceJournal,
-	definition EffectiveWorkspaceDefinition,
-	repository ReviewRepositoryPort,
-	request RecordAttemptReviewResultRequest,
-) (preparedReviewResult, error) {
-	if journal == nil || repository == nil || request.AttemptID.IsZero() ||
-		request.ReservationDigest.IsZero() || request.Submission.digest.IsZero() ||
-		request.OccurredAt.IsZero() {
-		return preparedReviewResult{}, fmt.Errorf(
-			"record review result requires journal, repository, attempt, reservation, result, and occurrence time",
-		)
+	request RecordAttemptReviewGateRequest,
+) (ReviewGateRecord, error) {
+	if journal == nil || request.AttemptID.IsZero() || request.DispatchDigest.IsZero() ||
+		!request.Verdict.valid() || request.EvidenceDigest.IsZero() || request.OccurredAt.IsZero() {
+		return ReviewGateRecord{}, fmt.Errorf("review gate record requires journal, attempt, dispatch, verdict, evidence, and occurrence time")
 	}
 	snapshot, projection, err := readReviewRuntime(journal, definition)
 	if err != nil {
-		return preparedReviewResult{}, err
+		return ReviewGateRecord{}, err
 	}
 	state, exists := projection.State(request.AttemptID)
 	if !exists {
-		return preparedReviewResult{}, fmt.Errorf("attempt %s has no active review round", request.AttemptID)
+		return ReviewGateRecord{}, fmt.Errorf("attempt %s has no review gate dispatch", request.AttemptID)
 	}
-	for _, round := range state.rounds {
-		for _, existing := range round.attempts {
-			if existing.reservationDigest != request.ReservationDigest {
-				continue
-			}
-			if existing.submission.digest == request.Submission.digest {
-				return preparedReviewResult{verified: existing, alreadyRecorded: true}, nil
-			}
-			return preparedReviewResult{}, fmt.Errorf("review request already has different durable evidence")
-		}
-	}
-	pending, ok, err := state.NextRequest()
-	if err != nil || !ok {
-		return preparedReviewResult{}, fmt.Errorf("review round has no pending profile")
-	}
-	latestRound := state.rounds[len(state.rounds)-1]
-	reservation, reserved := pendingReviewInvocation(latestRound)
-	if !reserved || reservation.digest != request.ReservationDigest || pending.digest != request.Submission.requestDigest ||
-		request.Submission.reviewerInstance != reservation.reviewerInstance || !request.Submission.isolation.Strict() {
-		return preparedReviewResult{}, fmt.Errorf("review result does not match pending request or strict isolation")
-	}
-	attempt, exists := projection.core.Attempt(request.AttemptID)
-	if !exists || attempt.phase != AttemptActive || attempt.verifiedHead != pending.head {
-		return preparedReviewResult{}, fmt.Errorf("review result attempt is stale or inactive")
-	}
-	unit, err := executionForMergeUnit(definition.execution, attempt.mergeUnit)
-	if err != nil {
-		return preparedReviewResult{}, err
-	}
-	if err := validateAttemptReviewProtocolState(definition, unit, attempt, state, true, false); err != nil {
-		return preparedReviewResult{}, err
-	}
-	repositoryRequest, err := NewReviewRepositoryRequest(attempt.worktree, pending.head)
-	if err != nil {
-		return preparedReviewResult{}, err
-	}
-	repositorySnapshot, err := repository.InspectReviewSnapshot(ctx, repositoryRequest)
-	if err != nil {
-		return preparedReviewResult{}, err
-	}
-	if !repositorySnapshot.clean || repositorySnapshot.head != pending.head || repositorySnapshot.tree != pending.tree {
-		return preparedReviewResult{}, fmt.Errorf("reviewer changed or no longer matches the exact clean head/tree")
-	}
-	domain, err := NewRecordReviewResult(
-		pending.round, pending.profileOrdinal, pending.invocation,
-		request.ReservationDigest, request.Submission,
-	)
-	if err != nil {
-		return preparedReviewResult{}, err
-	}
-	if _, err := ReduceReview(state, domain); err != nil {
-		return preparedReviewResult{}, err
-	}
-	return preparedReviewResult{
-		snapshot: snapshot, state: state, domain: domain,
-		verified: VerifiedReviewResult{
-			request: pending, submission: cloneReviewResult(request.Submission),
-			reservationDigest: request.ReservationDigest,
-		},
-	}, nil
-}
-
-type RecordAttemptReviewInvocationFailureRequest struct {
-	AttemptID         ID
-	ReservationDigest Digest
-	FailureDigest     Digest
-	OccurredAt        time.Time
-}
-
-func RecordAttemptReviewInvocationFailure(
-	journal *WorkspaceJournal,
-	definition EffectiveWorkspaceDefinition,
-	request RecordAttemptReviewInvocationFailureRequest,
-) (ReviewState, JournalRecord, error) {
-	if journal == nil || request.AttemptID.IsZero() || request.ReservationDigest.IsZero() ||
-		request.FailureDigest.IsZero() || request.OccurredAt.IsZero() {
-		return ReviewState{}, JournalRecord{}, fmt.Errorf("record review invocation failure requires journal, attempt, reservation, failure, and occurrence time")
-	}
-	snapshot, projection, err := readReviewRuntime(journal, definition)
-	if err != nil {
-		return ReviewState{}, JournalRecord{}, err
-	}
-	state, exists := projection.State(request.AttemptID)
+	dispatch, exists := state.Dispatch(request.DispatchDigest)
 	if !exists {
-		return ReviewState{}, JournalRecord{}, fmt.Errorf("attempt %s has no active review state", request.AttemptID)
+		return ReviewGateRecord{}, fmt.Errorf("review gate dispatch %s is unknown for attempt %s", request.DispatchDigest, request.AttemptID)
 	}
-	for _, round := range state.rounds {
-		for _, failure := range round.failures {
-			if failure.reservationDigest != request.ReservationDigest {
-				continue
+	if ReviewGateCarriesDocumentContract(dispatch.adapter) && request.Verdict != ReviewGateFailedToRun {
+		return ReviewGateRecord{}, fmt.Errorf("review gate dispatch %s requires a review document for %s", request.DispatchDigest, request.Verdict)
+	}
+	if existing, recorded := state.Record(request.DispatchDigest); recorded {
+		if existing.verdict == request.Verdict && existing.evidenceDigest == request.EvidenceDigest {
+			if err := discardReviewGateFrozenCopy(projection.core.worktreeRoot, dispatch); err != nil {
+				return ReviewGateRecord{}, err
 			}
-			if failure.failureDigest == request.FailureDigest {
-				return state, JournalRecord{}, nil
-			}
-			return ReviewState{}, JournalRecord{}, fmt.Errorf("review invocation already has a different durable failure")
+			return existing, nil
 		}
+		return ReviewGateRecord{}, fmt.Errorf("review gate dispatch %s already has a different terminal record", request.DispatchDigest)
 	}
-	attempt, exists := projection.core.Attempt(request.AttemptID)
-	if !exists || attempt.phase != AttemptActive || attempt.verifiedHead != state.head {
-		return ReviewState{}, JournalRecord{}, fmt.Errorf("review invocation failure attempt is stale or inactive")
-	}
-	unit, err := executionForMergeUnit(definition.execution, attempt.mergeUnit)
+	gateRecord, err := NewReviewGateRecord(ReviewGateRecordOptions{
+		Dispatch: dispatch, Verdict: request.Verdict, EvidenceDigest: request.EvidenceDigest,
+		OccurredAt: request.OccurredAt,
+	})
 	if err != nil {
-		return ReviewState{}, JournalRecord{}, err
+		return ReviewGateRecord{}, err
 	}
-	if err := validateAttemptReviewProtocolState(definition, unit, attempt, state, true, false); err != nil {
-		return ReviewState{}, JournalRecord{}, err
-	}
-	domain, err := NewRecordReviewInvocationFailure(request.ReservationDigest, request.FailureDigest)
+	event, err := NewReviewGateRecordedJournalEvent(dispatch, gateRecord)
 	if err != nil {
-		return ReviewState{}, JournalRecord{}, err
+		return ReviewGateRecord{}, err
 	}
-	updated, err := ReduceReview(state, domain)
-	if err != nil {
-		return ReviewState{}, JournalRecord{}, err
+	if _, err := appendReviewJournalEvent(journal, snapshot, event, request.OccurredAt); err != nil {
+		return ReviewGateRecord{}, err
 	}
-	event, err := NewReviewInvocationFailedJournalEvent(
-		definition.workspace.id, definition.generation, request.AttemptID, state.loop.digest, domain,
-	)
-	if err != nil {
-		return ReviewState{}, JournalRecord{}, err
+	if err := discardReviewGateFrozenCopy(projection.core.worktreeRoot, dispatch); err != nil {
+		return ReviewGateRecord{}, fmt.Errorf("discard terminal review gate frozen copy: %w", err)
 	}
-	record, err := appendReviewJournalEvent(journal, snapshot, event, request.OccurredAt)
-	if err != nil {
-		return ReviewState{}, JournalRecord{}, err
-	}
-	_, rebuilt, err := readReviewRuntime(journal, definition)
-	if err != nil {
-		return ReviewState{}, JournalRecord{}, err
-	}
-	updated, _ = rebuilt.State(request.AttemptID)
-	return updated, record, nil
+	return gateRecord, nil
 }
 
-const ReviewMergeReadinessPurpose = "review_merge_readiness"
-
-type ReviewReadiness struct {
-	purpose    string
-	workspace  ID
-	generation Digest
-	attemptID  ID
-	mergeUnit  MergeUnitReference
-	round      uint16
-	head       GitObjectID
-	tree       GitObjectID
-	digest     Digest
+// discardReviewGateFrozenCopy removes only the deterministic top-level copy
+// reserved by a durable gate dispatch. The rooted deletion keeps symlinks and
+// replaced directory identities from escaping the verified worktree root.
+// A missing copy is normal after an earlier successful terminal-record retry.
+func discardReviewGateFrozenCopy(
+	worktreeRoot WorkspaceWorktreeRootBinding,
+	dispatch ReviewGateDispatch,
+) error {
+	if worktreeRoot.IsZero() {
+		return fmt.Errorf("review gate frozen copy has no verified worktree root")
+	}
+	root, err := OpenVerifiedRoot(RootRoleWorktree, worktreeRoot.Path(), false)
+	if err != nil {
+		return fmt.Errorf("open review gate frozen-copy root: %w", err)
+	}
+	defer root.Close()
+	if err := root.VerifyPath(); err != nil {
+		return fmt.Errorf("verify review gate frozen-copy root: %w", err)
+	}
+	copyPath, err := reviewGateFrozenCopyPath(root.Path(), dispatch.digest)
+	if err != nil {
+		return err
+	}
+	if filepath.Dir(copyPath) != root.Path() {
+		return fmt.Errorf("review gate frozen copy escapes its verified root")
+	}
+	relative := filepath.Base(copyPath)
+	if !strings.HasPrefix(relative, "review-gate-") || len(relative) != len("review-gate-")+64 {
+		return fmt.Errorf("review gate frozen copy path is not dispatch-derived")
+	}
+	info, exists, err := root.adapter.inspectExact(relative)
+	if err != nil {
+		return fmt.Errorf("inspect review gate frozen copy: %w", err)
+	}
+	if !exists {
+		return root.VerifyPath()
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("review gate frozen copy is not an exact directory and will be preserved")
+	}
+	identity, err := platformFileIdentity(info)
+	if err != nil {
+		return fmt.Errorf("identify review gate frozen copy: %w", err)
+	}
+	if err := root.adapter.removeDirectoryTreeIdentityExact(relative, identity); err != nil {
+		return fmt.Errorf("discard review gate frozen copy: %w", err)
+	}
+	return root.VerifyPath()
 }
 
-func (readiness ReviewReadiness) Purpose() string               { return readiness.purpose }
-func (readiness ReviewReadiness) WorkspaceID() ID               { return readiness.workspace }
-func (readiness ReviewReadiness) Generation() Digest            { return readiness.generation }
-func (readiness ReviewReadiness) AttemptID() ID                 { return readiness.attemptID }
-func (readiness ReviewReadiness) MergeUnit() MergeUnitReference { return readiness.mergeUnit }
-func (readiness ReviewReadiness) Round() uint16                 { return readiness.round }
-func (readiness ReviewReadiness) Head() GitObjectID             { return readiness.head }
-func (readiness ReviewReadiness) Tree() GitObjectID             { return readiness.tree }
-func (readiness ReviewReadiness) Digest() Digest                { return readiness.digest }
-
+// ConfirmReviewMergeReadiness is the direct readiness path. Integration also
+// independently checks the same gate fact through the workspace gate view.
 func ConfirmReviewMergeReadiness(
 	ctx context.Context,
 	journal *WorkspaceJournal,
 	definition EffectiveWorkspaceDefinition,
 	repository ReviewRepositoryPort,
 	attemptID ID,
-) (ReviewReadiness, error) {
-	if journal == nil || repository == nil || attemptID.IsZero() {
-		return ReviewReadiness{}, fmt.Errorf("confirm review readiness requires journal, repository, and attempt")
+) (ReviewGateReadiness, error) {
+	if ctx == nil || journal == nil || repository == nil || attemptID.IsZero() {
+		return ReviewGateReadiness{}, fmt.Errorf("confirm review gate readiness requires context, journal, repository, and attempt")
 	}
 	_, projection, err := readReviewRuntime(journal, definition)
 	if err != nil {
-		return ReviewReadiness{}, err
-	}
-	state, exists := projection.State(attemptID)
-	if !exists || !state.MergeReady() {
-		return ReviewReadiness{}, fmt.Errorf("attempt %s has no exact-head clean review confirmation", attemptID)
+		return ReviewGateReadiness{}, err
 	}
 	attempt, exists := projection.core.Attempt(attemptID)
-	if !exists || attempt.verifiedHead != state.head {
-		return ReviewReadiness{}, fmt.Errorf("review readiness is stale against attempt head")
+	if !exists || attempt.phase != AttemptActive || attempt.verifiedHead.IsZero() {
+		return ReviewGateReadiness{}, fmt.Errorf("attempt %s has no active exact head for review gate readiness", attemptID)
 	}
 	unit, err := executionForMergeUnit(definition.execution, attempt.mergeUnit)
 	if err != nil {
-		return ReviewReadiness{}, err
+		return ReviewGateReadiness{}, err
 	}
-	if err := validateAttemptReviewProtocolState(definition, unit, attempt, state, true, false); err != nil {
-		return ReviewReadiness{}, err
+	config, configured := unit.ReviewGate()
+	if !configured || !config.bound() {
+		return ReviewGateReadiness{}, fmt.Errorf("attempt %s has no configured review gate", attemptID)
 	}
-	repositoryRequest, err := NewReviewRepositoryRequest(attempt.worktree, state.head)
+	state, exists := projection.State(attemptID)
+	if !exists {
+		return ReviewGateReadiness{}, fmt.Errorf("attempt %s has no review gate state", attemptID)
+	}
+	repositoryRequest, err := NewReviewRepositoryRequest(attempt.worktree, attempt.verifiedHead)
 	if err != nil {
-		return ReviewReadiness{}, err
+		return ReviewGateReadiness{}, err
 	}
-	snapshot, err := repository.InspectReviewSnapshot(ctx, repositoryRequest)
-	if err != nil || !snapshot.clean || snapshot.head != state.head || snapshot.tree != state.tree {
-		return ReviewReadiness{}, fmt.Errorf("review readiness is stale against repository head/tree")
+	artifact, err := repository.InspectReviewSnapshot(ctx, repositoryRequest)
+	if err != nil || !artifact.clean || artifact.head != attempt.verifiedHead {
+		return ReviewGateReadiness{}, fmt.Errorf("review gate readiness is stale against repository head and tree")
 	}
-	return newReviewMergeReadiness(definition, attempt, state)
-}
-
-func newReviewMergeReadiness(
-	definition EffectiveWorkspaceDefinition,
-	attempt RuntimeAttemptProjection,
-	state ReviewState,
-) (ReviewReadiness, error) {
-	if !state.MergeReady() || state.workspaceID != definition.workspace.id ||
-		state.generation != definition.generation || state.attemptID != attempt.attemptID ||
-		state.mergeUnit != attempt.mergeUnit || state.head != attempt.verifiedHead ||
-		state.head.IsZero() || state.tree.IsZero() {
-		return ReviewReadiness{}, fmt.Errorf("review readiness does not match durable exact-head review state")
-	}
-	readiness := ReviewReadiness{
-		purpose: ReviewMergeReadinessPurpose, workspace: definition.workspace.id,
-		generation: definition.generation, attemptID: attempt.attemptID, mergeUnit: attempt.mergeUnit,
-		round: state.RoundsUsed(), head: state.head, tree: state.tree,
-	}
-	type readinessJSON struct {
-		SchemaVersion int    `json:"schema_version"`
-		Purpose       string `json:"purpose"`
-		WorkspaceID   string `json:"workspace_id"`
-		Generation    string `json:"generation"`
-		PlanID        string `json:"plan_id"`
-		MergeUnitID   string `json:"merge_unit_id"`
-		AttemptID     string `json:"attempt_id"`
-		Round         uint16 `json:"round"`
-		Head          string `json:"head"`
-		Tree          string `json:"tree"`
-		Loop          string `json:"loop_digest"`
-	}
-	canonical, _ := json.Marshal(readinessJSON{
-		SchemaVersion: 2, Purpose: readiness.purpose, WorkspaceID: readiness.workspace.String(),
-		Generation: readiness.generation.String(), PlanID: readiness.mergeUnit.planID.String(),
-		MergeUnitID: readiness.mergeUnit.mergeUnitID.String(),
-		AttemptID:   attempt.attemptID.String(), Round: readiness.round,
-		Head: readiness.head.String(), Tree: readiness.tree.String(), Loop: state.loop.digest.String(),
-	})
-	readiness.digest = DigestBytes(canonical)
-	return readiness, nil
-}
-
-func validateAttemptReviewProtocolState(
-	_ EffectiveWorkspaceDefinition,
-	unit UnitExecution,
-	attempt RuntimeAttemptProjection,
-	review ReviewState,
-	hasReview bool,
-	allowStaleReviewHead bool,
-) error {
-	loop, configured := unit.ReviewLoop()
-	if !configured || attempt.verifiedHead.IsZero() {
-		return fmt.Errorf("attempt %s has no configured review loop at an accepted head", attempt.attemptID)
-	}
-	if !hasReview {
-		return nil
-	}
-	if review.loop.digest != loop.digest {
-		return fmt.Errorf("attempt %s review state does not match its configured loop", attempt.attemptID)
-	}
-	if review.head != attempt.verifiedHead && !allowStaleReviewHead {
-		return fmt.Errorf("attempt %s review state no longer matches the accepted head", attempt.attemptID)
-	}
-	return nil
+	return newReviewGateReadiness(definition, attempt, state, config, artifact.head, artifact.tree)
 }
 
 func readReviewRuntime(

@@ -118,6 +118,28 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 	if err != nil {
 		return WorkspaceBundle{}, fmt.Errorf("read execution config %s: %w", executionPath, err)
 	}
+	executionConfig, err := DecodeExecutionConfig(executionBytes)
+	if err != nil {
+		return WorkspaceBundle{}, fmt.Errorf("decode execution config %s: %w", executionPath, err)
+	}
+	policyPaths := reviewGatePolicyPaths(executionConfig)
+	policies := make([]SourceArtifact, 0, len(policyPaths))
+	for index, configuredPath := range policyPaths {
+		policyPath, pathErr := normalizeBundleSourcePath(
+			fmt.Sprintf("review_gate policy %d", index), configuredPath,
+		)
+		if pathErr != nil {
+			return WorkspaceBundle{}, pathErr
+		}
+		if claimErr := claimSourcePath(policyPath, fmt.Sprintf("review_gate policy %d", index)); claimErr != nil {
+			return WorkspaceBundle{}, claimErr
+		}
+		content, readErr := readWorkspaceBundleFile(filesystem, policyPath, MaxArtifactBytes)
+		if readErr != nil {
+			return WorkspaceBundle{}, fmt.Errorf("read review gate policy %s: %w", policyPath, readErr)
+		}
+		policies = append(policies, SourceArtifact{Path: policyPath, Bytes: content})
+	}
 
 	planPaths := make([]string, 0, len(wire.Plans))
 	planSeen := make(map[string]struct{}, len(wire.Plans))
@@ -149,6 +171,7 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 		Workspace:       SourceArtifact{Path: workspacePath, Bytes: workspaceBytes},
 		Plans:           plans,
 		ExecutionConfig: SourceArtifact{Path: executionPath, Bytes: executionBytes},
+		ReviewPolicies:  policies,
 	}
 	definition, err := ValidateDefinition(sources)
 	if err != nil {
@@ -175,6 +198,9 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 	sourceFiles[executionPath] = append([]byte(nil), executionBytes...)
 	for _, plan := range plans {
 		sourceFiles[plan.Path] = append([]byte(nil), plan.Bytes...)
+	}
+	for _, policy := range policies {
+		sourceFiles[policy.Path] = append([]byte(nil), policy.Bytes...)
 	}
 	return WorkspaceBundle{
 		root:             filesystem.Path(),
@@ -262,9 +288,13 @@ func cloneDefinitionSources(source DefinitionSources) DefinitionSources {
 		Workspace:       SourceArtifact{Path: source.Workspace.Path, Bytes: append([]byte(nil), source.Workspace.Bytes...)},
 		ExecutionConfig: SourceArtifact{Path: source.ExecutionConfig.Path, Bytes: append([]byte(nil), source.ExecutionConfig.Bytes...)},
 		Plans:           make([]SourceArtifact, 0, len(source.Plans)),
+		ReviewPolicies:  make([]SourceArtifact, 0, len(source.ReviewPolicies)),
 	}
 	for _, plan := range source.Plans {
 		result.Plans = append(result.Plans, SourceArtifact{Path: plan.Path, Bytes: append([]byte(nil), plan.Bytes...)})
+	}
+	for _, policy := range source.ReviewPolicies {
+		result.ReviewPolicies = append(result.ReviewPolicies, SourceArtifact{Path: policy.Path, Bytes: append([]byte(nil), policy.Bytes...)})
 	}
 	return result
 }

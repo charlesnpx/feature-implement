@@ -343,6 +343,13 @@ func (journal *WorkspaceJournal) appendToSnapshot(snapshot JournalSnapshot, requ
 	if err != nil {
 		return JournalRecord{}, fmt.Errorf("validate journal event %s: %w", record.event.eventType(), err)
 	}
+	if isReviewJournalEvent(record.event) {
+		candidate := snapshot
+		candidate.records = append(append([]JournalRecord(nil), snapshot.records...), record)
+		if _, err := RebuildProjection(candidate, ReviewRuntimeProjection{}, reduceReviewRuntime); err != nil {
+			return JournalRecord{}, fmt.Errorf("validate review journal event %s: %w", record.event.eventType(), err)
+		}
+	}
 	encoded, err := marshalJournalRecord(record)
 	if err != nil {
 		return JournalRecord{}, err

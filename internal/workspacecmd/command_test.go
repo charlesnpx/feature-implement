@@ -44,26 +44,17 @@ func TestLocalCommandDecodersRequireExactReceiptFreeFields(t *testing.T) {
 			want:   "unknown field",
 		},
 		{
-			name: "review result rejects receipt",
+			name: "review gate record rejects unknown fields",
 			source: `{
   "schema_version": 2,
   "occurred_at": "2026-07-22T10:00:00Z",
   "attempt_id": "attempt-one",
-  "reservation_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "request_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  "reviewer_instance": "reviewer-one",
-  "status": "completed",
-  "findings": [],
-  "isolation": {
-    "repository_read_only": true,
-    "scratch_ephemeral": true,
-    "repository_hooks": false,
-    "write_network": false,
-    "external_write": false
-  },
-  "receipt": {}
+	  "dispatch_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	  "verdict": "satisfied",
+	  "evidence_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	  "receipt": {}
 }`,
-			target: func() any { return &recordReviewInput{} },
+			target: func() any { return &recordReviewGateInput{} },
 			want:   "unknown field",
 		},
 		{
@@ -130,9 +121,7 @@ func TestRequestSchemasExposeOnlySupportedLocalMutations(t *testing.T) {
 		"attempt.pause",
 		"attempt.resume",
 		"attempt.abandon",
-		"review.start",
-		"review.reserve",
-		"review.request",
+		"review.dispatch",
 		"review.record",
 		"review.record-document",
 		"review.ready",
@@ -143,38 +132,27 @@ func TestRequestSchemasExposeOnlySupportedLocalMutations(t *testing.T) {
 			t.Fatalf("request schemas omit %s", required)
 		}
 	}
-	if len(schemas) != 15 {
+	if len(schemas) != 13 {
 		t.Fatalf("request schema count = %d: %+v", len(schemas), schemas)
 	}
-	for _, removed := range []string{
-		"commit.next", "review.reserve-fix", "review.apply-fix", "review.record-fix",
-	} {
-		if _, exists := schemas[removed]; exists {
-			t.Fatalf("request schemas retain removed action %s", removed)
-		}
+	recordDocument := schemas["review.record-document"].(map[string]any)
+	verdicts := recordDocument["properties"].(map[string]any)["verdict"].(map[string]any)["enum"].([]string)
+	if strings.Join(verdicts, ",") != "satisfied,not_satisfied" {
+		t.Fatalf("review document verdicts = %v", verdicts)
 	}
 }
 
 func TestDecodeRequestKeepsSchemaOptionalFieldsOptional(t *testing.T) {
-	var input recordReviewInput
+	var input recordReviewGateInput
 	if err := decodeRequest([]byte(`{
   "schema_version": 2,
   "occurred_at": "2026-07-22T10:00:00Z",
   "attempt_id": "attempt-one",
-  "reservation_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "request_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  "reviewer_instance": "reviewer-one",
-  "status": "completed",
-  "findings": [],
-  "isolation": {
-    "repository_read_only": true,
-    "scratch_ephemeral": true,
-    "repository_hooks": false,
-    "write_network": false,
-    "external_write": false
-  }
+	  "dispatch_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	  "verdict": "failed_to_run",
+	  "evidence_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 }`), &input); err != nil {
-		t.Fatalf("optional review infrastructure failure was required: %v", err)
+		t.Fatalf("valid review gate record envelope: %v", err)
 	}
 }
 
@@ -235,12 +213,6 @@ func TestWorkspaceViewSchemaOmitsRetiredDirectiveFields(t *testing.T) {
 	attemptProperties := attempt["properties"].(map[string]any)
 	if _, exists := attemptProperties["branch"]; exists {
 		t.Fatalf("workspace attempt schema still exposes retired branch: %+v", attemptProperties)
-	}
-	reviews := properties["reviews"].(map[string]any)
-	review := reviews["items"].(map[string]any)
-	reviewProperties := review["properties"].(map[string]any)
-	if _, exists := reviewProperties["findings"]; exists {
-		t.Fatalf("workspace review schema still exposes report findings: %+v", reviewProperties)
 	}
 }
 
@@ -366,7 +338,6 @@ policy:
   require_passing_checks: true
   allow_write_network: false
   max_attempts: 2
-  max_review_rounds: 2
 profiles:
   - id: standard
     runner: codex
@@ -374,7 +345,6 @@ profiles:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 2
-      max_review_rounds: 2
 merge_units:
   - plan_id: alpha-plan
     merge_unit_id: unit-one
@@ -387,7 +357,6 @@ merge_units:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 2
-      max_review_rounds: 2
 `)
 	if _, err := Execute(context.Background(), Options{
 		Action:           "validate",

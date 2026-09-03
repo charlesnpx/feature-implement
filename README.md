@@ -48,7 +48,7 @@ feature workspace init|recover --bundle <bundle-root> --workspace <runtime-root>
 feature workspace status --bundle <bundle-root> --workspace <runtime-root> [--json]
 
 feature workspace attempt start|adopt-head|pause|resume|abandon ...
-feature workspace review start|reserve|request|record|record-document|ready ...
+feature workspace review dispatch|record|record-document|ready ...
 feature workspace integrate merge-unit ...
 feature workspace complete verify ...
 ```
@@ -72,6 +72,8 @@ sample-workspace/
 │   └── sample-plan.yaml
 ├── config/
 │   └── execution.yaml
+├── policies/
+│   └── review.md
 └── generated/                  # tool-owned immutable lock projections
 ```
 
@@ -139,7 +141,8 @@ merge_units:
 ```
 
 Execution configuration assigns every merge unit exactly one profile, an
-execution policy that may only narrow its parent, and an explicit boundary:
+execution policy that may only narrow its parent, an explicit boundary, and an
+optional review-gate adapter contract:
 
 ```yaml
 schema_version: 2
@@ -147,7 +150,6 @@ policy:
   require_passing_checks: true
   allow_write_network: false
   max_attempts: 3
-  max_review_rounds: 3
 profiles:
   - id: standard
     runner: codex
@@ -155,9 +157,12 @@ profiles:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 3
-      max_review_rounds: 3
     boundary:
       escalation: allowed
+review_gate:
+  adapter: natural-language
+  recipe: default
+  policy_file: policies/review.md
 merge_units:
   - plan_id: sample-plan
     merge_unit_id: first-contract
@@ -170,7 +175,6 @@ merge_units:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 3
-      max_review_rounds: 3
 ```
 
 `checkpoint` is the owner's planned gate; `escalation` is the agent's
@@ -189,17 +193,29 @@ A merge unit may narrow `allowed` to `forbidden`, but never widen `forbidden`
 to `allowed`. Profiles deliberately do not declare `checkpoint`; planned
 checkpoints remain on individual merge units.
 
-Commit protocols and review loops are optional strict schemas within each
+Commit protocols and review gates are optional strict schemas within each
 merge-unit entry. A configured commit protocol validates the final clean
 base-to-head history—ordered checkpoints, exact messages, path constraints,
-and isolated checks that exit zero—before review or integration. Without a
-configured review loop, `attempt adopt-head` records the exact clean accepted
-head and tree before integration.
+and isolated checks that exit zero—before gate dispatch or integration.
 
-Agent-driven broad review is capped at three iterations per attempt, not per
-head. Start another iteration only when the preceding review found a Critical or High issue.
-After a review with no Critical or High findings, apply worthwhile Medium and
-Low fixes once, perform targeted confirmation, and stop the broad-review loop.
+A `review_gate` names `adapter`, `recipe`, and `policy_file` together. A merge
+unit either inherits the complete root gate or names another complete gate; a
+partial override is rejected. The policy file is ordinary bundle source text:
+its exact bytes are digested, retained in the generation, and handed to the
+adapter without interpretation by `feature-implement`. The natural-language
+adapter is the default implementation. Its policy specifies any iteration the
+adapter performs; that policy is the adapter's concern, not local scheduling
+logic.
+
+Each dispatch records intent before a frozen copy is materialized. Its terminal
+record is exactly one of `satisfied`, `not_satisfied`, or `failed_to_run`, and
+always carries an evidence digest. The latter two are terminal facts rather
+than special scheduler paths. Without a configured review gate,
+`attempt adopt-head` records the exact clean accepted head and tree before
+integration.
+
+Witness review input is transported as a JSON string, so dispatch rejects
+non-UTF-8 review input.
 
 ## Locks and runtime state
 
@@ -248,28 +264,31 @@ not interpreted or migrated.
    `commit_protocol` is configured, the final base-to-head history is checked
    against its ordered checkpoints and configured checks before review or
    integration.
-5. For configured review, use `review start`, `reserve`, `request`,
-   `record-document`, and `ready`; `record` remains the path for an
-   infrastructure failure. Apply review feedback as ordinary local commits;
-   a changed head requires a new review. The request and report documents use
-   the Witness review contract, while `record-document` strictly validates the
-   report against the exact charter and patch and retains its raw bytes. Reviewer
-   labels are descriptive local metadata, and every result binds the exact
-   request, head, tree, and evidence.
-6. Without configured review, submit `attempt adopt-head` for the exact clean
-   descendant selected for integration.
-7. Before integration, submit `attempt pause` only when the merge unit
+5. For a configured review gate, submit `review dispatch` after the attempt is
+   clean. It records the request first and returns a separately materialized
+   frozen copy plus the opaque policy text; give the adapter only that copy.
+   When the adapter has a durable evidence record, submit `review record` with
+   its digest, or use `review record-document` for a Witness
+   `review-report-v1` document. The latter strictly validates and retains raw
+   report bytes. A changed head or tree requires a fresh dispatch.
+6. `review ready` is a read-only check for a satisfied gate against the exact
+   current artifact. It does not conduct review. `not_satisfied` and
+   `failed_to_run` remain distinguishable terminal facts; use ordinary owner
+   decisions and attempt lifecycle actions rather than a review-specific loop.
+7. Without a configured review gate, submit `attempt adopt-head` for the exact
+   clean descendant selected for integration.
+8. Before integration, submit `attempt pause` only when the merge unit
    configures a checkpoint other than `none`, or when the agent genuinely needs
    an allowed escalation. The request requires `kind`: use `checkpoint` for the
    configured planned stop and `escalation` for a genuine agent-raised stop. Record it
    while the attempt is active, before `integrate merge-unit`.
-8. Resume the attempt directly when a pause was recorded. Use `attempt abandon`
+9. Resume the attempt directly when a pause was recorded. Use `attempt abandon`
    only to terminally exit a non-integrated attempt; it leaves its detached
    scratch directory intact for inspection. If no pause is needed, proceed
    directly. Only then submit `integrate merge-unit` for the exact accepted head and tree. Integration
    creates a deterministic two-parent local commit and compare-and-swap updates
    only the workspace-owned feature ref.
-9. After every unit is integrated and every pause is resolved, run
+10. After every unit is integrated and every pause is resolved, run
    `complete verify` to record local workspace completion.
 
 Every mutation returns a fresh journal-derived workspace view. Treat that view as the

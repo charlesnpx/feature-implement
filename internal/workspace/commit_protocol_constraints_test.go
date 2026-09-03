@@ -228,7 +228,6 @@ policy:
   require_passing_checks: true
   allow_write_network: false
   max_attempts: 3
-  max_review_rounds: 3
 profiles:
   - id: standard
     runner: codex
@@ -236,7 +235,6 @@ profiles:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 3
-      max_review_rounds: 3
 merge_units:
   - plan_id: alpha-plan
     merge_unit_id: unit-one
@@ -247,6 +245,5 @@ merge_units:
     policy:
       require_passing_checks: true
       allow_write_network: false
-      max_attempts: 3
-      max_review_rounds: 3` + protocol + "\n"
+      max_attempts: 3` + protocol + "\n"
 }

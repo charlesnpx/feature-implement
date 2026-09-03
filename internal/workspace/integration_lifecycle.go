@@ -609,24 +609,17 @@ func confirmIntegrationAcceptance(
 		head: repositorySnapshot.head,
 		tree: repositorySnapshot.tree,
 	}
-	if loop, configured := unit.ReviewLoop(); configured {
+	if gate, configured := unit.ReviewGate(); configured {
 		state, exists := reviews.State(attempt.attemptID)
-		if !exists || !state.MergeReady() ||
-			state.loop.digest != loop.digest ||
-			state.head != repositorySnapshot.head ||
-			state.tree != repositorySnapshot.tree {
+		if !exists {
 			return integrationAcceptanceEvidence{}, fmt.Errorf(
 				"attempt %s has no exact-head review readiness for integration",
 				attempt.attemptID,
 			)
 		}
-		if err := validateAttemptReviewProtocolState(
-			definition, unit, attempt, state, true, false,
-		); err != nil {
-			return integrationAcceptanceEvidence{}, err
-		}
-		readiness, err := newReviewMergeReadiness(
-			definition, attempt, state,
+		readiness, err := newReviewGateReadiness(
+			definition, attempt, state, gate,
+			repositorySnapshot.head, repositorySnapshot.tree,
 		)
 		if err != nil {
 			return integrationAcceptanceEvidence{}, err

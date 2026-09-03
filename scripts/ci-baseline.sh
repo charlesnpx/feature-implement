@@ -114,7 +114,7 @@ run_stress_concurrency() {
 	test_parallel=$(configured_test_parallel)
 	go clean -testcache
 	go test -count=3 -p=1 -parallel="$test_parallel" -timeout=30m \
-		-run '^(TestWorkspaceJournalMultiProcessCASAllowsOneWinner|TestLocalTargetInitializationRefRaceIsNotAdopted|TestWorkspaceInitializationUsesCommittedPlanHeadCheckpoint|TestPlanCheckpointVerificationRejectsDirtyPlanRepository|TestReviewInvocationReservationSerializesRunnerAndCountsRawFailureIdentity|TestConcurrentIntegrationsPublishExactlyOneIntent)$' \
+		-run '^(TestWorkspaceJournalMultiProcessCASAllowsOneWinner|TestLocalTargetInitializationRefRaceIsNotAdopted|TestWorkspaceInitializationUsesCommittedPlanHeadCheckpoint|TestPlanCheckpointVerificationRejectsDirtyPlanRepository|TestConcurrentIntegrationsPublishExactlyOneIntent)$' \
 		./internal/workspace
 }
 

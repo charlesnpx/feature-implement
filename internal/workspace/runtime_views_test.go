@@ -15,19 +15,8 @@ func TestWorkspaceRuntimeViewsExposeOnlyLocalStateAndReplayDeterministically(
 ) {
 	t.Parallel()
 
-	harness := newReviewHarness(t)
-	if _, err := workspace.StartAttemptReviewRound(
-		context.Background(),
-		harness.journal,
-		harness.definition,
-		harness.repository,
-		workspace.StartAttemptReviewRoundRequest{
-			AttemptID:  harness.attempt.AttemptID(),
-			OccurredAt: mustTime(t, "2026-07-21T18:00:00Z"),
-		},
-	); err != nil {
-		t.Fatal(err)
-	}
+	harness := newGatedReviewHarness(t)
+	harness.dispatch(t, "2026-07-21T18:00:00Z")
 	snapshot, err := harness.journal.ReadSnapshot()
 	if err != nil {
 		t.Fatal(err)
@@ -156,9 +145,10 @@ func TestWorkspaceRuntimeViewsExposeOnlyLocalStateAndReplayDeterministically(
 	if review.AttemptID != harness.attempt.AttemptID().String() ||
 		review.Head != harness.base.String() ||
 		review.Tree != harness.tree.String() ||
-		review.Status != "active" ||
-		review.RoundsUsed != 1 ||
-		review.MergeReady {
+		review.Status != "dispatched" ||
+		review.DispatchDigest == "" || review.Adapter != "natural-language" ||
+		review.Recipe != "default" || review.PolicyDigest == "" ||
+		review.Verdict != "" || review.EvidenceDigest != "" {
 		t.Fatalf("review view = %+v", review)
 	}
 
@@ -300,24 +290,11 @@ func TestConfiguredCommitGateResolvesAtDurableIntegrationIntent(t *testing.T) {
 	}
 }
 
-func TestWorkspaceReviewViewSerializationMatchesPreAdapterSchema(t *testing.T) {
+func TestWorkspaceReviewViewSerializationMatchesGateSchema(t *testing.T) {
 	t.Parallel()
 
-	// This workspace follows the established review lifecycle and never uses the
-	// review-document adapter path.
-	harness := newReviewHarness(t)
-	if _, err := workspace.StartAttemptReviewRound(
-		context.Background(),
-		harness.journal,
-		harness.definition,
-		harness.repository,
-		workspace.StartAttemptReviewRoundRequest{
-			AttemptID:  harness.attempt.AttemptID(),
-			OccurredAt: mustTime(t, "2026-07-21T18:00:00Z"),
-		},
-	); err != nil {
-		t.Fatal(err)
-	}
+	harness := newGatedReviewHarness(t)
+	harness.dispatch(t, "2026-07-21T18:00:00Z")
 	snapshot, err := harness.journal.ReadSnapshot()
 	if err != nil {
 		t.Fatal(err)
@@ -339,15 +316,15 @@ func TestWorkspaceReviewViewSerializationMatchesPreAdapterSchema(t *testing.T) {
 	}
 	want := map[string]struct{}{
 		"attempt_id": {}, "plan_id": {}, "merge_unit_id": {}, "generation": {},
-		"head": {}, "tree": {}, "status": {}, "rounds_used": {},
-		"infrastructure_retries": {}, "merge_ready": {},
+		"dispatch_digest": {}, "adapter": {}, "recipe": {}, "policy_digest": {},
+		"head": {}, "tree": {}, "status": {},
 	}
 	if len(fields) != len(want) {
-		t.Fatalf("pre-adapter review JSON fields = %#v, want %#v", fields, want)
+		t.Fatalf("gate review JSON fields = %#v, want %#v", fields, want)
 	}
 	for field := range want {
 		if _, exists := fields[field]; !exists {
-			t.Fatalf("pre-adapter review JSON omits %q: %#v", field, fields)
+			t.Fatalf("gate review JSON omits %q: %#v", field, fields)
 		}
 	}
 }

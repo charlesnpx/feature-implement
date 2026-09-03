@@ -590,7 +590,7 @@ func TestIntegrationCompletionCapacityRejectsOversizedSupersededSetAndReservesJo
 				mergeUnit:  unit,
 				generation: intent.generation,
 				base:       intent.expectedFeatureHead,
-				phase:      AttemptReviewExhausted,
+				phase:      AttemptPaused,
 			},
 		)
 	}

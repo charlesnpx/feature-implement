@@ -21,11 +21,9 @@ const (
 	JournalEventAttemptBoundary              JournalEventType = "attempt.paused.v3"
 	JournalEventAttemptResumed               JournalEventType = "attempt.resumed.v3"
 	JournalEventAttemptAbandoned             JournalEventType = "attempt.abandoned.v3"
-	JournalEventReviewRoundStarted           JournalEventType = "review.round_started.v2"
 	JournalEventReviewHeadAdopted            JournalEventType = "review.head_adopted.v2"
-	JournalEventReviewInvocationReserved     JournalEventType = "review.invocation_reserved.v2"
-	JournalEventReviewInvocationFailed       JournalEventType = "review.invocation_failed.v2"
-	JournalEventReviewResultRecorded         JournalEventType = "review.result_recorded.v2"
+	JournalEventReviewGateDispatched         JournalEventType = "review.gate_dispatched.v1"
+	JournalEventReviewGateRecorded           JournalEventType = "review.gate_recorded.v1"
 	JournalEventMergeUnitIntegrationIntended JournalEventType = "merge_unit_integration_intended"
 	JournalEventMergeUnitIntegrated          JournalEventType = "merge_unit_integrated"
 	JournalEventWorkspaceCompleted           JournalEventType = "workspace_completed"
@@ -200,10 +198,9 @@ func newJournalAppend(
 			return JournalAppend{}, fmt.Errorf("attempt boundary must use the atomic boundary workflow")
 		case AttemptAbandonedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("attempt abandonment must use the attempt lifecycle workflow")
-		case ReviewHeadAdoptedJournalEvent, ReviewRoundStartedJournalEvent,
-			ReviewInvocationReservedJournalEvent, ReviewInvocationFailedJournalEvent,
-			ReviewResultRecordedJournalEvent:
-			return JournalAppend{}, fmt.Errorf("review events must use the exact-head review workflow")
+		case ReviewHeadAdoptedJournalEvent, ReviewGateDispatchedJournalEvent,
+			ReviewGateRecordedJournalEvent:
+			return JournalAppend{}, fmt.Errorf("review gate events must use the exact-artifact workflow")
 		case MergeUnitIntegrationIntendedJournalEvent, MergeUnitIntegratedJournalEvent:
 			return JournalAppend{}, fmt.Errorf(
 				"integration events must use the ancestry-checked CAS integration workflow",

@@ -4,900 +4,346 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
+	"time"
 )
 
-const maxReviewFindings = 128
-
-type ReviewSeverity string
+// ReviewGateVerdict is the terminal fact recorded by an adapter. The local
+// workflow records the fact and its artifact bindings; it does not interpret
+// the policy that led to it.
+type ReviewGateVerdict string
 
 const (
-	ReviewSeverityCritical ReviewSeverity = "critical"
-	ReviewSeverityHigh     ReviewSeverity = "high"
-	ReviewSeverityMedium   ReviewSeverity = "medium"
-	ReviewSeverityLow      ReviewSeverity = "low"
+	ReviewGateSatisfied    ReviewGateVerdict = "satisfied"
+	ReviewGateNotSatisfied ReviewGateVerdict = "not_satisfied"
+	ReviewGateFailedToRun  ReviewGateVerdict = "failed_to_run"
 )
 
-func (severity ReviewSeverity) valid() bool {
-	switch severity {
-	case ReviewSeverityCritical, ReviewSeverityHigh, ReviewSeverityMedium, ReviewSeverityLow:
+func (verdict ReviewGateVerdict) valid() bool {
+	switch verdict {
+	case ReviewGateSatisfied, ReviewGateNotSatisfied, ReviewGateFailedToRun:
 		return true
 	default:
 		return false
 	}
 }
 
-func (severity ReviewSeverity) Blocking() bool {
-	return severity == ReviewSeverityCritical || severity == ReviewSeverityHigh
+// ReviewGateDispatch is the durable intent that precedes handing a frozen
+// tree to an adapter. Its digest identifies one repeatable request, including
+// the policy bytes selected by the bundle.
+type ReviewGateDispatch struct {
+	workspaceID     ID
+	generation      Digest
+	attemptID       ID
+	mergeUnit       MergeUnitReference
+	adapter         ID
+	recipe          ID
+	policyDigest    Digest
+	head            GitObjectID
+	tree            GitObjectID
+	terminalOrdinal uint64
+	digest          Digest
 }
 
-type ReviewFindingOptions struct {
-	Severity       ReviewSeverity
-	Category       ID
-	Path           string
-	Line           uint32
-	Summary        string
-	EvidenceDigest Digest
+type ReviewGateDispatchOptions struct {
+	WorkspaceID     ID
+	Generation      Digest
+	AttemptID       ID
+	MergeUnit       MergeUnitReference
+	Adapter         ID
+	Recipe          ID
+	PolicyDigest    Digest
+	Head            GitObjectID
+	Tree            GitObjectID
+	TerminalOrdinal uint64
 }
 
-type ReviewFinding struct {
-	id             Digest
-	severity       ReviewSeverity
-	category       ID
-	path           string
-	line           uint32
-	summary        string
+func NewReviewGateDispatch(options ReviewGateDispatchOptions) (ReviewGateDispatch, error) {
+	dispatch := ReviewGateDispatch{
+		workspaceID: options.WorkspaceID, generation: options.Generation,
+		attemptID: options.AttemptID, mergeUnit: options.MergeUnit,
+		adapter: options.Adapter, recipe: options.Recipe,
+		policyDigest: options.PolicyDigest, head: options.Head, tree: options.Tree,
+		terminalOrdinal: options.TerminalOrdinal,
+	}
+	canonical, err := canonicalReviewGateDispatch(dispatch)
+	if err != nil {
+		return ReviewGateDispatch{}, err
+	}
+	dispatch.digest = DigestBytes(canonical)
+	return dispatch, nil
+}
+
+func (dispatch ReviewGateDispatch) WorkspaceID() ID      { return dispatch.workspaceID }
+func (dispatch ReviewGateDispatch) AttemptID() ID        { return dispatch.attemptID }
+func (dispatch ReviewGateDispatch) Adapter() ID          { return dispatch.adapter }
+func (dispatch ReviewGateDispatch) Recipe() ID           { return dispatch.recipe }
+func (dispatch ReviewGateDispatch) PolicyDigest() Digest { return dispatch.policyDigest }
+func (dispatch ReviewGateDispatch) Head() GitObjectID    { return dispatch.head }
+func (dispatch ReviewGateDispatch) Tree() GitObjectID    { return dispatch.tree }
+func (dispatch ReviewGateDispatch) Digest() Digest       { return dispatch.digest }
+
+func canonicalReviewGateDispatch(dispatch ReviewGateDispatch) ([]byte, error) {
+	if dispatch.workspaceID.IsZero() || dispatch.generation.IsZero() ||
+		dispatch.attemptID.IsZero() || dispatch.mergeUnit.planID.IsZero() ||
+		dispatch.mergeUnit.mergeUnitID.IsZero() || dispatch.adapter.IsZero() ||
+		dispatch.recipe.IsZero() || dispatch.policyDigest.IsZero() ||
+		dispatch.head.IsZero() || dispatch.tree.IsZero() ||
+		dispatch.head.Algorithm() != dispatch.tree.Algorithm() {
+		return nil, fmt.Errorf("review gate dispatch requires exact workspace, adapter, policy, head, and tree bindings")
+	}
+	return json.Marshal(struct {
+		SchemaVersion   int    `json:"schema_version"`
+		WorkspaceID     string `json:"workspace_id"`
+		Generation      string `json:"generation"`
+		AttemptID       string `json:"attempt_id"`
+		PlanID          string `json:"plan_id"`
+		MergeUnitID     string `json:"merge_unit_id"`
+		Adapter         string `json:"adapter"`
+		Recipe          string `json:"recipe"`
+		PolicyDigest    string `json:"policy_digest"`
+		Head            string `json:"head"`
+		Tree            string `json:"tree"`
+		TerminalOrdinal uint64 `json:"terminal_ordinal"`
+	}{
+		SchemaVersion: 2, WorkspaceID: dispatch.workspaceID.String(),
+		Generation: dispatch.generation.String(), AttemptID: dispatch.attemptID.String(),
+		PlanID: dispatch.mergeUnit.planID.String(), MergeUnitID: dispatch.mergeUnit.mergeUnitID.String(),
+		Adapter: dispatch.adapter.String(), Recipe: dispatch.recipe.String(),
+		PolicyDigest: dispatch.policyDigest.String(), Head: dispatch.head.String(), Tree: dispatch.tree.String(),
+		TerminalOrdinal: dispatch.terminalOrdinal,
+	})
+}
+
+// ReviewGateRecord is the terminal half of a dispatch. EvidenceDigest names
+// the adapter-owned durable record; it is required for every outcome,
+// including a failure to run.
+type ReviewGateRecord struct {
+	dispatchDigest Digest
+	adapter        ID
+	recipe         ID
+	head           GitObjectID
+	tree           GitObjectID
+	verdict        ReviewGateVerdict
 	evidenceDigest Digest
+	policyDigest   Digest
+	occurredAt     time.Time
+	digest         Digest
 }
 
-func NewReviewFinding(options ReviewFindingOptions) (ReviewFinding, error) {
-	path := strings.TrimSpace(options.Path)
-	if path != "" {
-		normalized, err := normalizeSourcePath(path)
-		if err != nil {
-			return ReviewFinding{}, fmt.Errorf("review finding path: %w", err)
-		}
-		path = normalized
+type ReviewGateRecordOptions struct {
+	Dispatch       ReviewGateDispatch
+	Verdict        ReviewGateVerdict
+	EvidenceDigest Digest
+	OccurredAt     time.Time
+}
+
+func NewReviewGateRecord(options ReviewGateRecordOptions) (ReviewGateRecord, error) {
+	record := ReviewGateRecord{
+		dispatchDigest: options.Dispatch.digest, adapter: options.Dispatch.adapter,
+		recipe: options.Dispatch.recipe, head: options.Dispatch.head, tree: options.Dispatch.tree,
+		verdict: options.Verdict, evidenceDigest: options.EvidenceDigest,
+		policyDigest: options.Dispatch.policyDigest, occurredAt: options.OccurredAt.UTC(),
 	}
-	summary := strings.TrimSpace(options.Summary)
-	if !options.Severity.valid() || options.Category.IsZero() || options.EvidenceDigest.IsZero() {
-		return ReviewFinding{}, fmt.Errorf("review finding requires severity, category, and evidence")
-	}
-	if err := validateBoundedText("review finding summary", summary, 8192); err != nil {
-		return ReviewFinding{}, err
-	}
-	if options.Line != 0 && path == "" {
-		return ReviewFinding{}, fmt.Errorf("review finding line requires a repository path")
-	}
-	finding := ReviewFinding{
-		severity: options.Severity, category: options.Category, path: path,
-		line: options.Line, summary: summary, evidenceDigest: options.EvidenceDigest,
-	}
-	canonical, err := canonicalReviewFinding(finding)
+	canonical, err := canonicalReviewGateRecord(record)
 	if err != nil {
-		return ReviewFinding{}, err
+		return ReviewGateRecord{}, err
 	}
-	finding.id = DigestBytes(canonical)
-	return finding, nil
+	record.digest = DigestBytes(canonical)
+	return record, nil
 }
 
-func (finding ReviewFinding) ID() Digest               { return finding.id }
-func (finding ReviewFinding) Severity() ReviewSeverity { return finding.severity }
-func (finding ReviewFinding) Category() ID             { return finding.category }
-func (finding ReviewFinding) Path() string             { return finding.path }
-func (finding ReviewFinding) Line() uint32             { return finding.line }
-func (finding ReviewFinding) Summary() string          { return finding.summary }
-func (finding ReviewFinding) EvidenceDigest() Digest   { return finding.evidenceDigest }
-func (finding ReviewFinding) Blocking() bool           { return finding.severity.Blocking() }
+func (record ReviewGateRecord) DispatchDigest() Digest { return record.dispatchDigest }
+func (record ReviewGateRecord) Adapter() ID            { return record.adapter }
+func (record ReviewGateRecord) Recipe() ID             { return record.recipe }
+func (record ReviewGateRecord) Head() GitObjectID      { return record.head }
+func (record ReviewGateRecord) Tree() GitObjectID      { return record.tree }
+func (record ReviewGateRecord) Verdict() ReviewGateVerdict {
+	return record.verdict
+}
+func (record ReviewGateRecord) EvidenceDigest() Digest { return record.evidenceDigest }
+func (record ReviewGateRecord) PolicyDigest() Digest   { return record.policyDigest }
+func (record ReviewGateRecord) OccurredAt() time.Time  { return record.occurredAt }
+func (record ReviewGateRecord) Digest() Digest         { return record.digest }
 
-func canonicalReviewFinding(finding ReviewFinding) ([]byte, error) {
-	if !finding.severity.valid() || finding.category.IsZero() || finding.evidenceDigest.IsZero() {
-		return nil, fmt.Errorf("review finding is incomplete")
+func canonicalReviewGateRecord(record ReviewGateRecord) ([]byte, error) {
+	if record.dispatchDigest.IsZero() || record.adapter.IsZero() || record.recipe.IsZero() ||
+		record.head.IsZero() || record.tree.IsZero() ||
+		record.head.Algorithm() != record.tree.Algorithm() || !record.verdict.valid() ||
+		record.evidenceDigest.IsZero() || record.policyDigest.IsZero() || record.occurredAt.IsZero() ||
+		record.occurredAt.Location() != time.UTC {
+		return nil, fmt.Errorf("review gate record requires dispatch, adapter, exact artifact, verdict, evidence, policy, and occurrence bindings")
 	}
-	type findingJSON struct {
-		SchemaVersion int            `json:"schema_version"`
-		Severity      ReviewSeverity `json:"severity"`
-		Category      string         `json:"category"`
-		Path          string         `json:"path,omitempty"`
-		Line          uint32         `json:"line,omitempty"`
-		Summary       string         `json:"summary"`
-		Evidence      string         `json:"evidence_digest"`
-	}
-	return json.Marshal(findingJSON{
-		SchemaVersion: 2, Severity: finding.severity, Category: finding.category.String(),
-		Path: finding.path, Line: finding.line, Summary: finding.summary,
-		Evidence: finding.evidenceDigest.String(),
+	return json.Marshal(struct {
+		SchemaVersion  int               `json:"schema_version"`
+		DispatchDigest string            `json:"dispatch_digest"`
+		Adapter        string            `json:"adapter"`
+		Recipe         string            `json:"recipe"`
+		Head           string            `json:"head"`
+		Tree           string            `json:"tree"`
+		Verdict        ReviewGateVerdict `json:"verdict"`
+		EvidenceDigest string            `json:"evidence_digest"`
+		PolicyDigest   string            `json:"policy_digest"`
+		OccurredAt     string            `json:"occurred_at"`
+	}{
+		SchemaVersion: 2, DispatchDigest: record.dispatchDigest.String(),
+		Adapter: record.adapter.String(), Recipe: record.recipe.String(),
+		Head: record.head.String(), Tree: record.tree.String(), Verdict: record.verdict,
+		EvidenceDigest: record.evidenceDigest.String(), PolicyDigest: record.policyDigest.String(),
+		OccurredAt: record.occurredAt.Format(time.RFC3339Nano),
 	})
 }
 
-func normalizeReviewFindings(values []ReviewFinding) ([]ReviewFinding, error) {
-	if len(values) > maxReviewFindings {
-		return nil, fmt.Errorf("review result exceeds %d findings", maxReviewFindings)
+// ReviewGateState is a projection of durable requests and terminal records for
+// one attempt. It intentionally exposes no assessment details.
+type ReviewGateState struct {
+	workspaceID          ID
+	generation           Digest
+	attemptID            ID
+	mergeUnit            MergeUnitReference
+	dispatches           []ReviewGateDispatch
+	records              []ReviewGateRecord
+	documentedDispatches []Digest
+}
+
+func (state ReviewGateState) Dispatch(digest Digest) (ReviewGateDispatch, bool) {
+	for _, dispatch := range state.dispatches {
+		if dispatch.digest == digest {
+			return dispatch, true
+		}
 	}
-	result := append([]ReviewFinding(nil), values...)
-	seen := make(map[string][]byte, len(result))
-	for index := range result {
-		canonical, err := canonicalReviewFinding(result[index])
-		if err != nil {
-			return nil, err
+	return ReviewGateDispatch{}, false
+}
+
+func (state ReviewGateState) Record(dispatchDigest Digest) (ReviewGateRecord, bool) {
+	for _, record := range state.records {
+		if record.dispatchDigest == dispatchDigest {
+			return record, true
 		}
-		derived := DigestBytes(canonical)
-		if result[index].id.IsZero() {
-			result[index].id = derived
+	}
+	return ReviewGateRecord{}, false
+}
+
+func (state ReviewGateState) Pending() (ReviewGateDispatch, bool) {
+	for index := len(state.dispatches) - 1; index >= 0; index-- {
+		dispatch := state.dispatches[index]
+		if _, recorded := state.Record(dispatch.digest); !recorded {
+			return dispatch, true
 		}
-		if result[index].id != derived {
-			return nil, fmt.Errorf("review finding identity does not match engine-derived content")
+	}
+	return ReviewGateDispatch{}, false
+}
+
+func (state ReviewGateState) Satisfied(
+	config ReviewGateConfig, head, tree GitObjectID,
+) (ReviewGateRecord, bool) {
+	for index := len(state.records) - 1; index >= 0; index-- {
+		record := state.records[index]
+		if record.verdict != ReviewGateSatisfied || record.adapter != config.adapter ||
+			record.recipe != config.recipe || record.policyDigest != config.policyDigest ||
+			record.head != head || record.tree != tree {
+			continue
 		}
-		key := result[index].id.String()
-		if prior, exists := seen[key]; exists {
-			if string(prior) == string(canonical) {
-				return nil, fmt.Errorf("duplicate review finding %s", result[index].id)
+		dispatch, exists := state.Dispatch(record.dispatchDigest)
+		if exists && dispatch.adapter == record.adapter && dispatch.recipe == record.recipe &&
+			dispatch.policyDigest == record.policyDigest && dispatch.head == record.head && dispatch.tree == record.tree {
+			if reviewGateRecordRequiresDocumentArtifact(dispatch, record) && !state.hasDocumentArtifact(record.dispatchDigest) {
+				continue
 			}
-			return nil, fmt.Errorf("review finding identity collision %s", result[index].id)
-		}
-		seen[key] = append([]byte(nil), canonical...)
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].id.String() < result[j].id.String() })
-	return result, nil
-}
-
-type ReviewIsolationProof struct {
-	repositoryReadOnly bool
-	scratchEphemeral   bool
-	repositoryHooks    bool
-	writeNetwork       bool
-	externalWrite      bool
-	digest             Digest
-}
-
-func NewReviewIsolationProof(
-	repositoryReadOnly, scratchEphemeral, repositoryHooks,
-	writeNetwork, externalWrite bool,
-) ReviewIsolationProof {
-	type proofJSON struct {
-		SchemaVersion      int  `json:"schema_version"`
-		RepositoryReadOnly bool `json:"repository_read_only"`
-		ScratchEphemeral   bool `json:"scratch_ephemeral"`
-		RepositoryHooks    bool `json:"repository_hooks"`
-		WriteNetwork       bool `json:"write_network"`
-		ExternalWrite      bool `json:"external_write"`
-	}
-	canonical, _ := json.Marshal(proofJSON{
-		SchemaVersion:      2,
-		RepositoryReadOnly: repositoryReadOnly, ScratchEphemeral: scratchEphemeral,
-		RepositoryHooks: repositoryHooks,
-		WriteNetwork:    writeNetwork, ExternalWrite: externalWrite,
-	})
-	return ReviewIsolationProof{
-		repositoryReadOnly: repositoryReadOnly, scratchEphemeral: scratchEphemeral,
-		repositoryHooks: repositoryHooks,
-		writeNetwork:    writeNetwork, externalWrite: externalWrite,
-		digest: DigestBytes(canonical),
-	}
-}
-
-func StrictReviewIsolationProof() ReviewIsolationProof {
-	return NewReviewIsolationProof(true, true, false, false, false)
-}
-
-func (proof ReviewIsolationProof) RepositoryReadOnly() bool { return proof.repositoryReadOnly }
-func (proof ReviewIsolationProof) ScratchEphemeral() bool   { return proof.scratchEphemeral }
-func (proof ReviewIsolationProof) RepositoryHooks() bool    { return proof.repositoryHooks }
-func (proof ReviewIsolationProof) WriteNetwork() bool       { return proof.writeNetwork }
-func (proof ReviewIsolationProof) ExternalWrite() bool      { return proof.externalWrite }
-func (proof ReviewIsolationProof) Digest() Digest           { return proof.digest }
-func (proof ReviewIsolationProof) Strict() bool {
-	return !proof.digest.IsZero() && proof.repositoryReadOnly && proof.scratchEphemeral &&
-		!proof.repositoryHooks && !proof.writeNetwork && !proof.externalWrite
-}
-
-type ReviewResultStatus string
-
-const (
-	ReviewResultCompleted             ReviewResultStatus = "completed"
-	ReviewResultInfrastructureFailure ReviewResultStatus = "infrastructure_failure"
-)
-
-func (status ReviewResultStatus) valid() bool {
-	return status == ReviewResultCompleted || status == ReviewResultInfrastructureFailure
-}
-
-type ReviewResultSubmissionOptions struct {
-	RequestDigest         Digest
-	ReviewerInstance      ID
-	Status                ReviewResultStatus
-	Findings              []ReviewFinding
-	InfrastructureFailure Digest
-	Isolation             ReviewIsolationProof
-}
-
-type ReviewResultSubmission struct {
-	requestDigest         Digest
-	reviewerInstance      ID
-	status                ReviewResultStatus
-	findings              []ReviewFinding
-	infrastructureFailure Digest
-	isolation             ReviewIsolationProof
-	digest                Digest
-}
-
-func NewReviewResultSubmission(options ReviewResultSubmissionOptions) (ReviewResultSubmission, error) {
-	if options.RequestDigest.IsZero() || options.ReviewerInstance.IsZero() || !options.Status.valid() ||
-		options.Isolation.digest.IsZero() {
-		return ReviewResultSubmission{}, fmt.Errorf("review result requires request, reviewer instance, status, and isolation proof")
-	}
-	findings, err := normalizeReviewFindings(options.Findings)
-	if err != nil {
-		return ReviewResultSubmission{}, err
-	}
-	if options.Status == ReviewResultCompleted {
-		if !options.InfrastructureFailure.IsZero() {
-			return ReviewResultSubmission{}, fmt.Errorf("completed review result cannot carry infrastructure failure")
-		}
-	} else if len(findings) != 0 || options.InfrastructureFailure.IsZero() {
-		return ReviewResultSubmission{}, fmt.Errorf("infrastructure review result requires only a failure digest")
-	}
-	result := ReviewResultSubmission{
-		requestDigest: options.RequestDigest, reviewerInstance: options.ReviewerInstance,
-		status: options.Status, findings: findings, infrastructureFailure: options.InfrastructureFailure,
-		isolation: options.Isolation,
-	}
-	canonical, err := canonicalReviewResult(result)
-	if err != nil {
-		return ReviewResultSubmission{}, err
-	}
-	if len(canonical) > MaxJournalRecordBytes-2*reviewJournalRecordSafetyBytes {
-		return ReviewResultSubmission{}, fmt.Errorf("review result exceeds the aggregate safe journal bound")
-	}
-	result.digest = DigestBytes(canonical)
-	return result, nil
-}
-
-func (result ReviewResultSubmission) RequestDigest() Digest      { return result.requestDigest }
-func (result ReviewResultSubmission) ReviewerInstance() ID       { return result.reviewerInstance }
-func (result ReviewResultSubmission) Status() ReviewResultStatus { return result.status }
-func (result ReviewResultSubmission) Findings() []ReviewFinding {
-	return append([]ReviewFinding(nil), result.findings...)
-}
-func (result ReviewResultSubmission) InfrastructureFailureDigest() Digest {
-	return result.infrastructureFailure
-}
-func (result ReviewResultSubmission) Isolation() ReviewIsolationProof { return result.isolation }
-func (result ReviewResultSubmission) Digest() Digest                  { return result.digest }
-
-func canonicalReviewResult(result ReviewResultSubmission) ([]byte, error) {
-	if result.requestDigest.IsZero() || result.reviewerInstance.IsZero() || !result.status.valid() ||
-		result.isolation.digest.IsZero() {
-		return nil, fmt.Errorf("review result is incomplete")
-	}
-	type findingJSON struct {
-		ID       string         `json:"id"`
-		Severity ReviewSeverity `json:"severity"`
-		Category string         `json:"category"`
-		Path     string         `json:"path,omitempty"`
-		Line     uint32         `json:"line,omitempty"`
-		Summary  string         `json:"summary"`
-		Evidence string         `json:"evidence_digest"`
-	}
-	type resultJSON struct {
-		SchemaVersion         int                `json:"schema_version"`
-		Request               string             `json:"request_digest"`
-		ReviewerInstance      string             `json:"reviewer_instance"`
-		Status                ReviewResultStatus `json:"status"`
-		Findings              []findingJSON      `json:"findings"`
-		InfrastructureFailure string             `json:"infrastructure_failure_digest,omitempty"`
-		Isolation             string             `json:"isolation_digest"`
-	}
-	value := resultJSON{
-		SchemaVersion: 2, Request: result.requestDigest.String(), ReviewerInstance: result.reviewerInstance.String(),
-		Status: result.status, Findings: make([]findingJSON, 0, len(result.findings)),
-		InfrastructureFailure: result.infrastructureFailure.String(), Isolation: result.isolation.digest.String(),
-	}
-	for _, finding := range result.findings {
-		value.Findings = append(value.Findings, findingJSON{
-			ID: finding.id.String(), Severity: finding.severity, Category: finding.category.String(),
-			Path: finding.path, Line: finding.line, Summary: finding.summary,
-			Evidence: finding.evidenceDigest.String(),
-		})
-	}
-	return json.Marshal(value)
-}
-
-type ReviewRequest struct {
-	workspaceID       ID
-	generation        Digest
-	attemptID         ID
-	mergeUnit         MergeUnitReference
-	loopDigest        Digest
-	round             uint16
-	profile           ReviewProfile
-	profileOrdinal    uint16
-	invocation        uint16
-	head              GitObjectID
-	tree              GitObjectID
-	isolationRequired ReviewIsolationProof
-	digest            Digest
-}
-
-func newReviewRequest(
-	workspaceID ID,
-	generation Digest,
-	attemptID ID,
-	mergeUnit MergeUnitReference,
-	loopDigest Digest,
-	round uint16,
-	profile ReviewProfile,
-	profileOrdinal, invocation uint16,
-	head, tree GitObjectID,
-) (ReviewRequest, error) {
-	request := ReviewRequest{
-		workspaceID: workspaceID, generation: generation, attemptID: attemptID, mergeUnit: mergeUnit,
-		loopDigest: loopDigest, round: round, profile: profile, profileOrdinal: profileOrdinal,
-		invocation: invocation, head: head, tree: tree, isolationRequired: StrictReviewIsolationProof(),
-	}
-	canonical, err := canonicalReviewRequest(request)
-	if err != nil {
-		return ReviewRequest{}, err
-	}
-	request.digest = DigestBytes(canonical)
-	return request, nil
-}
-
-func (request ReviewRequest) WorkspaceID() ID               { return request.workspaceID }
-func (request ReviewRequest) Generation() Digest            { return request.generation }
-func (request ReviewRequest) AttemptID() ID                 { return request.attemptID }
-func (request ReviewRequest) MergeUnit() MergeUnitReference { return request.mergeUnit }
-func (request ReviewRequest) LoopDigest() Digest            { return request.loopDigest }
-func (request ReviewRequest) Round() uint16                 { return request.round }
-func (request ReviewRequest) Profile() ReviewProfile        { return request.profile }
-func (request ReviewRequest) ProfileOrdinal() uint16        { return request.profileOrdinal }
-func (request ReviewRequest) Invocation() uint16            { return request.invocation }
-func (request ReviewRequest) Head() GitObjectID             { return request.head }
-func (request ReviewRequest) Tree() GitObjectID             { return request.tree }
-func (request ReviewRequest) IsolationRequirements() ReviewIsolationProof {
-	return request.isolationRequired
-}
-func (request ReviewRequest) Digest() Digest { return request.digest }
-
-func canonicalReviewRequest(request ReviewRequest) ([]byte, error) {
-	if request.workspaceID.IsZero() || request.generation.IsZero() || request.attemptID.IsZero() ||
-		request.mergeUnit.planID.IsZero() || request.mergeUnit.mergeUnitID.IsZero() || request.loopDigest.IsZero() ||
-		request.round == 0 || request.profile.id.IsZero() || request.profile.runner.IsZero() ||
-		!request.profile.reviewerPolicy.valid() || request.profileOrdinal == 0 || request.invocation == 0 ||
-		request.head.IsZero() || request.tree.IsZero() || request.head.Algorithm() != request.tree.Algorithm() ||
-		!request.isolationRequired.Strict() {
-		return nil, fmt.Errorf("review request requires exact loop, profile, Git, and isolation bindings")
-	}
-	type requestJSON struct {
-		SchemaVersion  int                  `json:"schema_version"`
-		WorkspaceID    string               `json:"workspace_id"`
-		Generation     string               `json:"generation"`
-		AttemptID      string               `json:"attempt_id"`
-		PlanID         string               `json:"plan_id"`
-		MergeUnitID    string               `json:"merge_unit_id"`
-		Loop           string               `json:"loop_digest"`
-		Round          uint16               `json:"round"`
-		Profile        string               `json:"profile"`
-		Runner         string               `json:"runner"`
-		ReviewerPolicy ReviewReviewerPolicy `json:"reviewer_policy"`
-		ProfileOrdinal uint16               `json:"profile_ordinal"`
-		Invocation     uint16               `json:"invocation"`
-		Head           string               `json:"head"`
-		Tree           string               `json:"tree"`
-		Isolation      string               `json:"isolation_requirements_digest"`
-	}
-	return json.Marshal(requestJSON{
-		SchemaVersion: 2, WorkspaceID: request.workspaceID.String(), Generation: request.generation.String(),
-		AttemptID: request.attemptID.String(), PlanID: request.mergeUnit.planID.String(),
-		MergeUnitID: request.mergeUnit.mergeUnitID.String(), Loop: request.loopDigest.String(), Round: request.round,
-		Profile: request.profile.id.String(), Runner: request.profile.runner.String(),
-		ReviewerPolicy: request.profile.reviewerPolicy, ProfileOrdinal: request.profileOrdinal,
-		Invocation: request.invocation, Head: request.head.String(), Tree: request.tree.String(),
-		Isolation: request.isolationRequired.digest.String(),
-	})
-}
-
-type VerifiedReviewResult struct {
-	request           ReviewRequest
-	submission        ReviewResultSubmission
-	reservationDigest Digest
-}
-
-func (result VerifiedReviewResult) Request() ReviewRequest { return result.request }
-func (result VerifiedReviewResult) Submission() ReviewResultSubmission {
-	return cloneReviewResult(result.submission)
-}
-func (result VerifiedReviewResult) ReservationDigest() Digest { return result.reservationDigest }
-
-type ReviewRoundState struct {
-	ordinal      uint16
-	head         GitObjectID
-	tree         GitObjectID
-	reservations []ReviewInvocationReservation
-	failures     []ReviewInvocationFailure
-	attempts     []VerifiedReviewResult
-	results      []VerifiedReviewResult
-}
-
-func (round ReviewRoundState) Ordinal() uint16   { return round.ordinal }
-func (round ReviewRoundState) Head() GitObjectID { return round.head }
-func (round ReviewRoundState) Tree() GitObjectID { return round.tree }
-func (round ReviewRoundState) Reservations() []ReviewInvocationReservation {
-	return cloneReviewInvocationReservations(round.reservations)
-}
-func (round ReviewRoundState) Failures() []ReviewInvocationFailure {
-	return cloneReviewInvocationFailures(round.failures)
-}
-func (round ReviewRoundState) Attempts() []VerifiedReviewResult {
-	return cloneVerifiedReviewResults(round.attempts)
-}
-func (round ReviewRoundState) Results() []VerifiedReviewResult {
-	return cloneVerifiedReviewResults(round.results)
-}
-func (round ReviewRoundState) Complete(required int) bool { return len(round.results) == required }
-func (round ReviewRoundState) Findings() []ReviewFinding {
-	var findings []ReviewFinding
-	for _, result := range round.results {
-		findings = append(findings, result.submission.findings...)
-	}
-	return append([]ReviewFinding(nil), findings...)
-}
-func (round ReviewRoundState) HasBlockingFindings() bool {
-	for _, finding := range round.Findings() {
-		if finding.Blocking() {
-			return true
+			return record, true
 		}
 	}
-	return false
+	return ReviewGateRecord{}, false
 }
 
-type ReviewExhaustionReason string
-
-const (
-	ReviewExhaustedRounds         ReviewExhaustionReason = "round_budget"
-	ReviewExhaustedInfrastructure ReviewExhaustionReason = "infrastructure_budget"
-)
-
-func (reason ReviewExhaustionReason) valid() bool {
-	return reason == ReviewExhaustedRounds || reason == ReviewExhaustedInfrastructure
-}
-
-func reviewRoundBudgetExhaustedError(maxRounds uint16) error {
-	return fmt.Errorf(
-		"review round budget exhausted: max_review_rounds=%d per attempt",
-		maxRounds,
-	)
-}
-
-func reviewInfrastructureRetryBudgetExhaustedError(maxRetries uint16) error {
-	return fmt.Errorf(
-		"review infrastructure retry budget exhausted: max_infrastructure_retries=%d per attempt",
-		maxRetries,
-	)
-}
-
-type ReviewState struct {
-	workspaceID ID
-	generation  Digest
-	attemptID   ID
-	mergeUnit   MergeUnitReference
-	loop        ReviewLoop
-	head        GitObjectID
-	tree        GitObjectID
-	rounds      []ReviewRoundState
-	exhaustion  *ReviewExhaustionReason
-}
-
-func (state ReviewState) WorkspaceID() ID               { return state.workspaceID }
-func (state ReviewState) Generation() Digest            { return state.generation }
-func (state ReviewState) AttemptID() ID                 { return state.attemptID }
-func (state ReviewState) MergeUnit() MergeUnitReference { return state.mergeUnit }
-func (state ReviewState) Loop() ReviewLoop              { return cloneReviewLoop(state.loop) }
-func (state ReviewState) Head() GitObjectID             { return state.head }
-func (state ReviewState) Tree() GitObjectID             { return state.tree }
-func (state ReviewState) Rounds() []ReviewRoundState    { return cloneReviewRounds(state.rounds) }
-func (state ReviewState) RoundsUsed() uint16            { return uint16(len(state.rounds)) }
-func (state ReviewState) InfrastructureRetriesUsed() uint16 {
-	var used uint16
-	for _, round := range state.rounds {
-		for _, reservation := range round.reservations {
-			// Invocation one is the substantive profile attempt. Every later
-			// reserved invocation is a retry, regardless of whether it eventually
-			// succeeds, reports a typed failure, or crashes in the runner.
-			if reservation.request.invocation > 1 {
-				used++
-			}
-		}
-	}
-	return used
-}
-func (state ReviewState) Exhaustion() (ReviewExhaustionReason, bool) {
-	if state.exhaustion == nil {
-		return ReviewExhaustionReason(""), false
-	}
-	return *state.exhaustion, true
-}
-func (state ReviewState) MergeReady() bool {
-	if state.exhaustion != nil || len(state.rounds) == 0 {
-		return false
-	}
-	round := state.rounds[len(state.rounds)-1]
-	return round.Complete(len(state.loop.profiles)) && round.head == state.head && round.tree == state.tree &&
-		!round.HasBlockingFindings()
-}
-
-func (state ReviewState) NextRequest() (ReviewRequest, bool, error) {
-	if state.exhaustion != nil || len(state.rounds) == 0 {
-		return ReviewRequest{}, false, nil
-	}
-	round := state.rounds[len(state.rounds)-1]
-	if pending, ok := pendingReviewInvocation(round); ok {
-		return pending.request, true, nil
-	}
-	if round.Complete(len(state.loop.profiles)) {
-		return ReviewRequest{}, false, nil
-	}
-	profileIndex := len(round.results)
-	profile := state.loop.profiles[profileIndex]
-	invocation := uint16(1)
-	for _, reservation := range round.reservations {
-		if reservation.request.profileOrdinal == uint16(profileIndex+1) {
-			invocation++
-		}
-	}
-	request, err := newReviewRequest(
-		state.workspaceID, state.generation, state.attemptID, state.mergeUnit, state.loop.digest,
-		round.ordinal, profile, uint16(profileIndex+1), invocation, round.head, round.tree,
-	)
-	return request, err == nil, err
-}
-
-type ReviewEvent interface{ isReviewEvent() }
-
-type StartReviewRound struct {
-	workspaceID ID
-	generation  Digest
-	attemptID   ID
-	mergeUnit   MergeUnitReference
-	loop        ReviewLoop
-	ordinal     uint16
-	head        GitObjectID
-	tree        GitObjectID
-}
-
-func NewStartReviewRound(
-	workspaceID ID, generation Digest, attemptID ID, mergeUnit MergeUnitReference,
-	loop ReviewLoop, ordinal uint16, head, tree GitObjectID,
-) (StartReviewRound, error) {
-	if workspaceID.IsZero() || generation.IsZero() || attemptID.IsZero() || mergeUnit.planID.IsZero() ||
-		mergeUnit.mergeUnitID.IsZero() || loop.digest.IsZero() || ordinal == 0 || head.IsZero() || tree.IsZero() ||
-		head.Algorithm() != tree.Algorithm() {
-		return StartReviewRound{}, fmt.Errorf("review round start requires workspace, attempt, loop, ordinal, head, and tree")
-	}
-	return StartReviewRound{
-		workspaceID: workspaceID, generation: generation, attemptID: attemptID, mergeUnit: mergeUnit,
-		loop: cloneReviewLoop(loop), ordinal: ordinal, head: head, tree: tree,
-	}, nil
-}
-func (StartReviewRound) isReviewEvent() {}
-
-type ReserveReviewInvocation struct {
-	reservation ReviewInvocationReservation
-}
-
-func NewReserveReviewInvocation(
-	request ReviewRequest,
-	reviewerInstance ID,
-	idempotencyKey Digest,
-) (ReserveReviewInvocation, error) {
-	reservation, err := NewReviewInvocationReservation(request, reviewerInstance, idempotencyKey)
-	if err != nil {
-		return ReserveReviewInvocation{}, err
-	}
-	return ReserveReviewInvocation{reservation: reservation}, nil
-}
-func (ReserveReviewInvocation) isReviewEvent() {}
-
-type RecordReviewInvocationFailure struct {
-	reservationDigest Digest
-	failureDigest     Digest
-}
-
-func NewRecordReviewInvocationFailure(
-	reservationDigest, failureDigest Digest,
-) (RecordReviewInvocationFailure, error) {
-	failure, err := NewReviewInvocationFailure(reservationDigest, failureDigest)
-	if err != nil {
-		return RecordReviewInvocationFailure{}, err
-	}
-	return RecordReviewInvocationFailure{
-		reservationDigest: failure.reservationDigest, failureDigest: failure.failureDigest,
-	}, nil
-}
-func (RecordReviewInvocationFailure) isReviewEvent() {}
-
-type RecordReviewResult struct {
-	round             uint16
-	profileOrdinal    uint16
-	invocation        uint16
-	reservationDigest Digest
-	result            ReviewResultSubmission
-}
-
-func NewRecordReviewResult(
-	round, profileOrdinal, invocation uint16,
-	reservationDigest Digest,
-	result ReviewResultSubmission,
-) (RecordReviewResult, error) {
-	canonical, err := canonicalReviewResult(result)
-	if round == 0 || profileOrdinal == 0 || invocation == 0 || err != nil ||
-		reservationDigest.IsZero() || result.digest != DigestBytes(canonical) {
-		return RecordReviewResult{}, fmt.Errorf(
-			"review result record requires canonical local result bindings",
-		)
-	}
-	return RecordReviewResult{
-		round: round, profileOrdinal: profileOrdinal, invocation: invocation, reservationDigest: reservationDigest,
-		result: cloneReviewResult(result),
-	}, nil
-}
-func (RecordReviewResult) isReviewEvent() {}
-
-func ReduceReview(current ReviewState, event ReviewEvent) (ReviewState, error) {
-	if event == nil {
-		return ReviewState{}, fmt.Errorf("review event is required")
-	}
-	next := cloneReviewState(current)
-	switch value := event.(type) {
-	case StartReviewRound:
-		if current.workspaceID.IsZero() {
-			if value.ordinal != 1 {
-				return ReviewState{}, fmt.Errorf("first review round must be ordinal 1")
-			}
-			next = ReviewState{
-				workspaceID: value.workspaceID, generation: value.generation, attemptID: value.attemptID,
-				mergeUnit: value.mergeUnit, loop: cloneReviewLoop(value.loop), head: value.head, tree: value.tree,
-			}
-		} else {
-			if current.exhaustion != nil {
-				return ReviewState{}, fmt.Errorf("review loop is exhausted")
-			}
-			if value.workspaceID != current.workspaceID || value.generation != current.generation ||
-				value.attemptID != current.attemptID || value.mergeUnit != current.mergeUnit ||
-				value.loop.digest != current.loop.digest {
-				return ReviewState{}, fmt.Errorf("review round cannot reset durable configuration or identity")
-			}
-			if len(current.rounds) == 0 || !current.rounds[len(current.rounds)-1].Complete(len(current.loop.profiles)) {
-				return ReviewState{}, fmt.Errorf("review round cannot start while the prior round is incomplete")
-			}
-			if value.ordinal != uint16(len(current.rounds)+1) ||
-				value.head == current.head && value.tree != current.tree {
-				return ReviewState{}, fmt.Errorf("review round does not match the next ordinal and exact current head/tree")
-			}
-			next.head, next.tree = value.head, value.tree
-		}
-		if value.ordinal > next.loop.maxRounds {
-			return ReviewState{}, reviewRoundBudgetExhaustedError(next.loop.maxRounds)
-		}
-		next.rounds = append(next.rounds, ReviewRoundState{ordinal: value.ordinal, head: value.head, tree: value.tree})
-	case ReserveReviewInvocation:
-		if current.workspaceID.IsZero() || current.exhaustion != nil || len(current.rounds) == 0 {
-			return ReviewState{}, fmt.Errorf("review invocation requires an active non-exhausted round")
-		}
-		round := &next.rounds[len(next.rounds)-1]
-		if pending, exists := pendingReviewInvocation(*round); exists {
-			if pending.digest == value.reservation.digest {
-				return next, nil
-			}
-			return ReviewState{}, fmt.Errorf("review request is already reserved by a different invocation")
-		}
-		request, ok, err := current.NextRequest()
-		if err != nil || !ok || request.digest != value.reservation.request.digest {
-			return ReviewState{}, fmt.Errorf("review invocation reservation does not match the ordered exact-head request")
-		}
-		canonical, err := canonicalReviewInvocationReservation(value.reservation)
-		if err != nil || value.reservation.digest != DigestBytes(canonical) {
-			return ReviewState{}, fmt.Errorf("review invocation reservation is not canonical")
-		}
-		for _, priorRound := range current.rounds {
-			for _, prior := range priorRound.reservations {
-				if prior.idempotencyKey == value.reservation.idempotencyKey {
-					return ReviewState{}, fmt.Errorf("review invocation idempotency key is already bound")
-				}
-			}
-		}
-		if err := validateReviewInstancePolicy(
-			request.profile,
-			value.reservation.reviewerInstance,
-			reviewReviewerInstanceUsesFromRounds(current.rounds),
-		); err != nil {
-			return ReviewState{}, err
-		}
-		round.reservations = append(round.reservations, value.reservation)
-	case RecordReviewInvocationFailure:
-		if current.workspaceID.IsZero() || current.exhaustion != nil || len(current.rounds) == 0 {
-			return ReviewState{}, fmt.Errorf("review invocation failure requires an active non-exhausted round")
-		}
-		round := &next.rounds[len(next.rounds)-1]
-		pending, exists := pendingReviewInvocation(*round)
-		if !exists || pending.digest != value.reservationDigest || value.failureDigest.IsZero() {
-			return ReviewState{}, fmt.Errorf("review invocation failure does not match the pending reservation")
-		}
-		round.failures = append(round.failures, ReviewInvocationFailure{
-			reservationDigest: value.reservationDigest, failureDigest: value.failureDigest,
-		})
-	case RecordReviewResult:
-		if current.workspaceID.IsZero() || current.exhaustion != nil || len(current.rounds) == 0 {
-			return ReviewState{}, fmt.Errorf("review result requires an active non-exhausted round")
-		}
-		round := &next.rounds[len(next.rounds)-1]
-		reservation, reserved := pendingReviewInvocation(*round)
-		if !reserved || reservation.digest != value.reservationDigest {
-			return ReviewState{}, fmt.Errorf("review result has no matching durable invocation reservation")
-		}
-		request := reservation.request
-		if value.round != request.round || value.profileOrdinal != request.profileOrdinal ||
-			value.invocation != request.invocation || value.result.requestDigest != request.digest ||
-			value.result.reviewerInstance != reservation.reviewerInstance || !value.result.isolation.Strict() {
-			return ReviewState{}, fmt.Errorf("review result does not match the ordered exact-head request and strict sandbox")
-		}
-		verified := VerifiedReviewResult{
-			request: request, submission: cloneReviewResult(value.result),
-			reservationDigest: value.reservationDigest,
-		}
-		round.attempts = append(round.attempts, verified)
-		if value.result.status == ReviewResultCompleted {
-			round.results = append(round.results, verified)
-		}
-	default:
-		return ReviewState{}, fmt.Errorf("unsupported review event %T", event)
-	}
-	next.exhaustion = deriveReviewExhaustion(next)
-	return next, nil
-}
-
-func pendingReviewInvocation(round ReviewRoundState) (ReviewInvocationReservation, bool) {
-	if len(round.reservations) == 0 {
-		return ReviewInvocationReservation{}, false
-	}
-	latest := round.reservations[len(round.reservations)-1]
-	for _, result := range round.attempts {
-		if result.reservationDigest == latest.digest {
-			return ReviewInvocationReservation{}, false
-		}
-	}
-	for _, failure := range round.failures {
-		if failure.reservationDigest == latest.digest {
-			return ReviewInvocationReservation{}, false
-		}
-	}
-	return latest, true
-}
-
-func latestReviewInvocationFailed(round ReviewRoundState) bool {
-	if len(round.reservations) == 0 {
-		return false
-	}
-	latest := round.reservations[len(round.reservations)-1]
-	for _, failure := range round.failures {
-		if failure.reservationDigest == latest.digest {
-			return true
-		}
-	}
-	for _, result := range round.attempts {
-		if result.reservationDigest == latest.digest {
-			return result.submission.status == ReviewResultInfrastructureFailure
-		}
-	}
-	return false
-}
-
-type reviewReviewerInstanceUse struct {
-	profileID ID
-	instance  ID
-}
-
-func reviewReviewerInstanceUsesFromRounds(rounds []ReviewRoundState) []reviewReviewerInstanceUse {
-	uses := make([]reviewReviewerInstanceUse, 0)
-	for _, round := range rounds {
-		for _, reservation := range round.reservations {
-			uses = append(uses, reviewReviewerInstanceUse{
-				profileID: reservation.request.profile.id, instance: reservation.reviewerInstance,
-			})
-		}
-	}
-	return uses
-}
-
-func validateReviewInstancePolicy(
-	profile ReviewProfile,
-	instance ID,
-	uses []reviewReviewerInstanceUse,
-) error {
-	prior := make([]ID, 0, len(uses))
-	for _, use := range uses {
-		if use.profileID == profile.id {
-			prior = append(prior, use.instance)
-		}
-	}
-	if len(prior) == 0 {
-		return nil
-	}
-	if profile.reviewerPolicy == ReviewReviewerRetain {
-		if prior[0] != instance {
-			return fmt.Errorf("review profile %s must retain reviewer instance %s", profile.id, prior[0])
-		}
-		return nil
-	}
-	for _, used := range prior {
-		if used == instance {
-			return fmt.Errorf("review profile %s requires a fresh reviewer instance", profile.id)
-		}
-	}
-	return nil
-}
-
-func deriveReviewExhaustion(state ReviewState) *ReviewExhaustionReason {
-	return deriveReviewExhaustionAtUsage(
-		state, state.RoundsUsed(), state.InfrastructureRetriesUsed(),
-	)
-}
-
-func deriveReviewExhaustionAtUsage(
-	state ReviewState, roundsUsed, infrastructureRetriesUsed uint16,
-) *ReviewExhaustionReason {
-	reason := ReviewExhaustionReason("")
-	latestInfrastructureFailure := false
-	if len(state.rounds) != 0 {
-		latestInfrastructureFailure = latestReviewInvocationFailed(state.rounds[len(state.rounds)-1])
-	}
-	if latestInfrastructureFailure && infrastructureRetriesUsed >= state.loop.maxInfrastructureRetries {
-		reason = ReviewExhaustedInfrastructure
-	} else if len(state.rounds) != 0 {
-		round := state.rounds[len(state.rounds)-1]
-		if round.Complete(len(state.loop.profiles)) && round.head == state.head && round.tree == state.tree &&
-			round.HasBlockingFindings() {
-			if roundsUsed >= state.loop.maxRounds {
-				reason = ReviewExhaustedRounds
-			}
-		}
-	}
-	if !reason.valid() {
-		return nil
-	}
-	return &reason
-}
-
-func cloneReviewResult(result ReviewResultSubmission) ReviewResultSubmission {
-	result.findings = append([]ReviewFinding(nil), result.findings...)
-	return result
-}
-
-func cloneVerifiedReviewResults(values []VerifiedReviewResult) []VerifiedReviewResult {
-	result := append([]VerifiedReviewResult(nil), values...)
-	for index := range result {
-		result[index].submission = cloneReviewResult(result[index].submission)
-	}
-	return result
-}
-
-func cloneReviewRounds(values []ReviewRoundState) []ReviewRoundState {
-	result := append([]ReviewRoundState(nil), values...)
-	for index := range result {
-		result[index].reservations = cloneReviewInvocationReservations(result[index].reservations)
-		result[index].failures = cloneReviewInvocationFailures(result[index].failures)
-		result[index].attempts = cloneVerifiedReviewResults(result[index].attempts)
-		result[index].results = cloneVerifiedReviewResults(result[index].results)
-	}
-	return result
-}
-
-func cloneReviewState(state ReviewState) ReviewState {
-	state.loop = cloneReviewLoop(state.loop)
-	state.rounds = cloneReviewRounds(state.rounds)
-	if state.exhaustion != nil {
-		reason := *state.exhaustion
-		state.exhaustion = &reason
-	}
+func cloneReviewGateState(state ReviewGateState) ReviewGateState {
+	state.dispatches = append([]ReviewGateDispatch(nil), state.dispatches...)
+	state.records = append([]ReviewGateRecord(nil), state.records...)
+	state.documentedDispatches = append([]Digest(nil), state.documentedDispatches...)
 	return state
 }
+
+func (state ReviewGateState) hasDocumentArtifact(dispatchDigest Digest) bool {
+	for _, documented := range state.documentedDispatches {
+		if documented == dispatchDigest {
+			return true
+		}
+	}
+	return false
+}
+
+func sortReviewGateStates(states []ReviewGateState) {
+	sort.Slice(states, func(i, j int) bool {
+		return states[i].attemptID.String() < states[j].attemptID.String()
+	})
+}
+
+// ReviewGateReadiness is the immutable evidence used by integration when the
+// configured gate is satisfied against the exact accepted head and tree.
+type ReviewGateReadiness struct {
+	workspaceID ID
+	generation  Digest
+	attemptID   ID
+	mergeUnit   MergeUnitReference
+	head        GitObjectID
+	tree        GitObjectID
+	dispatch    Digest
+	gateRecord  Digest
+	digest      Digest
+}
+
+func newReviewGateReadiness(
+	definition EffectiveWorkspaceDefinition,
+	attempt RuntimeAttemptProjection,
+	state ReviewGateState,
+	config ReviewGateConfig,
+	head, tree GitObjectID,
+) (ReviewGateReadiness, error) {
+	if attempt.attemptID.IsZero() || attempt.generation != definition.generation ||
+		attempt.verifiedHead != head || !config.bound() {
+		return ReviewGateReadiness{}, fmt.Errorf("review gate readiness requires an active configured exact attempt")
+	}
+	record, satisfied := state.Satisfied(config, head, tree)
+	if !satisfied {
+		return ReviewGateReadiness{}, fmt.Errorf("attempt %s has no satisfied review gate for the exact head and tree", attempt.attemptID)
+	}
+	if ReviewGateCarriesDocumentContract(record.adapter) && !state.hasDocumentArtifact(record.dispatchDigest) {
+		return ReviewGateReadiness{}, fmt.Errorf("attempt %s satisfied review gate lacks its required document artifact", attempt.attemptID)
+	}
+	readiness := ReviewGateReadiness{
+		workspaceID: definition.workspace.id, generation: definition.generation,
+		attemptID: attempt.attemptID, mergeUnit: attempt.mergeUnit, head: head, tree: tree,
+		dispatch: record.dispatchDigest, gateRecord: record.digest,
+	}
+	canonical, err := json.Marshal(struct {
+		SchemaVersion int    `json:"schema_version"`
+		WorkspaceID   string `json:"workspace_id"`
+		Generation    string `json:"generation"`
+		AttemptID     string `json:"attempt_id"`
+		PlanID        string `json:"plan_id"`
+		MergeUnitID   string `json:"merge_unit_id"`
+		Head          string `json:"head"`
+		Tree          string `json:"tree"`
+		Dispatch      string `json:"dispatch_digest"`
+		GateRecord    string `json:"gate_record_digest"`
+	}{
+		SchemaVersion: 2, WorkspaceID: readiness.workspaceID.String(), Generation: readiness.generation.String(),
+		AttemptID: readiness.attemptID.String(), PlanID: readiness.mergeUnit.planID.String(),
+		MergeUnitID: readiness.mergeUnit.mergeUnitID.String(), Head: readiness.head.String(), Tree: readiness.tree.String(),
+		Dispatch: readiness.dispatch.String(), GateRecord: readiness.gateRecord.String(),
+	})
+	if err != nil {
+		return ReviewGateReadiness{}, err
+	}
+	readiness.digest = DigestBytes(canonical)
+	return readiness, nil
+}
+
+func (readiness ReviewGateReadiness) WorkspaceID() ID               { return readiness.workspaceID }
+func (readiness ReviewGateReadiness) Generation() Digest            { return readiness.generation }
+func (readiness ReviewGateReadiness) AttemptID() ID                 { return readiness.attemptID }
+func (readiness ReviewGateReadiness) MergeUnit() MergeUnitReference { return readiness.mergeUnit }
+func (readiness ReviewGateReadiness) Head() GitObjectID             { return readiness.head }
+func (readiness ReviewGateReadiness) Tree() GitObjectID             { return readiness.tree }
+func (readiness ReviewGateReadiness) DispatchDigest() Digest        { return readiness.dispatch }
+func (readiness ReviewGateReadiness) GateRecordDigest() Digest      { return readiness.gateRecord }
+func (readiness ReviewGateReadiness) Digest() Digest                { return readiness.digest }

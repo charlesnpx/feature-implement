@@ -137,7 +137,7 @@ func validateWorkspaceSubaction(action, subaction string) error {
 		)
 	case "review":
 		supported = stringSet(
-			"start", "reserve", "request", "record", "record-document", "ready",
+			"dispatch", "record", "record-document", "ready",
 		)
 	case "integrate":
 		supported = stringSet("merge-unit")
@@ -179,9 +179,7 @@ func BundleExample() string {
 // remains authoritative and rejects unknown fields and trailing JSON.
 func RequestSchemas() map[string]any {
 	stringProperty := func() map[string]any { return map[string]any{"type": "string", "minLength": 1} }
-	optionalString := func() map[string]any { return map[string]any{"type": "string"} }
 	integerProperty := func(minimum int) map[string]any { return map[string]any{"type": "integer", "minimum": minimum} }
-	booleanProperty := func() map[string]any { return map[string]any{"type": "boolean"} }
 	enumProperty := func(values ...string) map[string]any { return map[string]any{"enum": values} }
 	request := func(required []string, properties map[string]any) map[string]any {
 		properties["schema_version"] = map[string]any{"const": requestSchemaVersion}
@@ -203,24 +201,6 @@ func RequestSchemas() map[string]any {
 		"properties": map[string]any{
 			"kind": stringProperty(), "digest": stringProperty(),
 			"items": map[string]any{"type": "array", "items": evidenceItem},
-		},
-	}
-	reviewFinding := map[string]any{
-		"type": "object", "additionalProperties": false,
-		"required": []string{"severity", "category", "path", "line", "summary", "evidence_digest"},
-		"properties": map[string]any{
-			"severity": enumProperty("critical", "high", "medium", "low"), "category": stringProperty(),
-			"path": map[string]any{"type": "string"}, "line": integerProperty(0),
-			"summary": stringProperty(), "evidence_digest": stringProperty(),
-		},
-	}
-	isolation := map[string]any{
-		"type": "object", "additionalProperties": false,
-		"required": []string{"repository_read_only", "scratch_ephemeral", "repository_hooks", "write_network", "external_write"},
-		"properties": map[string]any{
-			"repository_read_only": booleanProperty(), "scratch_ephemeral": booleanProperty(),
-			"repository_hooks": booleanProperty(), "write_network": booleanProperty(),
-			"external_write": booleanProperty(),
 		},
 	}
 	occurred := func(properties map[string]any) map[string]any {
@@ -246,48 +226,23 @@ func RequestSchemas() map[string]any {
 		})),
 		"attempt.resume":  request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
 		"attempt.abandon": request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
-		"review.start":    request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
-		"review.reserve": request([]string{"occurred_at", "attempt_id", "reviewer_instance", "idempotency_key"}, occurred(map[string]any{
-			"attempt_id": stringProperty(),
-			"reviewer_instance": map[string]any{
-				"type": "string", "minLength": 1,
-				"description": "Descriptive local reviewer label; not an authenticated identity.",
-			},
-			"idempotency_key": stringProperty(),
-		})),
-		"review.request": request([]string{
-			"attempt_id", "reservation_digest", "request_digest", "output_dir",
-		}, map[string]any{
-			"attempt_id": stringProperty(), "reservation_digest": stringProperty(),
-			"request_digest": stringProperty(), "output_dir": stringProperty(),
-		}),
+		"review.dispatch": request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
 		"review.record": request([]string{
-			"occurred_at", "attempt_id", "reservation_digest", "request_digest",
-			"reviewer_instance", "status", "findings", "isolation",
+			"occurred_at", "attempt_id", "dispatch_digest", "verdict", "evidence_digest",
 		}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "reservation_digest": stringProperty(), "request_digest": stringProperty(),
-			"reviewer_instance": map[string]any{
-				"type": "string", "minLength": 1,
-				"description": "Descriptive local reviewer label; not an authenticated identity.",
-			},
-			"status":                 enumProperty("completed", "infrastructure_failure"),
-			"findings":               map[string]any{"type": "array", "items": reviewFinding},
-			"infrastructure_failure": optionalString(), "isolation": isolation,
+			"attempt_id": stringProperty(), "dispatch_digest": stringProperty(),
+			"verdict":         enumProperty("satisfied", "not_satisfied", "failed_to_run"),
+			"evidence_digest": stringProperty(),
 		})),
 		"review.record-document": request([]string{
-			"occurred_at", "attempt_id", "reservation_digest", "request_digest",
-			"reviewer_instance", "document", "isolation",
+			"occurred_at", "attempt_id", "dispatch_digest", "verdict", "document",
 		}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "reservation_digest": stringProperty(), "request_digest": stringProperty(),
-			"reviewer_instance": map[string]any{
-				"type": "string", "minLength": 1,
-				"description": "Descriptive local reviewer label; not an authenticated identity.",
-			},
+			"attempt_id": stringProperty(), "dispatch_digest": stringProperty(),
+			"verdict": enumProperty("satisfied", "not_satisfied"),
 			"document": map[string]any{
 				"type":        "object",
 				"description": "Raw review-report-v1 document; the Witness contract performs strict decoding and validation.",
 			},
-			"isolation": isolation,
 		})),
 		"review.ready": request([]string{"attempt_id"}, map[string]any{"attempt_id": stringProperty()}),
 		"integrate.merge-unit": request([]string{"occurred_at", "attempt_id"}, occurred(map[string]any{

@@ -373,10 +373,6 @@ func journalEventTargetsAttempt(event WorkspaceJournalEvent, attemptID ID) bool 
 	switch event := event.(type) {
 	case ReviewHeadAdoptedJournalEvent:
 		return event.attemptID == attemptID
-	case ReviewInvocationReservedJournalEvent:
-		return event.attemptID == attemptID
-	case ReviewInvocationFailedJournalEvent:
-		return event.attemptID == attemptID
 	}
 	bound, ok := event.(interface{ AttemptID() ID })
 	return ok && bound.AttemptID() == attemptID

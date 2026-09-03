@@ -1,154 +1,147 @@
 package workspace
 
 import (
-	"encoding/json"
 	"fmt"
 	"sort"
+	"unicode/utf8"
 )
 
-const (
-	maxReviewProfiles              = 32
-	maxReviewInfrastructureRetries = ^uint16(0) - 1
-)
-
-type ReviewReviewerPolicy string
-
-const (
-	ReviewReviewerRetain              ReviewReviewerPolicy = "retain"
-	ReviewReviewerFreshEachInvocation ReviewReviewerPolicy = "fresh_each_invocation"
-)
-
-func (policy ReviewReviewerPolicy) valid() bool {
-	return policy == ReviewReviewerRetain || policy == ReviewReviewerFreshEachInvocation
+// ReviewGateConfig names an adapter and recipe and binds them to exactly one
+// policy source. The policy is opaque prose to this package; it is retained so
+// the adapter, rather than this tool, is the authority that interprets it.
+type ReviewGateConfig struct {
+	adapter      ID
+	recipe       ID
+	policyPath   string
+	policy       []byte
+	policyDigest Digest
 }
 
-type ReviewProfile struct {
-	id             ID
-	runner         ID
-	reviewerPolicy ReviewReviewerPolicy
-}
-
-func (profile ReviewProfile) ID() ID                               { return profile.id }
-func (profile ReviewProfile) Runner() ID                           { return profile.runner }
-func (profile ReviewProfile) ReviewerPolicy() ReviewReviewerPolicy { return profile.reviewerPolicy }
-
-type ReviewLoop struct {
-	profiles                 []ReviewProfile
-	maxRounds                uint16
-	maxInfrastructureRetries uint16
-	digest                   Digest
-}
-
-func (loop ReviewLoop) Profiles() []ReviewProfile {
-	return append([]ReviewProfile(nil), loop.profiles...)
-}
-func (loop ReviewLoop) MaxRounds() uint16                { return loop.maxRounds }
-func (loop ReviewLoop) MaxInfrastructureRetries() uint16 { return loop.maxInfrastructureRetries }
-func (loop ReviewLoop) Digest() Digest                   { return loop.digest }
-
-func normalizeReviewProfiles(wire []reviewProfileWire) ([]ReviewProfile, map[string]ReviewProfile, error) {
-	profiles := make([]ReviewProfile, 0, len(wire))
-	byID := make(map[string]ReviewProfile, len(wire))
-	for index, item := range wire {
-		id, err := NewID(item.ID)
-		if err != nil {
-			return nil, nil, fmt.Errorf("review_profiles[%d].id: %w", index, err)
-		}
-		runner, err := NewID(item.Runner)
-		if err != nil {
-			return nil, nil, fmt.Errorf("review profile %s runner: %w", id, err)
-		}
-		policy := ReviewReviewerPolicy(item.ReviewerPolicy)
-		if !policy.valid() {
-			return nil, nil, fmt.Errorf("review profile %s reviewer_policy %q is unsupported", id, item.ReviewerPolicy)
-		}
-		if _, exists := byID[id.String()]; exists {
-			return nil, nil, fmt.Errorf("duplicate review profile %s", id)
-		}
-		profile := ReviewProfile{id: id, runner: runner, reviewerPolicy: policy}
-		profiles = append(profiles, profile)
-		byID[id.String()] = profile
-	}
-	sort.Slice(profiles, func(i, j int) bool { return profiles[i].id.String() < profiles[j].id.String() })
-	return profiles, byID, nil
-}
-
-func normalizeReviewLoop(
-	wire *reviewLoopWire,
-	profiles map[string]ReviewProfile,
-	policy ExecutionPolicy,
-	location string,
-) (*ReviewLoop, error) {
+func newReviewGateConfig(wire *reviewGateWire, location string) (*ReviewGateConfig, error) {
 	if wire == nil {
 		return nil, nil
 	}
-	if len(wire.Profiles) == 0 || len(wire.Profiles) > maxReviewProfiles ||
-		wire.MaxInfrastructureRetries == nil || *wire.MaxInfrastructureRetries == 0 ||
-		*wire.MaxInfrastructureRetries > maxReviewInfrastructureRetries {
-		return nil, fmt.Errorf("%s requires ordered profiles and a positive infrastructure retry budget below 65535", location)
+	if wire.Adapter == nil || wire.Recipe == nil || wire.PolicyFile == nil {
+		return nil, fmt.Errorf("%s must name adapter, recipe, and policy_file together", location)
 	}
-	loop := ReviewLoop{
-		profiles:                 make([]ReviewProfile, 0, len(wire.Profiles)),
-		maxRounds:                policy.maxReviewRounds,
-		maxInfrastructureRetries: *wire.MaxInfrastructureRetries,
-	}
-	seen := make(map[string]struct{}, len(wire.Profiles))
-	for index, raw := range wire.Profiles {
-		id, err := NewID(raw)
-		if err != nil {
-			return nil, fmt.Errorf("%s profiles[%d]: %w", location, index, err)
-		}
-		profile, exists := profiles[id.String()]
-		if !exists {
-			return nil, fmt.Errorf("%s references unknown review profile %s", location, id)
-		}
-		if _, duplicate := seen[id.String()]; duplicate {
-			return nil, fmt.Errorf("%s duplicates review profile %s", location, id)
-		}
-		seen[id.String()] = struct{}{}
-		loop.profiles = append(loop.profiles, profile)
-	}
-	canonical, err := canonicalReviewLoopBytes(loop)
+	adapter, err := NewID(*wire.Adapter)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s adapter: %w", location, err)
 	}
-	loop.digest = DigestBytes(canonical)
-	return &loop, nil
+	recipe, err := NewID(*wire.Recipe)
+	if err != nil {
+		return nil, fmt.Errorf("%s recipe: %w", location, err)
+	}
+	policyPath, err := normalizeSourcePath(*wire.PolicyFile)
+	if err != nil {
+		return nil, fmt.Errorf("%s policy_file: %w", location, err)
+	}
+	return &ReviewGateConfig{adapter: adapter, recipe: recipe, policyPath: policyPath}, nil
 }
 
-func canonicalReviewLoopBytes(loop ReviewLoop) ([]byte, error) {
-	if len(loop.profiles) == 0 || loop.maxRounds == 0 ||
-		loop.maxInfrastructureRetries == 0 || loop.maxInfrastructureRetries > maxReviewInfrastructureRetries {
-		return nil, fmt.Errorf("review loop is incomplete")
+func (config ReviewGateConfig) Adapter() ID        { return config.adapter }
+func (config ReviewGateConfig) Recipe() ID         { return config.recipe }
+func (config ReviewGateConfig) PolicyPath() string { return config.policyPath }
+func (config ReviewGateConfig) PolicyDigest() Digest {
+	return config.policyDigest
+}
+func (config ReviewGateConfig) Policy() []byte {
+	return append([]byte(nil), config.policy...)
+}
+
+func (config ReviewGateConfig) complete() bool {
+	return !config.adapter.IsZero() && !config.recipe.IsZero() && config.policyPath != ""
+}
+
+func (config ReviewGateConfig) bound() bool {
+	return config.complete() && len(config.policy) != 0 && !config.policyDigest.IsZero()
+}
+
+func cloneReviewGateConfig(config ReviewGateConfig) ReviewGateConfig {
+	config.policy = append([]byte(nil), config.policy...)
+	return config
+}
+
+func bindReviewGateConfigPolicy(config ReviewGateConfig, policy SourceArtifact) (ReviewGateConfig, error) {
+	path, err := normalizeSourcePath(policy.Path)
+	if err != nil {
+		return ReviewGateConfig{}, fmt.Errorf("review gate policy source path: %w", err)
 	}
-	type profileJSON struct {
-		ID             string               `json:"id"`
-		Runner         string               `json:"runner"`
-		ReviewerPolicy ReviewReviewerPolicy `json:"reviewer_policy"`
+	if !config.complete() || path != config.policyPath {
+		return ReviewGateConfig{}, fmt.Errorf("review gate policy source does not match configured policy_file")
 	}
-	type loopJSON struct {
-		SchemaVersion            int           `json:"schema_version"`
-		Profiles                 []profileJSON `json:"profiles"`
-		MaxReviewRounds          uint16        `json:"max_review_rounds"`
-		MaxInfrastructureRetries uint16        `json:"max_infrastructure_retries"`
+	if len(policy.Bytes) == 0 || len(policy.Bytes) > MaxArtifactBytes || !utf8.Valid(policy.Bytes) {
+		return ReviewGateConfig{}, fmt.Errorf("review gate policy source must be non-empty valid UTF-8 within the artifact limit")
 	}
-	value := loopJSON{
-		SchemaVersion: 2, Profiles: make([]profileJSON, 0, len(loop.profiles)),
-		MaxReviewRounds:          loop.maxRounds,
-		MaxInfrastructureRetries: loop.maxInfrastructureRetries,
+	config.policy = append([]byte(nil), policy.Bytes...)
+	config.policyDigest = DigestBytes(config.policy)
+	return config, nil
+}
+
+func reviewGatePolicyPaths(config ExecutionConfig) []string {
+	paths := make(map[string]struct{})
+	if config.reviewGate != nil {
+		paths[config.reviewGate.policyPath] = struct{}{}
 	}
-	for _, profile := range loop.profiles {
-		if profile.id.IsZero() || profile.runner.IsZero() || !profile.reviewerPolicy.valid() {
-			return nil, fmt.Errorf("review loop contains an invalid profile")
+	for _, unit := range config.mergeUnits {
+		if unit.reviewGate != nil {
+			paths[unit.reviewGate.policyPath] = struct{}{}
 		}
-		value.Profiles = append(value.Profiles, profileJSON{
-			ID: profile.id.String(), Runner: profile.runner.String(), ReviewerPolicy: profile.reviewerPolicy,
-		})
 	}
-	return json.Marshal(value)
+	result := make([]string, 0, len(paths))
+	for path := range paths {
+		result = append(result, path)
+	}
+	sort.Strings(result)
+	return result
 }
 
-func cloneReviewLoop(loop ReviewLoop) ReviewLoop {
-	loop.profiles = append([]ReviewProfile(nil), loop.profiles...)
-	return loop
+func bindExecutionReviewGatePolicies(config ExecutionConfig, policies []SourceArtifact) (ExecutionConfig, error) {
+	required := reviewGatePolicyPaths(config)
+	if len(required) == 0 {
+		if len(policies) != 0 {
+			return ExecutionConfig{}, fmt.Errorf("review gate policy sources were supplied without a configured review gate")
+		}
+		return config, nil
+	}
+	sources := make(map[string]SourceArtifact, len(policies))
+	for index, policy := range policies {
+		path, err := normalizeSourcePath(policy.Path)
+		if err != nil {
+			return ExecutionConfig{}, fmt.Errorf("review gate policy source %d: %w", index, err)
+		}
+		if _, exists := sources[path]; exists {
+			return ExecutionConfig{}, fmt.Errorf("duplicate review gate policy source %s", path)
+		}
+		policy.Path = path
+		policy.Bytes = append([]byte(nil), policy.Bytes...)
+		sources[path] = policy
+	}
+	if len(sources) != len(required) {
+		return ExecutionConfig{}, fmt.Errorf("configured review gate policies and supplied policy sources do not match")
+	}
+	bind := func(gate *ReviewGateConfig) (*ReviewGateConfig, error) {
+		if gate == nil {
+			return nil, nil
+		}
+		source, exists := sources[gate.policyPath]
+		if !exists {
+			return nil, fmt.Errorf("configured review gate policy %s was not supplied", gate.policyPath)
+		}
+		bound, err := bindReviewGateConfigPolicy(*gate, source)
+		if err != nil {
+			return nil, err
+		}
+		return &bound, nil
+	}
+	var err error
+	if config.reviewGate, err = bind(config.reviewGate); err != nil {
+		return ExecutionConfig{}, err
+	}
+	for index := range config.mergeUnits {
+		if config.mergeUnits[index].reviewGate, err = bind(config.mergeUnits[index].reviewGate); err != nil {
+			return ExecutionConfig{}, err
+		}
+	}
+	return config, nil
 }

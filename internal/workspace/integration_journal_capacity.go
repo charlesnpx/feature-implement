@@ -74,7 +74,6 @@ func longestIntegrationNonterminalPhase() AttemptRuntimePhase {
 	for _, phase := range []AttemptRuntimePhase{
 		AttemptActive,
 		AttemptPaused,
-		AttemptReviewExhausted,
 	} {
 		if len(phase) > len(longest) {
 			longest = phase

@@ -66,32 +66,32 @@ source of truth.
 
 ## Review
 
-Run a broad read-only review loop for every merge unit.
+`feature-implement` records a review-gate fact; it neither conducts review nor
+interprets a policy.
 
-1. Treat each fresh broad audit as one review iteration and run at most three per attempt, not per head.
-   Use a fresh Claude subagent with the exact base-to-head diff, read-only
-   repository access, ephemeral scratch, disabled repository hooks, no
-   write-capable network, and no external-write permission.
-2. Apply evidence-backed Critical and High fixes and worthwhile Medium and Low
-   fixes once. Targeted confirmation stays within the same iteration.
-3. Start another broad audit only when the preceding audit reported a Critical
-   or High finding. Stop after a review with no Critical or High findings or
-   after the third iteration.
-4. For a configured review loop, submit `review start`, reserve the exact
-   invocation with `review reserve`, and submit the local result through
-   `review record`. Preserve exact finding details, evidence digests, the
-   descriptive reviewer label, request digest, head, tree, and isolation
-   fields.
-5. Apply accepted findings as ordinary local commits, rerun validation, and
-   start a new review round when the head changes; a prior review is valid only
-   for its exact head and tree. When a configured review is clean, submit
-   `review ready` for that exact head and tree.
-6. Without a configured review loop, apply accepted fixes with ordinary local
-   commits, rerun validation, then submit `attempt adopt-head` for the exact
+1. When a complete `review_gate` is configured, submit `review dispatch` after
+   the attempt is clean. This records intent before it materializes a separate
+   frozen copy at the exact head and tree.
+2. Give the named adapter only that frozen copy and its opaque policy text, not
+   the attempt worktree. A configured adapter may use a fresh Claude subagent
+   according to its own policy; this workflow does not prescribe an iteration
+   scheme.
+3. After the adapter creates durable evidence, submit `review record` with its
+   evidence digest. For a completed Witness run, use `review record-document`
+   with its strict `review-report-v1` document instead; for Witness
+   `failed_to_run`, use `review record` with the durable failure-evidence
+   digest. The raw document is retained as the gate evidence.
+4. Record exactly one terminal verdict: `satisfied`, `not_satisfied`, or
+   `failed_to_run`. A failure to run is not a negative verdict and does not
+   alter the attempt phase; use ordinary attempt lifecycle actions if the owner
+   chooses to retry.
+5. `review ready` only checks that a satisfied gate binds the exact current
+   head and tree. It never runs an adapter. A changed artifact needs a fresh
+   dispatch and terminal record.
+6. Without a configured review gate, submit `attempt adopt-head` for the exact
    clean accepted head and tree.
 
-Do not invent findings, reviewer identity claims, isolation state, or
-readiness.
+Do not invent adapter evidence, terminal verdicts, or readiness.
 
 ## Integrate, pause when needed, and complete
 
@@ -107,8 +107,9 @@ readiness.
    leaves the detached scratch directory intact for inspection.
 4. After any required pause is resolved and the attempt is active again, or
    immediately when no boundary is needed, submit `integrate merge-unit` only
-   for the exact accepted head and tree. Configured review requires matching
-   `review ready`; review-optional work requires matching `attempt adopt-head`.
+   for the exact accepted head and tree. A configured review gate must be
+   satisfied for that artifact; `review ready` can inspect the same binding,
+   while review-optional work requires matching `attempt adopt-head`.
 5. Integration creates a deterministic two-parent commit whose first parent is
    the expected feature head, second parent is the accepted attempt head, and
    tree is the accepted attempt tree. It compare-and-swap updates only the
