@@ -173,10 +173,8 @@ func (projection WorkspaceRuntimeProjection) PlanCheckpoint() Digest {
 func (projection WorkspaceRuntimeProjection) PlanCheckpointArtifactDigest() Digest {
 	return projection.planCheckpointArtifactDigest
 }
-func (projection WorkspaceRuntimeProjection) WorktreeRoot() WorkspaceWorktreeRootBinding {
-	// Scratch roots are derived from the runtime directory and intentionally
-	// have no durable journal binding.
-	return WorkspaceWorktreeRootBinding{}
+func (projection WorkspaceRuntimeProjection) WorktreeRoot() string {
+	return ""
 }
 func (projection WorkspaceRuntimeProjection) LocalTarget() (
 	RuntimeLocalTargetProjection,

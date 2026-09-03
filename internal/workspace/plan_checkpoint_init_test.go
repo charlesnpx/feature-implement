@@ -162,10 +162,9 @@ merge_units:
       max_attempts: 1
 `)
 	if _, err := workspacecmd.Execute(context.Background(), workspacecmd.Options{
-		Action:           "validate",
-		BundleDir:        root,
-		WriteLocks:       true,
-		GeneratorVersion: "test",
+		Action:     "validate",
+		BundleDir:  root,
+		WriteLocks: true,
 	}); err != nil {
 		t.Fatalf("write generated locks: %v", err)
 	}

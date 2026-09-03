@@ -48,17 +48,6 @@ type PlanCheckpointJournalBinding struct {
 	ArtifactDigest Digest
 }
 
-func NewWorkspaceInitializedJournalEvent(
-	workspaceID ID,
-	generation, definitionDigest Digest,
-	_ WorkspaceWorktreeRootBinding,
-	planCheckpoint ...PlanCheckpointJournalBinding,
-) (WorkspaceInitializedJournalEvent, error) {
-	return newWorkspaceInitializedJournalEvent(
-		workspaceID, generation, definitionDigest, LocalTargetBinding{}, planCheckpoint...,
-	)
-}
-
 // NewWorkspaceInitializedJournalEventWithTarget records the one admitted
 // local target binding with workspace initialization. The feature ref remains
 // absent until the first integration publishes its deterministic merge.
@@ -123,9 +112,6 @@ func (event WorkspaceInitializedJournalEvent) PlanCheckpoint() Digest {
 }
 func (event WorkspaceInitializedJournalEvent) PlanCheckpointArtifactDigest() Digest {
 	return event.planCheckpointArtifactDigest
-}
-func (event WorkspaceInitializedJournalEvent) WorktreeRoot() WorkspaceWorktreeRootBinding {
-	return WorkspaceWorktreeRootBinding{}
 }
 func (event WorkspaceInitializedJournalEvent) LocalTarget() LocalTargetBinding {
 	return event.localTarget

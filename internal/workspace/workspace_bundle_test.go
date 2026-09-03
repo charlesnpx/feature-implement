@@ -1,6 +1,7 @@
 package workspace_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -191,6 +192,126 @@ func TestWorkspaceBundleLockTornWriteRetainsPriorReadableLock(t *testing.T) {
 	after, err := workspace.ReadWorkspaceBundleLock(bundle)
 	if err != nil || string(after) != string(before) {
 		t.Fatalf("readable lock after simulated tear = %q, %v", after, err)
+	}
+}
+
+func TestWorkspaceBundleLockSerializesInterleavedWriters(t *testing.T) {
+	t.Parallel()
+
+	fixture := newDefinitionFixture(t)
+	root := writeDefinitionBundle(t, fixture, nil)
+	bundle, err := workspace.LoadWorkspaceBundle(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.WriteWorkspaceBundleLock(
+		bundle, workspace.WorkspaceLockWriteOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	runTargetGitTest(t, root, "init", "--quiet", "--initial-branch=main")
+	runTargetGitTest(t, root, "config", "user.name", "Workspace Lock Test")
+	runTargetGitTest(t, root, "config", "user.email", "workspace-lock@example.test")
+	runTargetGitTest(t, root, "add", ".")
+	runTargetGitTest(t, root, "commit", "--quiet", "-m", "Commit initial workspace lock")
+
+	planPath := filepath.Join(root, "plans", "alpha.yaml")
+	originalPlan, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		planPath, append(originalPlan, []byte("\n# writer one\n")...), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	firstBundle, err := workspace.LoadWorkspaceBundle(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	firstReady := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		_, writeErr := workspace.WriteWorkspaceBundleLock(
+			firstBundle,
+			workspace.WorkspaceLockWriteOptions{
+				FaultInjector: func(point workspace.WorkspaceLockWriteFaultPoint) error {
+					if point == workspace.WorkspaceLockFaultAfterTemporarySync {
+						close(firstReady)
+						<-releaseFirst
+					}
+					return nil
+				},
+			},
+		)
+		firstDone <- writeErr
+	}()
+	<-firstReady
+
+	if err := os.WriteFile(
+		planPath, append(originalPlan, []byte("\n# writer two\n")...), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	secondBundle, err := workspace.LoadWorkspaceBundle(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondContended := make(chan struct{})
+	secondReachedTemporarySync := make(chan struct{})
+	secondDone := make(chan error, 1)
+	go func() {
+		_, writeErr := workspace.WriteWorkspaceBundleLock(secondBundle, workspace.WorkspaceLockWriteOptions{
+			FaultInjector: func(point workspace.WorkspaceLockWriteFaultPoint) error {
+				switch point {
+				case workspace.WorkspaceLockFaultPublicationLockContended:
+					close(secondContended)
+				case workspace.WorkspaceLockFaultAfterTemporarySync:
+					close(secondReachedTemporarySync)
+					return errors.New("second writer reached temporary sync before first publication")
+				}
+				return nil
+			},
+		},
+		)
+		secondDone <- writeErr
+	}()
+	select {
+	case <-secondContended:
+	case <-secondReachedTemporarySync:
+		close(releaseFirst)
+		if err := <-firstDone; err != nil {
+			t.Fatalf("first writer after missed serialization = %v", err)
+		}
+		t.Fatal("second writer passed authority check before first publication")
+	case err := <-secondDone:
+		close(releaseFirst)
+		if firstErr := <-firstDone; firstErr != nil {
+			t.Fatalf("first writer after second writer error = %v", firstErr)
+		}
+		t.Fatalf("second writer ended before publication-lock contention: %v", err)
+	}
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first writer error = %v", err)
+	}
+	if err := <-secondDone; err == nil ||
+		!strings.Contains(err.Error(), "differs unexpectedly from its committed value") {
+		t.Fatalf("second writer error = %v", err)
+	}
+
+	stored, err := workspace.ReadWorkspaceBundleLock(firstBundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := workspace.WorkspaceBundleLockBytes(firstBundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(stored, want) {
+		t.Fatalf("interleaved writers retained %q, want first writer %q", stored, want)
 	}
 }
 

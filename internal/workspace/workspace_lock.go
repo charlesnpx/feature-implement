@@ -9,14 +9,20 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"syscall"
 )
 
 // MaxWorkspaceLockBytes bounds the one canonical, committed definition lock.
 const MaxWorkspaceLockBytes = MaxArtifactBytes
 
+const workspaceLockPublicationLockName = WorkspaceLockFileName + ".publication.lock"
+
 type WorkspaceLockWriteFaultPoint string
 
-const WorkspaceLockFaultAfterTemporarySync WorkspaceLockWriteFaultPoint = "after_temporary_sync"
+const (
+	WorkspaceLockFaultAfterTemporarySync       WorkspaceLockWriteFaultPoint = "after_temporary_sync"
+	WorkspaceLockFaultPublicationLockContended WorkspaceLockWriteFaultPoint = "publication_lock_contended"
+)
 
 type WorkspaceLockWriteOptions struct {
 	FaultInjector func(WorkspaceLockWriteFaultPoint) error
@@ -25,12 +31,10 @@ type WorkspaceLockWriteOptions struct {
 type WorkspaceLockWriteResult struct {
 	created bool
 	updated bool
-	digest  Digest
 }
 
-func (result WorkspaceLockWriteResult) Created() bool  { return result.created }
-func (result WorkspaceLockWriteResult) Updated() bool  { return result.updated }
-func (result WorkspaceLockWriteResult) Digest() Digest { return result.digest }
+func (result WorkspaceLockWriteResult) Created() bool { return result.created }
+func (result WorkspaceLockWriteResult) Updated() bool { return result.updated }
 
 // WorkspaceBundleLockBytes is the sole authoritative generated artifact for a
 // validated workspace bundle. It binds the normalized definition, including
@@ -56,7 +60,7 @@ func WorkspaceBundleLockBytes(bundle WorkspaceBundle) ([]byte, error) {
 func WriteWorkspaceBundleLock(
 	bundle WorkspaceBundle,
 	options WorkspaceLockWriteOptions,
-) (WorkspaceLockWriteResult, error) {
+) (result WorkspaceLockWriteResult, resultErr error) {
 	if err := bundle.VerifyRoot(); err != nil {
 		return WorkspaceLockWriteResult{}, err
 	}
@@ -69,13 +73,20 @@ func WriteWorkspaceBundleLock(
 		return WorkspaceLockWriteResult{}, fmt.Errorf("open workspace lock root: %w", err)
 	}
 	defer root.Close()
+	releasePublication, err := lockWorkspaceLockPublication(root, options.FaultInjector)
+	if err != nil {
+		return WorkspaceLockWriteResult{}, err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, releasePublication())
+	}()
 
 	existing, exists, err := readWorkspaceLock(root)
 	if err != nil {
 		return WorkspaceLockWriteResult{}, err
 	}
 	if exists && bytes.Equal(existing, desired) {
-		return WorkspaceLockWriteResult{digest: DigestBytes(desired)}, nil
+		return WorkspaceLockWriteResult{}, nil
 	}
 	if exists {
 		committed, err := committedWorkspaceLockBytes(context.Background(), bundle.root)
@@ -129,7 +140,60 @@ func WriteWorkspaceBundleLock(
 		return WorkspaceLockWriteResult{}, err
 	}
 	return WorkspaceLockWriteResult{
-		created: !exists, updated: exists, digest: DigestBytes(desired),
+		created: !exists, updated: exists,
+	}, nil
+}
+
+func lockWorkspaceLockPublication(
+	root *VerifiedRoot,
+	faultInjector func(WorkspaceLockWriteFaultPoint) error,
+) (func() error, error) {
+	file, _, err := root.openOwnedRegularFile(
+		workspaceLockPublicationLockName, os.O_RDWR, 0o600, true,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("open workspace lock publication lock: %w", err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			_ = file.Close()
+			return nil, fmt.Errorf("acquire workspace lock publication lock: %w", err)
+		}
+		if faultInjector != nil {
+			if faultErr := faultInjector(WorkspaceLockFaultPublicationLockContended); faultErr != nil {
+				_ = file.Close()
+				return nil, fmt.Errorf("workspace lock fault on publication-lock contention: %w", faultErr)
+			}
+		}
+		if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
+			_ = file.Close()
+			return nil, fmt.Errorf("acquire workspace lock publication lock: %w", err)
+		}
+	}
+	if err := root.verifyOwnedRegularFile(workspaceLockPublicationLockName, file); err != nil {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+		return nil, fmt.Errorf("verify workspace lock publication lock: %w", err)
+	}
+	return func() error {
+		verifyErr := root.verifyOwnedRegularFile(
+			workspaceLockPublicationLockName, file,
+		)
+		unlockErr := syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		closeErr := file.Close()
+		if verifyErr != nil {
+			verifyErr = fmt.Errorf(
+				"workspace lock publication lock was replaced before release: %w",
+				verifyErr,
+			)
+		}
+		if unlockErr != nil {
+			unlockErr = fmt.Errorf("unlock workspace lock publication lock: %w", unlockErr)
+		}
+		if closeErr != nil {
+			closeErr = fmt.Errorf("close workspace lock publication lock: %w", closeErr)
+		}
+		return errors.Join(verifyErr, unlockErr, closeErr)
 	}, nil
 }
 

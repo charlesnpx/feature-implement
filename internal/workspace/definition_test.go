@@ -169,23 +169,13 @@ func TestValidateDefinitionBuildsContentAddressedEffectiveInputs(t *testing.T) {
 	if workspaceLock.SchemaVersion() != 2 || workspaceLock.Generation() != definition.Generation() || len(workspaceLock.Artifacts()) != 3 {
 		t.Fatalf("workspace projection = %#v", workspaceLock)
 	}
-	planLocks := workspace.ProjectPlanLocks(definition)
-	if len(planLocks) != 1 || planLocks[0].PlanID().String() != "alpha-plan" || planLocks[0].Generation() != definition.Generation() {
-		t.Fatalf("plan projections = %#v", planLocks)
-	}
 	workspaceLockJSON, err := json.Marshal(workspaceLock)
 	if err != nil {
 		t.Fatal(err)
 	}
-	planLockJSON, err := json.Marshal(planLocks[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, encoded := range [][]byte{workspaceLockJSON, planLockJSON} {
-		text := string(encoded)
-		if !strings.Contains(text, definition.Generation().String()) || strings.Contains(text, "runtime") || strings.Contains(text, "status") || strings.Contains(text, "base_ref") || strings.Contains(text, "remote") {
-			t.Fatalf("projection JSON has mutable or misplaced state: %s", text)
-		}
+	text := string(workspaceLockJSON)
+	if !strings.Contains(text, definition.Generation().String()) || strings.Contains(text, "runtime") || strings.Contains(text, "status") || strings.Contains(text, "base_ref") || strings.Contains(text, "remote") {
+		t.Fatalf("projection JSON has mutable or misplaced state: %s", text)
 	}
 }
 
@@ -585,11 +575,10 @@ func TestDefinitionDefensivelyCopiesNestedInputsAndOutputs(t *testing.T) {
 	}
 }
 
-func TestV2PlanAndLockProjectionsCannotOwnRuntimeOrWorkspaceState(t *testing.T) {
+func TestV2PlanAndWorkspaceLockProjectionsCannotOwnRuntimeOrWorkspaceState(t *testing.T) {
 	t.Parallel()
 
 	assertTypeOmitsFields(t, reflect.TypeOf(workspace.Plan{}), "base", "remote", "policy", "runtime", "state", "status")
-	assertTypeOmitsFields(t, reflect.TypeOf(workspace.PlanLockProjection{}), "base", "remote", "policy", "runtime", "state", "status")
 	assertTypeOmitsFields(t, reflect.TypeOf(workspace.WorkspaceLockProjection{}), "runtime", "state", "status", "approval", "attempt")
 }
 

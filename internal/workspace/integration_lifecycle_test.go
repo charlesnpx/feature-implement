@@ -60,7 +60,7 @@ func (git *integrationGitStub) InspectIntegration(
 			if intent.ExpectedFeatureRefAbsent() {
 				state = workspace.IntegrationRefExpectedAbsent
 			} else {
-				state = workspace.IntegrationRefUnrelatedDrift
+				state = workspace.IntegrationRefUnexpectedDrift
 			}
 		} else {
 			switch git.featureHead {
@@ -69,7 +69,7 @@ func (git *integrationGitStub) InspectIntegration(
 			case intent.ExpectedMerge():
 				state = workspace.IntegrationRefExpectedMerge
 			default:
-				state = workspace.IntegrationRefUnrelatedDrift
+				state = workspace.IntegrationRefUnexpectedDrift
 			}
 		}
 	}
@@ -192,7 +192,7 @@ func (git *concurrentIntegrationGitStub) InspectIntegration(
 	present := git.featureRefPresent
 	objectExists := git.objects[intent.Digest().String()]
 	git.mu.Unlock()
-	state := workspace.IntegrationRefUnrelatedDrift
+	state := workspace.IntegrationRefUnexpectedDrift
 	if !present {
 		if intent.ExpectedFeatureRefAbsent() {
 			state = workspace.IntegrationRefExpectedAbsent

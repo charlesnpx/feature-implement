@@ -118,7 +118,7 @@ func InitializeWorkspaceV2WithOptions(
 	} else if !os.IsNotExist(statErr) {
 		return WorkspaceInitializationResult{}, fmt.Errorf("inspect derived runtime marker: %w", statErr)
 	}
-	targetInspection, err := inspectLocalTargetForInitializationAdmission(
+	targetBinding, err := inspectLocalTargetForInitializationAdmission(
 		ctx,
 		targetGit,
 		definition,
@@ -197,7 +197,7 @@ func InitializeWorkspaceV2WithOptions(
 			definition.workspace.id,
 			definition.generation,
 			stored.definitionDigest,
-			targetInspection.binding,
+			targetBinding,
 			eventCheckpoint...,
 		)
 		if err != nil {
@@ -310,16 +310,16 @@ func inspectLocalTargetForInitializationAdmission(
 	adapter LocalTargetGitAdapter,
 	definition EffectiveWorkspaceDefinition,
 	snapshot JournalSnapshot,
-) (LocalTargetInspection, error) {
+) (LocalTargetBinding, error) {
 	if len(snapshot.records) == 0 {
 		return adapter.inspectUncreatedTarget(ctx, definition.workspace.target)
 	}
 	runtime, err := RebuildWorkspaceRuntime(snapshot)
 	if err != nil {
-		return LocalTargetInspection{}, err
+		return LocalTargetBinding{}, err
 	}
 	if runtime.workspaceID != definition.workspace.id {
-		return LocalTargetInspection{}, fmt.Errorf(
+		return LocalTargetBinding{}, fmt.Errorf(
 			"workspace journal does not match local target admission workspace %s",
 			definition.workspace.id,
 		)
@@ -332,7 +332,7 @@ func inspectLocalTargetForInitializationAdmission(
 		target.binding.baseRef != definition.workspace.target.baseRef ||
 		target.binding.baseCommit != definition.workspace.target.baseCommit ||
 		target.binding.featureBranch != definition.workspace.target.featureBranch {
-		return LocalTargetInspection{}, fmt.Errorf(
+		return LocalTargetBinding{}, fmt.Errorf(
 			"durable local target binding does not match the active workspace definition",
 		)
 	}
@@ -341,6 +341,39 @@ func inspectLocalTargetForInitializationAdmission(
 	}
 	return adapter.verifyOwnedFeatureRefAt(
 		ctx, target.binding, target.createdHead,
+	)
+}
+
+// ValidateLocalTargetForWorkspaceRuntime selects the established admission
+// path from the durable runtime when one exists. Before runtime initialization,
+// it retains initial target admission.
+func ValidateLocalTargetForWorkspaceRuntime(
+	ctx context.Context,
+	workspaceDir string,
+	definition EffectiveWorkspaceDefinition,
+) (LocalTargetBinding, error) {
+	if ctx == nil {
+		return LocalTargetBinding{}, fmt.Errorf(
+			"local target validation requires context",
+		)
+	}
+	workspaceDir, err := absoluteWorkspaceRuntimeDirectory(workspaceDir)
+	if err != nil {
+		return LocalTargetBinding{}, err
+	}
+	if _, err := os.Lstat(filepath.Join(workspaceDir, RuntimeFormatFileName)); os.IsNotExist(err) {
+		return ValidateLocalTarget(ctx, definition.workspace)
+	} else if err != nil {
+		return LocalTargetBinding{}, fmt.Errorf(
+			"inspect derived runtime marker: %w", err,
+		)
+	}
+	snapshot, err := ReadWorkspaceJournalSnapshot(workspaceDir)
+	if err != nil {
+		return LocalTargetBinding{}, err
+	}
+	return inspectLocalTargetForInitializationAdmission(
+		ctx, DefaultLocalTargetGitAdapter(), definition, snapshot,
 	)
 }
 

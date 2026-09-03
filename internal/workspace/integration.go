@@ -451,16 +451,13 @@ const (
 	IntegrationRefExpectedAbsent  IntegrationRefState = "expected_absent"
 	IntegrationRefExpectedHead    IntegrationRefState = "expected_head"
 	IntegrationRefExpectedMerge   IntegrationRefState = "expected_merge"
-	IntegrationRefAncestorDrift   IntegrationRefState = "ancestor_drift"
-	IntegrationRefDescendantDrift IntegrationRefState = "descendant_drift"
-	IntegrationRefUnrelatedDrift  IntegrationRefState = "unrelated_drift"
+	IntegrationRefUnexpectedDrift IntegrationRefState = "unexpected_drift"
 )
 
 func (state IntegrationRefState) valid() bool {
 	switch state {
 	case IntegrationRefExpectedAbsent, IntegrationRefExpectedHead, IntegrationRefExpectedMerge,
-		IntegrationRefAncestorDrift, IntegrationRefDescendantDrift,
-		IntegrationRefUnrelatedDrift:
+		IntegrationRefUnexpectedDrift:
 		return true
 	default:
 		return false

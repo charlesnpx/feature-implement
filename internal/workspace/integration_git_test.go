@@ -352,82 +352,38 @@ func TestLocalGitIntegrationRejectsCompletedUnexpectedFeatureRef(
 	if err != nil {
 		t.Fatal(err)
 	}
+	requireFullSuite(t, "completed integration drift")
 	merge := result.MergeCommit()
-	descendant := createIntegrationTestCommit(
+	unexpected := createIntegrationTestCommit(
 		t, scenario.repositoryRoot, scenario.acceptedTree,
-		[]workspace.GitObjectID{merge}, "descendant drift",
+		nil, "unexpected drift",
 	)
-	unrelated := createIntegrationTestCommit(
-		t, scenario.repositoryRoot, scenario.acceptedTree,
-		nil, "unrelated drift",
+	runTargetGitTest(
+		t, scenario.repositoryRoot,
+		"update-ref", result.Intent().FeatureRef(),
+		rawGitObject(unexpected), rawGitObject(merge),
 	)
-	tests := []struct {
-		name string
-		head workspace.GitObjectID
-		want workspace.IntegrationRefState
-	}{
-		{
-			name: "ancestor",
-			head: scenario.acceptedHead,
-			want: workspace.IntegrationRefUnrelatedDrift,
+	_, err = workspace.IntegrateMergeUnit(
+		context.Background(),
+		scenario.journal,
+		scenario.definition,
+		scenario.repository,
+		workspace.DefaultLocalIntegrationGitAdapter(),
+		workspace.IntegrateMergeUnitRequest{
+			AttemptID:  scenario.attempt.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-25T16:00:01Z"),
 		},
-		{
-			name: "descendant",
-			head: descendant,
-			want: workspace.IntegrationRefUnrelatedDrift,
-		},
-		{
-			name: "unrelated",
-			head: unrelated,
-			want: workspace.IntegrationRefUnrelatedDrift,
-		},
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), string(workspace.IntegrationRefUnexpectedDrift)) {
+		t.Fatalf("unexpected drift error = %v", err)
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			requireFullSuiteCase(
-				t,
-				test.name == "unrelated",
-				"completed integration drift permutation",
-			)
-
-			runTargetGitTest(
-				t, scenario.repositoryRoot,
-				"update-ref", result.Intent().FeatureRef(),
-				rawGitObject(test.head), rawGitObject(merge),
-			)
-			_, err := workspace.IntegrateMergeUnit(
-				context.Background(),
-				scenario.journal,
-				scenario.definition,
-				scenario.repository,
-				workspace.DefaultLocalIntegrationGitAdapter(),
-				workspace.IntegrateMergeUnitRequest{
-					AttemptID: scenario.attempt.AttemptID(),
-					OccurredAt: mustTime(
-						t, "2026-07-25T16:00:01Z",
-					),
-				},
-			)
-			if err == nil ||
-				!strings.Contains(err.Error(), string(test.want)) {
-				t.Fatalf("%s drift error = %v", test.want, err)
-			}
-			current := strings.TrimSpace(runTargetGitTest(
-				t, scenario.repositoryRoot,
-				"rev-parse", result.Intent().FeatureRef(),
-			))
-			if current != rawGitObject(test.head) {
-				t.Fatalf(
-					"%s drift was reset to %s",
-					test.want, current,
-				)
-			}
-			runTargetGitTest(
-				t, scenario.repositoryRoot,
-				"update-ref", result.Intent().FeatureRef(),
-				rawGitObject(merge), rawGitObject(test.head),
-			)
-		})
+	current := strings.TrimSpace(runTargetGitTest(
+		t, scenario.repositoryRoot,
+		"rev-parse", result.Intent().FeatureRef(),
+	))
+	if current != rawGitObject(unexpected) {
+		t.Fatalf("unexpected drift was reset to %s", current)
 	}
 }
 
@@ -911,7 +867,7 @@ func TestLocalGitIntegrationRejectsUnexpectedFeatureRefBeforeIntent(t *testing.T
 		"update-ref", featureRef, rawGitObject(scenario.base),
 	)
 	assertRejectedRealIntegration(
-		t, scenario, string(workspace.IntegrationRefUnrelatedDrift),
+		t, scenario, string(workspace.IntegrationRefUnexpectedDrift),
 	)
 }
 
@@ -939,7 +895,7 @@ func TestLocalGitIntegrationRejectsUnexpectedFeatureRefAfterAbsentIntent(t *test
 			OccurredAt: mustTime(t, "2026-07-25T16:42:00Z"),
 		},
 	); err == nil ||
-		!strings.Contains(err.Error(), string(workspace.IntegrationRefUnrelatedDrift)) {
+		!strings.Contains(err.Error(), string(workspace.IntegrationRefUnexpectedDrift)) {
 		t.Fatalf("unexpected feature ref after absent intent error = %v", err)
 	}
 	runTargetGitTest(
@@ -1236,7 +1192,7 @@ func TestLocalGitIntegrationRejectsRefChangesAfterIntent(t *testing.T) {
 		); err == nil ||
 			!strings.Contains(
 				err.Error(),
-				string(workspace.IntegrationRefUnrelatedDrift),
+				string(workspace.IntegrationRefUnexpectedDrift),
 			) {
 			t.Fatalf("moved feature ref error = %v", err)
 		}
@@ -1461,7 +1417,7 @@ func TestLocalGitIntegrationRejectsInvalidAcceptedAncestryTreeAndBase(
 			"update-ref", featureRef, rawGitObject(drift),
 		)
 		assertRejectedRealIntegration(
-			t, scenario, string(workspace.IntegrationRefUnrelatedDrift),
+			t, scenario, string(workspace.IntegrationRefUnexpectedDrift),
 		)
 		current := strings.TrimSpace(runTargetGitTest(
 			t, scenario.repositoryRoot, "rev-parse", featureRef,

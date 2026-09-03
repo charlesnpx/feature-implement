@@ -12,7 +12,6 @@ import (
 )
 
 const (
-	PlanCheckpointGeneratorVersion = "feature-plan-checkpoint/v2"
 	PlanCheckpointArtifactFileName = "plan-checkpoint.v5.json"
 	maxPlanGitOutputBytes          = 8 * 1024 * 1024
 )
@@ -316,7 +315,14 @@ func requireCleanPlanRepository(ctx context.Context, root string) error {
 	if err != nil {
 		return fmt.Errorf("inspect plan repository status: %w", err)
 	}
-	if len(bytes.TrimSpace(status)) != 0 {
+	// The persistent flock inode is operational synchronization state, not a
+	// plan source or generated lock artifact.
+	for _, line := range bytes.Split(status, []byte("\n")) {
+		if len(line) == 0 || bytes.Equal(
+			line, []byte("?? "+workspaceLockPublicationLockName),
+		) {
+			continue
+		}
 		return fmt.Errorf("plan repository must be clean before workspace initialization")
 	}
 	return nil

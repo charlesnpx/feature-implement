@@ -362,17 +362,23 @@ merge_units:
       max_attempts: 2
 `)
 	if _, err := Execute(context.Background(), Options{
-		Action:           "validate",
-		BundleDir:        bundleRoot,
-		WriteLocks:       true,
-		GeneratorVersion: "test",
+		Action:     "validate",
+		BundleDir:  bundleRoot,
+		WriteLocks: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	runGitTest(t, bundleRoot, "init", "-b", "main")
 	runGitTest(t, bundleRoot, "config", "user.name", "Feature Test")
 	runGitTest(t, bundleRoot, "config", "user.email", "feature@example.test")
-	runGitTest(t, bundleRoot, "add", ".")
+	runGitTest(
+		t, bundleRoot, "add",
+		workspace.WorkspaceBundleFileName,
+		"feature.workspace.yaml",
+		"plans/alpha.yaml",
+		"config/execution.yaml",
+		workspace.WorkspaceLockFileName,
+	)
 	runGitTest(t, bundleRoot, "commit", "-m", "Committed plan locks")
 	bundle, err := workspace.LoadWorkspaceBundle(bundleRoot)
 	if err != nil {
@@ -489,6 +495,36 @@ merge_units:
 			first.Report.Integration,
 		)
 	}
+	t.Run("workspace validate uses durable integration head", func(t *testing.T) {
+		if _, err := Execute(context.Background(), Options{
+			Action:       "validate",
+			BundleDir:    bundleRoot,
+			WorkspaceDir: workspaceDir,
+			WriteLocks:   true,
+		}); err != nil {
+			t.Fatalf("validate integrated workspace: %v", err)
+		}
+		featureRef := bundle.Definition().Workspace().FeatureRef()
+		runGitTest(
+			t, repositoryRoot,
+			"update-ref", featureRef,
+			strings.TrimPrefix(base.String(), "sha1:"),
+		)
+		if _, err := Execute(context.Background(), Options{
+			Action:       "validate",
+			BundleDir:    bundleRoot,
+			WorkspaceDir: workspaceDir,
+			WriteLocks:   true,
+		}); err == nil || !strings.Contains(err.Error(), featureRef) ||
+			!strings.Contains(err.Error(), "expected recorded head") {
+			t.Fatalf("validate drifted integrated workspace error = %v", err)
+		}
+		runGitTest(
+			t, repositoryRoot,
+			"update-ref", featureRef,
+			strings.TrimPrefix(first.Report.Target.FeatureHead, "sha1:"),
+		)
+	})
 	journal, err = workspace.OpenWorkspaceJournal(
 		workspaceDir, workspace.JournalReadOnly,
 	)

@@ -260,7 +260,7 @@ func workspaceCommand(args []string) error {
 	}
 	result, err := workspacecmd.Execute(context.Background(), workspacecmd.Options{
 		Action: action, Subaction: subaction, BundleDir: *bundle,
-		Input: input, WriteLocks: *writeLocks, GeneratorVersion: Version,
+		Input: input, WriteLocks: *writeLocks,
 	})
 	if err != nil {
 		return err

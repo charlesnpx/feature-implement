@@ -215,10 +215,9 @@ merge_units:
 	}
 	write("config/execution.yaml", executionConfig)
 	if _, err := Execute(context.Background(), Options{
-		Action:           "validate",
-		BundleDir:        bundleRoot,
-		WriteLocks:       true,
-		GeneratorVersion: "test",
+		Action:     "validate",
+		BundleDir:  bundleRoot,
+		WriteLocks: true,
 	}); err != nil {
 		t.Fatal(err)
 	}

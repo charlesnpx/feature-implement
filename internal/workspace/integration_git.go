@@ -375,7 +375,7 @@ func (adapter LocalIntegrationGitAdapter) VerifyCompletedIntegration(
 		return err
 	}
 	refState, err := classifyIntegrationRefState(
-		ctx, session, featureHead, frontier, frontierCommit,
+		featureHead, frontier, frontierCommit,
 	)
 	if err != nil {
 		return err
@@ -647,7 +647,7 @@ func inspectIntegrationSession(
 		)
 	}
 	refState, err := classifyIntegrationRefState(
-		ctx, session, featureHead, intent, expectedCommit,
+		featureHead, intent, expectedCommit,
 	)
 	if err != nil {
 		return IntegrationGitInspection{}, err
@@ -856,8 +856,6 @@ func integrationIsAncestor(
 }
 
 func classifyIntegrationRefState(
-	ctx context.Context,
-	session *localTargetGitSession,
 	current GitObjectID,
 	intent MergeUnitIntegrationIntent,
 	expectedCommit bool,
@@ -874,7 +872,7 @@ func classifyIntegrationRefState(
 		// An intent that bound an absent ref cannot safely adopt any observed
 		// ref, including one pointing at the pinned base: another actor may have
 		// created it after the intent was journaled.
-		return IntegrationRefUnrelatedDrift, nil
+		return IntegrationRefUnexpectedDrift, nil
 	}
 	switch current {
 	case intent.expectedFeatureHead:
@@ -887,54 +885,7 @@ func classifyIntegrationRefState(
 		}
 		return IntegrationRefExpectedMerge, nil
 	}
-	if expectedCommit {
-		ancestor, err := integrationIsAncestor(
-			ctx, session, current, intent.expectedMerge,
-		)
-		if err != nil {
-			return "", err
-		}
-		if ancestor {
-			return IntegrationRefAncestorDrift, nil
-		}
-		descendant, err := integrationIsAncestor(
-			ctx, session, intent.expectedMerge, current,
-		)
-		if err != nil {
-			return "", err
-		}
-		if descendant {
-			return IntegrationRefDescendantDrift, nil
-		}
-		return IntegrationRefUnrelatedDrift, nil
-	}
-	for _, parent := range []GitObjectID{
-		intent.expectedFeatureHead, intent.acceptedHead,
-	} {
-		ancestor, err := integrationIsAncestor(
-			ctx, session, current, parent,
-		)
-		if err != nil {
-			return "", err
-		}
-		if ancestor {
-			return IntegrationRefAncestorDrift, nil
-		}
-	}
-	for _, parent := range []GitObjectID{
-		intent.expectedFeatureHead, intent.acceptedHead,
-	} {
-		descendant, err := integrationIsAncestor(
-			ctx, session, parent, current,
-		)
-		if err != nil {
-			return "", err
-		}
-		if descendant {
-			return IntegrationRefDescendantDrift, nil
-		}
-	}
-	return IntegrationRefUnrelatedDrift, nil
+	return IntegrationRefUnexpectedDrift, nil
 }
 
 func integrationDriftError(

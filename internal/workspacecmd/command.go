@@ -17,13 +17,12 @@ const requestSchemaVersion = 2
 const MaxCommandInputBytes = workspace.MaxArtifactBytes
 
 type Options struct {
-	Action           string
-	Subaction        string
-	BundleDir        string
-	WorkspaceDir     string
-	Input            []byte
-	WriteLocks       bool
-	GeneratorVersion string
+	Action       string
+	Subaction    string
+	BundleDir    string
+	WorkspaceDir string
+	Input        []byte
+	WriteLocks   bool
 }
 
 type ValidationResult struct {
@@ -36,7 +35,6 @@ type ValidationResult struct {
 	LockPath         string   `json:"lock_path,omitempty"`
 	Created          []string `json:"created,omitempty"`
 	Updated          []string `json:"updated,omitempty"`
-	Deleted          []string `json:"deleted,omitempty"`
 }
 
 type InitializationResult struct {
@@ -100,9 +98,6 @@ func Execute(ctx context.Context, options Options) (any, error) {
 			return nil, directoryErr
 		}
 		options.WorkspaceDir = workspaceDir
-	}
-	if options.GeneratorVersion == "" {
-		options.GeneratorVersion = "dev"
 	}
 	switch action {
 	case "validate":
@@ -268,9 +263,17 @@ func validateBundle(
 	if err := bundle.VerifyRoot(); err != nil {
 		return ValidationResult{}, err
 	}
-	if _, err := workspace.ValidateLocalTarget(
-		ctx, bundle.Definition().Workspace(),
-	); err != nil {
+	workspaceDir, err := resolvedWorkspaceDirectory(bundle, options.WorkspaceDir)
+	if err != nil {
+		return ValidationResult{}, err
+	}
+	validateTarget := func() error {
+		_, err := workspace.ValidateLocalTargetForWorkspaceRuntime(
+			ctx, workspaceDir, bundle.Definition(),
+		)
+		return err
+	}
+	if err := validateTarget(); err != nil {
 		return ValidationResult{}, fmt.Errorf(
 			"validate local target: %w", err,
 		)
@@ -278,15 +281,13 @@ func validateBundle(
 	result := ValidationResult{
 		SchemaVersion: requestSchemaVersion, Status: "valid", BundleRoot: bundle.Root(),
 		WorkspaceID: bundle.Definition().Workspace().ID().String(), Generation: bundle.Definition().Generation().String(),
-		DescriptorDigest: bundle.DescriptorDigest().String(), Created: []string{}, Updated: []string{}, Deleted: []string{},
+		DescriptorDigest: bundle.DescriptorDigest().String(), Created: []string{}, Updated: []string{},
 	}
 	if !options.WriteLocks {
 		if err := bundle.VerifyRoot(); err != nil {
 			return ValidationResult{}, err
 		}
-		if _, err := workspace.ValidateLocalTarget(
-			ctx, bundle.Definition().Workspace(),
-		); err != nil {
+		if err := validateTarget(); err != nil {
 			return ValidationResult{}, fmt.Errorf(
 				"revalidate local target: %w", err,
 			)
@@ -309,9 +310,7 @@ func validateBundle(
 	if err := bundle.VerifyRoot(); err != nil {
 		return ValidationResult{}, err
 	}
-	if _, err := workspace.ValidateLocalTarget(
-		ctx, bundle.Definition().Workspace(),
-	); err != nil {
+	if err := validateTarget(); err != nil {
 		return ValidationResult{}, fmt.Errorf(
 			"revalidate local target: %w", err,
 		)

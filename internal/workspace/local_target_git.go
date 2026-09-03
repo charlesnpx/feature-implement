@@ -9,29 +9,6 @@ import (
 	"strings"
 )
 
-// LocalTargetInspection is the short-lived admission result for a primary
-// local repository. It records only state needed by initialization and
-// integration; Git administration storage is deliberately not an authority.
-type LocalTargetInspection struct {
-	binding          LocalTargetBinding
-	baseHead         GitObjectID
-	featureRefExists bool
-	featureHead      GitObjectID
-}
-
-func (inspection LocalTargetInspection) Binding() LocalTargetBinding {
-	return inspection.binding
-}
-func (inspection LocalTargetInspection) BaseHead() GitObjectID {
-	return inspection.baseHead
-}
-func (inspection LocalTargetInspection) FeatureRefExists() bool {
-	return inspection.featureRefExists
-}
-func (inspection LocalTargetInspection) FeatureHead() GitObjectID {
-	return inspection.featureHead
-}
-
 type localTargetInspectionOptions struct {
 	requireBaseAtPin    bool
 	allowFeatureRef     bool
@@ -73,51 +50,47 @@ func ValidateLocalTarget(
 			"local target validation requires a local workspace manifest",
 		)
 	}
-	inspection, err := DefaultLocalTargetGitAdapter().inspect(
+	return DefaultLocalTargetGitAdapter().inspect(
 		ctx, manifest.target,
 		localTargetInspectionOptions{requireBaseAtPin: true},
 	)
-	if err != nil {
-		return LocalTargetBinding{}, err
-	}
-	return inspection.binding, nil
 }
 
 func (adapter LocalTargetGitAdapter) inspect(
 	ctx context.Context,
 	target LocalTarget,
 	options localTargetInspectionOptions,
-) (LocalTargetInspection, error) {
+) (LocalTargetBinding, error) {
 	if ctx == nil {
-		return LocalTargetInspection{}, fmt.Errorf("local target inspection requires context")
+		return LocalTargetBinding{}, fmt.Errorf("local target inspection requires context")
 	}
 	if target.IsZero() {
-		return LocalTargetInspection{}, fmt.Errorf(
+		return LocalTargetBinding{}, fmt.Errorf(
 			"local target inspection requires complete target authority",
 		)
 	}
 	root, err := requireCanonicalObservedTargetPath("target worktree", target.root)
 	if err != nil {
-		return LocalTargetInspection{}, err
+		return LocalTargetBinding{}, err
 	}
 	if err := adapter.rejectBare(ctx, root); err != nil {
-		return LocalTargetInspection{}, err
+		return LocalTargetBinding{}, err
 	}
 	topLevel, err := adapter.runText(
 		ctx, root,
 		"rev-parse", "--path-format=absolute", "--show-toplevel",
 	)
 	if err != nil {
-		return LocalTargetInspection{}, fmt.Errorf(
+		return LocalTargetBinding{}, fmt.Errorf(
 			"inspect local target worktree root: %w", err,
 		)
 	}
 	topLevel, err = requireCanonicalObservedTargetPath("target worktree", topLevel)
 	if err != nil {
-		return LocalTargetInspection{}, err
+		return LocalTargetBinding{}, err
 	}
 	if topLevel != root {
-		return LocalTargetInspection{}, fmt.Errorf(
+		return LocalTargetBinding{}, fmt.Errorf(
 			"repository.root %s is not the selected primary Git worktree root %s",
 			root, topLevel,
 		)
@@ -128,77 +101,77 @@ func (adapter LocalTargetGitAdapter) inspect(
 		"rev-parse", "--path-format=absolute", "--absolute-git-dir",
 	)
 	if err != nil {
-		return LocalTargetInspection{}, fmt.Errorf("inspect local target Git directory: %w", err)
+		return LocalTargetBinding{}, fmt.Errorf("inspect local target Git directory: %w", err)
 	}
 	gitDirectory, err = requireCanonicalObservedTargetPath("Git directory", gitDirectory)
 	if err != nil {
-		return LocalTargetInspection{}, err
+		return LocalTargetBinding{}, err
 	}
 	commonDirectory, err := adapter.runText(
 		ctx, root,
 		"rev-parse", "--path-format=absolute", "--git-common-dir",
 	)
 	if err != nil {
-		return LocalTargetInspection{}, fmt.Errorf("inspect local target Git common directory: %w", err)
+		return LocalTargetBinding{}, fmt.Errorf("inspect local target Git common directory: %w", err)
 	}
 	commonDirectory, err = requireCanonicalObservedTargetPath("Git common directory", commonDirectory)
 	if err != nil {
-		return LocalTargetInspection{}, err
+		return LocalTargetBinding{}, err
 	}
 	if gitDirectory != commonDirectory {
-		return LocalTargetInspection{}, fmt.Errorf(
+		return LocalTargetBinding{}, fmt.Errorf(
 			"local target must be a primary local worktree, not a linked worktree",
 		)
 	}
 
 	configs, err := adapter.readConfigScope(ctx, root, "--local")
 	if err != nil {
-		return LocalTargetInspection{}, fmt.Errorf("inspect local target configuration: %w", err)
+		return LocalTargetBinding{}, fmt.Errorf("inspect local target configuration: %w", err)
 	}
 	if err := rejectExecutingLocalTargetConfiguration(configs); err != nil {
-		return LocalTargetInspection{}, err
+		return LocalTargetBinding{}, err
 	}
 	if err := adapter.rejectReplacementRefs(ctx, root); err != nil {
-		return LocalTargetInspection{}, err
+		return LocalTargetBinding{}, err
 	}
 	objectFormat, err := adapter.git.objectFormat(ctx, root)
 	if err != nil {
-		return LocalTargetInspection{}, err
+		return LocalTargetBinding{}, err
 	}
 	if target.baseCommit.Algorithm() != objectFormat {
-		return LocalTargetInspection{}, fmt.Errorf(
+		return LocalTargetBinding{}, fmt.Errorf(
 			"base_commit uses %s but repository uses %s",
 			target.baseCommit.Algorithm(), objectFormat,
 		)
 	}
 	baseHead, err := adapter.resolveCommitRef(ctx, root, target.baseRef, objectFormat)
 	if err != nil {
-		return LocalTargetInspection{}, err
+		return LocalTargetBinding{}, err
 	}
 	if options.requireBaseAtPin && baseHead != target.baseCommit {
-		return LocalTargetInspection{}, fmt.Errorf(
+		return LocalTargetBinding{}, fmt.Errorf(
 			"base_ref %s resolves to %s, not pinned base_commit %s",
 			target.baseRef, baseHead, target.baseCommit,
 		)
 	}
 	if err := adapter.verifyExactCommit(ctx, root, target.baseCommit); err != nil {
-		return LocalTargetInspection{}, err
+		return LocalTargetBinding{}, err
 	}
 	if err := adapter.validateFeatureRefSyntax(ctx, root, target.featureBranch); err != nil {
-		return LocalTargetInspection{}, err
+		return LocalTargetBinding{}, err
 	}
 	featureExists, featureHead, err := adapter.inspectFeatureRef(
 		ctx, root, target.FeatureRef(), objectFormat,
 	)
 	if err != nil {
-		return LocalTargetInspection{}, err
+		return LocalTargetBinding{}, err
 	}
 	if err := adapter.rejectCheckedOutFeatureBranch(ctx, root, target.FeatureRef()); err != nil {
-		return LocalTargetInspection{}, err
+		return LocalTargetBinding{}, err
 	}
 	if featureExists {
 		if !options.allowFeatureRef {
-			return LocalTargetInspection{}, fmt.Errorf(
+			return LocalTargetBinding{}, fmt.Errorf(
 				"feature ref %s already exists before a recorded integration",
 				target.FeatureRef(),
 			)
@@ -208,7 +181,7 @@ func (adapter LocalTargetGitAdapter) inspect(
 			expected = target.baseCommit
 		}
 		if expected.Algorithm() != objectFormat || featureHead != expected {
-			return LocalTargetInspection{}, fmt.Errorf(
+			return LocalTargetBinding{}, fmt.Errorf(
 				"feature ref %s is %s, expected recorded head %s",
 				target.FeatureRef(), featureHead, expected,
 			)
@@ -222,17 +195,14 @@ func (adapter LocalTargetGitAdapter) inspect(
 		FeatureBranch: target.featureBranch,
 	})
 	if err != nil {
-		return LocalTargetInspection{}, err
+		return LocalTargetBinding{}, err
 	}
 	if options.expectedBinding != nil && binding.digest != options.expectedBinding.digest {
-		return LocalTargetInspection{}, fmt.Errorf(
+		return LocalTargetBinding{}, fmt.Errorf(
 			"local target binding differs from the recorded integration target",
 		)
 	}
-	return LocalTargetInspection{
-		binding: binding, baseHead: baseHead,
-		featureRefExists: featureExists, featureHead: featureHead,
-	}, nil
+	return binding, nil
 }
 
 func (adapter LocalTargetGitAdapter) runText(
@@ -519,7 +489,7 @@ func (adapter LocalTargetGitAdapter) verifyOwnedFeatureRefAt(
 	ctx context.Context,
 	binding LocalTargetBinding,
 	expectedHead GitObjectID,
-) (LocalTargetInspection, error) {
+) (LocalTargetBinding, error) {
 	target := LocalTarget{
 		root: binding.root, baseRef: binding.baseRef,
 		baseCommit: binding.baseCommit, featureBranch: binding.featureBranch,
@@ -533,7 +503,7 @@ func (adapter LocalTargetGitAdapter) verifyOwnedFeatureRefAt(
 func (adapter LocalTargetGitAdapter) verifyFeatureRefAbsent(
 	ctx context.Context,
 	binding LocalTargetBinding,
-) (LocalTargetInspection, error) {
+) (LocalTargetBinding, error) {
 	target := LocalTarget{
 		root: binding.root, baseRef: binding.baseRef,
 		baseCommit: binding.baseCommit, featureBranch: binding.featureBranch,
@@ -546,12 +516,6 @@ func (adapter LocalTargetGitAdapter) verifyFeatureRefAbsent(
 func (adapter LocalTargetGitAdapter) inspectUncreatedTarget(
 	ctx context.Context,
 	target LocalTarget,
-) (LocalTargetInspection, error) {
+) (LocalTargetBinding, error) {
 	return adapter.inspect(ctx, target, localTargetInspectionOptions{requireBaseAtPin: true})
-}
-
-func (adapter LocalTargetGitAdapter) refuseConfiguredExternalPrograms(
-	configs map[string][]string,
-) error {
-	return rejectExecutingLocalTargetConfiguration(configs)
 }
