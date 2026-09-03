@@ -3,80 +3,8 @@ package workspace
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 )
-
-type reviewProfilePayloadWire struct {
-	ID             string               `json:"id"`
-	Runner         string               `json:"runner"`
-	ReviewerPolicy ReviewReviewerPolicy `json:"reviewer_policy"`
-}
-
-type reviewLoopPayloadWire struct {
-	Profiles                 []reviewProfilePayloadWire `json:"profiles"`
-	MaxReviewRounds          uint16                     `json:"max_review_rounds"`
-	MaxInfrastructureRetries uint16                     `json:"max_infrastructure_retries"`
-	Digest                   string                     `json:"digest"`
-}
-
-type reviewFindingPayloadWire struct {
-	ID       string         `json:"id"`
-	Severity ReviewSeverity `json:"severity"`
-	Category string         `json:"category"`
-	Path     string         `json:"path,omitempty"`
-	Line     uint32         `json:"line,omitempty"`
-	Summary  string         `json:"summary"`
-	Evidence string         `json:"evidence_digest"`
-}
-
-type reviewIsolationPayloadWire struct {
-	RepositoryReadOnly bool   `json:"repository_read_only"`
-	ScratchEphemeral   bool   `json:"scratch_ephemeral"`
-	RepositoryHooks    bool   `json:"repository_hooks"`
-	WriteNetwork       bool   `json:"write_network"`
-	ExternalWrite      bool   `json:"external_write"`
-	Digest             string `json:"digest"`
-}
-
-type reviewResultPayloadWire struct {
-	RequestDigest         string                     `json:"request_digest"`
-	ReviewerInstance      string                     `json:"reviewer_instance"`
-	Status                ReviewResultStatus         `json:"status"`
-	Findings              []reviewFindingPayloadWire `json:"findings"`
-	InfrastructureFailure string                     `json:"infrastructure_failure_digest,omitempty"`
-	Isolation             reviewIsolationPayloadWire `json:"isolation"`
-	Digest                string                     `json:"digest"`
-}
-
-type reviewRequestPayloadWire struct {
-	WorkspaceID     string               `json:"workspace_id"`
-	Generation      string               `json:"generation"`
-	AttemptID       string               `json:"attempt_id"`
-	PlanID          string               `json:"plan_id"`
-	MergeUnitID     string               `json:"merge_unit_id"`
-	LoopDigest      string               `json:"loop_digest"`
-	Round           uint16               `json:"round"`
-	ProfileID       string               `json:"profile_id"`
-	Runner          string               `json:"runner"`
-	ReviewerPolicy  ReviewReviewerPolicy `json:"reviewer_policy"`
-	ProfileOrdinal  uint16               `json:"profile_ordinal"`
-	Invocation      uint16               `json:"invocation"`
-	Head            string               `json:"head"`
-	Tree            string               `json:"tree"`
-	IsolationDigest string               `json:"isolation_digest"`
-	Digest          string               `json:"digest"`
-}
-
-type reviewRoundStartedPayloadWire struct {
-	WorkspaceID string                `json:"workspace_id"`
-	Generation  string                `json:"generation"`
-	AttemptID   string                `json:"attempt_id"`
-	PlanID      string                `json:"plan_id"`
-	MergeUnitID string                `json:"merge_unit_id"`
-	Loop        reviewLoopPayloadWire `json:"loop"`
-	Ordinal     uint16                `json:"ordinal"`
-	Head        string                `json:"head"`
-	Tree        string                `json:"tree"`
-}
 
 type reviewHeadAdoptedPayloadWire struct {
 	WorkspaceID    string `json:"workspace_id"`
@@ -90,22 +18,37 @@ type reviewHeadAdoptedPayloadWire struct {
 	SnapshotDigest string `json:"snapshot_digest"`
 }
 
-type reviewResultRecordedPayloadWire struct {
-	WorkspaceID    string                             `json:"workspace_id"`
-	Generation     string                             `json:"generation"`
-	AttemptID      string                             `json:"attempt_id"`
-	LoopDigest     string                             `json:"loop_digest"`
-	Round          uint16                             `json:"round"`
-	ProfileOrdinal uint16                             `json:"profile_ordinal"`
-	Invocation     uint16                             `json:"invocation"`
-	Reservation    string                             `json:"reservation_digest"`
-	Result         reviewResultPayloadWire            `json:"result"`
-	Document       *reviewDocumentArtifactPayloadWire `json:"document,omitempty"`
+type reviewGateDispatchPayloadWire struct {
+	WorkspaceID  string `json:"workspace_id"`
+	Generation   string `json:"generation"`
+	AttemptID    string `json:"attempt_id"`
+	PlanID       string `json:"plan_id"`
+	MergeUnitID  string `json:"merge_unit_id"`
+	Adapter      string `json:"adapter"`
+	Recipe       string `json:"recipe"`
+	PolicyDigest string `json:"policy_digest"`
+	Head         string `json:"head"`
+	Tree         string `json:"tree"`
+	Digest       string `json:"digest"`
 }
 
-// reviewDocumentArtifactPayloadWire is metadata for a content-addressed raw
-// review-report-v1 file. The legacy result contains the invocation request
-// digest; Request here is the semantic digest of review-request-v1.
+type reviewGateRecordPayloadWire struct {
+	DispatchDigest string            `json:"dispatch_digest"`
+	Adapter        string            `json:"adapter"`
+	Recipe         string            `json:"recipe"`
+	Head           string            `json:"head"`
+	Tree           string            `json:"tree"`
+	Verdict        ReviewGateVerdict `json:"verdict"`
+	EvidenceDigest string            `json:"evidence_digest"`
+	PolicyDigest   string            `json:"policy_digest"`
+	OccurredAt     string            `json:"occurred_at"`
+	Digest         string            `json:"digest"`
+}
+
+type reviewGateDispatchedPayloadWire struct {
+	Dispatch reviewGateDispatchPayloadWire `json:"dispatch"`
+}
+
 type reviewDocumentArtifactPayloadWire struct {
 	RawDocumentDigest string `json:"raw_document_digest"`
 	ReportDigest      string `json:"report_digest"`
@@ -115,24 +58,10 @@ type reviewDocumentArtifactPayloadWire struct {
 	Path              string `json:"path"`
 }
 
-type reviewInvocationReservedPayloadWire struct {
-	WorkspaceID       string                   `json:"workspace_id"`
-	Generation        string                   `json:"generation"`
-	AttemptID         string                   `json:"attempt_id"`
-	LoopDigest        string                   `json:"loop_digest"`
-	Request           reviewRequestPayloadWire `json:"request"`
-	ReviewerInstance  string                   `json:"reviewer_instance"`
-	IdempotencyKey    string                   `json:"idempotency_key"`
-	ReservationDigest string                   `json:"reservation_digest"`
-}
-
-type reviewInvocationFailedPayloadWire struct {
-	WorkspaceID       string `json:"workspace_id"`
-	Generation        string `json:"generation"`
-	AttemptID         string `json:"attempt_id"`
-	LoopDigest        string `json:"loop_digest"`
-	ReservationDigest string `json:"reservation_digest"`
-	FailureDigest     string `json:"failure_digest"`
+type reviewGateRecordedPayloadWire struct {
+	Dispatch reviewGateDispatchPayloadWire      `json:"dispatch"`
+	Record   reviewGateRecordPayloadWire        `json:"record"`
+	Document *reviewDocumentArtifactPayloadWire `json:"document,omitempty"`
 }
 
 func marshalReviewJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, bool, error) {
@@ -145,40 +74,17 @@ func marshalReviewJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, bo
 			MergeUnitID: event.mergeUnit.mergeUnitID.String(), PriorHead: event.priorHead.String(),
 			Head: event.head.String(), Tree: event.tree.String(), SnapshotDigest: event.snapshotDigest.String(),
 		}
-	case ReviewRoundStartedJournalEvent:
-		value = reviewRoundStartedPayloadWire{
-			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
-			AttemptID: event.attemptID.String(), PlanID: event.mergeUnit.planID.String(),
-			MergeUnitID: event.mergeUnit.mergeUnitID.String(), Loop: reviewLoopToWire(event.loop),
-			Ordinal: event.ordinal, Head: event.head.String(), Tree: event.tree.String(),
+	case ReviewGateDispatchedJournalEvent:
+		value = reviewGateDispatchedPayloadWire{Dispatch: reviewGateDispatchToWire(event.dispatch)}
+	case ReviewGateRecordedJournalEvent:
+		gate := reviewGateRecordedPayloadWire{
+			Dispatch: reviewGateDispatchToWire(event.dispatch), Record: reviewGateRecordToWire(event.record),
 		}
-	case ReviewInvocationReservedJournalEvent:
-		request := event.reservation.request
-		value = reviewInvocationReservedPayloadWire{
-			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
-			AttemptID: event.attemptID.String(), LoopDigest: event.loopDigest.String(),
-			Request: reviewRequestToWire(request), ReviewerInstance: event.reservation.reviewerInstance.String(),
-			IdempotencyKey:    event.reservation.idempotencyKey.String(),
-			ReservationDigest: event.reservation.digest.String(),
+		if event.document != nil {
+			document := reviewDocumentArtifactToWire(*event.document)
+			gate.Document = &document
 		}
-	case ReviewInvocationFailedJournalEvent:
-		value = reviewInvocationFailedPayloadWire{
-			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
-			AttemptID: event.attemptID.String(), LoopDigest: event.loopDigest.String(),
-			ReservationDigest: event.reservationDigest.String(), FailureDigest: event.failureDigest.String(),
-		}
-	case ReviewResultRecordedJournalEvent:
-		var document *reviewDocumentArtifactPayloadWire
-		if artifact, exists := event.DocumentArtifact(); exists {
-			value := reviewDocumentArtifactToWire(artifact)
-			document = &value
-		}
-		value = reviewResultRecordedPayloadWire{
-			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
-			AttemptID: event.attemptID.String(), LoopDigest: event.loopDigest.String(),
-			Round: event.round, ProfileOrdinal: event.profileOrdinal, Invocation: event.invocation,
-			Reservation: event.reservationDigest.String(), Result: reviewResultToWire(event.result), Document: document,
-		}
+		value = gate
 	default:
 		return nil, false, nil
 	}
@@ -193,7 +99,7 @@ func decodeReviewJournalEvent(
 	case JournalEventReviewHeadAdopted:
 		var wire reviewHeadAdoptedPayloadWire
 		if err := decodeStrictJSON(payload, &wire); err != nil {
-			return nil, true, fmt.Errorf("decode review head adoption: %w", err)
+			return nil, true, fmt.Errorf("decode head adoption: %w", err)
 		}
 		workspaceID, generation, attemptID, err := parseReviewEnvelope(wire.WorkspaceID, wire.Generation, wire.AttemptID)
 		if err != nil {
@@ -211,42 +117,7 @@ func decodeReviewJournalEvent(
 		if err != nil {
 			return nil, true, err
 		}
-		objects := make([]GitObjectID, 0, 3)
-		for _, raw := range []string{wire.PriorHead, wire.Head, wire.Tree} {
-			object, err := ParseGitObjectID(raw)
-			if err != nil {
-				return nil, true, err
-			}
-			objects = append(objects, object)
-		}
-		snapshotDigest, err := ParseDigest(wire.SnapshotDigest)
-		if err != nil {
-			return nil, true, err
-		}
-		event, err := NewReviewHeadAdoptedJournalEvent(
-			workspaceID, generation, attemptID, mergeUnit,
-			objects[0], objects[1], objects[2], snapshotDigest,
-		)
-		return event, true, err
-	case JournalEventReviewRoundStarted:
-		var wire reviewRoundStartedPayloadWire
-		if err := decodeStrictJSON(payload, &wire); err != nil {
-			return nil, true, fmt.Errorf("decode review round: %w", err)
-		}
-		workspaceID, generation, attemptID, err := parseReviewEnvelope(wire.WorkspaceID, wire.Generation, wire.AttemptID)
-		if err != nil {
-			return nil, true, err
-		}
-		planID, err := NewID(wire.PlanID)
-		if err != nil {
-			return nil, true, err
-		}
-		unitID, err := NewID(wire.MergeUnitID)
-		if err != nil {
-			return nil, true, err
-		}
-		mergeUnit, _ := NewMergeUnitReference(planID, unitID)
-		loop, err := reviewLoopFromWire(wire.Loop)
+		priorHead, err := ParseGitObjectID(wire.PriorHead)
 		if err != nil {
 			return nil, true, err
 		}
@@ -258,127 +129,174 @@ func decodeReviewJournalEvent(
 		if err != nil {
 			return nil, true, err
 		}
-		start, err := NewStartReviewRound(workspaceID, generation, attemptID, mergeUnit, loop, wire.Ordinal, head, tree)
+		snapshotDigest, err := ParseDigest(wire.SnapshotDigest)
 		if err != nil {
 			return nil, true, err
 		}
-		event, err := NewReviewRoundStartedJournalEvent(start)
-		return event, true, err
-	case JournalEventReviewInvocationReserved:
-		var wire reviewInvocationReservedPayloadWire
-		if err := decodeStrictJSON(payload, &wire); err != nil {
-			return nil, true, fmt.Errorf("decode review invocation reservation: %w", err)
-		}
-		workspaceID, generation, attemptID, err := parseReviewEnvelope(wire.WorkspaceID, wire.Generation, wire.AttemptID)
-		if err != nil {
-			return nil, true, err
-		}
-		loopDigest, err := ParseDigest(wire.LoopDigest)
-		if err != nil {
-			return nil, true, err
-		}
-		request, err := reviewRequestFromWire(wire.Request)
-		if err != nil || request.workspaceID != workspaceID || request.generation != generation ||
-			request.attemptID != attemptID || request.loopDigest != loopDigest {
-			return nil, true, fmt.Errorf("review invocation reservation request envelope mismatch")
-		}
-		reviewer, err := NewID(wire.ReviewerInstance)
-		if err != nil {
-			return nil, true, err
-		}
-		idempotencyKey, err := ParseDigest(wire.IdempotencyKey)
-		if err != nil {
-			return nil, true, err
-		}
-		reservation, err := NewReviewInvocationReservation(request, reviewer, idempotencyKey)
-		if err != nil {
-			return nil, true, err
-		}
-		stored, err := ParseDigest(wire.ReservationDigest)
-		if err != nil || stored != reservation.digest {
-			return nil, true, fmt.Errorf("review invocation reservation digest mismatch")
-		}
-		event, err := NewReviewInvocationReservedJournalEvent(workspaceID, generation, attemptID, loopDigest, reservation)
-		return event, true, err
-	case JournalEventReviewInvocationFailed:
-		var wire reviewInvocationFailedPayloadWire
-		if err := decodeStrictJSON(payload, &wire); err != nil {
-			return nil, true, fmt.Errorf("decode review invocation failure: %w", err)
-		}
-		workspaceID, generation, attemptID, err := parseReviewEnvelope(wire.WorkspaceID, wire.Generation, wire.AttemptID)
-		if err != nil {
-			return nil, true, err
-		}
-		loopDigest, err := ParseDigest(wire.LoopDigest)
-		if err != nil {
-			return nil, true, err
-		}
-		reservation, err := ParseDigest(wire.ReservationDigest)
-		if err != nil {
-			return nil, true, err
-		}
-		failureDigest, err := ParseDigest(wire.FailureDigest)
-		if err != nil {
-			return nil, true, err
-		}
-		failure, err := NewRecordReviewInvocationFailure(reservation, failureDigest)
-		if err != nil {
-			return nil, true, err
-		}
-		event, err := NewReviewInvocationFailedJournalEvent(workspaceID, generation, attemptID, loopDigest, failure)
-		return event, true, err
-	case JournalEventReviewResultRecorded:
-		var wire reviewResultRecordedPayloadWire
-		if err := decodeStrictJSON(payload, &wire); err != nil {
-			return nil, true, fmt.Errorf("decode review result: %w", err)
-		}
-		workspaceID, generation, attemptID, err := parseReviewEnvelope(wire.WorkspaceID, wire.Generation, wire.AttemptID)
-		if err != nil {
-			return nil, true, err
-		}
-		loopDigest, err := ParseDigest(wire.LoopDigest)
-		if err != nil {
-			return nil, true, err
-		}
-		result, err := reviewResultFromWire(wire.Result)
-		if err != nil {
-			return nil, true, err
-		}
-		reservation, err := ParseDigest(wire.Reservation)
-		if err != nil {
-			return nil, true, err
-		}
-		record, err := NewRecordReviewResult(
-			wire.Round, wire.ProfileOrdinal, wire.Invocation, reservation, result,
+		event, err := NewReviewHeadAdoptedJournalEvent(
+			workspaceID, generation, attemptID, mergeUnit, priorHead, head, tree, snapshotDigest,
 		)
+		return event, true, err
+	case JournalEventReviewGateDispatched:
+		var wire reviewGateDispatchedPayloadWire
+		if err := decodeStrictJSON(payload, &wire); err != nil {
+			return nil, true, fmt.Errorf("decode review gate dispatch: %w", err)
+		}
+		dispatch, err := reviewGateDispatchFromWire(wire.Dispatch)
 		if err != nil {
 			return nil, true, err
 		}
-		if wire.Document != nil {
-			document, documentErr := reviewDocumentArtifactFromWire(*wire.Document)
-			if documentErr != nil {
-				return nil, true, documentErr
-			}
-			event, eventErr := NewReviewResultRecordedDocumentJournalEvent(
-				workspaceID, generation, attemptID, loopDigest, record, document,
-			)
+		event, err := NewReviewGateDispatchedJournalEvent(dispatch)
+		return event, true, err
+	case JournalEventReviewGateRecorded:
+		var wire reviewGateRecordedPayloadWire
+		if err := decodeStrictJSON(payload, &wire); err != nil {
+			return nil, true, fmt.Errorf("decode review gate record: %w", err)
+		}
+		dispatch, err := reviewGateDispatchFromWire(wire.Dispatch)
+		if err != nil {
+			return nil, true, err
+		}
+		record, err := reviewGateRecordFromWire(wire.Record, dispatch)
+		if err != nil {
+			return nil, true, err
+		}
+		if wire.Document == nil {
+			event, eventErr := NewReviewGateRecordedJournalEvent(dispatch, record)
 			return event, true, eventErr
 		}
-		event, err := NewReviewResultRecordedJournalEvent(workspaceID, generation, attemptID, loopDigest, record)
-		return event, true, err
+		document, documentErr := reviewDocumentArtifactFromWire(*wire.Document)
+		if documentErr != nil {
+			return nil, true, documentErr
+		}
+		event, eventErr := NewReviewGateRecordedDocumentJournalEvent(dispatch, record, document)
+		return event, true, eventErr
 	default:
 		return nil, false, nil
 	}
 }
 
+func reviewGateDispatchToWire(dispatch ReviewGateDispatch) reviewGateDispatchPayloadWire {
+	return reviewGateDispatchPayloadWire{
+		WorkspaceID: dispatch.workspaceID.String(), Generation: dispatch.generation.String(),
+		AttemptID: dispatch.attemptID.String(), PlanID: dispatch.mergeUnit.planID.String(),
+		MergeUnitID: dispatch.mergeUnit.mergeUnitID.String(), Adapter: dispatch.adapter.String(),
+		Recipe: dispatch.recipe.String(), PolicyDigest: dispatch.policyDigest.String(),
+		Head: dispatch.head.String(), Tree: dispatch.tree.String(), Digest: dispatch.digest.String(),
+	}
+}
+
+func reviewGateDispatchFromWire(wire reviewGateDispatchPayloadWire) (ReviewGateDispatch, error) {
+	workspaceID, generation, attemptID, err := parseReviewEnvelope(wire.WorkspaceID, wire.Generation, wire.AttemptID)
+	if err != nil {
+		return ReviewGateDispatch{}, err
+	}
+	planID, err := NewID(wire.PlanID)
+	if err != nil {
+		return ReviewGateDispatch{}, err
+	}
+	mergeUnitID, err := NewID(wire.MergeUnitID)
+	if err != nil {
+		return ReviewGateDispatch{}, err
+	}
+	mergeUnit, err := NewMergeUnitReference(planID, mergeUnitID)
+	if err != nil {
+		return ReviewGateDispatch{}, err
+	}
+	adapter, err := NewID(wire.Adapter)
+	if err != nil {
+		return ReviewGateDispatch{}, err
+	}
+	recipe, err := NewID(wire.Recipe)
+	if err != nil {
+		return ReviewGateDispatch{}, err
+	}
+	policyDigest, err := ParseDigest(wire.PolicyDigest)
+	if err != nil {
+		return ReviewGateDispatch{}, err
+	}
+	head, err := ParseGitObjectID(wire.Head)
+	if err != nil {
+		return ReviewGateDispatch{}, err
+	}
+	tree, err := ParseGitObjectID(wire.Tree)
+	if err != nil {
+		return ReviewGateDispatch{}, err
+	}
+	dispatch, err := NewReviewGateDispatch(ReviewGateDispatchOptions{
+		WorkspaceID: workspaceID, Generation: generation, AttemptID: attemptID, MergeUnit: mergeUnit,
+		Adapter: adapter, Recipe: recipe, PolicyDigest: policyDigest, Head: head, Tree: tree,
+	})
+	if err != nil {
+		return ReviewGateDispatch{}, err
+	}
+	digest, err := ParseDigest(wire.Digest)
+	if err != nil || digest != dispatch.digest {
+		return ReviewGateDispatch{}, fmt.Errorf("review gate dispatch digest mismatch")
+	}
+	return dispatch, nil
+}
+
+func reviewGateRecordToWire(record ReviewGateRecord) reviewGateRecordPayloadWire {
+	return reviewGateRecordPayloadWire{
+		DispatchDigest: record.dispatchDigest.String(), Adapter: record.adapter.String(), Recipe: record.recipe.String(),
+		Head: record.head.String(), Tree: record.tree.String(), Verdict: record.verdict,
+		EvidenceDigest: record.evidenceDigest.String(), PolicyDigest: record.policyDigest.String(),
+		OccurredAt: record.occurredAt.Format(time.RFC3339Nano), Digest: record.digest.String(),
+	}
+}
+
+func reviewGateRecordFromWire(wire reviewGateRecordPayloadWire, dispatch ReviewGateDispatch) (ReviewGateRecord, error) {
+	dispatchDigest, err := ParseDigest(wire.DispatchDigest)
+	if err != nil || dispatchDigest != dispatch.digest {
+		return ReviewGateRecord{}, fmt.Errorf("review gate record dispatch digest mismatch")
+	}
+	adapter, err := NewID(wire.Adapter)
+	if err != nil || adapter != dispatch.adapter {
+		return ReviewGateRecord{}, fmt.Errorf("review gate record adapter mismatch")
+	}
+	recipe, err := NewID(wire.Recipe)
+	if err != nil || recipe != dispatch.recipe {
+		return ReviewGateRecord{}, fmt.Errorf("review gate record recipe mismatch")
+	}
+	head, err := ParseGitObjectID(wire.Head)
+	if err != nil || head != dispatch.head {
+		return ReviewGateRecord{}, fmt.Errorf("review gate record head mismatch")
+	}
+	tree, err := ParseGitObjectID(wire.Tree)
+	if err != nil || tree != dispatch.tree {
+		return ReviewGateRecord{}, fmt.Errorf("review gate record tree mismatch")
+	}
+	policyDigest, err := ParseDigest(wire.PolicyDigest)
+	if err != nil || policyDigest != dispatch.policyDigest {
+		return ReviewGateRecord{}, fmt.Errorf("review gate record policy digest mismatch")
+	}
+	evidenceDigest, err := ParseDigest(wire.EvidenceDigest)
+	if err != nil {
+		return ReviewGateRecord{}, err
+	}
+	occurredAt, err := time.Parse(time.RFC3339Nano, wire.OccurredAt)
+	if err != nil || wire.OccurredAt != occurredAt.UTC().Format(time.RFC3339Nano) {
+		return ReviewGateRecord{}, fmt.Errorf("review gate record occurred_at must be canonical UTC RFC3339Nano")
+	}
+	record, err := NewReviewGateRecord(ReviewGateRecordOptions{
+		Dispatch: dispatch, Verdict: wire.Verdict, EvidenceDigest: evidenceDigest, OccurredAt: occurredAt,
+	})
+	if err != nil {
+		return ReviewGateRecord{}, err
+	}
+	digest, err := ParseDigest(wire.Digest)
+	if err != nil || digest != record.digest {
+		return ReviewGateRecord{}, fmt.Errorf("review gate record digest mismatch")
+	}
+	return record, nil
+}
+
 func reviewDocumentArtifactToWire(artifact ReviewDocumentArtifact) reviewDocumentArtifactPayloadWire {
 	return reviewDocumentArtifactPayloadWire{
-		RawDocumentDigest: artifact.rawDocumentDigest.String(),
-		ReportDigest:      artifact.reportDigest.String(),
-		RequestDigest:     artifact.requestDigest.String(),
-		ReviewInputDigest: artifact.reviewInputDigest.String(),
-		CharterHash:       artifact.charterHash.String(),
-		Path:              artifact.path,
+		RawDocumentDigest: artifact.rawDocumentDigest.String(), ReportDigest: artifact.reportDigest.String(),
+		RequestDigest: artifact.requestDigest.String(), ReviewInputDigest: artifact.reviewInputDigest.String(),
+		CharterHash: artifact.charterHash.String(), Path: artifact.path,
 	}
 }
 
@@ -404,224 +322,13 @@ func reviewDocumentArtifactFromWire(wire reviewDocumentArtifactPayloadWire) (Rev
 		return ReviewDocumentArtifact{}, err
 	}
 	artifact := ReviewDocumentArtifact{
-		rawDocumentDigest: rawDocumentDigest,
-		reportDigest:      reportDigest,
-		requestDigest:     requestDigest,
-		reviewInputDigest: reviewInputDigest,
-		charterHash:       charterHash,
-		path:              wire.Path,
+		rawDocumentDigest: rawDocumentDigest, reportDigest: reportDigest, requestDigest: requestDigest,
+		reviewInputDigest: reviewInputDigest, charterHash: charterHash, path: wire.Path,
 	}
 	if err := artifact.validate(); err != nil {
 		return ReviewDocumentArtifact{}, err
 	}
 	return artifact, nil
-}
-
-func reviewRequestToWire(request ReviewRequest) reviewRequestPayloadWire {
-	return reviewRequestPayloadWire{
-		WorkspaceID: request.workspaceID.String(), Generation: request.generation.String(),
-		AttemptID: request.attemptID.String(), PlanID: request.mergeUnit.planID.String(),
-		MergeUnitID: request.mergeUnit.mergeUnitID.String(), LoopDigest: request.loopDigest.String(),
-		Round: request.round, ProfileID: request.profile.id.String(), Runner: request.profile.runner.String(),
-		ReviewerPolicy: request.profile.reviewerPolicy, ProfileOrdinal: request.profileOrdinal,
-		Invocation: request.invocation, Head: request.head.String(), Tree: request.tree.String(),
-		IsolationDigest: request.isolationRequired.digest.String(), Digest: request.digest.String(),
-	}
-}
-
-func reviewRequestFromWire(wire reviewRequestPayloadWire) (ReviewRequest, error) {
-	workspaceID, generation, attemptID, err := parseReviewEnvelope(wire.WorkspaceID, wire.Generation, wire.AttemptID)
-	if err != nil {
-		return ReviewRequest{}, err
-	}
-	planID, err := NewID(wire.PlanID)
-	if err != nil {
-		return ReviewRequest{}, err
-	}
-	mergeUnitID, err := NewID(wire.MergeUnitID)
-	if err != nil {
-		return ReviewRequest{}, err
-	}
-	mergeUnit, err := NewMergeUnitReference(planID, mergeUnitID)
-	if err != nil {
-		return ReviewRequest{}, err
-	}
-	loopDigest, err := ParseDigest(wire.LoopDigest)
-	if err != nil {
-		return ReviewRequest{}, err
-	}
-	profileID, err := NewID(wire.ProfileID)
-	if err != nil {
-		return ReviewRequest{}, err
-	}
-	runner, err := NewID(wire.Runner)
-	if err != nil {
-		return ReviewRequest{}, err
-	}
-	if !wire.ReviewerPolicy.valid() {
-		return ReviewRequest{}, fmt.Errorf("review request wire reviewer policy is invalid")
-	}
-	head, err := ParseGitObjectID(wire.Head)
-	if err != nil {
-		return ReviewRequest{}, err
-	}
-	tree, err := ParseGitObjectID(wire.Tree)
-	if err != nil {
-		return ReviewRequest{}, err
-	}
-	request, err := newReviewRequest(
-		workspaceID, generation, attemptID, mergeUnit, loopDigest, wire.Round,
-		ReviewProfile{id: profileID, runner: runner, reviewerPolicy: wire.ReviewerPolicy},
-		wire.ProfileOrdinal, wire.Invocation, head, tree,
-	)
-	if err != nil {
-		return ReviewRequest{}, err
-	}
-	isolation, err := ParseDigest(wire.IsolationDigest)
-	if err != nil || isolation != request.isolationRequired.digest {
-		return ReviewRequest{}, fmt.Errorf("review request isolation digest mismatch")
-	}
-	digest, err := ParseDigest(wire.Digest)
-	if err != nil || digest != request.digest {
-		return ReviewRequest{}, fmt.Errorf("review request digest mismatch")
-	}
-	return request, nil
-}
-
-func reviewLoopToWire(loop ReviewLoop) reviewLoopPayloadWire {
-	wire := reviewLoopPayloadWire{
-		Profiles:                 make([]reviewProfilePayloadWire, 0, len(loop.profiles)),
-		MaxReviewRounds:          loop.maxRounds,
-		MaxInfrastructureRetries: loop.maxInfrastructureRetries, Digest: loop.digest.String(),
-	}
-	for _, profile := range loop.profiles {
-		wire.Profiles = append(wire.Profiles, reviewProfilePayloadWire{
-			ID: profile.id.String(), Runner: profile.runner.String(), ReviewerPolicy: profile.reviewerPolicy,
-		})
-	}
-	return wire
-}
-
-func reviewLoopFromWire(wire reviewLoopPayloadWire) (ReviewLoop, error) {
-	if len(wire.Profiles) == 0 || len(wire.Profiles) > maxReviewProfiles {
-		return ReviewLoop{}, fmt.Errorf("review loop profile count is invalid")
-	}
-	loop := ReviewLoop{
-		profiles: make([]ReviewProfile, 0, len(wire.Profiles)), maxRounds: wire.MaxReviewRounds,
-		maxInfrastructureRetries: wire.MaxInfrastructureRetries,
-	}
-	seen := make(map[string]struct{}, len(wire.Profiles))
-	for _, item := range wire.Profiles {
-		id, err := NewID(item.ID)
-		if err != nil {
-			return ReviewLoop{}, err
-		}
-		runner, err := NewID(item.Runner)
-		if err != nil {
-			return ReviewLoop{}, err
-		}
-		if !item.ReviewerPolicy.valid() {
-			return ReviewLoop{}, fmt.Errorf("review profile %s has unsupported reviewer policy", id)
-		}
-		if _, exists := seen[id.String()]; exists {
-			return ReviewLoop{}, fmt.Errorf("review loop duplicates profile %s", id)
-		}
-		seen[id.String()] = struct{}{}
-		loop.profiles = append(loop.profiles, ReviewProfile{id: id, runner: runner, reviewerPolicy: item.ReviewerPolicy})
-	}
-	canonical, err := canonicalReviewLoopBytes(loop)
-	if err != nil {
-		return ReviewLoop{}, err
-	}
-	loop.digest = DigestBytes(canonical)
-	digest, err := ParseDigest(wire.Digest)
-	if err != nil || digest != loop.digest {
-		return ReviewLoop{}, fmt.Errorf("review loop digest mismatch")
-	}
-	return loop, nil
-}
-
-func reviewResultToWire(result ReviewResultSubmission) reviewResultPayloadWire {
-	findings := make([]reviewFindingPayloadWire, 0, len(result.findings))
-	for _, finding := range result.findings {
-		findings = append(findings, reviewFindingPayloadWire{
-			ID: finding.id.String(), Severity: finding.severity, Category: finding.category.String(),
-			Path: finding.path, Line: finding.line, Summary: finding.summary,
-			Evidence: finding.evidenceDigest.String(),
-		})
-	}
-	return reviewResultPayloadWire{
-		RequestDigest: result.requestDigest.String(), ReviewerInstance: result.reviewerInstance.String(),
-		Status: result.status, Findings: findings, InfrastructureFailure: result.infrastructureFailure.String(),
-		Isolation: reviewIsolationPayloadWire{
-			RepositoryReadOnly: result.isolation.repositoryReadOnly, ScratchEphemeral: result.isolation.scratchEphemeral,
-			RepositoryHooks: result.isolation.repositoryHooks,
-			WriteNetwork:    result.isolation.writeNetwork, ExternalWrite: result.isolation.externalWrite,
-			Digest: result.isolation.digest.String(),
-		},
-		Digest: result.digest.String(),
-	}
-}
-
-func reviewResultFromWire(wire reviewResultPayloadWire) (ReviewResultSubmission, error) {
-	request, err := ParseDigest(wire.RequestDigest)
-	if err != nil {
-		return ReviewResultSubmission{}, err
-	}
-	instance, err := NewID(wire.ReviewerInstance)
-	if err != nil {
-		return ReviewResultSubmission{}, err
-	}
-	findings := make([]ReviewFinding, 0, len(wire.Findings))
-	for _, item := range wire.Findings {
-		category, err := NewID(item.Category)
-		if err != nil {
-			return ReviewResultSubmission{}, err
-		}
-		evidence, err := ParseDigest(item.Evidence)
-		if err != nil {
-			return ReviewResultSubmission{}, err
-		}
-		finding, err := NewReviewFinding(ReviewFindingOptions{
-			Severity: item.Severity, Category: category, Path: item.Path, Line: item.Line,
-			Summary: item.Summary, EvidenceDigest: evidence,
-		})
-		if err != nil {
-			return ReviewResultSubmission{}, err
-		}
-		id, err := ParseDigest(item.ID)
-		if err != nil || id != finding.id {
-			return ReviewResultSubmission{}, fmt.Errorf("review finding wire identity mismatch")
-		}
-		findings = append(findings, finding)
-	}
-	var infrastructure Digest
-	if wire.InfrastructureFailure != "" {
-		infrastructure, err = ParseDigest(wire.InfrastructureFailure)
-		if err != nil {
-			return ReviewResultSubmission{}, err
-		}
-	}
-	isolation := NewReviewIsolationProof(
-		wire.Isolation.RepositoryReadOnly, wire.Isolation.ScratchEphemeral,
-		wire.Isolation.RepositoryHooks, wire.Isolation.WriteNetwork, wire.Isolation.ExternalWrite,
-	)
-	isolationDigest, err := ParseDigest(wire.Isolation.Digest)
-	if err != nil || isolationDigest != isolation.digest {
-		return ReviewResultSubmission{}, fmt.Errorf("review isolation digest mismatch")
-	}
-	result, err := NewReviewResultSubmission(ReviewResultSubmissionOptions{
-		RequestDigest: request, ReviewerInstance: instance, Status: wire.Status,
-		Findings: findings, InfrastructureFailure: infrastructure, Isolation: isolation,
-	})
-	if err != nil {
-		return ReviewResultSubmission{}, err
-	}
-	digest, err := ParseDigest(wire.Digest)
-	if err != nil || digest != result.digest {
-		return ReviewResultSubmission{}, fmt.Errorf("review result digest mismatch")
-	}
-	return result, nil
 }
 
 func parseReviewEnvelope(workspaceRaw, generationRaw, attemptRaw string) (ID, Digest, ID, error) {

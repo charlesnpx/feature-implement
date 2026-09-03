@@ -4,146 +4,55 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
-func TestTransitionCodecsRejectReceiptFields(t *testing.T) {
-	payload := json.RawMessage(`{"receipt_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
-	for _, test := range []struct {
-		name   string
-		decode func() error
-	}{
-		{
-			name: "boundary",
-			decode: func() error {
-				_, _, err := decodeAttemptJournalEvent(
-					JournalEventAttemptBoundary,
-					payload,
-				)
-				return err
-			},
-		},
-		{
-			name: "resume",
-			decode: func() error {
-				_, _, err := decodeAttemptJournalEvent(
-					JournalEventAttemptResumed,
-					payload,
-				)
-				return err
-			},
-		},
-		{
-			name: "review result",
-			decode: func() error {
-				_, _, err := decodeReviewJournalEvent(
-					JournalEventReviewResultRecorded,
-					payload,
-				)
-				return err
-			},
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			err := test.decode()
-			if err == nil ||
-				!strings.Contains(err.Error(), `unknown field "receipt_digest"`) {
-				t.Fatalf("receipt-bearing payload error = %v", err)
-			}
-		})
-	}
-}
-
-func TestAttemptCodecsRejectRemovedRemoteBindings(t *testing.T) {
-	for _, test := range []struct {
-		name      string
-		eventType JournalEventType
-		payload   json.RawMessage
-		field     string
-	}{
-		{
-			name:      "boundary authorization identity",
-			eventType: JournalEventAttemptBoundary,
-			payload:   json.RawMessage(`{"authorization_id":"removed"}`),
-			field:     "authorization_id",
-		},
-		{
-			name:      "resume authorization identity",
-			eventType: JournalEventAttemptResumed,
-			payload:   json.RawMessage(`{"authorization_id":"removed"}`),
-			field:     "authorization_id",
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			event, supported, err := decodeAttemptJournalEvent(
-				test.eventType,
-				test.payload,
-			)
-			if !supported || event != nil || err == nil ||
-				!strings.Contains(
-					err.Error(),
-					`unknown field "`+test.field+`"`,
-				) {
-				t.Fatalf(
-					"removed binding %q decoded as %#v, supported=%t, err=%v",
-					test.field, event, supported, err,
-				)
-			}
-		})
-	}
-}
-
-func TestRemovedProviderJournalEventsAreUnsupported(t *testing.T) {
+func TestReviewGateCodecsRejectUnknownFields(t *testing.T) {
+	payload := json.RawMessage(`{"unexpected":"value"}`)
 	for _, eventType := range []JournalEventType{
-		"attempt.reserved.v2",
-		"attempt.materialization_intended.v2",
-		"attempt.started.v2",
-		"authorization.grant_recorded.v2",
-		"provider.intent_reserved.v2",
-		"provider.completion_verified.v2",
+		JournalEventReviewGateDispatched,
+		JournalEventReviewGateRecorded,
 	} {
-		event, err := decodeWorkspaceJournalEvent(eventType, json.RawMessage(`{}`))
-		if err == nil || event != nil ||
-			!strings.Contains(err.Error(), "unsupported journal event type") {
-			t.Fatalf("removed event %q decoded as %#v with %v", eventType, event, err)
+		event, supported, err := decodeReviewJournalEvent(eventType, payload)
+		if !supported || event != nil || err == nil || !strings.Contains(err.Error(), `unknown field "unexpected"`) {
+			t.Fatalf("%s unknown-field result = event=%#v supported=%t err=%v", eventType, event, supported, err)
 		}
 	}
 }
 
-func TestReviewIsolationCodecRejectsRemovedFields(t *testing.T) {
-	proof := StrictReviewIsolationProof()
-	result, err := NewReviewResultSubmission(ReviewResultSubmissionOptions{
-		RequestDigest:    DigestBytes([]byte("local-review-request")),
-		ReviewerInstance: MustID("local-reviewer"),
-		Status:           ReviewResultCompleted,
-		Isolation:        proof,
+func TestReviewGateRecordedCodecRetainsExactTerminalBindings(t *testing.T) {
+	head, _ := ParseGitObjectID("sha1:" + strings.Repeat("a", 40))
+	tree, _ := ParseGitObjectID("sha1:" + strings.Repeat("b", 40))
+	dispatch, err := NewReviewGateDispatch(ReviewGateDispatchOptions{
+		WorkspaceID: MustID("codec-workspace"), Generation: DigestBytes([]byte("codec-generation")),
+		AttemptID: MustID("codec-attempt"), MergeUnit: MergeUnitReference{planID: MustID("codec-plan"), mergeUnitID: MustID("codec-unit")},
+		Adapter: MustID("natural-language"), Recipe: MustID("default"), PolicyDigest: DigestBytes([]byte("codec-policy")),
+		Head: head, Tree: tree,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	encoded, err := json.Marshal(reviewResultToWire(result))
+	record, err := NewReviewGateRecord(ReviewGateRecordOptions{
+		Dispatch: dispatch, Verdict: ReviewGateNotSatisfied, EvidenceDigest: DigestBytes([]byte("codec-evidence")),
+		OccurredAt: time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"credentials_available", "provider_broker"} {
-		if strings.Contains(string(encoded), field) {
-			t.Fatalf("local review wire retains %q: %s", field, encoded)
-		}
+	event, err := NewReviewGateRecordedJournalEvent(dispatch, record)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, field := range []string{"credentials_available", "provider_broker"} {
-		var isolation reviewIsolationPayloadWire
-		payload := `{
-			"repository_read_only": true,
-			"scratch_ephemeral": true,
-			"repository_hooks": false,
-			"write_network": false,
-			"` + field + `": false,
-			"external_write": false,
-			"digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-		}`
-		err = decodeStrictJSON([]byte(payload), &isolation)
-		if err == nil ||
-			!strings.Contains(err.Error(), `unknown field "`+field+`"`) {
-			t.Fatalf("review isolation accepted removed field %q: %v", field, err)
-		}
+	payload, supported, err := marshalReviewJournalEvent(event)
+	if err != nil || !supported {
+		t.Fatalf("marshal gate record = %s supported=%t error=%v", payload, supported, err)
+	}
+	decoded, supported, err := decodeReviewJournalEvent(JournalEventReviewGateRecorded, payload)
+	if err != nil || !supported {
+		t.Fatalf("decode gate record = %#v supported=%t error=%v", decoded, supported, err)
+	}
+	decodedEvent, ok := decoded.(ReviewGateRecordedJournalEvent)
+	if !ok || decodedEvent.Dispatch() != dispatch || decodedEvent.Record() != record {
+		t.Fatalf("gate codec lost bindings: %#v", decoded)
 	}
 }

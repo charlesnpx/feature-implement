@@ -168,7 +168,6 @@ policy:
   require_passing_checks: true
   allow_write_network: false
   max_attempts: 2
-  max_review_rounds: 2
 profiles:
   - id: standard
     runner: codex
@@ -176,7 +175,6 @@ profiles:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 2
-      max_review_rounds: 2
 merge_units:
   - plan_id: alpha-plan
     merge_unit_id: unit-one
@@ -189,7 +187,6 @@ merge_units:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 2
-      max_review_rounds: 2
 `)
 	if _, err := Execute(context.Background(), Options{
 		Action:           "validate",

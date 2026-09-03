@@ -6,17 +6,17 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 type SchedulerUnitStatus string
 
 const (
-	SchedulerUnitBlocked         SchedulerUnitStatus = "blocked"
-	SchedulerUnitReady           SchedulerUnitStatus = "ready"
-	SchedulerUnitActive          SchedulerUnitStatus = "active"
-	SchedulerUnitPaused          SchedulerUnitStatus = "paused"
-	SchedulerUnitReviewExhausted SchedulerUnitStatus = "review_exhausted"
-	SchedulerUnitCompleted       SchedulerUnitStatus = "completed"
+	SchedulerUnitBlocked   SchedulerUnitStatus = "blocked"
+	SchedulerUnitReady     SchedulerUnitStatus = "ready"
+	SchedulerUnitActive    SchedulerUnitStatus = "active"
+	SchedulerUnitPaused    SchedulerUnitStatus = "paused"
+	SchedulerUnitCompleted SchedulerUnitStatus = "completed"
 )
 
 type WorkspaceUnitState struct {
@@ -132,16 +132,20 @@ type WorkspaceAttempt struct {
 }
 
 type WorkspaceReview struct {
-	AttemptID             string `json:"attempt_id"`
-	PlanID                string `json:"plan_id"`
-	MergeUnitID           string `json:"merge_unit_id"`
-	Generation            string `json:"generation"`
-	Head                  string `json:"head"`
-	Tree                  string `json:"tree"`
-	Status                string `json:"status"`
-	RoundsUsed            uint16 `json:"rounds_used"`
-	InfrastructureRetries uint16 `json:"infrastructure_retries"`
-	MergeReady            bool   `json:"merge_ready"`
+	AttemptID      string `json:"attempt_id"`
+	PlanID         string `json:"plan_id"`
+	MergeUnitID    string `json:"merge_unit_id"`
+	Generation     string `json:"generation"`
+	DispatchDigest string `json:"dispatch_digest"`
+	Adapter        string `json:"adapter"`
+	Recipe         string `json:"recipe"`
+	PolicyDigest   string `json:"policy_digest"`
+	Head           string `json:"head"`
+	Tree           string `json:"tree"`
+	Status         string `json:"status"`
+	Verdict        string `json:"verdict,omitempty"`
+	EvidenceDigest string `json:"evidence_digest,omitempty"`
+	OccurredAt     string `json:"occurred_at,omitempty"`
 }
 
 type WorkspaceIntegrationUnit struct {
@@ -262,13 +266,6 @@ func RebuildWorkspaceView(snapshot JournalSnapshot, definition EffectiveWorkspac
 			unit.Head = attempt.verifiedHead.String()
 			unit.BoundaryPending, unit.BoundaryReason, unit.PendingDirectives =
 				attemptBoundaryStatus(core, attempt)
-			if attempt.phase == AttemptActive {
-				if state, exists := reviews.State(attempt.attemptID); exists {
-					if _, exhausted := state.Exhaustion(); exhausted {
-						unit.Status = SchedulerUnitReviewExhausted
-					}
-				}
-			}
 		} else if len(unit.Blockers) == 0 {
 			unit.Status = SchedulerUnitReady
 		} else {
@@ -308,7 +305,7 @@ func RebuildWorkspaceView(snapshot JournalSnapshot, definition EffectiveWorkspac
 		unitGates.Checks = append(unitGates.Checks, commitGate)
 
 		reviewGate := WorkspaceGate{Name: "review", Generation: definition.generation.String()}
-		_, reviewConfigured := execution.ReviewLoop()
+		gateConfig, reviewConfigured := execution.ReviewGate()
 		switch {
 		case !hasAttempt:
 			reviewGate.Status, reviewGate.Reason = GatePending, "no_attempt"
@@ -316,16 +313,20 @@ func RebuildWorkspaceView(snapshot JournalSnapshot, definition EffectiveWorkspac
 			reviewGate.Status, reviewGate.Reason = GatePassed, "not_configured"
 		default:
 			state, exists := reviews.State(attempt.attemptID)
-			if exists && state.MergeReady() {
-				reviewGate.Status, reviewGate.Reason = GatePassed, "all_profiles_confirmed"
+			if record, satisfied := satisfiedReviewGateForHead(state, exists, gateConfig, attempt.verifiedHead); satisfied {
+				reviewGate.Status, reviewGate.Reason = GatePassed, "satisfied_exact_artifact"
+				_ = record
 			} else if exists {
-				if _, exhausted := state.Exhaustion(); exhausted {
-					reviewGate.Status, reviewGate.Reason = GateFailed, "review_exhausted"
+				if pending, pendingExists := state.Pending(); pendingExists {
+					reviewGate.Status, reviewGate.Reason = GatePending, "gate_dispatched"
+					_ = pending
+				} else if record, recorded := latestReviewGateRecord(state); recorded {
+					reviewGate.Status, reviewGate.Reason = GateFailed, string(record.Verdict())
 				} else {
-					reviewGate.Status, reviewGate.Reason = GatePending, "review_incomplete"
+					reviewGate.Status, reviewGate.Reason = GatePending, "gate_not_recorded"
 				}
 			} else {
-				reviewGate.Status, reviewGate.Reason = GatePending, "review_not_started"
+				reviewGate.Status, reviewGate.Reason = GatePending, "gate_not_dispatched"
 			}
 		}
 		unitGates.Checks = append(unitGates.Checks, reviewGate)
@@ -476,8 +477,8 @@ func setWorkspaceViewDigest(view *WorkspaceView) error {
 
 func dependencySetReason(sets [][]string) string {
 	parts := make([]string, 0, len(sets))
-	for _, providers := range sets {
-		parts = append(parts, "["+strings.Join(providers, ", ")+"]")
+	for _, alternatives := range sets {
+		parts = append(parts, "["+strings.Join(alternatives, ", ")+"]")
 	}
 	return "unsatisfied dependency sets: " + strings.Join(parts, ", ")
 }
@@ -575,29 +576,68 @@ func workspaceReviewViews(
 	states := reviews.States()
 	result := make([]WorkspaceReview, 0, len(states))
 	for _, state := range states {
-		status := "active"
-		if state.MergeReady() {
-			status = "ready"
-		} else if _, exhausted := state.Exhaustion(); exhausted {
-			status = "exhausted"
+		dispatches := state.Dispatches()
+		if len(dispatches) == 0 {
+			continue
 		}
-		result = append(result, WorkspaceReview{
-			AttemptID:             state.AttemptID().String(),
-			PlanID:                state.MergeUnit().PlanID().String(),
-			MergeUnitID:           state.MergeUnit().MergeUnitID().String(),
-			Generation:            state.Generation().String(),
-			Head:                  state.Head().String(),
-			Tree:                  state.Tree().String(),
-			Status:                status,
-			RoundsUsed:            reviews.RoundsUsed(state.AttemptID()),
-			InfrastructureRetries: reviews.InfrastructureRetriesUsed(state.AttemptID()),
-			MergeReady:            state.MergeReady(),
-		})
+		dispatch := dispatches[len(dispatches)-1]
+		view := WorkspaceReview{
+			AttemptID:      state.AttemptID().String(),
+			PlanID:         state.MergeUnit().PlanID().String(),
+			MergeUnitID:    state.MergeUnit().MergeUnitID().String(),
+			Generation:     state.Generation().String(),
+			DispatchDigest: dispatch.Digest().String(),
+			Adapter:        dispatch.Adapter().String(),
+			Recipe:         dispatch.Recipe().String(),
+			PolicyDigest:   dispatch.PolicyDigest().String(),
+			Head:           dispatch.Head().String(),
+			Tree:           dispatch.Tree().String(),
+			Status:         "dispatched",
+		}
+		if record, exists := state.Record(dispatch.Digest()); exists {
+			view.Status = string(record.Verdict())
+			view.Verdict = string(record.Verdict())
+			view.EvidenceDigest = record.EvidenceDigest().String()
+			view.OccurredAt = record.OccurredAt().Format(time.RFC3339Nano)
+		}
+		result = append(result, view)
 	}
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].AttemptID < result[j].AttemptID
 	})
 	return result
+}
+
+// satisfiedReviewGateForHead is the gate-view readiness path. It requires a
+// durable satisfied terminal record whose dispatch carries the same configured
+// adapter, recipe, policy, and exact head. The direct readiness path also
+// compares the record's tree to a fresh repository snapshot before integration.
+func satisfiedReviewGateForHead(
+	state ReviewGateState,
+	exists bool,
+	config ReviewGateConfig,
+	head GitObjectID,
+) (ReviewGateRecord, bool) {
+	if !exists {
+		return ReviewGateRecord{}, false
+	}
+	for _, record := range state.Records() {
+		if record.Verdict() != ReviewGateSatisfied || record.Head() != head {
+			continue
+		}
+		if satisfied, ok := state.Satisfied(config, head, record.Tree()); ok {
+			return satisfied, true
+		}
+	}
+	return ReviewGateRecord{}, false
+}
+
+func latestReviewGateRecord(state ReviewGateState) (ReviewGateRecord, bool) {
+	records := state.Records()
+	if len(records) == 0 {
+		return ReviewGateRecord{}, false
+	}
+	return records[len(records)-1], true
 }
 
 func attemptBoundaryStatus(
@@ -719,8 +759,6 @@ func schedulerStatusForAttempt(attempt RuntimeAttemptProjection) SchedulerUnitSt
 	switch attempt.phase {
 	case AttemptPaused:
 		return SchedulerUnitPaused
-	case AttemptReviewExhausted:
-		return SchedulerUnitReviewExhausted
 	case AttemptSuperseded, AttemptFailed, AttemptAbandoned:
 		return SchedulerUnitReady
 	case AttemptCompleted:

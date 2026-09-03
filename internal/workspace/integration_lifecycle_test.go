@@ -890,181 +890,32 @@ func TestConcurrentIntegrationsPublishExactlyOneIntent(t *testing.T) {
 	}
 }
 
-func TestIntegrationMakesReviewExhaustedLoserRetryableAtNewFrontier(
+func TestIntegrationMakesTerminalGateAttemptRetryableThroughGenericAbandonment(
 	t *testing.T,
 ) {
 	t.Parallel()
-	requireFullSuite(t, "multi-integration frontier permutation")
-
-	fixture := configuredReviewFixture(t)
-	fixture.sources.Plans[0].Bytes = []byte(strings.Replace(
-		string(fixture.sources.Plans[0].Bytes),
-		"    dependencies:\n      - story-one",
-		"    dependencies: []",
-		1,
-	))
-	loserCore := newAttemptHarnessFromFixture(
-		t, fixture, "unit-one",
-	)
-	loser := loserCore.reserve(t, "2026-07-25T12:50:00Z")
-	loserTree := mustGitObject(t, 'b')
-	loserSnapshot, err := workspace.NewReviewRepositorySnapshot(
-		loser.VerifiedHead(), loserTree, true,
-	)
+	harness := newGatedReviewHarness(t)
+	dispatched := harness.dispatch(t, "2026-07-25T12:50:01Z")
+	harness.record(t, dispatched.Dispatch(), workspace.ReviewGateFailedToRun, "2026-07-25T12:50:02Z")
+	if _, err := workspace.AbandonAttempt(
+		harness.journal, harness.definition,
+		workspace.AbandonAttemptRequest{AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-25T12:50:03Z")},
+	); err != nil {
+		t.Fatalf("generic abandonment after terminal gate: %v", err)
+	}
+	replacementGoal, err := workspace.NewGoalBinding(workspace.MustID("terminal-gate-replacement"), workspace.GoalScopeMergeUnit)
 	if err != nil {
 		t.Fatal(err)
 	}
-	loserReview := &reviewHarness{
-		attemptHarness: loserCore,
-		attempt:        loser,
-		repository: &reviewRepositoryStub{
-			snapshot: loserSnapshot,
-		},
-		tree: loserTree,
-	}
-	start, err := workspace.StartAttemptReviewRound(
-		context.Background(),
-		loserCore.journal,
-		loserCore.definition,
-		loserReview.repository,
-		workspace.StartAttemptReviewRoundRequest{
-			AttemptID:  loser.AttemptID(),
-			OccurredAt: mustTime(t, "2026-07-25T12:50:02Z"),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := start.Request()
-	for invocation := 1; invocation <= 3; invocation++ {
-		submission := reviewSubmission(
-			t,
-			request,
-			workspace.MustID("security-one"),
-			workspace.ReviewResultInfrastructureFailure,
-			nil,
-			workspace.DigestBytes(
-				[]byte(fmt.Sprintf(
-					"loser-review-failure-%d", invocation,
-				)),
-			),
-		)
-		loserReview.record(
-			t,
-			request,
-			submission,
-			fmt.Sprintf(
-				"2026-07-25T12:50:%02dZ", invocation+2,
-			),
-		)
-		state := mustReviewState(
-			t, loserCore.journal, loserCore.definition,
-			loser.AttemptID(),
-		)
-		if invocation == 3 {
-			if _, exhausted := state.Exhaustion(); !exhausted {
-				t.Fatal("losing attempt did not exhaust its review budget")
-			}
-			break
-		}
-		var ok bool
-		request, ok, err = state.NextRequest()
-		if err != nil || !ok {
-			t.Fatalf(
-				"next losing review request = %#v ok=%t err=%v",
-				request, ok, err,
-			)
-		}
-	}
-
-	winnerCore := loserCore
-	winnerCore.unit = mustMergeUnitReference(
-		t, "alpha-plan", "unit-two",
-	)
-	winnerCore.goal, _ = workspace.NewGoalBinding(
-		workspace.MustID("winner-goal"),
-		workspace.GoalScopeMergeUnit,
-	)
-	winner := winnerCore.reserve(t, "2026-07-25T12:50:06Z")
-	winnerRepository := adoptedIntegrationRepository(
-		t, winnerCore, winner, mustGitObject(t, 'c'),
-		mustGitObject(t, 'd'), "2026-07-25T12:50:08Z",
-	)
-	git := &integrationGitStub{featureHead: loserCore.base}
-	integrated, err := workspace.IntegrateMergeUnit(
-		context.Background(),
-		winnerCore.journal,
-		winnerCore.definition,
-		winnerRepository,
-		git,
-		workspace.IntegrateMergeUnitRequest{
-			AttemptID:  winner.AttemptID(),
-			OccurredAt: mustTime(t, "2026-07-25T12:50:09Z"),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	snapshot, err := loserCore.journal.ReadSnapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	view, err := workspace.RebuildWorkspaceView(
-		snapshot, loserCore.definition,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	scheduler := view.Scheduler
-	loserUnit := schedulerUnitByID(
-		t, scheduler, "unit-one",
-	)
-	if loserUnit.Status != workspace.SchedulerUnitReady ||
-		loserUnit.AttemptID != "" {
-		t.Fatalf(
-			"superseded exhausted loser scheduler view = %#v",
-			loserUnit,
-		)
-	}
-	gates := view.Gates
-	loserGate := gateUnitByID(t, gates, "unit-one")
-	if loserGate.AttemptID != "" ||
-		gateCheckByName(
-			t, loserGate, "commit",
-		).Reason != "no_attempt" ||
-		gateCheckByName(
-			t, loserGate, "review",
-		).Reason != "no_attempt" {
-		t.Fatalf(
-			"superseded exhausted loser gates = %#v",
-			loserGate,
-		)
-	}
-	replacementGoal, _ := workspace.NewGoalBinding(
-		workspace.MustID("exhausted-loser-replacement"),
-		workspace.GoalScopeMergeUnit,
-	)
 	replacement, err := workspace.StartAttempt(
-		context.Background(),
-		loserCore.journal,
-		loserCore.definition,
-		loserCore.git,
+		context.Background(), harness.journal, harness.definition, harness.git,
 		workspace.StartAttemptRequest{
-			MergeUnit:     loser.MergeUnit(),
-			AttemptNumber: 2,
-			Goal:          replacementGoal,
-			OccurredAt: mustTime(
-				t, "2026-07-25T12:50:10Z",
-			),
+			MergeUnit: harness.attempt.MergeUnit(), AttemptNumber: 2, Goal: replacementGoal,
+			OccurredAt: mustTime(t, "2026-07-25T12:50:04Z"),
 		},
 	)
-	if err != nil ||
-		replacement.Base() != integrated.MergeCommit() {
-		t.Fatalf(
-			"review-exhausted loser replacement = %#v error=%v",
-			replacement, err,
-		)
+	if err != nil || replacement.AttemptNumber() != 2 {
+		t.Fatalf("replacement after terminal gate = %#v error=%v", replacement, err)
 	}
 }
 
@@ -1166,7 +1017,7 @@ func TestCompletedIntegrationRetryFollowsLaterDurableFrontier(
 func TestReviewReadyIntegrationBindsExactHeadTreeAndReadiness(t *testing.T) {
 	t.Parallel()
 
-	harness := newReviewHarness(t)
+	harness := newGatedReviewHarness(t)
 	git := &integrationGitStub{featureHead: harness.base}
 	_, err := workspace.IntegrateMergeUnit(
 		context.Background(), harness.journal, harness.definition,
@@ -1180,39 +1031,8 @@ func TestReviewReadyIntegrationBindsExactHeadTreeAndReadiness(t *testing.T) {
 		t.Fatal("integration without review readiness succeeded")
 	}
 
-	start, err := workspace.StartAttemptReviewRound(
-		context.Background(), harness.journal, harness.definition,
-		harness.repository,
-		workspace.StartAttemptReviewRoundRequest{
-			AttemptID:  harness.attempt.AttemptID(),
-			OccurredAt: mustTime(t, "2026-07-25T13:00:01Z"),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	first := reviewSubmission(
-		t, start.Request(), workspace.MustID("security-one"),
-		workspace.ReviewResultCompleted, nil, workspace.Digest{},
-	)
-	harness.record(
-		t, start.Request(), first, "2026-07-25T13:00:02Z",
-	)
-	state := mustReviewState(
-		t, harness.journal, harness.definition,
-		harness.attempt.AttemptID(),
-	)
-	secondRequest, ok, err := state.NextRequest()
-	if err != nil || !ok {
-		t.Fatalf("second review request = %#v ok=%t err=%v", secondRequest, ok, err)
-	}
-	second := reviewSubmission(
-		t, secondRequest, workspace.MustID("correctness-one"),
-		workspace.ReviewResultCompleted, nil, workspace.Digest{},
-	)
-	harness.record(
-		t, secondRequest, second, "2026-07-25T13:00:03Z",
-	)
+	dispatched := harness.dispatch(t, "2026-07-25T13:00:01Z")
+	harness.record(t, dispatched.Dispatch(), workspace.ReviewGateSatisfied, "2026-07-25T13:00:02Z")
 	readiness, err := workspace.ConfirmReviewMergeReadiness(
 		context.Background(), harness.journal, harness.definition,
 		harness.repository, harness.attempt.AttemptID(),
@@ -1237,7 +1057,7 @@ func TestReviewReadyIntegrationBindsExactHeadTreeAndReadiness(t *testing.T) {
 			OccurredAt: mustTime(t, "2026-07-25T13:00:04Z"),
 		},
 	); err == nil ||
-		!strings.Contains(err.Error(), "exact-head review readiness") {
+		!strings.Contains(err.Error(), "exact head and tree") {
 		t.Fatalf("stale review readiness error = %v", err)
 	}
 	harness.repository.snapshot = exact
@@ -1389,8 +1209,8 @@ func configuredCommitProtocolFixture(t *testing.T) definitionFixture {
 	t.Helper()
 	fixture := newDefinitionFixture(t)
 	configuration := string(fixture.sources.ExecutionConfig.Bytes)
-	needle := "      max_review_rounds: 3\n  - plan_id: alpha-plan\n    merge_unit_id: unit-two"
-	replacement := `      max_review_rounds: 3
+	needle := "      max_attempts: 3\n  - plan_id: alpha-plan\n    merge_unit_id: unit-two"
+	replacement := `      max_attempts: 3
     commit_protocol:
       steps:
         - id: implementation

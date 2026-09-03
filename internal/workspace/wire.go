@@ -56,18 +56,17 @@ type mergeUnitWire struct {
 }
 
 type executionConfigWire struct {
-	SchemaVersion  int                    `yaml:"schema_version"`
-	Policy         executionPolicyWire    `yaml:"policy"`
-	Profiles       []executionProfileWire `yaml:"profiles"`
-	ReviewProfiles []reviewProfileWire    `yaml:"review_profiles"`
-	MergeUnits     []unitExecutionWire    `yaml:"merge_units"`
+	SchemaVersion int                    `yaml:"schema_version"`
+	Policy        executionPolicyWire    `yaml:"policy"`
+	Profiles      []executionProfileWire `yaml:"profiles"`
+	ReviewGate    *reviewGateWire        `yaml:"review_gate"`
+	MergeUnits    []unitExecutionWire    `yaml:"merge_units"`
 }
 
 type executionPolicyWire struct {
 	RequirePassingChecks *bool   `yaml:"require_passing_checks"`
 	AllowWriteNetwork    *bool   `yaml:"allow_write_network"`
 	MaxAttempts          *uint16 `yaml:"max_attempts"`
-	MaxReviewRounds      *uint16 `yaml:"max_review_rounds"`
 }
 
 type executionProfileWire struct {
@@ -77,12 +76,6 @@ type executionProfileWire struct {
 	Boundary *profileBoundaryPolicyWire `yaml:"boundary"`
 }
 
-type reviewProfileWire struct {
-	ID             string `yaml:"id"`
-	Runner         string `yaml:"runner"`
-	ReviewerPolicy string `yaml:"reviewer_policy"`
-}
-
 type unitExecutionWire struct {
 	PlanID         string                     `yaml:"plan_id"`
 	MergeUnitID    string                     `yaml:"merge_unit_id"`
@@ -90,12 +83,16 @@ type unitExecutionWire struct {
 	Policy         executionPolicyWire        `yaml:"policy"`
 	Boundary       *attemptBoundaryPolicyWire `yaml:"boundary"`
 	CommitProtocol *commitProtocolWire        `yaml:"commit_protocol"`
-	ReviewLoop     *reviewLoopWire            `yaml:"review_loop"`
+	ReviewGate     *reviewGateWire            `yaml:"review_gate"`
 }
 
-type reviewLoopWire struct {
-	Profiles                 []string `yaml:"profiles"`
-	MaxInfrastructureRetries *uint16  `yaml:"max_infrastructure_retries"`
+// reviewGateWire is deliberately all-or-nothing. A merge unit either
+// inherits the root gate configuration or supplies another complete one; prose
+// has no meaningful field-by-field narrowing relation.
+type reviewGateWire struct {
+	Adapter    *string `yaml:"adapter"`
+	Recipe     *string `yaml:"recipe"`
+	PolicyFile *string `yaml:"policy_file"`
 }
 
 type attemptBoundaryPolicyWire struct {

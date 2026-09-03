@@ -221,7 +221,7 @@ func (result AttemptHeadAdoptionResult) Record() JournalRecord { return result.r
 func (result AttemptHeadAdoptionResult) Adopted() bool         { return result.adopted }
 
 // AdoptAttemptHead records exact clean-head acceptance for an active attempt
-// without a review loop. Configured commit constraints are proved from the
+// without a configured review gate. Configured commit constraints are proved from the
 // final history immediately before this durable adoption.
 func AdoptAttemptHead(
 	ctx context.Context,
@@ -245,9 +245,9 @@ func AdoptAttemptHead(
 	if err != nil {
 		return AttemptHeadAdoptionResult{}, err
 	}
-	if _, configured := unit.ReviewLoop(); configured {
+	if _, configured := unit.ReviewGate(); configured {
 		return AttemptHeadAdoptionResult{}, fmt.Errorf(
-			"ordinary head adoption is unavailable for a configured review loop",
+			"ordinary head adoption is unavailable for a configured review gate",
 		)
 	}
 	if _, hasState := projection.State(request.AttemptID); hasState {
@@ -413,40 +413,6 @@ func RecordAttemptBoundary(
 			)
 		}
 		resolvedCheckpoint = AttemptCheckpointPauseOnly
-	}
-	unitExecution, err := executionForMergeUnit(definition.execution, attempt.mergeUnit)
-	if err != nil {
-		return AttemptBoundaryResult{}, err
-	}
-	if configuredLoop, required := unitExecution.ReviewLoop(); required {
-		reviewRuntime, rebuildErr := RebuildReviewRuntime(snapshot, definition)
-		if rebuildErr != nil {
-			return AttemptBoundaryResult{}, rebuildErr
-		}
-		reviewState, reviewed := reviewRuntime.State(attempt.attemptID)
-		if !reviewed || reviewState.loop.digest != configuredLoop.digest {
-			return AttemptBoundaryResult{}, fmt.Errorf(
-				"attempt %s cannot reach a boundary before its configured review loop starts",
-				attempt.attemptID,
-			)
-		}
-		if reviewErr := validateAttemptReviewProtocolState(
-			definition, unitExecution, attempt, reviewState, true, false,
-		); reviewErr != nil {
-			return AttemptBoundaryResult{}, reviewErr
-		}
-		if exhaustion, exhausted := reviewState.Exhaustion(); exhausted {
-			return AttemptBoundaryResult{}, fmt.Errorf(
-				"attempt %s cannot reach a boundary because its configured review loop is exhausted (%s)",
-				attempt.attemptID, exhaustion,
-			)
-		}
-		if !reviewState.MergeReady() || reviewState.head != attempt.verifiedHead {
-			return AttemptBoundaryResult{}, fmt.Errorf(
-				"attempt %s cannot reach a boundary before every configured review profile confirms its exact head and tree",
-				attempt.attemptID,
-			)
-		}
 	}
 	inspection, err := git.InspectAttemptWorktree(
 		ctx, definition.workspace.target.root, attempt.worktree,

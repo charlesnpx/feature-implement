@@ -8,19 +8,18 @@ import (
 type AttemptRuntimePhase string
 
 const (
-	AttemptActive          AttemptRuntimePhase = "active"
-	AttemptPaused          AttemptRuntimePhase = "paused"
-	AttemptReviewExhausted AttemptRuntimePhase = "review_exhausted"
-	AttemptSuperseded      AttemptRuntimePhase = "superseded"
-	AttemptCompleted       AttemptRuntimePhase = "completed"
-	AttemptFailed          AttemptRuntimePhase = "failed"
-	AttemptAbandoned       AttemptRuntimePhase = "abandoned"
+	AttemptActive     AttemptRuntimePhase = "active"
+	AttemptPaused     AttemptRuntimePhase = "paused"
+	AttemptSuperseded AttemptRuntimePhase = "superseded"
+	AttemptCompleted  AttemptRuntimePhase = "completed"
+	AttemptFailed     AttemptRuntimePhase = "failed"
+	AttemptAbandoned  AttemptRuntimePhase = "abandoned"
 )
 
 func (phase AttemptRuntimePhase) valid() bool {
 	switch phase {
 	case AttemptActive, AttemptPaused,
-		AttemptReviewExhausted, AttemptSuperseded, AttemptCompleted,
+		AttemptSuperseded, AttemptCompleted,
 		AttemptFailed, AttemptAbandoned:
 		return true
 	default:
@@ -29,8 +28,7 @@ func (phase AttemptRuntimePhase) valid() bool {
 }
 
 func (phase AttemptRuntimePhase) nonterminal() bool {
-	return phase == AttemptActive || phase == AttemptPaused ||
-		phase == AttemptReviewExhausted
+	return phase == AttemptActive || phase == AttemptPaused
 }
 
 func (phase AttemptRuntimePhase) retryableTerminal() bool {

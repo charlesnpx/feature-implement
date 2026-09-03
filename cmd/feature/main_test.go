@@ -482,7 +482,6 @@ policy:
   require_passing_checks: true
   allow_write_network: false
   max_attempts: 3
-  max_review_rounds: 3
 profiles:
   - id: standard
     runner: codex
@@ -490,7 +489,6 @@ profiles:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 3
-      max_review_rounds: 3
 merge_units:
   - plan_id: alpha-plan
     merge_unit_id: unit-one
@@ -503,7 +501,6 @@ merge_units:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 3
-      max_review_rounds: 3
 `,
 	}
 	for relative, content := range files {

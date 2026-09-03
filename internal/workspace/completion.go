@@ -247,22 +247,15 @@ func validateCompletionAttempt(
 	if err != nil {
 		return fmt.Errorf("execution_missing")
 	}
-	loop, reviewConfigured := unit.ReviewLoop()
+	gate, reviewConfigured := unit.ReviewGate()
 	if reviewConfigured {
 		state, exists := reviews.State(attempt.attemptID)
-		if !exists || !state.MergeReady() ||
-			state.loop.digest != loop.digest ||
-			state.head != intent.acceptedHead ||
-			state.tree != intent.acceptedTree {
+		if !exists {
 			return fmt.Errorf("review_readiness_mismatch")
 		}
-		if err := validateAttemptReviewProtocolState(
-			definition, unit, attempt, state, true, false,
-		); err != nil {
-			return fmt.Errorf("review_protocol_mismatch")
-		}
-		readiness, err := newReviewMergeReadiness(
-			definition, attempt, state,
+		readiness, err := newReviewGateReadiness(
+			definition, attempt, state, gate,
+			intent.acceptedHead, intent.acceptedTree,
 		)
 		if err != nil ||
 			intent.acceptanceMode !=

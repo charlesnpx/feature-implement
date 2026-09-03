@@ -193,49 +193,11 @@ func TestWorkspaceCompletionSupportsConfiguredReviewAndAdoptHead(
 ) {
 	t.Parallel()
 
-	harness := newReviewHarness(t)
-	start, err := workspace.StartAttemptReviewRound(
-		context.Background(),
-		harness.journal,
-		harness.definition,
-		harness.repository,
-		workspace.StartAttemptReviewRoundRequest{
-			AttemptID: harness.attempt.AttemptID(),
-			OccurredAt: mustTime(
-				t, "2026-07-25T20:20:00Z",
-			),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	security := reviewSubmission(
-		t, start.Request(), workspace.MustID("security-completion"),
-		workspace.ReviewResultCompleted, nil, workspace.Digest{},
-	)
+	harness := newGatedReviewHarness(t)
+	dispatched := harness.dispatch(t, "2026-07-25T20:20:00Z")
 	harness.record(
-		t, start.Request(), security,
+		t, dispatched.Dispatch(), workspace.ReviewGateSatisfied,
 		"2026-07-25T20:20:01Z",
-	)
-	state := mustReviewState(
-		t, harness.journal, harness.definition,
-		harness.attempt.AttemptID(),
-	)
-	correctnessRequest, ok, err := state.NextRequest()
-	if err != nil || !ok {
-		t.Fatalf(
-			"configured-review next request = %#v ok=%t err=%v",
-			correctnessRequest, ok, err,
-		)
-	}
-	correctness := reviewSubmission(
-		t, correctnessRequest,
-		workspace.MustID("correctness-completion"),
-		workspace.ReviewResultCompleted, nil, workspace.Digest{},
-	)
-	harness.record(
-		t, correctnessRequest, correctness,
-		"2026-07-25T20:20:02Z",
 	)
 	if _, err := workspace.ConfirmReviewMergeReadiness(
 		context.Background(),

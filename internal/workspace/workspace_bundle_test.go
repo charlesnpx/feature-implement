@@ -188,6 +188,35 @@ func TestWorkspaceBundleBindsDescriptorAndRejectsProviderEraFields(t *testing.T)
 	}
 }
 
+func TestWorkspaceBundleLoadsConfiguredReviewGatePolicyFiles(t *testing.T) {
+	t.Parallel()
+
+	fixture, rootPolicy, unitPolicy := configuredReviewGateFixture(t)
+	root := writeDefinitionBundle(t, fixture, nil)
+	bundle, err := workspace.LoadWorkspaceBundle(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := make(map[string]bool)
+	for _, path := range bundle.SourcePaths() {
+		paths[path] = true
+	}
+	for _, path := range []string{"policies/root-review.md", "policies/unit-two-review.md"} {
+		if !paths[path] {
+			t.Fatalf("bundle source paths omit configured policy %s: %#v", path, bundle.SourcePaths())
+		}
+	}
+	sources := bundle.Sources()
+	policyBytes := make(map[string][]byte)
+	for _, policy := range sources.ReviewPolicies {
+		policyBytes[policy.Path] = policy.Bytes
+	}
+	if string(policyBytes["policies/root-review.md"]) != string(rootPolicy) ||
+		string(policyBytes["policies/unit-two-review.md"]) != string(unitPolicy) {
+		t.Fatalf("bundle policy sources = %#v", policyBytes)
+	}
+}
+
 func writeDefinitionBundle(t *testing.T, fixture definitionFixture, overrides map[string]any) string {
 	t.Helper()
 	root := canonicalMaterializationTestTempDir(t)
@@ -209,6 +238,9 @@ func writeDefinitionBundle(t *testing.T, fixture definitionFixture, overrides ma
 		fixture.sources.Workspace.Path:       fixture.sources.Workspace.Bytes,
 		fixture.sources.Plans[0].Path:        fixture.sources.Plans[0].Bytes,
 		fixture.sources.ExecutionConfig.Path: fixture.sources.ExecutionConfig.Bytes,
+	}
+	for _, policy := range fixture.sources.ReviewPolicies {
+		files[policy.Path] = policy.Bytes
 	}
 	for relative, content := range files {
 		path := filepath.Join(root, filepath.FromSlash(relative))
