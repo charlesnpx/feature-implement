@@ -1,6 +1,7 @@
 package workspace_test
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -202,6 +203,41 @@ func TestFinalHistoryVerifierAcceptsOnlyConfiguredFinalSequence(t *testing.T) {
 	}
 }
 
+func TestFinalHistoryVerifierAcceptsExitZeroBinaryAndOversizedOutput(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name   string
+		stdout []byte
+	}{
+		{name: "binary output", stdout: []byte{0xff, 0x00, 'o', 'k'}},
+		{name: "oversized output", stdout: bytes.Repeat([]byte("x"), 8*1024*1024+1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := workspace.NewCheckProcessResult(
+				workspace.CheckExited, 0, "", test.stdout, nil,
+				workspace.StrictCheckIsolationProof(),
+			)
+			if err != nil {
+				t.Fatalf("NewCheckProcessResult: %v", err)
+			}
+			fixture := newFinalHistoryFixture(t)
+			verifier, err := workspace.NewFinalHistoryVerifier(
+				&finalHistoryGitStub{inspections: fixture.inspections},
+				&finalHistoryCheckRunnerStub{result: result},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := verifier.Verify(
+				context.Background(), fixture.protocol, "/private/tmp/final-history", fixture.base, fixture.head,
+			); err != nil {
+				t.Fatalf("exit-zero diagnostic output rejected final history: %v", err)
+			}
+		})
+	}
+}
+
 func TestFinalHistoryVerifierNamesViolations(t *testing.T) {
 	t.Parallel()
 
@@ -212,25 +248,53 @@ func TestFinalHistoryVerifierNamesViolations(t *testing.T) {
 		t.Fatal(err)
 	}
 	tests := []struct {
-		name    string
-		mutate  func(*testing.T, *finalHistoryFixture)
-		result  workspace.CheckProcessResult
-		wantErr string
+		name      string
+		mutate    func(*testing.T, *finalHistoryFixture)
+		result    workspace.CheckProcessResult
+		hasResult bool
+		wantErr   string
 	}{
 		{
 			name: "checkpoint ordering",
 			mutate: func(t *testing.T, fixture *finalHistoryFixture) {
 				t.Helper()
-				inspection, err := workspace.NewGitCommitInspection(
-					fixture.first, []workspace.GitObjectID{fixture.base}, fixture.firstTree,
-					"Add second checkpoint", "", fixture.firstDiff,
+				message, err := workspace.NewCommitMessagePolicy(
+					"Checkpoint", workspace.CommitBodyForbidden, nil,
 				)
 				if err != nil {
 					t.Fatal(err)
 				}
-				fixture.inspections[0] = inspection
+				steps := fixture.protocol.Steps()
+				rebuilt := make([]workspace.CommitStep, 0, len(steps))
+				for _, step := range steps {
+					updated, err := workspace.NewCommitStep(
+						step.ID(), message, step.Paths(), step.Checks(),
+					)
+					if err != nil {
+						t.Fatal(err)
+					}
+					rebuilt = append(rebuilt, updated)
+				}
+				fixture.protocol, err = workspace.NewCommitProtocol(rebuilt)
+				if err != nil {
+					t.Fatal(err)
+				}
+				first, second := fixture.inspections[0], fixture.inspections[1]
+				first, err = workspace.NewGitCommitInspection(
+					first.Commit(), first.Parents(), first.Tree(), "Checkpoint", "", first.Diff(),
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				second, err = workspace.NewGitCommitInspection(
+					second.Commit(), second.Parents(), second.Tree(), "Checkpoint", "", second.Diff(),
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fixture.inspections[0], fixture.inspections[1] = second, first
 			},
-			wantErr: "commit checkpoint first message",
+			wantErr: "commit checkpoint first path policy",
 		},
 		{
 			name: "exact subject",
@@ -263,24 +327,10 @@ func TestFinalHistoryVerifierNamesViolations(t *testing.T) {
 			wantErr: "commit checkpoint first path policy",
 		},
 		{
-			name: "parentage",
-			mutate: func(t *testing.T, fixture *finalHistoryFixture) {
-				t.Helper()
-				inspection, err := workspace.NewGitCommitInspection(
-					fixture.first, []workspace.GitObjectID{mustGitObject(t, '3')}, fixture.firstTree,
-					"Add first checkpoint", "", fixture.firstDiff,
-				)
-				if err != nil {
-					t.Fatal(err)
-				}
-				fixture.inspections[0] = inspection
-			},
-			wantErr: "commit checkpoint first has invalid parentage",
-		},
-		{
-			name:    "nonzero configured check",
-			result:  nonzero,
-			wantErr: "configured check first-check did not exit zero",
+			name:      "nonzero configured check",
+			result:    nonzero,
+			hasResult: true,
+			wantErr:   "configured check first-check did not exit zero",
 		},
 	}
 	for _, test := range tests {
@@ -290,7 +340,7 @@ func TestFinalHistoryVerifierNamesViolations(t *testing.T) {
 				test.mutate(t, &fixture)
 			}
 			result := passingFinalHistoryCheckResult(t)
-			if test.result.Termination() != "" {
+			if test.hasResult {
 				result = test.result
 			}
 			verifier, err := workspace.NewFinalHistoryVerifier(

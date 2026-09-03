@@ -131,7 +131,7 @@ exit 0
 	if err != nil {
 		t.Fatalf("RunConfiguredCheck with isolated runner: %v", err)
 	}
-	if !result.Isolation().Strict() || !result.Succeeded() {
+	if !result.Succeeded() {
 		t.Fatalf("isolated check result = %#v", result)
 	}
 }

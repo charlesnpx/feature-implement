@@ -587,7 +587,7 @@ func workspaceReviewViews(
 			Head:                  state.Head().String(),
 			Tree:                  state.Tree().String(),
 			Status:                status,
-			RoundsUsed:            state.RoundsUsed(),
+			RoundsUsed:            reviews.RoundsUsed(state.AttemptID()),
 			InfrastructureRetries: state.InfrastructureRetriesUsed(),
 			MergeReady:            state.MergeReady(),
 		})

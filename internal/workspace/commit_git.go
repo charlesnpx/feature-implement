@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha1"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"hash"
@@ -77,7 +76,6 @@ type GitCommitInspection struct {
 	subject string
 	body    string
 	diff    CommitDiff
-	digest  Digest
 }
 
 func NewGitCommitInspection(
@@ -87,7 +85,7 @@ func NewGitCommitInspection(
 	subject, body string,
 	diff CommitDiff,
 ) (GitCommitInspection, error) {
-	if commit.IsZero() || len(parents) == 0 || tree.IsZero() || diff.digest.IsZero() {
+	if commit.IsZero() || len(parents) == 0 || tree.IsZero() || len(diff.changes) == 0 {
 		return GitCommitInspection{}, fmt.Errorf("Git commit inspection requires commit, parent, tree, and diff")
 	}
 	copyParents := append([]GitObjectID(nil), parents...)
@@ -108,25 +106,9 @@ func NewGitCommitInspection(
 	if err := validateCommitBody(body); err != nil {
 		return GitCommitInspection{}, err
 	}
-	type canonical struct {
-		Commit  string   `json:"commit"`
-		Parents []string `json:"parents"`
-		Tree    string   `json:"tree"`
-		Subject string   `json:"subject"`
-		Body    string   `json:"body"`
-		Diff    string   `json:"diff"`
-	}
-	parentStrings := make([]string, 0, len(copyParents))
-	for _, parent := range copyParents {
-		parentStrings = append(parentStrings, parent.String())
-	}
-	content, _ := json.Marshal(canonical{
-		Commit: commit.String(), Parents: parentStrings, Tree: tree.String(), Subject: subject, Body: body,
-		Diff: diff.digest.String(),
-	})
 	return GitCommitInspection{
 		commit: commit, parents: copyParents, tree: tree, subject: subject, body: body,
-		diff: cloneCommitDiff(diff), digest: DigestBytes(content),
+		diff: cloneCommitDiff(diff),
 	}, nil
 }
 
@@ -138,7 +120,6 @@ func (inspection GitCommitInspection) Tree() GitObjectID { return inspection.tre
 func (inspection GitCommitInspection) Subject() string   { return inspection.subject }
 func (inspection GitCommitInspection) Body() string      { return inspection.body }
 func (inspection GitCommitInspection) Diff() CommitDiff  { return cloneCommitDiff(inspection.diff) }
-func (inspection GitCommitInspection) Digest() Digest    { return inspection.digest }
 
 type CommitGitPort interface {
 	InspectFirstParentRange(context.Context, string, GitObjectID, GitObjectID) ([]GitCommitInspection, error)

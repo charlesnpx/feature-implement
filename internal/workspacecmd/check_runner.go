@@ -74,9 +74,6 @@ func (runner isolatedCheckRunner) RunConfiguredCheck(
 	stdout.maximum, stderr.maximum = configuredCheckOutputLimit, configuredCheckOutputLimit
 	command.Stdout, command.Stderr = &stdout, &stderr
 	runErr := command.Run()
-	if stdout.exceeded || stderr.exceeded {
-		return workspace.CheckProcessResult{}, fmt.Errorf("configured check output exceeded %d bytes", configuredCheckOutputLimit)
-	}
 	termination, exitCode, signal, err := classifyCheckTermination(ctx, runErr)
 	if err != nil {
 		return workspace.CheckProcessResult{}, err

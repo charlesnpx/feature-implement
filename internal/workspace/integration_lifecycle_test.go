@@ -418,7 +418,7 @@ func TestIntegrationCompletionAccountsForAndReleasesLeaseAndSerialSegment(
 	}
 }
 
-func TestIntegrationRerunsConfiguredFinalHistoryAtAcceptedHead(t *testing.T) {
+func TestIntegrationDoesNotRunConfiguredChecksAfterIntent(t *testing.T) {
 	t.Parallel()
 
 	core := newAttemptHarnessFromFixture(t, configuredCommitProtocolFixture(t), "unit-one")
@@ -428,7 +428,15 @@ func TestIntegrationRerunsConfiguredFinalHistoryAtAcceptedHead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository := &reviewRepositoryStub{snapshot: snapshot}
+	repository := &reviewRepositoryStub{
+		snapshot: snapshot,
+		finalHistory: func(run int) error {
+			if run > 2 {
+				return errors.New("configured check full-suite did not exit zero")
+			}
+			return nil
+		},
+	}
 	if _, err := workspace.AdoptAttemptHead(
 		context.Background(), core.journal, core.definition, repository,
 		workspace.AdoptAttemptHeadRequest{
@@ -441,27 +449,24 @@ func TestIntegrationRerunsConfiguredFinalHistoryAtAcceptedHead(t *testing.T) {
 		t.Fatalf("head adoption final-history runs = %d, want 1", repository.finalHistoryRuns)
 	}
 
-	repository.finalHistoryErr = errors.New("configured check full-suite did not exit zero")
 	git := &integrationGitStub{featureHead: core.base}
-	before := journalRecordCount(t, core.journal)
-	_, err = workspace.IntegrateMergeUnit(
+	result, err := workspace.IntegrateMergeUnit(
 		context.Background(), core.journal, core.definition, repository, git,
 		workspace.IntegrateMergeUnitRequest{
 			AttemptID: attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-25T10:30:02Z"),
 		},
 	)
-	if err == nil || !strings.Contains(err.Error(), "integration final history") ||
-		!strings.Contains(err.Error(), "full-suite") {
-		t.Fatalf("configured final-history integration error = %v", err)
+	if err != nil {
+		t.Fatalf("integration with post-intent check failure = %v", err)
 	}
-	if repository.finalHistoryRuns != 2 || git.createCalls != 0 || git.publishCalls != 0 {
+	if result.Attempt().Phase() != workspace.AttemptCompleted {
+		t.Fatalf("integration did not complete after pre-intent checks: %#v", result.Attempt())
+	}
+	if repository.finalHistoryRuns != 2 || git.createCalls != 1 || git.publishCalls != 1 {
 		t.Fatalf(
-			"failed final-history integration ran=%d creates=%d publishes=%d",
+			"integration ran configured checks=%d creates=%d publishes=%d",
 			repository.finalHistoryRuns, git.createCalls, git.publishCalls,
 		)
-	}
-	if after := journalRecordCount(t, core.journal); after != before {
-		t.Fatalf("failed final-history integration changed journal: before=%d after=%d", before, after)
 	}
 }
 

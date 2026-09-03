@@ -176,6 +176,10 @@ func StartAttemptReviewRound(
 	if !repositorySnapshot.clean {
 		return ReviewRoundStartResult{}, fmt.Errorf("review requires a clean exact attempt head")
 	}
+	if (repositorySnapshot.head != attempt.verifiedHead || !hasState) &&
+		projection.RoundsUsed(request.AttemptID) >= loop.MaxRounds() {
+		return ReviewRoundStartResult{}, reviewRoundBudgetExhaustedError(loop.MaxRounds())
+	}
 	if err := verifyAttemptFinalHistory(
 		ctx, repository, unit, attempt, repositorySnapshot.head,
 	); err != nil {
@@ -210,7 +214,10 @@ func StartAttemptReviewRound(
 		if state.loop.digest != loop.digest || state.generation != definition.generation {
 			return ReviewRoundStartResult{}, fmt.Errorf("review configuration cannot reset durable counters")
 		}
-		if _, exhausted := state.Exhaustion(); exhausted {
+		if directive, exhausted := state.Exhaustion(); exhausted {
+			if directive.Reason() == ReviewExhaustedRounds {
+				return ReviewRoundStartResult{}, reviewRoundBudgetExhaustedError(loop.MaxRounds())
+			}
 			return ReviewRoundStartResult{}, fmt.Errorf("review loop is exhausted")
 		}
 		if pending, ok, err := state.NextRequest(); err != nil {
@@ -222,6 +229,9 @@ func StartAttemptReviewRound(
 			return ReviewRoundStartResult{}, fmt.Errorf("review is already clean on exact head %s", state.head)
 		}
 		ordinal = state.RoundsUsed() + 1
+	}
+	if projection.RoundsUsed(request.AttemptID) >= loop.MaxRounds() {
+		return ReviewRoundStartResult{}, reviewRoundBudgetExhaustedError(loop.MaxRounds())
 	}
 	if !repositorySnapshot.clean || repositorySnapshot.head != attempt.verifiedHead {
 		return ReviewRoundStartResult{}, fmt.Errorf("review requires a clean exact attempt head")

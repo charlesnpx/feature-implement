@@ -68,7 +68,7 @@ source of truth.
 
 Run a broad read-only review loop for every merge unit.
 
-1. Treat each fresh broad audit as one review iteration and run at most three.
+1. Treat each fresh broad audit as one review iteration and run at most three per attempt, not per head.
    Use a fresh Claude subagent with the exact base-to-head diff, read-only
    repository access, ephemeral scratch, disabled repository hooks, no
    write-capable network, and no external-write permission.

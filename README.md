@@ -196,8 +196,8 @@ and isolated checks that exit zero—before review or integration. Without a
 configured review loop, `attempt adopt-head` records the exact clean accepted
 head and tree before integration.
 
-Agent-driven broad review is capped at three iterations. Start another
-iteration only when the preceding review found a Critical or High issue.
+Agent-driven broad review is capped at three iterations per attempt, not per
+head. Start another iteration only when the preceding review found a Critical or High issue.
 After a review with no Critical or High findings, apply worthwhile Medium and
 Low fixes once, perform targeted confirmation, and stop the broad-review loop.
 

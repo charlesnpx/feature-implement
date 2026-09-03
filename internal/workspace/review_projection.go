@@ -10,7 +10,13 @@ type ReviewRuntimeProjection struct {
 	workspaceID      ID
 	activeGeneration Digest
 	states           []ReviewState
+	roundCounts      []reviewRoundCount
 	core             WorkspaceRuntimeProjection
+}
+
+type reviewRoundCount struct {
+	attemptID  ID
+	roundsUsed uint16
 }
 
 func (projection ReviewRuntimeProjection) WorkspaceID() ID { return projection.workspaceID }
@@ -31,6 +37,12 @@ func (projection ReviewRuntimeProjection) State(attemptID ID) (ReviewState, bool
 		}
 	}
 	return ReviewState{}, false
+}
+func (projection ReviewRuntimeProjection) RoundsUsed(attemptID ID) uint16 {
+	if index := reviewRoundCountIndex(projection.roundCounts, attemptID); index >= 0 {
+		return projection.roundCounts[index].roundsUsed
+	}
+	return 0
 }
 
 func RebuildReviewRuntime(
@@ -97,7 +109,6 @@ func reduceReviewRuntime(current ReviewRuntimeProjection, record JournalRecord) 
 		if index := reviewStateIndex(current.states, event.attemptID); index >= 0 {
 			// A review is valid only for its exact head and tree. An ordinary
 			// follow-up commit replaces that head, so discard the old review state
-			// rather than carrying a review-fix reservation or budget forward.
 			next.states = append(next.states[:index:index], next.states[index+1:]...)
 		}
 	case ReviewRoundStartedJournalEvent:
@@ -106,6 +117,9 @@ func reduceReviewRuntime(current ReviewRuntimeProjection, record JournalRecord) 
 			attempt.mergeUnit != event.mergeUnit || attempt.verifiedHead != event.head ||
 			current.workspaceID != event.workspaceID || current.activeGeneration != event.generation {
 			return ReviewRuntimeProjection{}, fmt.Errorf("review round does not match an active exact-head attempt")
+		}
+		if current.RoundsUsed(event.attemptID) >= event.loop.maxRounds {
+			return ReviewRuntimeProjection{}, reviewRoundBudgetExhaustedError(event.loop.maxRounds)
 		}
 		start, err := NewStartReviewRound(
 			event.workspaceID, event.generation, event.attemptID, event.mergeUnit,
@@ -129,6 +143,7 @@ func reduceReviewRuntime(current ReviewRuntimeProjection, record JournalRecord) 
 		} else {
 			next.states[index] = state
 		}
+		next.roundCounts = incrementReviewRoundCount(next.roundCounts, event.attemptID)
 	case ReviewInvocationReservedJournalEvent:
 		index := reviewStateIndex(current.states, event.attemptID)
 		attempt, exists := current.core.Attempt(event.attemptID)
@@ -184,6 +199,11 @@ func reduceReviewRuntime(current ReviewRuntimeProjection, record JournalRecord) 
 		if err != nil {
 			return ReviewRuntimeProjection{}, err
 		}
+		if state.exhaustion == nil {
+			state.exhaustion = deriveReviewExhaustionAtRounds(
+				state, current.RoundsUsed(event.attemptID),
+			)
+		}
 		next.states[index] = state
 	}
 	return next, nil
@@ -198,12 +218,32 @@ func reviewStateIndex(states []ReviewState, attemptID ID) int {
 	return -1
 }
 
+func reviewRoundCountIndex(counts []reviewRoundCount, attemptID ID) int {
+	for index, count := range counts {
+		if count.attemptID == attemptID {
+			return index
+		}
+	}
+	return -1
+}
+
+func incrementReviewRoundCount(
+	counts []reviewRoundCount, attemptID ID,
+) []reviewRoundCount {
+	if index := reviewRoundCountIndex(counts, attemptID); index >= 0 {
+		counts[index].roundsUsed++
+		return counts
+	}
+	return append(counts, reviewRoundCount{attemptID: attemptID, roundsUsed: 1})
+}
+
 func cloneReviewRuntime(source ReviewRuntimeProjection) ReviewRuntimeProjection {
 	result := source
 	result.states = make([]ReviewState, 0, len(source.states))
 	for _, state := range source.states {
 		result.states = append(result.states, cloneReviewState(state))
 	}
+	result.roundCounts = append([]reviewRoundCount(nil), source.roundCounts...)
 	result.core = cloneWorkspaceRuntime(source.core)
 	return result
 }
@@ -243,15 +283,21 @@ func canonicalReviewRuntime(projection ReviewRuntimeProjection) ([]byte, error) 
 		Tree        string      `json:"tree"`
 		Rounds      []roundJSON `json:"rounds"`
 	}
+	type roundCountJSON struct {
+		AttemptID  string `json:"attempt_id"`
+		RoundsUsed uint16 `json:"rounds_used"`
+	}
 	type runtimeJSON struct {
-		SchemaVersion    int         `json:"schema_version"`
-		WorkspaceID      string      `json:"workspace_id"`
-		ActiveGeneration string      `json:"active_generation"`
-		States           []stateJSON `json:"states"`
+		SchemaVersion    int              `json:"schema_version"`
+		WorkspaceID      string           `json:"workspace_id"`
+		ActiveGeneration string           `json:"active_generation"`
+		States           []stateJSON      `json:"states"`
+		RoundCounts      []roundCountJSON `json:"round_counts"`
 	}
 	value := runtimeJSON{
 		SchemaVersion: 2, WorkspaceID: projection.workspaceID.String(),
 		ActiveGeneration: projection.activeGeneration.String(), States: make([]stateJSON, 0, len(projection.states)),
+		RoundCounts: make([]roundCountJSON, 0, len(projection.roundCounts)),
 	}
 	for _, state := range projection.states {
 		item := stateJSON{
@@ -295,5 +341,13 @@ func canonicalReviewRuntime(projection ReviewRuntimeProjection) ([]byte, error) 
 		value.States = append(value.States, item)
 	}
 	sort.Slice(value.States, func(i, j int) bool { return value.States[i].AttemptID < value.States[j].AttemptID })
+	for _, count := range projection.roundCounts {
+		value.RoundCounts = append(value.RoundCounts, roundCountJSON{
+			AttemptID: count.attemptID.String(), RoundsUsed: count.roundsUsed,
+		})
+	}
+	sort.Slice(value.RoundCounts, func(i, j int) bool {
+		return value.RoundCounts[i].AttemptID < value.RoundCounts[j].AttemptID
+	})
 	return json.Marshal(value)
 }

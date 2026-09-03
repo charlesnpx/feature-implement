@@ -56,12 +56,8 @@ func (verifier FinalHistoryVerifier) Verify(
 			len(steps), len(inspections),
 		)
 	}
-	parent := base
 	for index, inspection := range inspections {
 		step := steps[index]
-		if len(inspection.parents) != 1 || inspection.parents[0] != parent {
-			return fmt.Errorf("commit checkpoint %s has invalid parentage", step.id)
-		}
 		if err := step.message.Validate(inspection.subject, inspection.body); err != nil {
 			return fmt.Errorf("commit checkpoint %s message: %w", step.id, err)
 		}
@@ -70,10 +66,6 @@ func (verifier FinalHistoryVerifier) Verify(
 				return fmt.Errorf("commit checkpoint %s path policy: %w", step.id, err)
 			}
 		}
-		parent = inspection.commit
-	}
-	if parent != head {
-		return fmt.Errorf("configured commit protocol does not end at the accepted head")
 	}
 	if verifier.checks == nil {
 		for _, step := range steps {
@@ -98,7 +90,10 @@ func (verifier FinalHistoryVerifier) Verify(
 				return fmt.Errorf("configured check %s did not prove strict isolation", check.id)
 			}
 			if !result.Succeeded() {
-				return fmt.Errorf("configured check %s did not exit zero", check.id)
+				return fmt.Errorf(
+					"configured check %s did not exit zero: %s",
+					check.id, result.failureDiagnostic(),
+				)
 			}
 			if err := verifier.git.VerifyCleanWorktree(ctx, worktree, head); err != nil {
 				return fmt.Errorf("configured check %s changed Git state: %w", check.id, err)

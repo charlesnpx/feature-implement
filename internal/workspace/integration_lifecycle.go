@@ -94,7 +94,7 @@ func IntegrateMergeUnit(
 	if attempt.integration == nil {
 		evidence, err := confirmIntegrationAcceptance(
 			ctx, snapshot, reviews, definition, repository,
-			attempt, false,
+			attempt, false, true,
 		)
 		if err != nil {
 			return MergeUnitIntegrationResult{}, err
@@ -211,7 +211,7 @@ func IntegrateMergeUnit(
 
 	if _, err := confirmIntegrationAcceptance(
 		ctx, snapshot, reviews, definition, repository,
-		attempt, true,
+		attempt, true, false,
 	); err != nil {
 		return MergeUnitIntegrationResult{}, err
 	}
@@ -258,7 +258,7 @@ func IntegrateMergeUnit(
 		}
 		if _, err := confirmIntegrationAcceptance(
 			ctx, snapshot, reviews, definition, repository,
-			attempt, true,
+			attempt, true, false,
 		); err != nil {
 			return MergeUnitIntegrationResult{}, err
 		}
@@ -343,7 +343,7 @@ func IntegrateMergeUnit(
 	}
 	if _, err := confirmIntegrationAcceptance(
 		ctx, snapshot, reviews, definition, repository,
-		attempt, true,
+		attempt, true, false,
 	); err != nil {
 		return MergeUnitIntegrationResult{}, err
 	}
@@ -546,6 +546,7 @@ func confirmIntegrationAcceptance(
 	repository ReviewRepositoryPort,
 	attempt RuntimeAttemptProjection,
 	pendingIntent bool,
+	verifyFinalHistory bool,
 ) (integrationAcceptanceEvidence, error) {
 	if attempt.phase != AttemptActive || attempt.verifiedHead.IsZero() {
 		return integrationAcceptanceEvidence{}, fmt.Errorf(
@@ -594,10 +595,15 @@ func confirmIntegrationAcceptance(
 			"integration requires the exact clean accepted attempt head",
 		)
 	}
-	if err := verifyAttemptFinalHistory(
-		ctx, repository, unit, attempt, repositorySnapshot.head,
-	); err != nil {
-		return integrationAcceptanceEvidence{}, fmt.Errorf("integration final history: %w", err)
+	// Configured checks are arbitrary commands. They must finish before the
+	// integration intent becomes durable; later confirmations compare only the
+	// immutable accepted Git and review evidence to that intent.
+	if verifyFinalHistory {
+		if err := verifyAttemptFinalHistory(
+			ctx, repository, unit, attempt, repositorySnapshot.head,
+		); err != nil {
+			return integrationAcceptanceEvidence{}, fmt.Errorf("integration final history: %w", err)
+		}
 	}
 	evidence := integrationAcceptanceEvidence{
 		head: repositorySnapshot.head,

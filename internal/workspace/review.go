@@ -462,9 +462,12 @@ func (reason ReviewExhaustionReason) valid() bool {
 	return reason == ReviewExhaustedRounds || reason == ReviewExhaustedInfrastructure
 }
 
-type ReviewExhaustionOwnerChoice string
-
-const ReviewExhaustionStop ReviewExhaustionOwnerChoice = "stop"
+func reviewRoundBudgetExhaustedError(maxRounds uint16) error {
+	return fmt.Errorf(
+		"review round budget exhausted: max_review_rounds=%d per attempt",
+		maxRounds,
+	)
+}
 
 type ReviewExhaustionDirective struct {
 	workspaceID    ID
@@ -489,9 +492,6 @@ func (directive ReviewExhaustionDirective) InfrastructureRetriesUsed() uint16 {
 	return directive.infrastructure
 }
 func (directive ReviewExhaustionDirective) Digest() Digest { return directive.digest }
-func (ReviewExhaustionDirective) Choices() []ReviewExhaustionOwnerChoice {
-	return []ReviewExhaustionOwnerChoice{ReviewExhaustionStop}
-}
 
 type ReviewState struct {
 	workspaceID ID
@@ -694,7 +694,7 @@ func ReduceReview(current ReviewState, event ReviewEvent) (ReviewState, error) {
 			next.head, next.tree = value.head, value.tree
 		}
 		if value.ordinal > next.loop.maxRounds {
-			return ReviewState{}, fmt.Errorf("review round budget is exhausted")
+			return ReviewState{}, reviewRoundBudgetExhaustedError(next.loop.maxRounds)
 		}
 		next.rounds = append(next.rounds, ReviewRoundState{ordinal: value.ordinal, head: value.head, tree: value.tree})
 	case ReserveReviewInvocation:
@@ -834,6 +834,12 @@ func validateReviewInstancePolicy(state ReviewState, profile ReviewProfile, inst
 }
 
 func deriveReviewExhaustion(state ReviewState) *ReviewExhaustionDirective {
+	return deriveReviewExhaustionAtRounds(state, state.RoundsUsed())
+}
+
+func deriveReviewExhaustionAtRounds(
+	state ReviewState, roundsUsed uint16,
+) *ReviewExhaustionDirective {
 	reason := ReviewExhaustionReason("")
 	latestInfrastructureFailure := false
 	if len(state.rounds) != 0 {
@@ -845,7 +851,7 @@ func deriveReviewExhaustion(state ReviewState) *ReviewExhaustionDirective {
 		round := state.rounds[len(state.rounds)-1]
 		if round.Complete(len(state.loop.profiles)) && round.head == state.head && round.tree == state.tree &&
 			round.HasBlockingFindings() {
-			if state.RoundsUsed() >= state.loop.maxRounds {
+			if roundsUsed >= state.loop.maxRounds {
 				reason = ReviewExhaustedRounds
 			}
 		}
@@ -855,7 +861,7 @@ func deriveReviewExhaustion(state ReviewState) *ReviewExhaustionDirective {
 	}
 	directive := ReviewExhaustionDirective{
 		workspaceID: state.workspaceID, generation: state.generation, attemptID: state.attemptID,
-		head: state.head, tree: state.tree, reason: reason, roundsUsed: state.RoundsUsed(),
+		head: state.head, tree: state.tree, reason: reason, roundsUsed: roundsUsed,
 		infrastructure: state.InfrastructureRetriesUsed(),
 	}
 	type directiveJSON struct {

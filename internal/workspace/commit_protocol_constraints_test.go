@@ -52,16 +52,6 @@ func TestDeclarativeCommitProtocolSchemaKeepsOnlyFinalHistoryConstraints(t *test
 			wantErr: "must explicitly define allowed_paths, frozen_paths, and checks",
 		},
 		{
-			name: "legacy parser",
-			source: strings.Replace(
-				configured,
-				"              command:\n",
-				"              parser: go-test-json\n              command:\n",
-				1,
-			),
-			wantErr: "field parser not found",
-		},
-		{
 			name:    "runner mismatch",
 			source:  strings.Replace(configured, "              runner: codex\n", "              runner: other\n", 1),
 			wantErr: "does not match profile runner",

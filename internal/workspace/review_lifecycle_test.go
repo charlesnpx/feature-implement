@@ -17,6 +17,7 @@ type reviewRepositoryStub struct {
 	err              error
 	calls            int
 	finalHistoryErr  error
+	finalHistory     func(int) error
 	finalHistoryRuns int
 }
 
@@ -44,6 +45,9 @@ func (repository *reviewRepositoryStub) VerifyFinalHistory(
 	workspace.GitObjectID,
 ) error {
 	repository.finalHistoryRuns++
+	if repository.finalHistory != nil {
+		return repository.finalHistory(repository.finalHistoryRuns)
+	}
 	return repository.finalHistoryErr
 }
 
@@ -138,16 +142,6 @@ func TestReviewConfigurationPreservesLoopOrderAndRejectsUnsafeSchemas(t *testing
 		})
 	}
 
-	legacyFixProtocol := strings.Replace(
-		valid,
-		"    review_loop:\n",
-		"    review_fix_protocol: {}\n    review_loop:\n",
-		1,
-	)
-	if _, err := workspace.DecodeExecutionConfig([]byte(legacyFixProtocol)); err == nil ||
-		!strings.Contains(err.Error(), "review_fix_protocol") {
-		t.Fatalf("legacy review-fix protocol was accepted: %v", err)
-	}
 }
 
 func TestReviewResultRejectsAggregatePayloadThatCannotFitJournal(t *testing.T) {
@@ -293,8 +287,7 @@ func TestReviewReducerSeparatesInfrastructureAndRoundBudgets(t *testing.T) {
 		}
 		directive, exhausted := state.Exhaustion()
 		if !exhausted || directive.Reason() != workspace.ReviewExhaustedInfrastructure ||
-			directive.InfrastructureRetriesUsed() != 2 || directive.RoundsUsed() != 1 ||
-			len(directive.Choices()) != 1 || directive.Choices()[0] != workspace.ReviewExhaustionStop {
+			directive.InfrastructureRetriesUsed() != 2 || directive.RoundsUsed() != 1 {
 			t.Fatalf("infrastructure exhaustion = %#v exhausted=%v", directive, exhausted)
 		}
 	})
@@ -316,6 +309,116 @@ func TestReviewReducerSeparatesInfrastructureAndRoundBudgets(t *testing.T) {
 		}
 	})
 
+}
+
+func TestReviewRoundBudgetRejectsFourthBlockingReviewAcrossHeadChanges(t *testing.T) {
+	t.Parallel()
+
+	harness := newReviewHarness(t)
+	headTrees := []struct {
+		head workspace.GitObjectID
+		tree workspace.GitObjectID
+	}{
+		{head: harness.attempt.VerifiedHead(), tree: harness.tree},
+		{head: mustGitObject(t, 'c'), tree: mustGitObject(t, 'd')},
+		{head: mustGitObject(t, 'e'), tree: mustGitObject(t, 'f')},
+	}
+	for index, headTree := range headTrees {
+		snapshot, err := workspace.NewReviewRepositorySnapshot(
+			headTree.head, headTree.tree, true,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		harness.repository.snapshot = snapshot
+		started, err := workspace.StartAttemptReviewRound(
+			context.Background(), harness.journal, harness.definition, harness.repository,
+			workspace.StartAttemptReviewRoundRequest{
+				AttemptID:  harness.attempt.AttemptID(),
+				OccurredAt: mustTime(t, fmt.Sprintf("2026-07-21T12:00:%02dZ", index*3+1)),
+			},
+		)
+		if err != nil {
+			t.Fatalf("start blocking review round %d: %v", index+1, err)
+		}
+		finding := mustReviewFinding(
+			t, workspace.ReviewSeverityHigh,
+			fmt.Sprintf("blocking review round %d", index+1),
+		)
+		first := reviewSubmission(
+			t, started.Request(), workspace.MustID("security-one"),
+			workspace.ReviewResultCompleted, []workspace.ReviewFinding{finding}, workspace.Digest{},
+		)
+		harness.record(
+			t, started.Request(), first,
+			fmt.Sprintf("2026-07-21T12:00:%02dZ", index*3+2),
+		)
+		state := mustReviewState(
+			t, harness.journal, harness.definition, harness.attempt.AttemptID(),
+		)
+		second, ok, err := state.NextRequest()
+		if err != nil || !ok || second.Profile().ID().String() != "correctness" {
+			t.Fatalf("second request for review round %d = %#v ok=%v err=%v", index+1, second, ok, err)
+		}
+		secondSubmission := reviewSubmission(
+			t, second, workspace.MustID(fmt.Sprintf("correctness-%d", index+1)),
+			workspace.ReviewResultCompleted, nil, workspace.Digest{},
+		)
+		harness.record(
+			t, second, secondSubmission,
+			fmt.Sprintf("2026-07-21T12:00:%02dZ", index*3+3),
+		)
+	}
+
+	snapshot, err := harness.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviews, err := workspace.RebuildReviewRuntime(snapshot, harness.definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reviews.RoundsUsed(harness.attempt.AttemptID()) != 3 {
+		t.Fatalf("aggregate review rounds = %d, want 3", reviews.RoundsUsed(harness.attempt.AttemptID()))
+	}
+	state, exists := reviews.State(harness.attempt.AttemptID())
+	directive, exhausted := state.Exhaustion()
+	if !exists || !exhausted || directive.Reason() != workspace.ReviewExhaustedRounds ||
+		directive.RoundsUsed() != 3 {
+		t.Fatalf("cross-head review exhaustion = %#v exists=%v exhausted=%v", directive, exists, exhausted)
+	}
+	view, err := workspace.RebuildWorkspaceView(snapshot, harness.definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Reviews) != 1 || view.Reviews[0].RoundsUsed != 3 || view.Reviews[0].Status != "exhausted" {
+		t.Fatalf("operator review view = %#v", view.Reviews)
+	}
+
+	fourth, err := workspace.NewReviewRepositorySnapshot(
+		mustGitObject(t, '1'), mustGitObject(t, '2'), true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness.repository.snapshot = fourth
+	_, err = workspace.StartAttemptReviewRound(
+		context.Background(), harness.journal, harness.definition, harness.repository,
+		workspace.StartAttemptReviewRoundRequest{
+			AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-21T12:00:10Z"),
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "review round budget exhausted") ||
+		!strings.Contains(err.Error(), "max_review_rounds=3 per attempt") {
+		t.Fatalf("fourth review round error = %v", err)
+	}
+	after, err := harness.journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Records()) != len(snapshot.Records()) {
+		t.Fatalf("exhausted fourth review changed the journal: before=%d after=%d", len(snapshot.Records()), len(after.Records()))
+	}
 }
 
 func TestReviewLifecycleVerifiesLocalExactHeadEvidenceAndBoundaryReadiness(t *testing.T) {

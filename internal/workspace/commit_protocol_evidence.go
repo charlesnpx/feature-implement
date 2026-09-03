@@ -1,11 +1,9 @@
 package workspace
 
 import (
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
-	"unicode/utf8"
 )
 
 type GitFileMode string
@@ -147,7 +145,6 @@ func (policy CommitPathPolicy) ValidateChange(change CommitPathChange) error {
 
 type CommitDiff struct {
 	changes []CommitPathChange
-	digest  Digest
 }
 
 func NewCommitDiff(changes []CommitPathChange) (CommitDiff, error) {
@@ -185,43 +182,11 @@ func NewCommitDiff(changes []CommitPathChange) (CommitDiff, error) {
 			return CommitDiff{}, fmt.Errorf("duplicate commit path change for %q and %q", current.oldPath, current.newPath)
 		}
 	}
-	content, err := canonicalCommitChanges(copyChanges)
-	if err != nil {
-		return CommitDiff{}, err
-	}
-	if len(content) > MaxJournalRecordBytes/2 {
-		return CommitDiff{}, fmt.Errorf("commit diff exceeds its durable journal footprint")
-	}
-	return CommitDiff{changes: copyChanges, digest: DigestBytes(content)}, nil
+	return CommitDiff{changes: copyChanges}, nil
 }
 
 func (diff CommitDiff) Changes() []CommitPathChange {
 	return append([]CommitPathChange(nil), diff.changes...)
-}
-func (diff CommitDiff) Digest() Digest { return diff.digest }
-
-func canonicalCommitChanges(changes []CommitPathChange) ([]byte, error) {
-	type changeJSON struct {
-		Kind      CommitChangeKind `json:"kind"`
-		OldPath   string           `json:"old_path,omitempty"`
-		NewPath   string           `json:"new_path,omitempty"`
-		OldMode   GitFileMode      `json:"old_mode"`
-		NewMode   GitFileMode      `json:"new_mode"`
-		OldObject string           `json:"old_object,omitempty"`
-		NewObject string           `json:"new_object,omitempty"`
-	}
-	values := make([]changeJSON, 0, len(changes))
-	for _, change := range changes {
-		if err := change.validate(); err != nil {
-			return nil, err
-		}
-		values = append(values, changeJSON{
-			Kind: change.kind, OldPath: change.oldPath, NewPath: change.newPath,
-			OldMode: change.oldMode, NewMode: change.newMode,
-			OldObject: change.oldObject.String(), NewObject: change.newObject.String(),
-		})
-	}
-	return json.Marshal(values)
 }
 
 type CheckTerminationKind string
@@ -230,14 +195,13 @@ const (
 	CheckExited            CheckTerminationKind = "exited"
 	CheckTimedOut          CheckTerminationKind = "timed_out"
 	CheckSignaled          CheckTerminationKind = "signaled"
-	CheckCrashed           CheckTerminationKind = "crashed"
 	CheckMissingExecutable CheckTerminationKind = "missing_executable"
 	CheckInfrastructure    CheckTerminationKind = "infrastructure_failure"
 )
 
 func (kind CheckTerminationKind) valid() bool {
 	switch kind {
-	case CheckExited, CheckTimedOut, CheckSignaled, CheckCrashed, CheckMissingExecutable, CheckInfrastructure:
+	case CheckExited, CheckTimedOut, CheckSignaled, CheckMissingExecutable, CheckInfrastructure:
 		return true
 	default:
 		return false
@@ -247,18 +211,13 @@ func (kind CheckTerminationKind) valid() bool {
 type CheckIsolationProof struct {
 	repositoryHooks bool
 	writeNetwork    bool
-	digest          Digest
+	valid           bool
 }
 
 func NewCheckIsolationProof(repositoryHooks, writeNetwork bool) CheckIsolationProof {
-	type canonical struct {
-		RepositoryHooks bool `json:"repository_hooks"`
-		WriteNetwork    bool `json:"write_network"`
-	}
-	content, _ := json.Marshal(canonical{repositoryHooks, writeNetwork})
 	return CheckIsolationProof{
 		repositoryHooks: repositoryHooks,
-		writeNetwork:    writeNetwork, digest: DigestBytes(content),
+		writeNetwork:    writeNetwork, valid: true,
 	}
 }
 
@@ -266,11 +225,8 @@ func StrictCheckIsolationProof() CheckIsolationProof {
 	return NewCheckIsolationProof(false, false)
 }
 
-func (proof CheckIsolationProof) RepositoryHooks() bool { return proof.repositoryHooks }
-func (proof CheckIsolationProof) WriteNetwork() bool    { return proof.writeNetwork }
-func (proof CheckIsolationProof) Digest() Digest        { return proof.digest }
 func (proof CheckIsolationProof) Strict() bool {
-	return !proof.digest.IsZero() && !proof.repositoryHooks && !proof.writeNetwork
+	return proof.valid && !proof.repositoryHooks && !proof.writeNetwork
 }
 
 type CheckProcessResult struct {
@@ -280,7 +236,6 @@ type CheckProcessResult struct {
 	stdout      []byte
 	stderr      []byte
 	isolation   CheckIsolationProof
-	output      Digest
 }
 
 func NewCheckProcessResult(
@@ -290,10 +245,11 @@ func NewCheckProcessResult(
 	stdout, stderr []byte,
 	isolation CheckIsolationProof,
 ) (CheckProcessResult, error) {
-	if !termination.valid() || len(stdout) > maxAttemptGitOutputBytes || len(stderr) > maxAttemptGitOutputBytes ||
-		!utf8.Valid(stdout) || !utf8.Valid(stderr) {
-		return CheckProcessResult{}, fmt.Errorf("check process result is invalid or exceeds output bounds")
+	if !termination.valid() {
+		return CheckProcessResult{}, fmt.Errorf("check process result has an invalid termination")
 	}
+	stdout = boundedCheckDiagnosticOutput(stdout)
+	stderr = boundedCheckDiagnosticOutput(stderr)
 	if termination == CheckExited {
 		if exitCode < 0 || signal != "" {
 			return CheckProcessResult{}, fmt.Errorf("exited check requires non-negative code and no signal")
@@ -307,33 +263,41 @@ func NewCheckProcessResult(
 	if termination != CheckSignaled && signal != "" {
 		return CheckProcessResult{}, fmt.Errorf("only signaled checks can carry a signal")
 	}
-	if proof := isolation; proof.digest.IsZero() {
+	if proof := isolation; !proof.valid {
 		return CheckProcessResult{}, fmt.Errorf("check process result requires an isolation proof")
 	}
-	type outputEnvelope struct {
-		Termination CheckTerminationKind `json:"termination"`
-		ExitCode    int                  `json:"exit_code"`
-		Signal      string               `json:"signal,omitempty"`
-		Stdout      []byte               `json:"stdout"`
-		Stderr      []byte               `json:"stderr"`
-	}
-	content, _ := json.Marshal(outputEnvelope{termination, exitCode, signal, stdout, stderr})
 	return CheckProcessResult{
 		termination: termination, exitCode: exitCode, signal: signal,
 		stdout: append([]byte(nil), stdout...), stderr: append([]byte(nil), stderr...),
-		isolation: isolation, output: DigestBytes(content),
+		isolation: isolation,
 	}, nil
 }
 
-func (result CheckProcessResult) Termination() CheckTerminationKind { return result.termination }
-func (result CheckProcessResult) ExitCode() int                     { return result.exitCode }
-func (result CheckProcessResult) Signal() string                    { return result.signal }
-func (result CheckProcessResult) Stdout() []byte                    { return append([]byte(nil), result.stdout...) }
-func (result CheckProcessResult) Stderr() []byte                    { return append([]byte(nil), result.stderr...) }
-func (result CheckProcessResult) Isolation() CheckIsolationProof    { return result.isolation }
-func (result CheckProcessResult) OutputDigest() Digest              { return result.output }
 func (result CheckProcessResult) Succeeded() bool {
 	return result.termination == CheckExited && result.exitCode == 0
+}
+
+func boundedCheckDiagnosticOutput(output []byte) []byte {
+	if len(output) > maxAttemptGitOutputBytes {
+		output = output[:maxAttemptGitOutputBytes]
+	}
+	return []byte(strings.ToValidUTF8(string(output), "\uFFFD"))
+}
+
+func (result CheckProcessResult) failureDiagnostic() string {
+	if diagnostic := strings.TrimSpace(string(result.stderr)); diagnostic != "" {
+		return diagnostic
+	}
+	if diagnostic := strings.TrimSpace(string(result.stdout)); diagnostic != "" {
+		return diagnostic
+	}
+	if result.termination == CheckExited {
+		return fmt.Sprintf("exit status %d", result.exitCode)
+	}
+	if result.signal != "" {
+		return fmt.Sprintf("%s (%s)", result.termination, result.signal)
+	}
+	return string(result.termination)
 }
 
 func cloneCommitDiff(diff CommitDiff) CommitDiff {
