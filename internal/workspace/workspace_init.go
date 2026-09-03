@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
 )
@@ -34,7 +33,6 @@ func WorkspaceRuntimeProjectionPath(workspaceDir string) string {
 type WorkspaceInitializationOptions struct {
 	PlanCheckpoint *VerifiedPlanLockCheckpoint
 	TargetGit      *LocalTargetGitAdapter
-	WorktreeRoot   string
 }
 
 func InitializeWorkspaceV2WithOptions(
@@ -109,14 +107,16 @@ func InitializeWorkspaceV2WithOptions(
 	}
 	preflightSnapshot := JournalSnapshot{}
 	preflightSnapshotKnown := false
-	if _, statErr := os.Lstat(filepath.Join(workspaceDir, RuntimeFormatFileName)); statErr == nil {
+	runtimeInitialized, err := inspectRuntimeFormatForAdmission(workspaceDir)
+	if err != nil {
+		return WorkspaceInitializationResult{}, err
+	}
+	if runtimeInitialized {
 		preflightSnapshot, err = ReadWorkspaceJournalSnapshot(workspaceDir)
 		if err != nil {
 			return WorkspaceInitializationResult{}, err
 		}
 		preflightSnapshotKnown = true
-	} else if !os.IsNotExist(statErr) {
-		return WorkspaceInitializationResult{}, fmt.Errorf("inspect derived runtime marker: %w", statErr)
 	}
 	targetBinding, err := inspectLocalTargetForInitializationAdmission(
 		ctx,
@@ -391,12 +391,12 @@ func ValidateLocalTargetForWorkspaceRuntime(
 	if err != nil {
 		return LocalTargetBinding{}, err
 	}
-	if _, err := os.Lstat(filepath.Join(workspaceDir, RuntimeFormatFileName)); os.IsNotExist(err) {
+	runtimeInitialized, err := inspectRuntimeFormatForAdmission(workspaceDir)
+	if err != nil {
+		return LocalTargetBinding{}, err
+	}
+	if !runtimeInitialized {
 		return ValidateLocalTarget(ctx, definition.workspace)
-	} else if err != nil {
-		return LocalTargetBinding{}, fmt.Errorf(
-			"inspect derived runtime marker: %w", err,
-		)
 	}
 	snapshot, err := ReadWorkspaceJournalSnapshot(workspaceDir)
 	if err != nil {

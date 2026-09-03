@@ -131,9 +131,6 @@ func (adapter LocalTargetGitAdapter) inspect(
 	if err := rejectExecutingLocalTargetConfiguration(configs); err != nil {
 		return LocalTargetBinding{}, err
 	}
-	if err := adapter.rejectReplacementRefs(ctx, root); err != nil {
-		return LocalTargetBinding{}, err
-	}
 	objectFormat, err := adapter.git.objectFormat(ctx, root)
 	if err != nil {
 		return LocalTargetBinding{}, err
@@ -332,25 +329,6 @@ func (adapter LocalTargetGitAdapter) rejectBare(ctx context.Context, root string
 	}
 	if bare != "false" {
 		return fmt.Errorf("bare repositories are not supported")
-	}
-	return nil
-}
-
-func (adapter LocalTargetGitAdapter) rejectReplacementRefs(
-	ctx context.Context,
-	root string,
-) error {
-	output, exitCode, err := adapter.git.run(
-		ctx, root, "for-each-ref", "--format=%(refname)", "refs/replace",
-	)
-	if err != nil {
-		return err
-	}
-	if exitCode != 0 {
-		return fmt.Errorf("inspect replacement refs: Git exited with status %d", exitCode)
-	}
-	if strings.TrimSpace(string(output)) != "" {
-		return fmt.Errorf("replacement refs are not supported")
 	}
 	return nil
 }

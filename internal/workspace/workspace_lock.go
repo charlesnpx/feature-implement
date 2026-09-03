@@ -36,6 +36,21 @@ type WorkspaceLockWriteResult struct {
 func (result WorkspaceLockWriteResult) Created() bool { return result.created }
 func (result WorkspaceLockWriteResult) Updated() bool { return result.updated }
 
+type workspaceLockArtifactWire struct {
+	Kind         ArtifactKind `json:"kind"`
+	ID           string       `json:"id"`
+	Path         string       `json:"path"`
+	SourceHash   string       `json:"source_hash"`
+	SemanticHash string       `json:"semantic_hash"`
+}
+
+type workspaceLockWire struct {
+	SchemaVersion int                         `json:"schema_version"`
+	WorkspaceID   string                      `json:"workspace_id"`
+	Generation    string                      `json:"generation"`
+	Artifacts     []workspaceLockArtifactWire `json:"artifacts"`
+}
+
 // WorkspaceBundleLockBytes is the sole authoritative generated artifact for a
 // validated workspace bundle. It binds the normalized definition, including
 // every referenced source artifact, without projecting a per-plan file tree.
@@ -43,7 +58,22 @@ func WorkspaceBundleLockBytes(bundle WorkspaceBundle) ([]byte, error) {
 	if bundle.definition.generation.IsZero() || bundle.root == "" {
 		return nil, fmt.Errorf("validated workspace bundle is required")
 	}
-	content, err := json.Marshal(ProjectWorkspaceLock(bundle.definition))
+	artifacts := make([]workspaceLockArtifactWire, 0, len(bundle.definition.artifacts))
+	for _, artifact := range bundle.definition.artifacts {
+		artifacts = append(artifacts, workspaceLockArtifactWire{
+			Kind:         artifact.kind,
+			ID:           artifact.id.String(),
+			Path:         artifact.path,
+			SourceHash:   artifact.sourceHash.String(),
+			SemanticHash: artifact.semanticHash.String(),
+		})
+	}
+	content, err := json.Marshal(workspaceLockWire{
+		SchemaVersion: 2,
+		WorkspaceID:   bundle.definition.workspace.id.String(),
+		Generation:    bundle.definition.generation.String(),
+		Artifacts:     artifacts,
+	})
 	if err != nil {
 		return nil, err
 	}

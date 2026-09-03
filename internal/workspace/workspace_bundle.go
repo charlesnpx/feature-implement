@@ -70,6 +70,9 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 	if err != nil {
 		return WorkspaceBundle{}, err
 	}
+	if err := rejectReservedDerivedBundleRoot(bundleRoot); err != nil {
+		return WorkspaceBundle{}, err
+	}
 	filesystem, err := OpenVerifiedRoot(RootRolePlan, bundleRoot, false)
 	if err != nil {
 		return WorkspaceBundle{}, fmt.Errorf("open workspace bundle: %w", err)
@@ -208,6 +211,23 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 		sourceFiles:      sourceFiles,
 		sources:          cloneDefinitionSources(sources), definition: definition,
 	}, nil
+}
+
+func rejectReservedDerivedBundleRoot(bundleRoot string) error {
+	base := filepath.Base(bundleRoot)
+	for _, suffix := range []string{
+		derivedRuntimeDirectorySuffix,
+		derivedAttemptRootSuffix,
+	} {
+		if strings.HasSuffix(base, suffix) {
+			return fmt.Errorf(
+				"workspace bundle root basename %q ends in reserved derived suffix %q",
+				base,
+				suffix,
+			)
+		}
+	}
+	return nil
 }
 
 type canonicalWorkspaceBundle struct {

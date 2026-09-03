@@ -49,6 +49,9 @@ func (adapter LocalAttemptGitAdapter) openAttemptWorktreeRootGuard(
 	if err != nil {
 		return nil, err
 	}
+	if err := ValidateWorkspaceRuntimeRoot(parentPath); err != nil {
+		return nil, fmt.Errorf("reject derived attempt worktree root: %w", err)
+	}
 	canonicalWorktree := canonicalWorktreePath(worktree)
 	commitAdapter := LocalCommitGitAdapter{git: adapter}
 	binding, err := commitAdapter.captureTrustedWorktreeBinding(ctx, repositoryRoot)

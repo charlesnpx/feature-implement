@@ -100,11 +100,15 @@ func OpenRuntimeStorage(workspaceDir string, create bool) (*RuntimeStorage, erro
 
 func initializeRuntimeFormat(root *VerifiedRoot, runtimePath string, create bool) error {
 	if _, exists, err := loadRuntimeFormatMarker(root); err != nil {
-		return err
+		return incompatibleRuntimeFormatError(runtimePath)
 	} else if exists {
 		return nil
 	}
 	if !create {
+		return incompatibleRuntimeFormatError(runtimePath)
+	}
+	initializable, err := runtimeRootInitializable(root)
+	if err != nil || !initializable {
 		return incompatibleRuntimeFormatError(runtimePath)
 	}
 	lock, _, err := root.openOwnedRegularFile(
@@ -123,13 +127,13 @@ func initializeRuntimeFormat(root *VerifiedRoot, runtimePath string, create bool
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 
 	if _, exists, err := loadRuntimeFormatMarker(root); err != nil {
-		return err
+		return incompatibleRuntimeFormatError(runtimePath)
 	} else if exists {
 		return nil
 	}
-	initializable, err := runtimeRootInitializable(root)
+	initializable, err = runtimeRootInitializable(root)
 	if err != nil {
-		return err
+		return incompatibleRuntimeFormatError(runtimePath)
 	}
 	if !initializable {
 		return incompatibleRuntimeFormatError(runtimePath)
@@ -270,6 +274,40 @@ func incompatibleRuntimeFormatError(string) error {
 	return fmt.Errorf(
 		"runtime format is incompatible; regenerate from committed sources",
 	)
+}
+
+// inspectRuntimeFormatForAdmission distinguishes a missing or empty runtime
+// root from a fully readable current-format runtime without creating anything.
+// A nonempty root that cannot be opened as the current format is always an
+// incompatible prior runtime, not an uninitialized workspace.
+func inspectRuntimeFormatForAdmission(runtimePath string) (bool, error) {
+	runtimeRoot, err := OpenVerifiedRoot(RootRoleRuntime, runtimePath, false)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, incompatibleRuntimeFormatError(runtimePath)
+	}
+	defer runtimeRoot.Close()
+
+	entries, err := runtimeRoot.adapter.readDirectory(".")
+	if err != nil {
+		return false, incompatibleRuntimeFormatError(runtimePath)
+	}
+	if len(entries) == 0 {
+		return false, nil
+	}
+	if _, exists, markerErr := loadRuntimeFormatMarker(runtimeRoot); markerErr != nil || !exists {
+		return false, incompatibleRuntimeFormatError(runtimePath)
+	}
+	storage, err := OpenRuntimeStorage(runtimeRoot.Path(), false)
+	if err != nil {
+		return false, incompatibleRuntimeFormatError(runtimePath)
+	}
+	if err := storage.Close(); err != nil {
+		return false, incompatibleRuntimeFormatError(runtimePath)
+	}
+	return true, nil
 }
 
 func marshalRuntimeFormatMarker() ([]byte, error) {

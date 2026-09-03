@@ -227,11 +227,6 @@ func TestIndependentIntegrationConstructionReturnsTheSameCommitAndTree(t *testin
 		"refs/safety-net/accepted",
 		rawGitObject(acceptedHead),
 	)
-	worktreeRoot, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	type identity struct {
 		commit workspace.GitObjectID
 		tree   workspace.GitObjectID
@@ -239,7 +234,7 @@ func TestIndependentIntegrationConstructionReturnsTheSameCommitAndTree(t *testin
 	constructions := make([]identity, 0, 2)
 	for range 2 {
 		scenario := newIndependentIntegrationConstruction(
-			t, definition, worktreeRoot, acceptedHead, acceptedTree,
+			t, definition, acceptedHead, acceptedTree,
 		)
 		commit := stopRealIntegrationAfterCommit(t, scenario)
 		constructions = append(constructions, identity{
@@ -433,16 +428,12 @@ func TestInitializationRefusesUnownedFeatureRefWithoutMutation(t *testing.T) {
 		t, primary, "status", "--porcelain=v2", "-z", "--untracked-files=all",
 	))
 	runtimeRoot := t.TempDir()
-	worktreeRoot, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
 	if _, err := workspace.InitializeWorkspaceV2WithOptions(
 		context.Background(),
 		runtimeRoot,
 		definition,
 		mustTime(t, "2026-08-18T13:40:00Z"),
-		workspace.WorkspaceInitializationOptions{WorktreeRoot: worktreeRoot},
+		workspace.WorkspaceInitializationOptions{},
 	); err == nil {
 		t.Fatal("initialization adopted an unowned feature ref")
 	}
@@ -483,16 +474,12 @@ func reserveSafetyNetMaterializationAttempt(
 	t.Helper()
 
 	runtimeRoot := t.TempDir()
-	worktreeRoot, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
 	if _, err := workspace.InitializeWorkspaceV2WithOptions(
 		context.Background(),
 		runtimeRoot,
 		definition,
 		mustTime(t, "2026-08-18T12:50:00Z"),
-		workspace.WorkspaceInitializationOptions{WorktreeRoot: worktreeRoot},
+		workspace.WorkspaceInitializationOptions{},
 	); err != nil {
 		t.Fatalf("initialize materialization fixture: %v", err)
 	}
@@ -534,7 +521,6 @@ func reserveSafetyNetMaterializationAttempt(
 func newIndependentIntegrationConstruction(
 	t *testing.T,
 	definition workspace.EffectiveWorkspaceDefinition,
-	worktreeRoot string,
 	acceptedHead, acceptedTree workspace.GitObjectID,
 ) *realIntegrationScenario {
 	t.Helper()
@@ -545,7 +531,7 @@ func newIndependentIntegrationConstruction(
 		runtimeRoot,
 		definition,
 		mustTime(t, "2026-08-18T13:20:00Z"),
-		workspace.WorkspaceInitializationOptions{WorktreeRoot: worktreeRoot},
+		workspace.WorkspaceInitializationOptions{},
 	)
 	if err != nil {
 		t.Fatalf("initialize independent integration construction: %v", err)
@@ -625,7 +611,6 @@ func newIndependentIntegrationConstruction(
 			base:       target.CreatedHead(),
 			unit:       mergeUnit,
 			goal:       goal,
-			worktrees:  worktreeRoot,
 		},
 		attempt:        attempt,
 		repository:     repository,

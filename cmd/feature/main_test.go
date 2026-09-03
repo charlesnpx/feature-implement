@@ -385,32 +385,6 @@ func TestWorkspaceMutationInputIsStrictAndDoesNotCreateStateOnFailure(t *testing
 		t.Fatalf("unknown request field was not rejected: err=%v stderr=%s", err, stderr)
 	}
 
-	if err := os.WriteFile(input, []byte(`{
-	  "schema_version": 2,
-	  "occurred_at": "2026-07-22T12:00:00Z",
-	  "worktree_root": "relative/attempts"
-	}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	_, stderr, err = runFeature(
-		t,
-		"workspace", "init",
-		"--bundle", bundleDir,
-		"--input", input,
-	)
-	if err == nil ||
-		!strings.Contains(stderr, "unknown field") {
-		t.Fatalf(
-			"removed worktree root error = %v stderr=%s",
-			err, stderr,
-		)
-	}
-	if _, statErr := os.Stat(workspaceDir); !os.IsNotExist(statErr) {
-		t.Fatalf(
-			"relative worktree root created workspace state: %v",
-			statErr,
-		)
-	}
 }
 
 func TestHelperProcess(t *testing.T) {

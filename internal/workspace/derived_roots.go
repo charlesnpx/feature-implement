@@ -1,7 +1,9 @@
 package workspace
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -49,4 +51,45 @@ func derivedWorkspaceWorktreeRootForJournal(journal *WorkspaceJournal) (string, 
 		return "", fmt.Errorf("workspace journal runtime is unavailable")
 	}
 	return DerivedWorkspaceWorktreeRoot(journal.workspaceDir)
+}
+
+// ValidateWorkspaceRuntimeRoot refuses a caller-selected runtime directory
+// that would overwrite a source bundle or an unrelated Git repository.
+func ValidateWorkspaceRuntimeRoot(runtimeRoot string) error {
+	runtimeRoot = filepath.Clean(strings.TrimSpace(runtimeRoot))
+	if !filepath.IsAbs(runtimeRoot) {
+		return fmt.Errorf("workspace runtime root must be absolute")
+	}
+	if exists, err := rootedEntryExists(runtimeRoot, WorkspaceBundleFileName); err != nil {
+		return fmt.Errorf("inspect configured workspace runtime root: %w", err)
+	} else if exists {
+		return fmt.Errorf("configured workspace runtime root is a workspace bundle root")
+	}
+	if exists, err := rootedEntryExists(runtimeRoot, ".git"); err != nil {
+		return fmt.Errorf("inspect configured workspace runtime root: %w", err)
+	} else if exists {
+		return fmt.Errorf("configured workspace runtime root is a Git repository")
+	}
+	bareEntries := []string{"HEAD", "objects", "refs"}
+	for _, entry := range bareEntries {
+		exists, err := rootedEntryExists(runtimeRoot, entry)
+		if err != nil {
+			return fmt.Errorf("inspect configured workspace runtime root: %w", err)
+		}
+		if !exists {
+			return nil
+		}
+	}
+	return fmt.Errorf("configured workspace runtime root is a Git repository")
+}
+
+func rootedEntryExists(root, name string) (bool, error) {
+	_, err := os.Lstat(filepath.Join(root, name))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }

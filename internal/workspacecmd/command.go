@@ -525,7 +525,14 @@ func resolvedWorkspaceDirectory(
 	configured string,
 ) (string, error) {
 	if strings.TrimSpace(configured) != "" {
-		return absoluteDirectory(configured, "workspace")
+		directory, err := absoluteDirectory(configured, "workspace")
+		if err != nil {
+			return "", err
+		}
+		if err := workspace.ValidateWorkspaceRuntimeRoot(directory); err != nil {
+			return "", err
+		}
+		return directory, nil
 	}
 	return workspace.DerivedWorkspaceRuntimeDirectory(bundle.Root())
 }

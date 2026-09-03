@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -286,16 +285,12 @@ func newJournalSafetyNetFixture(t *testing.T) journalSafetyNetFixture {
 
 	definition := mustDefinition(t, newDefinitionFixture(t).sources)
 	workspaceDir := t.TempDir()
-	worktreePath, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
 	initialized, err := workspace.InitializeWorkspaceV2WithOptions(
 		context.Background(),
 		workspaceDir,
 		definition,
 		mustTime(t, "2026-08-18T11:00:00Z"),
-		workspace.WorkspaceInitializationOptions{WorktreeRoot: worktreePath},
+		workspace.WorkspaceInitializationOptions{},
 	)
 	if err != nil {
 		t.Fatalf("initialize journal safety-net fixture: %v", err)
@@ -328,17 +323,13 @@ func prepareUnchainedJournal(t *testing.T) malformedJournalFixture {
 
 	fixture := newDefinitionFixture(t)
 	definition := mustDefinition(t, fixture.sources)
-	worktreeRoot, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
 	firstDir := t.TempDir()
 	first, err := workspace.InitializeWorkspaceV2WithOptions(
 		context.Background(),
 		firstDir,
 		definition,
 		mustTime(t, "2026-08-18T11:10:00Z"),
-		workspace.WorkspaceInitializationOptions{WorktreeRoot: worktreeRoot},
+		workspace.WorkspaceInitializationOptions{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -356,7 +347,7 @@ func prepareUnchainedJournal(t *testing.T) malformedJournalFixture {
 		secondDir,
 		definition,
 		mustTime(t, "2026-08-18T11:11:00Z"),
-		workspace.WorkspaceInitializationOptions{WorktreeRoot: worktreeRoot},
+		workspace.WorkspaceInitializationOptions{},
 	); err != nil {
 		t.Fatal(err)
 	}

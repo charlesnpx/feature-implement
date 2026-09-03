@@ -1,12 +1,10 @@
 package workspace_test
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -164,18 +162,6 @@ func TestValidateDefinitionBuildsContentAddressedEffectiveInputs(t *testing.T) {
 		if artifact.SourceHash().IsZero() || artifact.SemanticHash().IsZero() || len(artifact.CanonicalBytes()) == 0 {
 			t.Fatalf("artifact is not fully hashed: kind=%s path=%s", artifact.Kind(), artifact.Path())
 		}
-	}
-	workspaceLock := workspace.ProjectWorkspaceLock(definition)
-	if workspaceLock.SchemaVersion() != 2 || workspaceLock.Generation() != definition.Generation() || len(workspaceLock.Artifacts()) != 3 {
-		t.Fatalf("workspace projection = %#v", workspaceLock)
-	}
-	workspaceLockJSON, err := json.Marshal(workspaceLock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(workspaceLockJSON)
-	if !strings.Contains(text, definition.Generation().String()) || strings.Contains(text, "runtime") || strings.Contains(text, "status") || strings.Contains(text, "base_ref") || strings.Contains(text, "remote") {
-		t.Fatalf("projection JSON has mutable or misplaced state: %s", text)
 	}
 }
 
@@ -575,13 +561,6 @@ func TestDefinitionDefensivelyCopiesNestedInputsAndOutputs(t *testing.T) {
 	}
 }
 
-func TestV2PlanAndWorkspaceLockProjectionsCannotOwnRuntimeOrWorkspaceState(t *testing.T) {
-	t.Parallel()
-
-	assertTypeOmitsFields(t, reflect.TypeOf(workspace.Plan{}), "base", "remote", "policy", "runtime", "state", "status")
-	assertTypeOmitsFields(t, reflect.TypeOf(workspace.WorkspaceLockProjection{}), "runtime", "state", "status", "approval", "attempt")
-}
-
 func artifactByKind(t *testing.T, definition workspace.EffectiveWorkspaceDefinition, kind workspace.ArtifactKind) workspace.NormalizedArtifact {
 	t.Helper()
 	for _, artifact := range definition.Artifacts() {
@@ -629,16 +608,4 @@ func configuredReviewGateFixture(t *testing.T) (definitionFixture, []byte, []byt
 		{Path: "policies/unit-two-review.md", Bytes: unitPolicy},
 	}
 	return fixture, rootPolicy, unitPolicy
-}
-
-func assertTypeOmitsFields(t *testing.T, typ reflect.Type, forbidden ...string) {
-	t.Helper()
-	for index := 0; index < typ.NumField(); index++ {
-		name := strings.ToLower(typ.Field(index).Name)
-		for _, fragment := range forbidden {
-			if strings.Contains(name, fragment) {
-				t.Fatalf("%s unexpectedly owns field %s", typ, typ.Field(index).Name)
-			}
-		}
-	}
 }

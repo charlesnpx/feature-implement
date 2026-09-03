@@ -2,6 +2,7 @@ package workspace_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -81,6 +82,116 @@ func TestWorkspaceBundleRejectsHiddenDuplicateAndAmbiguousSources(t *testing.T) 
 			t.Fatalf("duplicate descriptor key error = %v", err)
 		}
 	})
+}
+
+func TestWorkspaceBundleRejectsReservedDerivedRootSuffix(t *testing.T) {
+	t.Parallel()
+
+	fixture := newDefinitionFixture(t)
+	for _, suffix := range []string{
+		".feature-runtime",
+		"-attempt-worktrees",
+	} {
+		suffix := suffix
+		t.Run(suffix, func(t *testing.T) {
+			root := writeDefinitionBundle(t, fixture, nil)
+			reservedRoot := root + suffix
+			if err := os.Rename(root, reservedRoot); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := workspace.LoadWorkspaceBundle(reservedRoot); err == nil ||
+				!strings.Contains(err.Error(), "reserved derived suffix") ||
+				!strings.Contains(err.Error(), suffix) {
+				t.Fatalf("reserved bundle root %q error = %v", reservedRoot, err)
+			}
+		})
+	}
+}
+
+func TestConfiguredWorkspaceRuntimeRootRejectsBundleAndGitRepository(t *testing.T) {
+	t.Parallel()
+
+	fixture := newDefinitionFixture(t)
+	bundleRoot := writeDefinitionBundle(t, fixture, nil)
+	bundle, err := workspace.LoadWorkspaceBundle(bundleRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name string
+		root string
+		want string
+	}{
+		{
+			name: "bundle root",
+			root: bundle.Root(),
+			want: "workspace bundle root",
+		},
+		{
+			name: "Git repository",
+			root: bundle.Definition().Workspace().RepositoryRoot(),
+			want: "Git repository",
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			if err := workspace.ValidateWorkspaceRuntimeRoot(test.root); err == nil ||
+				!strings.Contains(err.Error(), test.want) {
+				t.Fatalf("configured runtime root %q error = %v", test.root, err)
+			}
+		})
+	}
+}
+
+func TestAttemptCannotMaterializeUnderAnotherWorkspaceBundleRoot(t *testing.T) {
+	t.Parallel()
+
+	firstFixture := newDefinitionFixture(t)
+	firstRoot := writeDefinitionBundle(t, firstFixture, nil)
+	first, err := workspace.LoadWorkspaceBundle(firstRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeRoot, err := workspace.DerivedWorkspaceRuntimeDirectory(first.Root())
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignRoot, err := workspace.DerivedWorkspaceWorktreeRoot(runtimeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	secondFixture := newDefinitionFixture(t)
+	stagedForeignRoot := writeDefinitionBundle(t, secondFixture, nil)
+	if err := os.Rename(stagedForeignRoot, foreignRoot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.LoadWorkspaceBundle(foreignRoot); err == nil ||
+		!strings.Contains(err.Error(), "reserved derived suffix") {
+		t.Fatalf("reserved foreign bundle root error = %v", err)
+	}
+	descriptorPath := filepath.Join(foreignRoot, workspace.WorkspaceBundleFileName)
+	descriptorBefore, err := os.ReadFile(descriptorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(foreignRoot, "attempt")
+	_, err = workspace.DefaultLocalAttemptGitAdapter().MaterializeAttemptTree(
+		context.Background(),
+		first.Definition().Workspace().RepositoryRoot(),
+		first.Definition().Workspace().BaseCommit(),
+		destination,
+	)
+	if err == nil || !strings.Contains(err.Error(), "workspace bundle root") {
+		t.Fatalf("materialize under foreign bundle error = %v", err)
+	}
+	if _, statErr := os.Lstat(destination); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("materialization created a child under the foreign bundle: %v", statErr)
+	}
+	descriptorAfter, err := os.ReadFile(descriptorPath)
+	if err != nil || !bytes.Equal(descriptorBefore, descriptorAfter) {
+		t.Fatalf("foreign bundle descriptor changed: %q, %v", descriptorAfter, err)
+	}
 }
 
 func TestWorkspaceBundleWritesOneAtomicCanonicalLock(t *testing.T) {

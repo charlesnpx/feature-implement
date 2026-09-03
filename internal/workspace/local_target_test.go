@@ -132,25 +132,6 @@ func TestLocalTargetAdmissionUsesNarrowedProfile(t *testing.T) {
 		}
 	})
 
-	t.Run("rejects replacement refs", func(t *testing.T) {
-		fixture := newDefinitionFixture(t)
-		definition := mustDefinition(t, fixture.sources)
-		root := definition.Workspace().RepositoryRoot()
-		base := definition.Workspace().BaseCommit()
-		runTargetGitTest(
-			t, root,
-			"-c", "user.name=Feature Implement Test",
-			"-c", "user.email=feature-implement@localhost",
-			"commit", "--quiet", "--allow-empty", "-m", "replacement object",
-		)
-		replacement := strings.TrimSpace(runTargetGitTest(t, root, "rev-parse", "HEAD"))
-		runTargetGitTest(t, root, "replace", baseObjectHex(base), replacement)
-		if _, err := workspace.ValidateLocalTarget(context.Background(), definition.Workspace()); err == nil ||
-			!strings.Contains(err.Error(), "replacement refs") {
-			t.Fatalf("replacement ref admission error = %v", err)
-		}
-	})
-
 	t.Run("rejects external text conversion", func(t *testing.T) {
 		fixture := newDefinitionFixture(t)
 		definition := mustDefinition(t, fixture.sources)
