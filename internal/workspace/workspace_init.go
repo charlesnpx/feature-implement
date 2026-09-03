@@ -336,12 +336,42 @@ func inspectLocalTargetForInitializationAdmission(
 			"durable local target binding does not match the active workspace definition",
 		)
 	}
+	pending, hasPending, err := pendingIntegrationIntent(runtime)
+	if err != nil {
+		return LocalTargetBinding{}, err
+	}
+	if hasPending {
+		return adapter.verifyPendingIntegrationFeatureRef(
+			ctx, target.binding, pending,
+		)
+	}
 	if target.headRecord == target.createdRecord {
 		return adapter.verifyFeatureRefAbsent(ctx, target.binding)
 	}
 	return adapter.verifyOwnedFeatureRefAt(
 		ctx, target.binding, target.createdHead,
 	)
+}
+
+func pendingIntegrationIntent(
+	runtime WorkspaceRuntimeProjection,
+) (MergeUnitIntegrationIntent, bool, error) {
+	var pending MergeUnitIntegrationIntent
+	hasPending := false
+	for _, attempt := range runtime.Attempts() {
+		integration, exists := attempt.Integration()
+		if !exists || integration.Integrated() {
+			continue
+		}
+		if hasPending {
+			return MergeUnitIntegrationIntent{}, false, fmt.Errorf(
+				"workspace runtime contains multiple pending integration intents",
+			)
+		}
+		pending = integration.Intent()
+		hasPending = true
+	}
+	return pending, hasPending, nil
 }
 
 // ValidateLocalTargetForWorkspaceRuntime selects the established admission

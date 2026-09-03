@@ -814,6 +814,92 @@ func TestLocalGitIntegrationRecoversCreatedObjectAndPublishedRef(
 	}
 }
 
+func TestRuntimeAdmissionAcceptsPendingPublishedIntegrationBeforeRecovery(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	scenario := newRealIntegrationScenario(
+		t, workspace.GitHashSHA1, true, workspace.GitObjectID{},
+	)
+	// Stage 1: publish the exact merge, then simulate the crash window.
+	_, err := workspace.IntegrateMergeUnit(
+		context.Background(),
+		scenario.journal,
+		scenario.definition,
+		scenario.repository,
+		workspace.DefaultLocalIntegrationGitAdapter(),
+		workspace.IntegrateMergeUnitRequest{
+			AttemptID:  scenario.attempt.AttemptID(),
+			OccurredAt: mustTime(t, "2026-07-25T16:45:00Z"),
+			Fault: failIntegrationOnce(
+				workspace.IntegrationFaultAfterRefCAS,
+			),
+		},
+	)
+	if err == nil || !strings.Contains(
+		err.Error(), string(workspace.IntegrationFaultAfterRefCAS),
+	) {
+		t.Fatalf("post-CAS integration fault = %v", err)
+	}
+	expectedMerge := integrationMergeFromRuntime(
+		t, scenario.journal, scenario.attempt.AttemptID(),
+	)
+	featureRef := scenario.definition.Workspace().FeatureRef()
+	if published := strings.TrimSpace(runTargetGitTest(
+		t, scenario.repositoryRoot, "rev-parse", featureRef,
+	)); published != rawGitObject(expectedMerge) {
+		t.Fatalf(
+			"post-CAS feature head = %s, want expected merge %s",
+			published, expectedMerge,
+		)
+	}
+	if err := scenario.journal.Close(); err != nil {
+		t.Fatalf("close crashed integration journal: %v", err)
+	}
+
+	// Stage 2: validation admits the published merge from the pending intent.
+	if _, err := workspace.ValidateLocalTargetForWorkspaceRuntime(
+		context.Background(), scenario.workspace, scenario.definition,
+	); err != nil {
+		t.Fatalf("validate pending published integration: %v", err)
+	}
+
+	journal, err := workspace.OpenWorkspaceJournal(
+		scenario.workspace, workspace.JournalReadWrite,
+	)
+	if err != nil {
+		t.Fatalf("reopen crashed integration journal: %v", err)
+	}
+	scenario.journal = journal
+	t.Cleanup(func() { _ = journal.Close() })
+
+	// Stage 3: ordinary recovery records the pending integration completion.
+	recovered, err := workspace.RecoverWorkspaceLocalEffects(
+		context.Background(),
+		scenario.journal,
+		scenario.definition,
+		workspace.DefaultLocalTargetGitAdapter(),
+		workspace.DefaultLocalAttemptGitAdapter(),
+		scenario.repository,
+		workspace.DefaultLocalIntegrationGitAdapter(),
+		workspace.RecoverWorkspaceLocalEffectsRequest{
+			OccurredAt: mustTime(t, "2026-07-25T16:45:01Z"),
+		},
+	)
+	if err != nil {
+		t.Fatalf("recover pending published integration: %v", err)
+	}
+	if !containsRecoveryAction(
+		recovered.Actions(), workspace.LocalRecoveryIntegrationCompleted,
+	) {
+		t.Fatalf("recovery actions = %v", recovered.Actions())
+	}
+	assertSingleIntegrationTransition(
+		t, scenario.journal, scenario.attempt.AttemptID(),
+	)
+}
+
 func TestLocalGitIntegrationRecoversExternalMoveToExpectedMerge(t *testing.T) {
 	t.Parallel()
 	requireFullSuite(t, "external ref-publication permutation")

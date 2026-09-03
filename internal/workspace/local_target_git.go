@@ -10,10 +10,10 @@ import (
 )
 
 type localTargetInspectionOptions struct {
-	requireBaseAtPin    bool
-	allowFeatureRef     bool
-	expectedBinding     *LocalTargetBinding
-	expectedFeatureHead GitObjectID
+	requireBaseAtPin     bool
+	requireFeatureRef    bool
+	expectedBinding      *LocalTargetBinding
+	expectedFeatureHeads []GitObjectID
 }
 
 type LocalTargetGitAdapter struct {
@@ -169,21 +169,32 @@ func (adapter LocalTargetGitAdapter) inspect(
 	if err := adapter.rejectCheckedOutFeatureBranch(ctx, root, target.FeatureRef()); err != nil {
 		return LocalTargetBinding{}, err
 	}
-	if featureExists {
-		if !options.allowFeatureRef {
+	if !featureExists {
+		if options.requireFeatureRef {
+			return LocalTargetBinding{}, fmt.Errorf(
+				"feature ref %s is absent, expected recorded head %s",
+				target.FeatureRef(), expectedFeatureRefHeads(options.expectedFeatureHeads),
+			)
+		}
+	} else {
+		if len(options.expectedFeatureHeads) == 0 {
 			return LocalTargetBinding{}, fmt.Errorf(
 				"feature ref %s already exists before a recorded integration",
 				target.FeatureRef(),
 			)
 		}
-		expected := options.expectedFeatureHead
-		if expected.IsZero() {
-			expected = target.baseCommit
+		expected := false
+		for _, candidate := range options.expectedFeatureHeads {
+			if candidate.Algorithm() == objectFormat && featureHead == candidate {
+				expected = true
+				break
+			}
 		}
-		if expected.Algorithm() != objectFormat || featureHead != expected {
+		if !expected {
 			return LocalTargetBinding{}, fmt.Errorf(
 				"feature ref %s is %s, expected recorded head %s",
-				target.FeatureRef(), featureHead, expected,
+				target.FeatureRef(), featureHead,
+				expectedFeatureRefHeads(options.expectedFeatureHeads),
 			)
 		}
 	}
@@ -203,6 +214,14 @@ func (adapter LocalTargetGitAdapter) inspect(
 		)
 	}
 	return binding, nil
+}
+
+func expectedFeatureRefHeads(heads []GitObjectID) string {
+	values := make([]string, 0, len(heads))
+	for _, head := range heads {
+		values = append(values, head.String())
+	}
+	return strings.Join(values, " or ")
 }
 
 func (adapter LocalTargetGitAdapter) runText(
@@ -495,8 +514,31 @@ func (adapter LocalTargetGitAdapter) verifyOwnedFeatureRefAt(
 		baseCommit: binding.baseCommit, featureBranch: binding.featureBranch,
 	}
 	return adapter.inspect(ctx, target, localTargetInspectionOptions{
-		requireBaseAtPin: false, allowFeatureRef: true,
-		expectedBinding: &binding, expectedFeatureHead: expectedHead,
+		requireBaseAtPin: false, requireFeatureRef: true,
+		expectedBinding: &binding, expectedFeatureHeads: []GitObjectID{expectedHead},
+	})
+}
+
+func (adapter LocalTargetGitAdapter) verifyPendingIntegrationFeatureRef(
+	ctx context.Context,
+	binding LocalTargetBinding,
+	intent MergeUnitIntegrationIntent,
+) (LocalTargetBinding, error) {
+	target := LocalTarget{
+		root: binding.root, baseRef: binding.baseRef,
+		baseCommit: binding.baseCommit, featureBranch: binding.featureBranch,
+	}
+	expectedHeads := []GitObjectID{intent.ExpectedMerge()}
+	if !intent.ExpectedFeatureRefAbsent() {
+		expectedHeads = append(
+			[]GitObjectID{intent.ExpectedFeatureHead()}, expectedHeads...,
+		)
+	}
+	return adapter.inspect(ctx, target, localTargetInspectionOptions{
+		requireBaseAtPin:     false,
+		requireFeatureRef:    !intent.ExpectedFeatureRefAbsent(),
+		expectedBinding:      &binding,
+		expectedFeatureHeads: expectedHeads,
 	})
 }
 
