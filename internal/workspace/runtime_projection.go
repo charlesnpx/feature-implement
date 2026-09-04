@@ -91,7 +91,6 @@ func (recovery RuntimeRecoveryProjection) Record() uint64        { return recove
 func (recovery RuntimeRecoveryProjection) Generation() Digest    { return recovery.generation }
 func (recovery RuntimeRecoveryProjection) DiscardOffset() int64  { return recovery.discardOffset }
 func (recovery RuntimeRecoveryProjection) DiscardSize() int64    { return recovery.discardSize }
-func (recovery RuntimeRecoveryProjection) DiscardDigest() Digest { return recovery.discardDigest }
 func (recovery RuntimeRecoveryProjection) ResultingHead() Digest { return recovery.resultingHead }
 
 type RuntimeLocalTargetProjection struct {
@@ -106,9 +105,6 @@ func (projection RuntimeLocalTargetProjection) Binding() LocalTargetBinding {
 }
 func (projection RuntimeLocalTargetProjection) CreatedHead() GitObjectID {
 	return projection.createdHead
-}
-func (projection RuntimeLocalTargetProjection) CreatedRecord() uint64 {
-	return projection.createdRecord
 }
 func (projection RuntimeLocalTargetProjection) HeadRecord() uint64 {
 	return projection.headRecord

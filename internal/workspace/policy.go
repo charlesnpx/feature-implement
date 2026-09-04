@@ -129,10 +129,6 @@ func newExecutionPolicy(wire executionPolicyWire, location string) (ExecutionPol
 	}, nil
 }
 
-func (policy ExecutionPolicy) RequirePassingChecks() bool { return policy.requirePassingChecks }
-func (policy ExecutionPolicy) AllowWriteNetwork() bool    { return policy.allowWriteNetwork }
-func (policy ExecutionPolicy) MaxAttempts() uint16        { return policy.maxAttempts }
-
 func (policy ExecutionPolicy) validateStrengthens(base ExecutionPolicy, location string) error {
 	if base.requirePassingChecks && !policy.requirePassingChecks {
 		return fmt.Errorf("%s weakens require_passing_checks", location)
@@ -154,7 +150,6 @@ type ExecutionProfile struct {
 }
 
 func (profile ExecutionProfile) ID() ID                  { return profile.id }
-func (profile ExecutionProfile) Runner() ID              { return profile.runner }
 func (profile ExecutionProfile) Policy() ExecutionPolicy { return profile.policy }
 func (profile ExecutionProfile) Boundary() (ProfileBoundaryPolicy, bool) {
 	if profile.boundary == nil {

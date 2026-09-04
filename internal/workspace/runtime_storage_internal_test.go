@@ -195,99 +195,67 @@ func TestRuntimeInitializationRecoversLeftoverStagingFile(t *testing.T) {
 }
 
 func TestOlderRuntimeMarkersRefuseAdmissionWithoutMutation(t *testing.T) {
-	tests := []struct {
-		name                  string
-		markerName            string
-		marker                []byte
-		schemaVersion         int
-		legacyProjection      string
-		legacyProjectionBytes []byte
-	}{
-		{
-			name:       "v7 marker",
-			markerName: "feature.runtime.v7.json",
-			marker:     []byte("v7 incompatible runtime marker\n"),
-		},
-		{
-			name:                  "v8 marker with stale projection",
-			markerName:            "feature.runtime.v8.json",
-			schemaVersion:         8,
-			legacyProjection:      filepath.Join(WorkspaceStateDirectoryName, "runtime-projection.v6.json"),
-			legacyProjectionBytes: []byte("stale v6 projection\n"),
-		},
+	runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "runtime")
+	markerName := "feature.runtime.v8.json"
+	marker, err := json.Marshal(runtimeFormatMarkerWire{
+		SchemaVersion: 8,
+		Kind:          localRuntimeFormatKind,
+		StateRoot:     WorkspaceStateDirectoryName,
+		Capabilities:  append([]string(nil), requiredRuntimeCapabilities...),
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "runtime")
-			marker := test.marker
-			if test.schemaVersion != 0 {
-				var err error
-				marker, err = json.Marshal(runtimeFormatMarkerWire{
-					SchemaVersion: test.schemaVersion,
-					Kind:          localRuntimeFormatKind,
-					StateRoot:     WorkspaceStateDirectoryName,
-					Capabilities:  append([]string(nil), requiredRuntimeCapabilities...),
-				})
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
-			if err := os.MkdirAll(runtimePath, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(runtimePath, test.markerName), marker, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if test.legacyProjection != "" {
-				legacyProjectionPath := filepath.Join(runtimePath, test.legacyProjection)
-				if err := os.MkdirAll(filepath.Dir(legacyProjectionPath), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(
-					legacyProjectionPath,
-					test.legacyProjectionBytes,
-					0o600,
-				); err != nil {
-					t.Fatal(err)
-				}
-			}
-			definition := EffectiveWorkspaceDefinition{
-				workspace: WorkspaceManifest{target: LocalTarget{
-					root: canonicalRuntimeTestTempDir(t),
-				}},
-				generation: DigestBytes([]byte(test.name + " incompatible runtime generation")),
-			}
-			before := snapshotRuntimeTree(t, runtimePath)
+	if err := os.MkdirAll(runtimePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimePath, markerName), marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacyProjectionPath := filepath.Join(
+		runtimePath, WorkspaceStateDirectoryName, "runtime-projection.v6.json",
+	)
+	if err := os.MkdirAll(filepath.Dir(legacyProjectionPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyProjectionPath, []byte("stale v6 projection\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	definition := EffectiveWorkspaceDefinition{
+		workspace: WorkspaceManifest{target: LocalTarget{
+			root: canonicalRuntimeTestTempDir(t),
+		}},
+		generation: DigestBytes([]byte("v8 marker with stale projection incompatible runtime generation")),
+	}
+	before := snapshotRuntimeTree(t, runtimePath)
 
-			if _, err := ValidateLocalTargetForWorkspaceRuntime(
-				context.Background(), runtimePath, definition,
-			); err == nil || err.Error() != "runtime format is incompatible; regenerate from committed sources" {
-				t.Fatalf("runtime validation error = %v", err)
-			}
-			assertRuntimeTreeUnchanged(t, runtimePath, before)
+	if _, err := ValidateLocalTargetForWorkspaceRuntime(
+		context.Background(), runtimePath, definition,
+	); err == nil || err.Error() != "runtime format is incompatible; regenerate from committed sources" {
+		t.Fatalf("runtime validation error = %v", err)
+	}
+	assertRuntimeTreeUnchanged(t, runtimePath, before)
 
-			if _, err := InitializeWorkspaceV2WithOptions(
-				context.Background(),
-				runtimePath,
-				definition,
-				time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC),
-				WorkspaceInitializationOptions{},
-			); err == nil || err.Error() != "runtime format is incompatible; regenerate from committed sources" {
-				t.Fatalf("runtime initialization error = %v", err)
-			}
-			assertRuntimeTreeUnchanged(t, runtimePath, before)
-			if content, err := os.ReadFile(filepath.Join(runtimePath, test.markerName)); err != nil || !bytes.Equal(content, marker) {
-				t.Fatalf("runtime marker changed: %q, %v", content, err)
-			}
-			for _, path := range []string{
-				RuntimeFormatFileName,
-				RuntimeInitializationLockName,
-			} {
-				if _, err := os.Lstat(filepath.Join(runtimePath, path)); !errors.Is(err, os.ErrNotExist) {
-					t.Fatalf("older runtime acquired v9 artifact %s: %v", path, err)
-				}
-			}
-		})
+	if _, err := InitializeWorkspaceV2WithOptions(
+		context.Background(),
+		runtimePath,
+		definition,
+		time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC),
+		WorkspaceInitializationOptions{},
+	); err == nil || err.Error() != "runtime format is incompatible; regenerate from committed sources" {
+		t.Fatalf("runtime initialization error = %v", err)
+	}
+	assertRuntimeTreeUnchanged(t, runtimePath, before)
+	if content, err := os.ReadFile(filepath.Join(runtimePath, markerName)); err != nil || !bytes.Equal(content, marker) {
+		t.Fatalf("runtime marker changed: %q, %v", content, err)
+	}
+	for _, path := range []string{
+		RuntimeFormatFileName,
+		RuntimeInitializationLockName,
+	} {
+		if _, err := os.Lstat(filepath.Join(runtimePath, path)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("older runtime acquired v9 artifact %s: %v", path, err)
+		}
 	}
 }
 

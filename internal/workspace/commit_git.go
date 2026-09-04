@@ -115,7 +115,6 @@ func (inspection GitCommitInspection) Parents() []GitObjectID {
 }
 func (inspection GitCommitInspection) Tree() GitObjectID { return inspection.tree }
 func (inspection GitCommitInspection) Subject() string   { return inspection.subject }
-func (inspection GitCommitInspection) Body() string      { return inspection.body }
 func (inspection GitCommitInspection) Diff() CommitDiff  { return cloneCommitDiff(inspection.diff) }
 
 type CommitGitPort interface {

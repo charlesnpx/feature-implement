@@ -17,9 +17,6 @@ type WorkspaceInitializationResult struct {
 	projectionDigest Digest
 }
 
-func (result WorkspaceInitializationResult) StoredGeneration() StoredGeneration {
-	return result.storedGeneration
-}
 func (result WorkspaceInitializationResult) Snapshot() JournalSnapshot { return result.snapshot }
 func (result WorkspaceInitializationResult) Runtime() WorkspaceRuntimeProjection {
 	return cloneWorkspaceRuntime(result.runtime)

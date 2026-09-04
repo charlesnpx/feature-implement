@@ -55,27 +55,6 @@ func RebuildReviewRuntime(
 	return projection, nil
 }
 
-func VerifyReviewRuntimeConformance(
-	snapshot JournalSnapshot,
-	definition EffectiveWorkspaceDefinition,
-) (Digest, error) {
-	digest, err := VerifyReplayConformance(
-		snapshot,
-		func() ReviewRuntimeProjection { return ReviewRuntimeProjection{} },
-		reduceReviewRuntime,
-		canonicalReviewRuntime,
-		func(state ReviewRuntimeProjection) Digest { return state.activeGeneration },
-		definition.generation,
-	)
-	if err != nil {
-		return Digest{}, err
-	}
-	if _, err := RebuildReviewRuntime(snapshot, definition); err != nil {
-		return Digest{}, err
-	}
-	return digest, nil
-}
-
 func reduceReviewRuntime(current ReviewRuntimeProjection, record JournalRecord) (ReviewRuntimeProjection, error) {
 	next := cloneReviewRuntime(current)
 	core, err := reduceWorkspaceRuntime(current.core, record)

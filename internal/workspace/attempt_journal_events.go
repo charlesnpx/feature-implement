@@ -31,9 +31,8 @@ func NewGoalBinding(id ID, scope GoalScope) (GoalBinding, error) {
 	return GoalBinding{id: id, scope: scope}, nil
 }
 
-func (goal GoalBinding) ID() ID           { return goal.id }
-func (goal GoalBinding) Scope() GoalScope { return goal.scope }
-func (goal GoalBinding) IsZero() bool     { return goal.id.IsZero() || !goal.scope.valid() }
+func (goal GoalBinding) ID() ID       { return goal.id }
+func (goal GoalBinding) IsZero() bool { return goal.id.IsZero() || !goal.scope.valid() }
 
 // AttemptStartJournalEvent is the single durable attempt-start boundary. It
 // deliberately records the immutable attempt bindings before the detached
@@ -207,21 +206,16 @@ func (event AttemptBoundaryReachedJournalEvent) validate() error {
 func (event AttemptBoundaryReachedJournalEvent) WorkspaceID() ID    { return event.workspaceID }
 func (event AttemptBoundaryReachedJournalEvent) Generation() Digest { return event.generation }
 func (event AttemptBoundaryReachedJournalEvent) AttemptID() ID      { return event.attemptID }
-func (event AttemptBoundaryReachedJournalEvent) BoundaryID() ID     { return event.boundaryID }
-func (event AttemptBoundaryReachedJournalEvent) Ordinal() uint64    { return event.ordinal }
 func (event AttemptBoundaryReachedJournalEvent) Kind() AttemptBoundaryKind {
 	return event.kind
 }
 func (event AttemptBoundaryReachedJournalEvent) Checkpoint() AttemptCheckpointMode {
 	return event.checkpoint
 }
-func (event AttemptBoundaryReachedJournalEvent) SerialSegment() ID { return event.serialSegment }
-func (event AttemptBoundaryReachedJournalEvent) LeaseID() ID       { return event.leaseID }
-func (event AttemptBoundaryReachedJournalEvent) Goal() GoalBinding { return event.goal }
-func (event AttemptBoundaryReachedJournalEvent) Head() GitObjectID { return event.head }
-func (event AttemptBoundaryReachedJournalEvent) Evidence() []Evidence {
-	return cloneEvidence(event.evidence)
-}
+func (event AttemptBoundaryReachedJournalEvent) SerialSegment() ID      { return event.serialSegment }
+func (event AttemptBoundaryReachedJournalEvent) LeaseID() ID            { return event.leaseID }
+func (event AttemptBoundaryReachedJournalEvent) Goal() GoalBinding      { return event.goal }
+func (event AttemptBoundaryReachedJournalEvent) Head() GitObjectID      { return event.head }
 func (event AttemptBoundaryReachedJournalEvent) EvidenceDigest() Digest { return event.evidenceDigest }
 
 type AttemptResumedJournalEvent struct {
@@ -272,9 +266,7 @@ func (event AttemptResumedJournalEvent) validate() error {
 func (event AttemptResumedJournalEvent) WorkspaceID() ID           { return event.workspaceID }
 func (event AttemptResumedJournalEvent) Generation() Digest        { return event.generation }
 func (event AttemptResumedJournalEvent) AttemptID() ID             { return event.attemptID }
-func (event AttemptResumedJournalEvent) BoundaryID() ID            { return event.boundaryID }
 func (event AttemptResumedJournalEvent) VerifiedHead() GitObjectID { return event.verifiedHead }
-func (event AttemptResumedJournalEvent) InspectionDigest() Digest  { return event.inspectionDigest }
 func (event AttemptResumedJournalEvent) LeaseID() ID               { return event.leaseID }
 func (event AttemptResumedJournalEvent) Goal() GoalBinding         { return event.goal }
 func (event AttemptResumedJournalEvent) SerialSegment() ID         { return event.serialSegment }

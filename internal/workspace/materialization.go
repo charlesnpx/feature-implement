@@ -75,7 +75,6 @@ func NewMaterializationArtifact(id, relativePath string, content []byte) (Materi
 
 func (artifact MaterializationArtifact) ID() string   { return artifact.id }
 func (artifact MaterializationArtifact) Path() string { return artifact.path }
-func (artifact MaterializationArtifact) Hash() Digest { return artifact.hash }
 func (artifact MaterializationArtifact) Bytes() []byte {
 	return append([]byte(nil), artifact.content...)
 }
@@ -115,9 +114,6 @@ type OwnedMaterializationArtifact struct {
 
 func (artifact OwnedMaterializationArtifact) ID() string   { return artifact.id }
 func (artifact OwnedMaterializationArtifact) Path() string { return artifact.path }
-func (artifact OwnedMaterializationArtifact) LastGeneratedHash() Digest {
-	return artifact.lastGeneratedHash
-}
 
 type MaterializationInventory struct {
 	schemaVersion    int
@@ -132,9 +128,6 @@ func (inventory MaterializationInventory) GeneratorVersion() string {
 }
 func (inventory MaterializationInventory) Artifacts() []OwnedMaterializationArtifact {
 	return append([]OwnedMaterializationArtifact(nil), inventory.artifacts...)
-}
-func (inventory MaterializationInventory) Directories() []string {
-	return append([]string(nil), inventory.directories...)
 }
 
 type MaterializationResult struct {
@@ -177,9 +170,7 @@ type MaterializationConflict struct {
 }
 
 func (conflict MaterializationConflict) Kind() MaterializationConflictKind { return conflict.kind }
-func (conflict MaterializationConflict) ArtifactID() string                { return conflict.artifactID }
 func (conflict MaterializationConflict) Path() string                      { return conflict.path }
-func (conflict MaterializationConflict) Detail() string                    { return conflict.detail }
 
 type MaterializationConflictError struct {
 	conflicts []MaterializationConflict

@@ -147,7 +147,6 @@ func (event JournalTailRecoveredEvent) WorkspaceID() ID       { return event.wor
 func (event JournalTailRecoveredEvent) Generation() Digest    { return event.generation }
 func (event JournalTailRecoveredEvent) DiscardOffset() int64  { return event.discardOffset }
 func (event JournalTailRecoveredEvent) DiscardSize() int64    { return event.discardSize }
-func (event JournalTailRecoveredEvent) DiscardDigest() Digest { return event.discardDigest }
 func (event JournalTailRecoveredEvent) ResultingHead() Digest { return event.resultingHead }
 
 type JournalAppend struct {
@@ -249,7 +248,6 @@ type JournalRecord struct {
 
 func (record JournalRecord) Sequence() uint64            { return record.sequence }
 func (record JournalRecord) OccurredAt() time.Time       { return record.occurredAt }
-func (record JournalRecord) PreviousHash() Digest        { return record.previousHash }
 func (record JournalRecord) EventHash() Digest           { return record.eventHash }
 func (record JournalRecord) Generation() Digest          { return record.generation }
 func (record JournalRecord) EventType() JournalEventType { return record.event.eventType() }

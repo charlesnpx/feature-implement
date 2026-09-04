@@ -45,8 +45,7 @@ type PlanReference struct {
 	source string
 }
 
-func (reference PlanReference) ID() ID         { return reference.id }
-func (reference PlanReference) Source() string { return reference.source }
+func (reference PlanReference) ID() ID { return reference.id }
 
 type MergeUnitReference struct {
 	planID      ID
@@ -258,12 +257,8 @@ type Story struct {
 	dependencies   []ID
 }
 
-func (story Story) ID() ID                   { return story.id }
-func (story Story) Summary() string          { return story.summary }
-func (story Story) Acceptance() []string     { return append([]string(nil), story.acceptance...) }
-func (story Story) Implementation() []string { return append([]string(nil), story.implementation...) }
-func (story Story) Testing() []string        { return append([]string(nil), story.testing...) }
-func (story Story) Dependencies() []ID       { return append([]ID(nil), story.dependencies...) }
+func (story Story) ID() ID             { return story.id }
+func (story Story) Dependencies() []ID { return append([]ID(nil), story.dependencies...) }
 
 type MergeUnit struct {
 	id       ID
@@ -271,9 +266,8 @@ type MergeUnit struct {
 	storyIDs []ID
 }
 
-func (unit MergeUnit) ID() ID         { return unit.id }
-func (unit MergeUnit) Name() string   { return unit.name }
-func (unit MergeUnit) StoryIDs() []ID { return append([]ID(nil), unit.storyIDs...) }
+func (unit MergeUnit) ID() ID       { return unit.id }
+func (unit MergeUnit) Name() string { return unit.name }
 
 // Plan owns only plan-local semantics: stories, their dependencies, and merge
 // unit composition. It has no repository, remote, execution policy, or runtime
@@ -415,7 +409,6 @@ func normalizePlan(wire planWire) (Plan, error) {
 }
 
 func (plan Plan) ID() ID                  { return plan.id }
-func (plan Plan) Title() string           { return plan.title }
 func (plan Plan) Stories() []Story        { return append([]Story(nil), plan.stories...) }
 func (plan Plan) MergeUnits() []MergeUnit { return append([]MergeUnit(nil), plan.mergeUnits...) }
 

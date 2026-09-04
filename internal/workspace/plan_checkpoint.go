@@ -23,15 +23,7 @@ type VerifiedPlanLockCheckpoint struct {
 	checkpointID   Digest
 }
 
-func (checkpoint VerifiedPlanLockCheckpoint) Root() string         { return checkpoint.root }
-func (checkpoint VerifiedPlanLockCheckpoint) Head() GitObjectID    { return checkpoint.head }
-func (checkpoint VerifiedPlanLockCheckpoint) Commit() GitObjectID  { return checkpoint.head }
-func (checkpoint VerifiedPlanLockCheckpoint) SourceDigest() Digest { return checkpoint.sourceDigest }
-func (checkpoint VerifiedPlanLockCheckpoint) SemanticDigest() Digest {
-	return checkpoint.semanticDigest
-}
 func (checkpoint VerifiedPlanLockCheckpoint) Generation() Digest   { return checkpoint.generation }
-func (checkpoint VerifiedPlanLockCheckpoint) LockDigest() Digest   { return checkpoint.lockDigest }
 func (checkpoint VerifiedPlanLockCheckpoint) CheckpointID() Digest { return checkpoint.checkpointID }
 
 func VerifyPlanLockCheckpoint(

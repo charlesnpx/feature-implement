@@ -20,7 +20,6 @@ type CommitCheckInvocation struct {
 func (invocation CommitCheckInvocation) CheckID() ID         { return invocation.checkID }
 func (invocation CommitCheckInvocation) Commit() GitObjectID { return invocation.commit }
 func (invocation CommitCheckInvocation) Tree() GitObjectID   { return invocation.tree }
-func (invocation CommitCheckInvocation) Runner() ID          { return invocation.runner }
 func (invocation CommitCheckInvocation) Worktree() string    { return invocation.worktree }
 func (invocation CommitCheckInvocation) Command() Argv {
 	return Argv{values: invocation.command.Values()}
