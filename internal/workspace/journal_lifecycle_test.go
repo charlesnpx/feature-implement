@@ -39,13 +39,13 @@ func TestJournalTailRecoveredEventsRejectGeneralAppend(t *testing.T) {
 	}
 }
 
-func TestInitializeWorkspaceV2AdmissionBeforeMutation(t *testing.T) {
+func TestWorkspaceInitializationAdmitsCurrentRuntimeBeforeMutation(t *testing.T) {
 	t.Parallel()
 
 	t.Run("derives worktree root", func(t *testing.T) {
 		definition := mustDefinition(t, newDefinitionFixture(t).sources)
 		workspaceDir := t.TempDir()
-		result, err := workspace.InitializeWorkspaceV2WithOptions(
+		_, err := workspace.InitializeWorkspaceV2WithOptions(
 			context.Background(),
 			workspaceDir,
 			definition,
@@ -54,9 +54,6 @@ func TestInitializeWorkspaceV2AdmissionBeforeMutation(t *testing.T) {
 		)
 		if err != nil {
 			t.Fatalf("derived worktree root initialization: %v", err)
-		}
-		if result.Runtime().WorktreeRoot() != "" {
-			t.Fatalf("runtime retained a worktree-root binding: %#v", result.Runtime())
 		}
 	})
 

@@ -73,65 +73,9 @@ func TestWorkspaceAttemptPauseHelpStatesRequiredKinds(t *testing.T) {
 	}
 }
 
-func TestRemovedMutablePlanLifecycleFailsClearly(t *testing.T) {
-	for _, args := range [][]string{
-		{"status", "plan", "--json"},
-		{"implement", "next", "plan", "--json"},
-		{"implement", "push", "plan", "--allow-push", "--write-state"},
-	} {
-		stdout, stderr, err := runFeature(t, args...)
-		if err == nil {
-			t.Fatalf("removed command feature %s unexpectedly succeeded: %s", strings.Join(args, " "), stdout)
-		}
-		if !strings.Contains(stderr, "was removed; use feature workspace") {
-			t.Fatalf("removed command feature %s failed unclearly: %s", strings.Join(args, " "), stderr)
-		}
-	}
-	for _, action := range []string{"scheduler", "gates", "report"} {
-		_, stderr, err := runFeature(t, "workspace", action)
-		if err == nil || !strings.Contains(stderr, "unsupported workspace command") {
-			t.Fatalf("removed workspace read command %q error = %v, %s", action, err, stderr)
-		}
-	}
-	stdout, stderr, err := runFeature(t, "--help")
-	if err != nil {
-		t.Fatalf("help: %v: %s", err, stderr)
-	}
-	for _, removed := range []string{"feature status <plan-dir>", "feature implement next|start"} {
-		if strings.Contains(stdout, removed) {
-			t.Fatalf("root help advertises removed command %q:\n%s", removed, stdout)
-		}
-	}
-	validateHelp := runFeatureOutput(t, "validate", "--help")
-	if strings.Contains(validateHelp, "before feature:implement") || !strings.Contains(validateHelp, "feature workspace validate") {
-		t.Fatalf("standalone validation help implies a legacy execution bridge:\n%s", validateHelp)
-	}
-}
-
-func TestRemovedWorkspaceCommandsAndWrongSubactionsFailClearly(
+func TestWrongWorkspaceSubactionsFailClearly(
 	t *testing.T,
 ) {
-	for _, args := range [][]string{
-		{"workspace", "queue"},
-		{"workspace", "receipts"},
-		{"workspace", "reconcile", "stage"},
-		{"workspace", "control", "grant"},
-		{"workspace", "provider", "dispatch"},
-	} {
-		stdout, stderr, err := runFeature(t, args...)
-		if err == nil {
-			t.Fatalf(
-				"removed command feature %s unexpectedly succeeded: %s",
-				strings.Join(args, " "), stdout,
-			)
-		}
-		if !strings.Contains(stderr, "was removed") {
-			t.Fatalf(
-				"removed command feature %s failed unclearly: %s",
-				strings.Join(args, " "), stderr,
-			)
-		}
-	}
 	for _, args := range [][]string{
 		{"workspace", "attempt", "unknown"},
 		{"workspace", "review", "unknown"},
@@ -143,30 +87,6 @@ func TestRemovedWorkspaceCommandsAndWrongSubactionsFailClearly(
 			t.Fatalf(
 				"wrong subaction feature %s error = %v, %s",
 				strings.Join(args, " "), err, stderr,
-			)
-		}
-	}
-	_, stderr, err := runFeature(
-		t,
-		"workspace", "status",
-		"--candidate-bundle", canonicalFeatureTestTempDir(t),
-	)
-	if err == nil ||
-		!strings.Contains(stderr, "candidate-bundle") {
-		t.Fatalf("removed candidate-bundle flag error = %v, %s", err, stderr)
-	}
-
-	help := runFeatureOutput(t, "workspace", "--help")
-	for _, removed := range []string{
-		"queue", "receipts", "reconcile", "control",
-		"provider", "commit next|rebase", "candidate-bundle",
-		"feature workspace scheduler", "feature workspace gates",
-		"feature workspace report",
-	} {
-		if strings.Contains(help, removed) {
-			t.Fatalf(
-				"workspace help advertises removed surface %q:\n%s",
-				removed, help,
 			)
 		}
 	}

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 )
 
@@ -48,10 +47,6 @@ func (report JournalRecoveryReport) DiscardSize() int64    { return report.disca
 func (report JournalRecoveryReport) DiscardDigest() Digest { return report.discardDigest }
 func (report JournalRecoveryReport) TruncatedHead() Digest { return report.truncatedHead }
 func (report JournalRecoveryReport) JournalHead() Digest   { return report.journalHead }
-
-func workspaceJournalRecoveryPath(workspaceDir string) string {
-	return filepath.Join(WorkspaceStateDirectory(workspaceDir), WorkspaceJournalRecoveryFileName)
-}
 
 func journalRecoveryPending(journal *WorkspaceJournal) (bool, error) {
 	if journal == nil || journal.runtime == nil {

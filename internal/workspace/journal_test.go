@@ -32,8 +32,7 @@ func TestJournalLifecycleAppendIsReadableAndRebuildable(t *testing.T) {
 		t.Fatalf("rebuild runtime from lifecycle records: %v", err)
 	}
 	if rebuilt.WorkspaceID() != fixture.definition.Workspace().ID() ||
-		rebuilt.ActiveGeneration() != fixture.definition.Generation() ||
-		rebuilt.WorktreeRoot() != fixture.initialized.Runtime().WorktreeRoot() {
+		rebuilt.ActiveGeneration() != fixture.definition.Generation() {
 		t.Fatalf("rebuilt runtime = %#v", rebuilt)
 	}
 	if _, err := workspace.VerifyWorkspaceRuntimeConformance(

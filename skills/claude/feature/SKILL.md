@@ -1,6 +1,6 @@
 ---
 name: feature
-description: Explicit /feature invocation only. Create an implementation-ready local workspace-v2 bundle with stories, merge units, execution policy, review policy, and exact Git bindings.
+description: Explicit /feature invocation only. Create an implementation-ready local workspace bundle with stories, merge units, execution policy, review policy, and exact Git bindings.
 ---
 
 # Feature Planning

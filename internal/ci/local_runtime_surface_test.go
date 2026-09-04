@@ -235,14 +235,6 @@ func allowedRemovedSurfaceReference(relative, line string) bool {
 		strings.TrimSpace(line) == "### Deferred GitHub design" {
 		return true
 	}
-	if normalized == "cmd/feature/main.go" &&
-		strings.HasPrefix(trimmed, `case "queue", "receipts", "reconcile", "control", "provider":`) {
-		return true
-	}
-	if normalized == "internal/workspacecmd/command.go" &&
-		strings.HasPrefix(trimmed, `case "queue", "receipts", "reconcile", "control", "provider":`) {
-		return true
-	}
 	if normalized == "internal/workspace/runtime_storage.go" &&
 		strings.Contains(line, "provider-oriented draft-v2 state") {
 		remainder := strings.ReplaceAll(

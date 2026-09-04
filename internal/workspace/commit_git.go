@@ -453,30 +453,6 @@ func (adapter LocalCommitGitAdapter) rejectHiddenIndexEntries(ctx context.Contex
 	return nil
 }
 
-func rejectHiddenIndexRecords(output []byte) error {
-	return rejectIndexTagRecords(output, func(tag byte) bool {
-		return tag == 'S' || (tag >= 'a' && tag <= 'z')
-	}, "configured execution forbids assume-unchanged and skip-worktree index entries")
-}
-
-func rejectFSMonitorIndexRecords(output []byte) error {
-	return rejectIndexTagRecords(output, func(tag byte) bool {
-		return tag >= 'a' && tag <= 'z'
-	}, "configured execution forbids fsmonitor-valid index entries")
-}
-
-func rejectIndexTagRecords(output []byte, forbidden func(byte) bool, message string) error {
-	for _, record := range bytes.Split(output, []byte{0}) {
-		if len(record) == 0 {
-			continue
-		}
-		if err := rejectIndexTagRecord(record, forbidden, message); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func rejectIndexTagRecord(
 	record []byte,
 	forbidden func(byte) bool,

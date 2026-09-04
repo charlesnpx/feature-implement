@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-func TestRuntimeStorageCreatesV7MarkerAndRejectsLegacyWithoutMutation(t *testing.T) {
+func TestRuntimeStorageCreatesCurrentMarkerAndRejectsUnmarkedRuntimeWithoutMutation(t *testing.T) {
 	parent := canonicalRuntimeTestTempDir(t)
 	legacy := filepath.Join(parent, "legacy")
 	if err := os.MkdirAll(filepath.Join(legacy, WorkspaceStateDirectoryName), 0o700); err != nil {

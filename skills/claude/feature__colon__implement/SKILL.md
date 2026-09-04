@@ -1,6 +1,6 @@
 ---
 name: "feature:implement"
-description: Explicit /feature:implement invocation only. Execute a validated local workspace-v2 bundle through isolated attempt worktrees, exact-head review, deterministic integration, and local completion.
+description: Explicit /feature:implement invocation only. Execute a validated local workspace bundle through isolated attempt worktrees, exact-head review, deterministic integration, and local completion.
 ---
 
 # Feature Implementation
@@ -11,7 +11,7 @@ Proceed only when the user's current request contains a literal
 `/feature:implement` invocation. If this skill was selected for another
 request, stop and ask the user to invoke `/feature:implement` explicitly.
 
-Execute one validated workspace-v2 bundle through its local journal.
+Execute one validated workspace bundle through its local journal.
 
 ## Preconditions
 

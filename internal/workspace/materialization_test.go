@@ -126,7 +126,7 @@ func TestMaterializationRejectsHiddenDestinationAncestors(t *testing.T) {
 	}
 }
 
-func TestMaterializationBootstrapsAbsentOrEmptyDestinationWithV2Inventory(t *testing.T) {
+func TestMaterializationBootstrapsAbsentOrEmptyDestination(t *testing.T) {
 	t.Parallel()
 
 	for _, existing := range []bool{false, true} {

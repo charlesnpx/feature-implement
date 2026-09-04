@@ -36,7 +36,7 @@ func TestStrictJSONRequiresPresentNonNullFields(t *testing.T) {
 	}
 }
 
-func TestStrictWorkspaceDecoderRejectsNonV2AndAmbiguousYAML(t *testing.T) {
+func TestStrictWorkspaceDecoderRejectsUnsupportedSchemaAndAmbiguousYAML(t *testing.T) {
 	t.Parallel()
 
 	fixture := newDefinitionFixture(t)

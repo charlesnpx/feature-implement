@@ -538,11 +538,6 @@ func readActiveMaterializationControl(
 	return control, nil
 }
 
-func readMaterializationState(adapter *RootedFilesystemAdapter) (materializationStateWire, error) {
-	state, _, err := readMaterializationStateWithBytes(adapter)
-	return state, err
-}
-
 func readMaterializationStateWithBytes(adapter *RootedFilesystemAdapter) (materializationStateWire, []byte, error) {
 	content, err := adapter.readBounded(MaterializationStateFileName, 64*1024)
 	if err != nil {

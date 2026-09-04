@@ -431,17 +431,6 @@ func normalizeSourcePath(value string) (string, error) {
 	return clean, nil
 }
 
-func normalizeToken(name, value string, maxBytes int) (string, error) {
-	value = strings.TrimSpace(value)
-	if err := validateBoundedText(name, value, maxBytes); err != nil {
-		return "", err
-	}
-	if strings.ContainsAny(value, " \t\r\n") {
-		return "", fmt.Errorf("%s must not contain whitespace", name)
-	}
-	return value, nil
-}
-
 func normalizeNonEmptyTextList(name string, values []string) ([]string, error) {
 	if len(values) == 0 {
 		return nil, fmt.Errorf("%s requires at least one item", name)

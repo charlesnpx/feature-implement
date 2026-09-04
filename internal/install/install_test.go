@@ -85,8 +85,8 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 		),
 	)
 	assertContainsAll(t, "codex feature metadata", codexFeatureMetadata, []string{
-		`short_description: "Create workspace-v2 bundles"`,
-		`default_prompt: "Use $feature to create and validate an implementation-ready workspace-v2 bundle."`,
+		`short_description: "Create local workspace bundles"`,
+		`default_prompt: "Use $feature to create and validate an implementation-ready local workspace bundle."`,
 		"policy:",
 		"allow_implicit_invocation: false",
 	})
@@ -101,7 +101,7 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 		t, "codex implement metadata", codexImplementMetadata,
 		[]string{
 			`short_description: "Execute local workspace bundles"`,
-			`default_prompt: "Use $feature:implement to execute a validated workspace-v2 bundle through local merge units."`,
+			`default_prompt: "Use $feature:implement to execute a validated local workspace bundle through local merge units."`,
 			"policy:",
 			"allow_implicit_invocation: false",
 		},
@@ -115,7 +115,7 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 		content := readInstalledSkill(t, path)
 		assertContainsAll(t, path, content, []string{
 			"Invocation guard",
-			"workspace-v2 bundle",
+			"workspace bundle",
 			"~/tmp/feature-plans/<workspace-id>/",
 			"feature.workspace.bundle.json",
 			"feature.workspace.yaml",
@@ -180,7 +180,7 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 		content := readInstalledSkill(t, path)
 		assertContainsAll(t, path, content, []string{
 			"Invocation guard",
-			"workspace-v2 bundle",
+			"workspace bundle",
 			"feature.workspace.bundle.json",
 			"feature workspace validate --bundle <bundle-dir> --write-locks --json",
 			"CLI derives the runtime as a sibling of `<bundle-dir>`",

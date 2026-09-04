@@ -73,8 +73,6 @@ func Execute(ctx context.Context, options Options) (any, error) {
 		default:
 			return nil, fmt.Errorf("unsupported workspace schema %q", options.Subaction)
 		}
-	case "queue", "receipts", "reconcile", "control", "provider":
-		return nil, removedWorkspaceCommand(action)
 	case "validate", "init", "status", "recover":
 		// handled below
 	case "attempt", "review", "integrate", "complete":
@@ -119,13 +117,6 @@ func Execute(ctx context.Context, options Options) (any, error) {
 	default:
 		panic("unreachable")
 	}
-}
-
-func removedWorkspaceCommand(action string) error {
-	return fmt.Errorf(
-		"workspace %s was removed from the local-only workflow",
-		action,
-	)
 }
 
 func validateWorkspaceSubaction(action, subaction string) error {

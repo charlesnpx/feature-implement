@@ -162,9 +162,6 @@ func (projection WorkspaceRuntimeProjection) PlanCheckpoint() Digest {
 func (projection WorkspaceRuntimeProjection) PlanCheckpointArtifactDigest() Digest {
 	return projection.planCheckpointArtifactDigest
 }
-func (projection WorkspaceRuntimeProjection) WorktreeRoot() string {
-	return ""
-}
 func (projection WorkspaceRuntimeProjection) LocalTarget() (
 	RuntimeLocalTargetProjection,
 	bool,
@@ -459,13 +456,4 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 		value.Attempts = append(value.Attempts, canonical)
 	}
 	return json.Marshal(value)
-}
-
-func containsDigest(values []Digest, wanted Digest) bool {
-	for _, value := range values {
-		if value == wanted {
-			return true
-		}
-	}
-	return false
 }

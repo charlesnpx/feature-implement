@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const WorkspaceRuntimeProjectionFileName = "runtime-projection.v6.json"
+const WorkspaceRuntimeProjectionFileName = "runtime-projection.json"
 
 type WorkspaceInitializationResult struct {
 	storedGeneration StoredGeneration
@@ -423,19 +423,6 @@ func RebuildWorkspaceRuntimeProjectionFile(journal *WorkspaceJournal) (Digest, e
 		return Digest{}, err
 	}
 	return writeWorkspaceRuntimeProjectionAt(journal.runtime, snapshot, runtime)
-}
-
-func writeWorkspaceRuntimeProjection(
-	workspaceDir string,
-	snapshot JournalSnapshot,
-	runtime WorkspaceRuntimeProjection,
-) (Digest, error) {
-	storage, err := OpenRuntimeStorage(workspaceDir, true)
-	if err != nil {
-		return Digest{}, err
-	}
-	defer storage.Close()
-	return writeWorkspaceRuntimeProjectionAt(storage, snapshot, runtime)
 }
 
 func writeWorkspaceRuntimeProjectionAt(

@@ -757,13 +757,6 @@ func (adapter *RootedFilesystemAdapter) renameDirectoryNoReplace(source, destina
 	return adapter.renamePathNoReplace(source, destination, true, nil)
 }
 
-func (adapter *RootedFilesystemAdapter) renameDirectoryIdentityNoReplace(
-	source, destination string,
-	expected PlatformFileIdentity,
-) error {
-	return adapter.renamePathNoReplace(source, destination, true, &expected)
-}
-
 func (adapter *RootedFilesystemAdapter) renamePathNoReplace(
 	source, destination string,
 	directorySource bool,
@@ -1424,14 +1417,6 @@ func (adapter *RootedFilesystemAdapter) removeEmptyDirectoryBound(
 	return true, nil
 }
 
-// removeDirectoryTreeExact removes one rooted directory without following
-// links or allowing a replaced entry to be removed under the original
-// permission. It is reserved for directories whose absence was claimed
-// before tool-owned materialization began.
-func (adapter *RootedFilesystemAdapter) removeDirectoryTreeExact(relative string) error {
-	return adapter.removeDirectoryTreeBound(relative, nil)
-}
-
 func (adapter *RootedFilesystemAdapter) removeDirectoryTreeIdentityExact(
 	relative string,
 	expected PlatformFileIdentity,
@@ -1546,10 +1531,6 @@ func (adapter *RootedFilesystemAdapter) verifyPath() error {
 	return nil
 }
 
-func removeRootContentsExact(directory *os.Root, display string) error {
-	return removeRootContentsExactGuarded(directory, display, nil)
-}
-
 func removeRootContentsExactGuarded(
 	directory *os.Root,
 	display string,
@@ -1557,16 +1538,6 @@ func removeRootContentsExactGuarded(
 ) error {
 	return removeRootContentsExceptExactGuarded(
 		directory, display, nil, beforeEffect,
-	)
-}
-
-func removeRootContentsExceptExact(
-	directory *os.Root,
-	display string,
-	preserved map[string]struct{},
-) error {
-	return removeRootContentsExceptExactGuarded(
-		directory, display, preserved, nil,
 	)
 }
 

@@ -2,7 +2,6 @@ package workspacecmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,7 +12,7 @@ import (
 	"github.com/charlesnpx/feature-implement/internal/workspace"
 )
 
-func TestLocalCommandDecodersRequireExactReceiptFreeFields(t *testing.T) {
+func TestLocalCommandDecodersRejectUnsupportedFields(t *testing.T) {
 	tests := []struct {
 		name   string
 		source string
@@ -52,7 +51,7 @@ func TestLocalCommandDecodersRequireExactReceiptFreeFields(t *testing.T) {
 	  "dispatch_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	  "verdict": "satisfied",
 	  "evidence_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-	  "receipt": {}
+			  "unsupported": {}
 }`,
 			target: func() any { return &recordReviewGateInput{} },
 			want:   "unknown field",
@@ -99,22 +98,6 @@ func TestLocalCommandDecodersRequireExactReceiptFreeFields(t *testing.T) {
 }
 
 func TestRequestSchemasExposeOnlySupportedLocalMutations(t *testing.T) {
-	encoded, err := json.Marshal(RequestSchemas())
-	if err != nil {
-		t.Fatal(err)
-	}
-	source := string(encoded)
-	for _, forbidden := range []string{
-		`"receipt"`, `"reconcile.`, `"control.`, `"provider.`,
-		`"provider_broker"`, `"commit.rebase"`, `"base"`,
-	} {
-		if strings.Contains(source, forbidden) {
-			t.Fatalf(
-				"request schemas expose removed field %q: %s",
-				forbidden, source,
-			)
-		}
-	}
 	schemas := RequestSchemas()["requests"].(map[string]any)
 	for _, required := range []string{
 		"init",
