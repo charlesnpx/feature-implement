@@ -109,6 +109,9 @@ func initializeRuntimeFormat(root *VerifiedRoot, runtimePath string, create bool
 	}
 	initializable, err := runtimeRootInitializable(root)
 	if err != nil || !initializable {
+		if _, exists, markerErr := loadRuntimeFormatMarker(root); markerErr == nil && exists {
+			return nil
+		}
 		return incompatibleRuntimeFormatError(runtimePath)
 	}
 	lock, _, err := root.openOwnedRegularFile(
@@ -132,10 +135,10 @@ func initializeRuntimeFormat(root *VerifiedRoot, runtimePath string, create bool
 		return nil
 	}
 	initializable, err = runtimeRootInitializable(root)
-	if err != nil {
-		return incompatibleRuntimeFormatError(runtimePath)
-	}
-	if !initializable {
+	if err != nil || !initializable {
+		if _, exists, markerErr := loadRuntimeFormatMarker(root); markerErr == nil && exists {
+			return nil
+		}
 		return incompatibleRuntimeFormatError(runtimePath)
 	}
 	if err := root.EnsureDirectory(WorkspaceStateDirectoryName, 0o700); err != nil {
@@ -230,6 +233,12 @@ func runtimeRootInitializable(root *VerifiedRoot) (bool, error) {
 		return true, nil
 	}
 	for _, entry := range entries {
+		if strings.HasPrefix(entry.name, runtimeStagePrefix) {
+			if entry.info.Mode()&os.ModeSymlink != 0 || !entry.info.Mode().IsRegular() {
+				return false, nil
+			}
+			continue
+		}
 		switch entry.name {
 		case RuntimeInitializationLockName:
 			if entry.info.Mode()&os.ModeSymlink != 0 || !entry.info.Mode().IsRegular() {

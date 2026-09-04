@@ -15,6 +15,8 @@ import (
 
 type RootRole string
 
+const runtimeStagePrefix = "runtime-stage-"
+
 const (
 	RootRolePlan               RootRole = "plan"
 	RootRoleRuntime            RootRole = "runtime"
@@ -231,7 +233,7 @@ func (root *VerifiedRoot) writeExclusivePublished(
 	}
 	temporary := path.Join(
 		path.Dir(relative),
-		"runtime-stage-"+hex.EncodeToString(random),
+		runtimeStagePrefix+hex.EncodeToString(random),
 	)
 	if err := root.adapter.writeFileExclusive(temporary, content, permission); err != nil {
 		return false, err

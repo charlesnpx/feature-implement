@@ -167,6 +167,33 @@ func TestRuntimeInitializationRejectsUnknownNonEmptyState(t *testing.T) {
 	}
 }
 
+func TestRuntimeInitializationRecoversLeftoverStagingFile(t *testing.T) {
+	runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "runtime")
+	if err := os.MkdirAll(runtimePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker, err := marshalRuntimeFormatMarker()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stagePath := filepath.Join(runtimePath, runtimeStagePrefix+strings.Repeat("a", 32))
+	if err := os.WriteFile(stagePath, marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	storage, err := OpenRuntimeStorage(runtimePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Verify(); err != nil {
+		_ = storage.Close()
+		t.Fatal(err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestV7RuntimeMarkerRefusesAdmissionWithoutMutation(t *testing.T) {
 	runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "v7-runtime")
 	v7MarkerName := "feature.runtime.v7.json"
@@ -265,7 +292,7 @@ func assertRuntimeTreeUnchanged(t *testing.T, root string, before map[string]run
 	}
 }
 
-func TestConcurrentRuntimeInitializationPublishesOneV7Runtime(t *testing.T) {
+func TestConcurrentRuntimeInitializationPublishesOneRuntime(t *testing.T) {
 	runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "runtime")
 	const contenders = 8
 	start := make(chan struct{})
