@@ -96,8 +96,6 @@ func (recovery RuntimeRecoveryProjection) ResultingHead() Digest { return recove
 
 type RuntimeLocalTargetProjection struct {
 	binding       LocalTargetBinding
-	intentDigest  Digest
-	intentRecord  uint64
 	createdHead   GitObjectID
 	createdRecord uint64
 	headRecord    uint64
@@ -105,15 +103,6 @@ type RuntimeLocalTargetProjection struct {
 
 func (projection RuntimeLocalTargetProjection) Binding() LocalTargetBinding {
 	return projection.binding
-}
-func (projection RuntimeLocalTargetProjection) IntentDigest() Digest {
-	return projection.intentDigest
-}
-func (projection RuntimeLocalTargetProjection) IntentRecord() uint64 {
-	return projection.intentRecord
-}
-func (projection RuntimeLocalTargetProjection) Created() bool {
-	return projection.createdRecord != 0
 }
 func (projection RuntimeLocalTargetProjection) CreatedHead() GitObjectID {
 	return projection.createdHead
@@ -157,7 +146,6 @@ type WorkspaceRuntimeProjection struct {
 	activeGeneration             Digest
 	planCheckpoint               Digest
 	planCheckpointArtifactDigest Digest
-	worktreeRoot                 WorkspaceWorktreeRootBinding
 	localTarget                  RuntimeLocalTargetProjection
 	recoveries                   []RuntimeRecoveryProjection
 	attempts                     []RuntimeAttemptProjection
@@ -174,8 +162,8 @@ func (projection WorkspaceRuntimeProjection) PlanCheckpoint() Digest {
 func (projection WorkspaceRuntimeProjection) PlanCheckpointArtifactDigest() Digest {
 	return projection.planCheckpointArtifactDigest
 }
-func (projection WorkspaceRuntimeProjection) WorktreeRoot() WorkspaceWorktreeRootBinding {
-	return projection.worktreeRoot
+func (projection WorkspaceRuntimeProjection) WorktreeRoot() string {
+	return ""
 }
 func (projection WorkspaceRuntimeProjection) LocalTarget() (
 	RuntimeLocalTargetProjection,
@@ -224,18 +212,15 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 		}
 	}
 	if !current.activeGeneration.IsZero() {
-		target, hasTarget := current.LocalTarget()
-		ready := hasTarget && target.Created()
+		_, ready := current.LocalTarget()
 		switch record.event.(type) {
-		case FeatureRefCreationIntendedJournalEvent,
-			FeatureRefCreatedJournalEvent,
-			JournalTailRecoveredEvent:
-			// Initialization and journal-tail recovery are the only transitions
-			// admitted before durable feature-ref completion.
+		case JournalTailRecoveredEvent:
+			// Journal-tail recovery is the only transition admitted before
+			// initialization is durable.
 		default:
 			if !ready {
 				return WorkspaceRuntimeProjection{}, fmt.Errorf(
-					"workspace runtime is not ready until feature_ref_created is durable",
+					"workspace runtime is not ready until local target admission is durable",
 				)
 			}
 		}
@@ -275,43 +260,14 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 		next.activeGeneration = event.generation
 		next.planCheckpoint = event.planCheckpoint
 		next.planCheckpointArtifactDigest = event.planCheckpointArtifactDigest
-		next.worktreeRoot = event.worktreeRoot
-	case FeatureRefCreationIntendedJournalEvent:
-		if current.workspaceID != event.workspaceID ||
-			current.activeGeneration != event.generation {
-			return WorkspaceRuntimeProjection{}, fmt.Errorf(
-				"feature-ref creation intent has stale workspace bindings",
-			)
+		if !event.localTarget.IsZero() {
+			next.localTarget = RuntimeLocalTargetProjection{
+				binding:       event.localTarget,
+				createdHead:   event.localTarget.baseCommit,
+				createdRecord: record.sequence,
+				headRecord:    record.sequence,
+			}
 		}
-		if !current.localTarget.IsZero() {
-			return WorkspaceRuntimeProjection{}, fmt.Errorf(
-				"feature-ref creation intent is already recorded",
-			)
-		}
-		next.localTarget = RuntimeLocalTargetProjection{
-			binding: event.binding, intentDigest: event.intentDigest,
-			intentRecord: record.sequence,
-		}
-	case FeatureRefCreatedJournalEvent:
-		if current.workspaceID != event.workspaceID ||
-			current.activeGeneration != event.generation ||
-			current.localTarget.IsZero() ||
-			current.localTarget.createdRecord != 0 {
-			return WorkspaceRuntimeProjection{}, fmt.Errorf(
-				"feature-ref creation completion has stale or duplicate workspace bindings",
-			)
-		}
-		target := current.localTarget
-		if target.intentDigest != event.intentDigest ||
-			target.binding.featureRef != event.featureRef ||
-			target.binding.baseCommit != event.head {
-			return WorkspaceRuntimeProjection{}, fmt.Errorf(
-				"feature-ref creation completion does not match its exact intent",
-			)
-		}
-		next.localTarget.createdHead = event.head
-		next.localTarget.createdRecord = record.sequence
-		next.localTarget.headRecord = record.sequence
 	case JournalTailRecoveredEvent:
 		if current.activeGeneration.IsZero() {
 			if current.workspaceID.IsZero() {
@@ -379,10 +335,9 @@ func journalEventTargetsAttempt(event WorkspaceJournalEvent, attemptID ID) bool 
 }
 
 func requireReadyLocalTarget(runtime WorkspaceRuntimeProjection) error {
-	target, ok := runtime.LocalTarget()
-	if !ok || !target.Created() {
+	if _, ok := runtime.LocalTarget(); !ok {
 		return fmt.Errorf(
-			"workspace runtime is not ready until feature_ref_created is durable",
+			"workspace runtime is not ready until local target admission is durable",
 		)
 	}
 	return nil
@@ -439,9 +394,6 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 	type localTargetJSON struct {
 		Binding       localTargetBindingWire `json:"binding"`
 		BindingDigest string                 `json:"binding_digest"`
-		IntentDigest  string                 `json:"intent_digest"`
-		IntentRecord  uint64                 `json:"intent_record"`
-		Created       bool                   `json:"created"`
 		CreatedHead   string                 `json:"created_head,omitempty"`
 		CreatedRecord uint64                 `json:"created_record,omitempty"`
 		HeadRecord    uint64                 `json:"head_record,omitempty"`
@@ -459,7 +411,6 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 		ActiveGeneration             string            `json:"active_generation"`
 		PlanCheckpoint               string            `json:"plan_checkpoint,omitempty"`
 		PlanCheckpointArtifactDigest string            `json:"plan_checkpoint_artifact_digest,omitempty"`
-		WorktreeRoot                 string            `json:"worktree_root"`
 		LocalTarget                  *localTargetJSON  `json:"local_target,omitempty"`
 		Recoveries                   []recoveryJSON    `json:"recoveries"`
 		Attempts                     []json.RawMessage `json:"attempts"`
@@ -470,7 +421,6 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 		ActiveGeneration:             projection.activeGeneration.String(),
 		PlanCheckpoint:               projection.planCheckpoint.String(),
 		PlanCheckpointArtifactDigest: projection.planCheckpointArtifactDigest.String(),
-		WorktreeRoot:                 projection.worktreeRoot.Path(),
 		Recoveries:                   make([]recoveryJSON, 0, len(projection.recoveries)),
 		Attempts:                     make([]json.RawMessage, 0, len(projection.attempts)),
 	}
@@ -480,9 +430,6 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 				projection.localTarget.binding,
 			),
 			BindingDigest: projection.localTarget.binding.digest.String(),
-			IntentDigest:  projection.localTarget.intentDigest.String(),
-			IntentRecord:  projection.localTarget.intentRecord,
-			Created:       projection.localTarget.createdRecord != 0,
 			CreatedHead:   projection.localTarget.createdHead.String(),
 			CreatedRecord: projection.localTarget.createdRecord,
 			HeadRecord:    projection.localTarget.headRecord,

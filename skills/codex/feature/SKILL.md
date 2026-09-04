@@ -50,7 +50,7 @@ can execute locally.
    preceding review reported a Critical or High finding. Stop after a review
    with no Critical or High findings or after the third iteration.
 10. Run `feature workspace validate --bundle <bundle-dir> --write-locks --json`,
-    commit the plan sources and generated locks in the bundle repository, and
+    commit the plan sources and the single generated `feature.workspace.lock.json` in the bundle repository, and
     verify the plan repository is clean at the committed `HEAD`.
 
 If the target root, base ref, exact base commit, feature branch, execution
@@ -72,7 +72,7 @@ The descriptor is strict JSON:
 }
 ```
 
-Every descriptor path is relative, non-hidden, outside `generated/`, uniquely
+Every descriptor path is relative, non-hidden, uniquely
 owned by one source role, and rooted beneath the bundle.
 
 The workspace manifest owns local target and composition bindings:

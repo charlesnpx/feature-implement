@@ -42,28 +42,21 @@ func TestJournalTailRecoveredEventsRejectGeneralAppend(t *testing.T) {
 func TestInitializeWorkspaceV2AdmissionBeforeMutation(t *testing.T) {
 	t.Parallel()
 
-	t.Run("requires explicit worktree root", func(t *testing.T) {
+	t.Run("derives worktree root", func(t *testing.T) {
 		definition := mustDefinition(t, newDefinitionFixture(t).sources)
 		workspaceDir := t.TempDir()
-		if _, err := workspace.InitializeWorkspaceV2WithOptions(
+		result, err := workspace.InitializeWorkspaceV2WithOptions(
 			context.Background(),
 			workspaceDir,
 			definition,
 			mustTime(t, "2026-07-21T00:59:00Z"),
 			workspace.WorkspaceInitializationOptions{},
-		); err == nil || !strings.Contains(
-			err.Error(), "requires an explicit worktree root",
-		) {
-			t.Fatalf("missing worktree root error = %v", err)
+		)
+		if err != nil {
+			t.Fatalf("derived worktree root initialization: %v", err)
 		}
-		for _, candidate := range []string{
-			filepath.Join(workspaceDir, workspace.RuntimeFormatFileName),
-			filepath.Join(workspaceDir, workspace.RuntimeInitializationLockName),
-			workspace.WorkspaceStateDirectory(workspaceDir),
-		} {
-			if _, err := os.Lstat(candidate); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("missing worktree root mutated %s: %v", candidate, err)
-			}
+		if result.Runtime().WorktreeRoot() != "" {
+			t.Fatalf("runtime retained a worktree-root binding: %#v", result.Runtime())
 		}
 	})
 
@@ -77,7 +70,7 @@ func TestInitializeWorkspaceV2AdmissionBeforeMutation(t *testing.T) {
 			target,
 			definition,
 			mustTime(t, "2026-07-21T01:00:00Z"),
-		); err == nil || !strings.Contains(err.Error(), "unsafe workspace root overlap") {
+		); err == nil || !strings.Contains(err.Error(), "overlaps the target root") {
 			t.Fatalf("runtime/target overlap error = %v", err)
 		}
 		for _, candidate := range []string{
@@ -125,11 +118,11 @@ func TestInitializationResumesAfterBootstrapTailRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	event, err := workspace.NewWorkspaceInitializedJournalEvent(
+	event, err := workspace.NewWorkspaceInitializedJournalEventWithTarget(
 		definition.Workspace().ID(),
 		definition.Generation(),
 		stored.DefinitionDigest(),
-		testJournalWorktreeRootBinding(t, t.TempDir()),
+		workspace.LocalTargetBinding{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -185,11 +178,9 @@ func TestInitializationResumesAfterBootstrapTailRecovery(t *testing.T) {
 		t.Fatalf("resume initialization: %v", err)
 	}
 	records := result.Snapshot().Records()
-	if len(records) != 4 ||
+	if len(records) != 2 ||
 		records[0].EventType() != workspace.JournalEventTailRecovered ||
-		records[1].EventType() != workspace.JournalEventWorkspaceInitialized ||
-		records[2].EventType() != workspace.JournalEventFeatureRefCreationIntended ||
-		records[3].EventType() != workspace.JournalEventFeatureRefCreated {
+		records[1].EventType() != workspace.JournalEventWorkspaceInitialized {
 		t.Fatalf("resumed initialization journal = %#v", records)
 	}
 	recovery, ok := records[0].Event().(workspace.JournalTailRecoveredEvent)
@@ -259,7 +250,6 @@ func TestWorkspaceJournalWriterContentionRejectsStaleHead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	worktreeRoot := t.TempDir()
 	gateDir := t.TempDir()
 	newCommand := func(worker string, output *bytes.Buffer) *exec.Cmd {
 		command := exec.Command(
@@ -271,7 +261,6 @@ func TestWorkspaceJournalWriterContentionRejectsStaleHead(t *testing.T) {
 			"WORKSPACE_JOURNAL_WRITER_HELPER="+workspaceDir,
 			"WORKSPACE_JOURNAL_WRITER_GENERATION="+definition.Generation().String(),
 			"WORKSPACE_JOURNAL_WRITER_DEFINITION="+stored.DefinitionDigest().String(),
-			"WORKSPACE_JOURNAL_WRITER_WORKTREE_ROOT="+worktreeRoot,
 			"WORKSPACE_JOURNAL_WRITER_GATE="+gateDir,
 			"WORKSPACE_JOURNAL_WRITER_ID="+worker,
 		)
@@ -392,14 +381,11 @@ func TestWorkspaceJournalWriterContentionSubprocess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	event, err := workspace.NewWorkspaceInitializedJournalEvent(
+	event, err := workspace.NewWorkspaceInitializedJournalEventWithTarget(
 		workspace.MustID("example-workspace"),
 		generation,
 		definitionDigest,
-		testJournalWorktreeRootBinding(
-			t,
-			os.Getenv("WORKSPACE_JOURNAL_WRITER_WORKTREE_ROOT"),
-		),
+		workspace.LocalTargetBinding{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -420,18 +406,6 @@ func TestWorkspaceJournalWriterContentionSubprocess(t *testing.T) {
 	} else {
 		t.Fatal(err)
 	}
-}
-
-func testJournalWorktreeRootBinding(
-	t *testing.T,
-	path string,
-) workspace.WorkspaceWorktreeRootBinding {
-	t.Helper()
-	binding, err := workspace.NewWorkspaceWorktreeRootBinding(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return binding
 }
 
 func writeJournalWriterGate(t *testing.T, path string) {

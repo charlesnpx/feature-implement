@@ -19,13 +19,13 @@ Execute one validated workspace-v2 bundle through its local journal.
 	   require `<bundle-dir>`. Require its strict
 	   `feature.workspace.bundle.json` and every referenced source.
 2. Run `feature workspace validate --bundle <bundle-dir> --write-locks --json`.
-	   Treat the source files and `generated/` projections as immutable for the
+	   Treat the source files and `feature.workspace.lock.json` as immutable for the
 	   active generation. Require the bundle repository to be clean at a committed
 	   `HEAD` containing the exact source and lock bytes.
-3. Use a dedicated `<runtime-dir>` and `<worktree-root>` outside the primary
-   checkout and target repository. Existing runtime state is authoritative. If
-   it exists, run `recover`; otherwise initialize it with a strict request that
-   contains the absolute worktree root.
+3. The CLI derives the runtime as a sibling of `<bundle-dir>` and derives its
+	   scratch and review-copy root from that runtime. Existing runtime state is
+	   authoritative. If it exists, run `recover`; otherwise initialize it with a
+	   strict request containing only `schema_version` and `occurred_at`.
 4. Verify the configured local repository root, fully qualified base ref,
    pinned base commit, feature branch, and current Git object format. The
    primary checkout may be dirty and must not be cleaned, stashed, reset,
@@ -35,7 +35,7 @@ Execute one validated workspace-v2 bundle through its local journal.
 
 If the journal, active generation, target binding, committed plan `HEAD`, or Git
 topology is missing, contradictory, or ambiguous, stop for operator direction.
-Never edit `generated/`, `<runtime-dir>/state/`, or journal records by hand.
+Never edit `feature.workspace.lock.json`, derived runtime state, or journal records by hand.
 
 ## Start a merge unit
 

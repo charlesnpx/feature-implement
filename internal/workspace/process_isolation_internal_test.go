@@ -53,19 +53,20 @@ func TestIsolatedProcessEnvironmentScrubsSensitiveStateAndDisablesGitAuthenticat
 		}
 	}
 	for name, expected := range map[string]string{
-		"PATH":                "/usr/bin:/bin",
-		"FEATURE_SAFE_VALUE":  "present",
-		"HOME":                os.DevNull,
-		"XDG_CONFIG_HOME":     os.DevNull,
-		"GIT_ATTR_NOSYSTEM":   "1",
-		"GIT_CONFIG_NOSYSTEM": "1",
-		"GIT_CONFIG_GLOBAL":   os.DevNull,
-		"GIT_CONFIG_SYSTEM":   os.DevNull,
-		"GIT_TERMINAL_PROMPT": "0",
-		"GCM_INTERACTIVE":     "Never",
-		"GIT_ASKPASS":         os.DevNull,
-		"SSH_ASKPASS":         os.DevNull,
-		"GIT_SSH_COMMAND":     os.DevNull,
+		"PATH":                   "/usr/bin:/bin",
+		"FEATURE_SAFE_VALUE":     "present",
+		"HOME":                   os.DevNull,
+		"XDG_CONFIG_HOME":        os.DevNull,
+		"GIT_ATTR_NOSYSTEM":      "1",
+		"GIT_CONFIG_NOSYSTEM":    "1",
+		"GIT_CONFIG_GLOBAL":      os.DevNull,
+		"GIT_CONFIG_SYSTEM":      os.DevNull,
+		"GIT_NO_REPLACE_OBJECTS": "1",
+		"GIT_TERMINAL_PROMPT":    "0",
+		"GCM_INTERACTIVE":        "Never",
+		"GIT_ASKPASS":            os.DevNull,
+		"SSH_ASKPASS":            os.DevNull,
+		"GIT_SSH_COMMAND":        os.DevNull,
 	} {
 		if values[name] != expected {
 			t.Fatalf("isolated environment %s = %q, want %q", name, values[name], expected)
@@ -98,6 +99,7 @@ func TestTrustedGitArgumentsDisableHooksHelpersPromptsAndAmbientHeaders(t *testi
 	arguments := trustedGitArguments("/tmp/repository", "status", "--short")
 	joined := strings.Join(arguments, "\x00")
 	for _, required := range []string{
+		"--no-replace-objects",
 		"core.hooksPath=" + os.DevNull,
 		"credential.helper=",
 		"credential.interactive=false",

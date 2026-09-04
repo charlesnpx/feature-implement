@@ -113,7 +113,6 @@ func TestWorkspaceRuntimeViewsExposeOnlyLocalStateAndReplayDeterministically(
 		first.Workflow.Generation !=
 			harness.definition.Generation().String() ||
 		first.Workflow.JournalHead != snapshot.Head().String() ||
-		first.Workflow.WorktreeRoot == "" ||
 		first.Workflow.ProjectionDigest == "" ||
 		first.Workflow.ReviewProjectionDigest == "" {
 		t.Fatalf("workflow view = %+v", first.Workflow)

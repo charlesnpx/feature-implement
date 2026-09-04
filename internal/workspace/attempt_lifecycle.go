@@ -67,7 +67,7 @@ func StartAttempt(
 		return RuntimeAttemptProjection{}, err
 	}
 	target, ok := runtime.LocalTarget()
-	if !ok || !target.Created() || target.CreatedHead().IsZero() {
+	if !ok || target.CreatedHead().IsZero() {
 		return RuntimeAttemptProjection{}, fmt.Errorf("attempt start requires a durable local feature head")
 	}
 	base := target.CreatedHead()
@@ -77,8 +77,12 @@ func StartAttempt(
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
 	}
+	worktreeRoot, err := derivedWorkspaceWorktreeRootForJournal(journal)
+	if err != nil {
+		return RuntimeAttemptProjection{}, err
+	}
 	worktree, err := AttemptWorktreePath(
-		runtime.worktreeRoot.Path(), identity, request.MergeUnit, request.AttemptNumber,
+		worktreeRoot, identity, request.MergeUnit, request.AttemptNumber,
 	)
 	if err != nil {
 		return RuntimeAttemptProjection{}, err
@@ -599,9 +603,6 @@ func readAttemptRuntime(
 		return JournalSnapshot{}, WorkspaceRuntimeProjection{}, fmt.Errorf("attempt definition does not match the active workspace generation")
 	}
 	if err := requireReadyLocalTarget(runtime); err != nil {
-		return JournalSnapshot{}, WorkspaceRuntimeProjection{}, err
-	}
-	if err := verifyWorkspaceWorktreeRootBinding(runtime.worktreeRoot); err != nil {
 		return JournalSnapshot{}, WorkspaceRuntimeProjection{}, err
 	}
 	return snapshot, runtime, nil

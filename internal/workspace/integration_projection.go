@@ -20,7 +20,7 @@ func reduceIntegrationRuntime(
 		return fmt.Errorf("integration event generation is not active")
 	}
 	target, ready := current.LocalTarget()
-	if !ready || !target.Created() {
+	if !ready {
 		return fmt.Errorf(
 			"integration requires a durable local feature head",
 		)

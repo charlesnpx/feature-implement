@@ -7,13 +7,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strings"
 )
 
 const (
-	PlanCheckpointGeneratorVersion = "feature-plan-checkpoint/v2"
 	PlanCheckpointArtifactFileName = "plan-checkpoint.v5.json"
 	maxPlanGitOutputBytes          = 8 * 1024 * 1024
 )
@@ -94,27 +92,30 @@ func VerifyPlanLockCheckpoint(
 			)
 		}
 	}
-	locks, err := WorkspaceBundleLockArtifacts(bundle)
+	lockBytes, err := WorkspaceBundleLockBytes(bundle)
 	if err != nil {
 		return VerifiedPlanLockCheckpoint{}, err
 	}
-	lockBytes := make(map[string][]byte, len(locks))
-	for _, artifact := range locks {
-		relative := filepath.ToSlash(filepath.Join(WorkspaceGeneratedDirectory, artifact.Path()))
-		lockBytes[relative] = artifact.Bytes()
-		committed, err := gitShowFile(ctx, bundle.root, head, relative)
-		if err != nil {
-			return VerifiedPlanLockCheckpoint{}, err
-		}
-		if !bytes.Equal(committed, artifact.Bytes()) {
-			return VerifiedPlanLockCheckpoint{}, fmt.Errorf(
-				"committed generated lock %s does not match current lock bytes",
-				relative,
-			)
-		}
+	currentLock, err := ReadWorkspaceBundleLock(bundle)
+	if err != nil {
+		return VerifiedPlanLockCheckpoint{}, err
+	}
+	if !bytes.Equal(currentLock, lockBytes) {
+		return VerifiedPlanLockCheckpoint{}, fmt.Errorf(
+			"current workspace lock does not match the normalized definition",
+		)
+	}
+	committedLock, err := gitShowFile(ctx, bundle.root, head, WorkspaceLockFileName)
+	if err != nil {
+		return VerifiedPlanLockCheckpoint{}, err
+	}
+	if !bytes.Equal(committedLock, lockBytes) {
+		return VerifiedPlanLockCheckpoint{}, fmt.Errorf(
+			"committed workspace lock does not match current lock bytes",
+		)
 	}
 	sourceDigest := digestNamedBytes(sourceFiles)
-	lockDigest := digestNamedBytes(lockBytes)
+	lockDigest := DigestBytes(lockBytes)
 	semanticDigest := digestDefinitionSemantics(bundle.definition)
 	checkpointID, err := deterministicPlanCheckpointID(
 		head, sourceDigest, semanticDigest, bundle.definition.generation, lockDigest,
@@ -314,7 +315,14 @@ func requireCleanPlanRepository(ctx context.Context, root string) error {
 	if err != nil {
 		return fmt.Errorf("inspect plan repository status: %w", err)
 	}
-	if len(bytes.TrimSpace(status)) != 0 {
+	// The persistent flock inode is operational synchronization state, not a
+	// plan source or generated lock artifact.
+	for _, line := range bytes.Split(status, []byte("\n")) {
+		if len(line) == 0 || bytes.Equal(
+			line, []byte("?? "+workspaceLockPublicationLockName),
+		) {
+			continue
+		}
 		return fmt.Errorf("plan repository must be clean before workspace initialization")
 	}
 	return nil

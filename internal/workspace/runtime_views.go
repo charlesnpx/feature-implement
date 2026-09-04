@@ -93,25 +93,20 @@ type WorkspaceWorkflow struct {
 	Generation             string `json:"generation"`
 	JournalHead            string `json:"journal_head"`
 	PlanCheckpoint         string `json:"plan_checkpoint"`
-	WorktreeRoot           string `json:"worktree_root"`
 	ProjectionDigest       string `json:"projection_digest"`
 	ReviewProjectionDigest string `json:"review_projection_digest"`
 }
 
 type WorkspaceTarget struct {
-	Root             string `json:"root"`
-	GitDirectory     string `json:"git_directory"`
-	CommonDirectory  string `json:"common_directory"`
-	RepositoryFormat uint64 `json:"repository_format"`
-	ObjectFormat     string `json:"object_format"`
-	LinkedWorktree   bool   `json:"linked_worktree"`
-	BaseRef          string `json:"base_ref"`
-	BaseCommit       string `json:"base_commit"`
-	FeatureBranch    string `json:"feature_branch"`
-	FeatureRef       string `json:"feature_ref"`
-	FeatureHead      string `json:"feature_head"`
-	BindingDigest    string `json:"binding_digest"`
-	Ready            bool   `json:"ready"`
+	Root          string `json:"root"`
+	ObjectFormat  string `json:"object_format"`
+	BaseRef       string `json:"base_ref"`
+	BaseCommit    string `json:"base_commit"`
+	FeatureBranch string `json:"feature_branch"`
+	FeatureRef    string `json:"feature_ref"`
+	FeatureHead   string `json:"feature_head"`
+	BindingDigest string `json:"binding_digest"`
+	Ready         bool   `json:"ready"`
 }
 
 type WorkspaceAttempt struct {
@@ -382,7 +377,7 @@ func RebuildWorkspaceView(snapshot JournalSnapshot, definition EffectiveWorkspac
 	driftInput := workspaceIntegrationDriftInput{
 		chain: append([]MergeUnitIntegrationIntent(nil), assessment.chain...),
 	}
-	if target, exists := core.LocalTarget(); exists && target.Created() {
+	if target, exists := core.LocalTarget(); exists {
 		driftInput.target = target.Binding()
 	}
 	_, driftInput.completionRecorded = core.Completion()
@@ -394,7 +389,6 @@ func RebuildWorkspaceView(snapshot JournalSnapshot, definition EffectiveWorkspac
 			Generation:             core.activeGeneration.String(),
 			JournalHead:            snapshot.head.String(),
 			PlanCheckpoint:         core.planCheckpoint.String(),
-			WorktreeRoot:           core.worktreeRoot.Path(),
 			ProjectionDigest:       coreDigest.String(),
 			ReviewProjectionDigest: reviewDigest.String(),
 		},
@@ -503,24 +497,16 @@ func workspaceTargetView(
 		}, nil
 	}
 	binding := target.Binding()
-	featureHead := ""
-	if target.Created() {
-		featureHead = target.CreatedHead().String()
-	}
 	return WorkspaceTarget{
-		Root:             binding.Root(),
-		GitDirectory:     binding.GitDirectory(),
-		CommonDirectory:  binding.CommonDirectory(),
-		RepositoryFormat: binding.RepositoryFormat(),
-		ObjectFormat:     string(binding.ObjectFormat()),
-		LinkedWorktree:   binding.LinkedWorktree(),
-		BaseRef:          binding.BaseRef(),
-		BaseCommit:       binding.BaseCommit().String(),
-		FeatureBranch:    binding.FeatureBranch(),
-		FeatureRef:       binding.FeatureRef(),
-		FeatureHead:      featureHead,
-		BindingDigest:    binding.Digest().String(),
-		Ready:            target.Created(),
+		Root:          binding.Root(),
+		ObjectFormat:  string(binding.ObjectFormat()),
+		BaseRef:       binding.BaseRef(),
+		BaseCommit:    binding.BaseCommit().String(),
+		FeatureBranch: binding.FeatureBranch(),
+		FeatureRef:    binding.FeatureRef(),
+		FeatureHead:   target.CreatedHead().String(),
+		BindingDigest: binding.Digest().String(),
+		Ready:         true,
 	}, nil
 }
 

@@ -2,13 +2,16 @@ package workspace
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestRuntimeStorageCreatesV7MarkerAndRejectsLegacyWithoutMutation(t *testing.T) {
@@ -34,7 +37,7 @@ func TestRuntimeStorageCreatesV7MarkerAndRejectsLegacyWithoutMutation(t *testing
 		t.Fatalf("legacy runtime changed: %q, %v", content, err)
 	}
 	if _, err := os.Lstat(filepath.Join(legacy, RuntimeFormatFileName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("legacy runtime acquired v7 marker: %v", err)
+		t.Fatalf("legacy runtime acquired v8 marker: %v", err)
 	}
 
 	fresh := filepath.Join(parent, "fresh")
@@ -58,11 +61,11 @@ func TestRuntimeStorageCreatesV7MarkerAndRejectsLegacyWithoutMutation(t *testing
 	}
 	marker, err := os.ReadFile(filepath.Join(fresh, RuntimeFormatFileName))
 	if err != nil {
-		t.Fatalf("read v7 runtime marker: %v", err)
+		t.Fatalf("read v8 runtime marker: %v", err)
 	}
 	var wire runtimeFormatMarkerWire
 	if err := json.Unmarshal(marker, &wire); err != nil {
-		t.Fatalf("decode v7 runtime marker: %v", err)
+		t.Fatalf("decode v8 runtime marker: %v", err)
 	}
 	if wire.SchemaVersion != RuntimeFormatSchemaVersion {
 		t.Fatalf(
@@ -99,7 +102,7 @@ func TestRuntimeStorageRejectsV4MarkerAtFormatGate(t *testing.T) {
 		t.Fatalf("v4 runtime format gate error = %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(runtimePath, RuntimeFormatFileName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("v4 runtime acquired v7 marker: %v", err)
+		t.Fatalf("v4 runtime acquired v8 marker: %v", err)
 	}
 }
 
@@ -160,11 +163,136 @@ func TestRuntimeInitializationRejectsUnknownNonEmptyState(t *testing.T) {
 		t.Fatalf("unknown state error = %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(runtimePath, RuntimeFormatFileName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("unknown state acquired v7 marker: %v", err)
+		t.Fatalf("unknown state acquired v8 marker: %v", err)
 	}
 }
 
-func TestConcurrentRuntimeInitializationPublishesOneV7Runtime(t *testing.T) {
+func TestRuntimeInitializationRecoversLeftoverStagingFile(t *testing.T) {
+	runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "runtime")
+	if err := os.MkdirAll(runtimePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker, err := marshalRuntimeFormatMarker()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stagePath := filepath.Join(runtimePath, runtimeStagePrefix+strings.Repeat("a", 32))
+	if err := os.WriteFile(stagePath, marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	storage, err := OpenRuntimeStorage(runtimePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Verify(); err != nil {
+		_ = storage.Close()
+		t.Fatal(err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestV7RuntimeMarkerRefusesAdmissionWithoutMutation(t *testing.T) {
+	runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "v7-runtime")
+	v7MarkerName := "feature.runtime.v7.json"
+	v7Marker := []byte("v7 incompatible runtime marker\n")
+	if err := os.MkdirAll(runtimePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimePath, v7MarkerName), v7Marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	definition := EffectiveWorkspaceDefinition{
+		workspace: WorkspaceManifest{target: LocalTarget{
+			root: canonicalRuntimeTestTempDir(t),
+		}},
+		generation: DigestBytes([]byte("v7 incompatible runtime generation")),
+	}
+	before := snapshotRuntimeTree(t, runtimePath)
+
+	if _, err := ValidateLocalTargetForWorkspaceRuntime(
+		context.Background(), runtimePath, definition,
+	); err == nil || err.Error() != "runtime format is incompatible; regenerate from committed sources" {
+		t.Fatalf("v7 runtime validation error = %v", err)
+	}
+	assertRuntimeTreeUnchanged(t, runtimePath, before)
+
+	if _, err := InitializeWorkspaceV2WithOptions(
+		context.Background(),
+		runtimePath,
+		definition,
+		time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC),
+		WorkspaceInitializationOptions{},
+	); err == nil || err.Error() != "runtime format is incompatible; regenerate from committed sources" {
+		t.Fatalf("v7 runtime initialization error = %v", err)
+	}
+	assertRuntimeTreeUnchanged(t, runtimePath, before)
+	if content, err := os.ReadFile(filepath.Join(runtimePath, v7MarkerName)); err != nil || !bytes.Equal(content, v7Marker) {
+		t.Fatalf("v7 marker changed: %q, %v", content, err)
+	}
+	for _, path := range []string{
+		RuntimeFormatFileName,
+		RuntimeInitializationLockName,
+	} {
+		if _, err := os.Lstat(filepath.Join(runtimePath, path)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("v7 runtime acquired v8 artifact %s: %v", path, err)
+		}
+	}
+}
+
+type runtimeTreeEntry struct {
+	mode    fs.FileMode
+	content []byte
+}
+
+func snapshotRuntimeTree(t *testing.T, root string) map[string]runtimeTreeEntry {
+	t.Helper()
+	entries := make(map[string]runtimeTreeEntry)
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		snapshot := runtimeTreeEntry{mode: info.Mode()}
+		if info.Mode().IsRegular() {
+			snapshot.content, err = os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+		}
+		entries[filepath.ToSlash(relative)] = snapshot
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entries
+}
+
+func assertRuntimeTreeUnchanged(t *testing.T, root string, before map[string]runtimeTreeEntry) {
+	t.Helper()
+	after := snapshotRuntimeTree(t, root)
+	if len(before) != len(after) {
+		t.Fatalf("runtime tree entry count changed: before=%d after=%d", len(before), len(after))
+	}
+	for path, expected := range before {
+		actual, exists := after[path]
+		if !exists || actual.mode != expected.mode || !bytes.Equal(actual.content, expected.content) {
+			t.Fatalf("runtime path changed: %s before=%#v after=%#v exists=%t", path, expected, actual, exists)
+		}
+	}
+}
+
+func TestConcurrentRuntimeInitializationPublishesOneRuntime(t *testing.T) {
 	runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "runtime")
 	const contenders = 8
 	start := make(chan struct{})

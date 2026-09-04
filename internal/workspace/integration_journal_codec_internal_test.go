@@ -190,9 +190,9 @@ func TestIntegrationJournalCodecRoundTripsAndRejectsTampering(t *testing.T) {
 		mutate func(*integrationIntentDigestWire)
 	}{
 		{
-			name: "feature marker",
+			name: "expected absent feature ref",
 			mutate: func(wire *integrationIntentDigestWire) {
-				wire.ExpectedFeatureMarker = "external replacement"
+				wire.ExpectedFeatureRefAbsent = !wire.ExpectedFeatureRefAbsent
 			},
 		},
 		{
@@ -288,18 +288,13 @@ func TestIntegrationCompletionReducerRequiresExactLeaseAndSerialSegment(
 		t.Fatal(err)
 	}
 	targetRoot := t.TempDir()
-	commonDirectory := filepath.Join(targetRoot, "git")
 	targetBinding, err := NewLocalTargetBinding(
 		LocalTargetBindingOptions{
-			Root:             targetRoot,
-			GitDirectory:     commonDirectory,
-			CommonDirectory:  commonDirectory,
-			RepositoryFormat: 0,
-			ObjectFormat:     GitHashSHA1,
-			LinkedWorktree:   false,
-			BaseRef:          "refs/heads/main",
-			BaseCommit:       intent.expectedFeatureHead,
-			FeatureBranch:    "feature/example-workspace",
+			Root:          targetRoot,
+			ObjectFormat:  GitHashSHA1,
+			BaseRef:       "refs/heads/main",
+			BaseCommit:    intent.expectedFeatureHead,
+			FeatureBranch: "feature/example-workspace",
 		},
 	)
 	if err != nil {
@@ -311,10 +306,7 @@ func TestIntegrationCompletionReducerRequiresExactLeaseAndSerialSegment(
 		workspaceID:      intent.workspaceID,
 		activeGeneration: intent.generation,
 		localTarget: RuntimeLocalTargetProjection{
-			binding: targetBinding, intentDigest: DigestBytes(
-				[]byte("target intent"),
-			),
-			intentRecord: 1, createdHead: intent.expectedFeatureHead,
+			binding: targetBinding, createdHead: intent.expectedFeatureHead,
 			createdRecord: 2, headRecord: 2,
 		},
 		attempts: []RuntimeAttemptProjection{
@@ -662,15 +654,12 @@ func integrationIntentTestOptions(
 		t.Fatal(err)
 	}
 	return MergeUnitIntegrationIntentOptions{
-		WorkspaceID:         MustID("example-workspace"),
-		Generation:          DigestBytes([]byte("integration-generation")),
-		AttemptID:           MustID("attempt-one"),
-		MergeUnit:           mergeUnit,
-		FeatureRef:          "refs/heads/feature/example-workspace",
-		ExpectedFeatureHead: integrationTestObject(t, algorithm, 'a'),
-		ExpectedFeatureMarker: localTargetReflogMessage(
-			DigestBytes([]byte("prior-feature-marker")),
-		),
+		WorkspaceID:            MustID("example-workspace"),
+		Generation:             DigestBytes([]byte("integration-generation")),
+		AttemptID:              MustID("attempt-one"),
+		MergeUnit:              mergeUnit,
+		FeatureRef:             "refs/heads/feature/example-workspace",
+		ExpectedFeatureHead:    integrationTestObject(t, algorithm, 'a'),
 		AttemptWorktreeBinding: attemptBinding,
 		AcceptedHead:           integrationTestObject(t, algorithm, 'b'),
 		AcceptedTree:           integrationTestObject(t, algorithm, 'c'),

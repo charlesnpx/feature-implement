@@ -133,7 +133,7 @@ func WorkspaceViewSchema() map[string]any {
 	workflow := object(
 		[]string{
 			"workspace_id", "generation", "journal_head",
-			"plan_checkpoint", "worktree_root", "projection_digest",
+			"plan_checkpoint", "projection_digest",
 			"review_projection_digest",
 		},
 		map[string]any{
@@ -141,32 +141,26 @@ func WorkspaceViewSchema() map[string]any {
 			"generation":               nonEmptyText(),
 			"journal_head":             nonEmptyText(),
 			"plan_checkpoint":          nonEmptyText(),
-			"worktree_root":            nonEmptyText(),
 			"projection_digest":        nonEmptyText(),
 			"review_projection_digest": nonEmptyText(),
 		},
 	)
 	target := object(
 		[]string{
-			"root", "git_directory", "common_directory",
-			"repository_format", "object_format", "linked_worktree",
+			"root", "object_format",
 			"base_ref", "base_commit", "feature_branch", "feature_ref",
 			"feature_head", "binding_digest", "ready",
 		},
 		map[string]any{
-			"root":              nonEmptyText(),
-			"git_directory":     text(),
-			"common_directory":  text(),
-			"repository_format": integer(0),
-			"object_format":     enum("", "sha1", "sha256"),
-			"linked_worktree":   boolean(),
-			"base_ref":          nonEmptyText(),
-			"base_commit":       nonEmptyText(),
-			"feature_branch":    nonEmptyText(),
-			"feature_ref":       nonEmptyText(),
-			"feature_head":      text(),
-			"binding_digest":    text(),
-			"ready":             boolean(),
+			"root":           nonEmptyText(),
+			"object_format":  enum("", "sha1", "sha256"),
+			"base_ref":       nonEmptyText(),
+			"base_commit":    nonEmptyText(),
+			"feature_branch": nonEmptyText(),
+			"feature_ref":    nonEmptyText(),
+			"feature_head":   text(),
+			"binding_digest": text(),
+			"ready":          boolean(),
 		},
 	)
 	attempt := object(

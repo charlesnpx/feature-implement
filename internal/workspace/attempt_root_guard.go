@@ -6,20 +6,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
-// attemptWorktreeRootGuard binds every Git-owned filesystem boundary that
-// could otherwise be substituted while an attempt claim is prepared.
+// attemptWorktreeRootGuard owns only the derived scratch parent. The target
+// worktree and Git administration remain read-only inputs to Git; retaining
+// their filesystem identities neither protects the primary checkout nor is
+// required for exact attempt materialization.
 type attemptWorktreeRootGuard struct {
-	binding         trustedWorktreeBinding
-	registered      map[string]registeredWorktree
-	target          *VerifiedRoot
-	common          *VerifiedRoot
-	worktree        *VerifiedRoot
-	registeredRoots []*VerifiedRoot
-	worktreePath    string
+	binding      trustedWorktreeBinding
+	worktree     *VerifiedRoot
+	worktreePath string
 }
 
 func (adapter LocalAttemptGitAdapter) ValidateAttemptWorktreeRoot(
@@ -27,9 +24,7 @@ func (adapter LocalAttemptGitAdapter) ValidateAttemptWorktreeRoot(
 	repositoryRoot string,
 	worktree string,
 ) error {
-	guard, err := adapter.openAttemptWorktreeRootGuard(
-		ctx, repositoryRoot, worktree, false,
-	)
+	guard, err := adapter.openAttemptWorktreeRootGuard(ctx, repositoryRoot, worktree, false)
 	if err != nil {
 		return err
 	}
@@ -54,85 +49,31 @@ func (adapter LocalAttemptGitAdapter) openAttemptWorktreeRootGuard(
 	if err != nil {
 		return nil, err
 	}
-	canonicalParent := canonicalWorktreePath(parentPath)
+	if err := ValidateWorkspaceRuntimeRoot(parentPath); err != nil {
+		return nil, fmt.Errorf("reject derived attempt worktree root: %w", err)
+	}
 	canonicalWorktree := canonicalWorktreePath(worktree)
-
 	commitAdapter := LocalCommitGitAdapter{git: adapter}
 	binding, err := commitAdapter.captureTrustedWorktreeBinding(ctx, repositoryRoot)
 	if err != nil {
 		return nil, fmt.Errorf("inspect attempt worktree Git binding: %w", err)
 	}
-	registered, err := adapter.inspectRegisteredWorktrees(ctx, binding.root)
-	if err != nil {
+	if err := rejectAttemptWorktreeRootOverlap(parentPath, canonicalWorktree, binding); err != nil {
 		return nil, err
 	}
-	if err := rejectAttemptWorktreeRootOverlap(
-		canonicalParent, canonicalWorktree, binding, registered,
-	); err != nil {
-		return nil, err
-	}
-
-	guard := &attemptWorktreeRootGuard{
-		binding: binding, registered: registered, worktreePath: canonicalWorktree,
-	}
-	closeGuard := true
-	defer func() {
-		if closeGuard {
-			_ = guard.Close()
-		}
-	}()
-	guard.target, err = OpenVerifiedRoot(RootRoleTarget, binding.root, false)
-	if err != nil {
-		return nil, fmt.Errorf("open attempt target root: %w", err)
-	}
-	guard.common, err = OpenVerifiedRoot(RootRoleGitCommon, binding.commonDir, false)
-	if err != nil {
-		return nil, fmt.Errorf("open attempt Git common root: %w", err)
-	}
-	for _, registeredPath := range sortedRegisteredWorktreePaths(registered) {
-		info, statErr := os.Lstat(registeredPath)
-		if errors.Is(statErr, os.ErrNotExist) {
-			continue
-		}
-		if statErr != nil {
-			return nil, fmt.Errorf(
-				"inspect registered worktree root %s: %w", registeredPath, statErr,
-			)
-		}
-		if !info.IsDir() {
-			return nil, fmt.Errorf(
-				"registered worktree root %s is not a directory", registeredPath,
-			)
-		}
-		root, openErr := OpenVerifiedRoot(
-			RootRoleRegisteredWorktree, registeredPath, false,
-		)
-		if openErr != nil {
-			return nil, fmt.Errorf(
-				"open registered worktree root %s: %w", registeredPath, openErr,
-			)
-		}
-		guard.registeredRoots = append(guard.registeredRoots, root)
-	}
-	guard.worktree, err = OpenVerifiedRoot(RootRoleWorktree, parentPath, create)
+	root, err := OpenVerifiedRoot(RootRoleWorktree, parentPath, create)
 	if errors.Is(err, os.ErrNotExist) && !create {
-		guard.worktree = nil
+		root = nil
 	} else if err != nil {
-		return nil, fmt.Errorf("open attempt worktree root: %w", err)
+		return nil, fmt.Errorf("open derived attempt worktree root: %w", err)
 	}
-	if guard.worktree != nil && guard.worktree.Path() != canonicalParent {
-		return nil, fmt.Errorf(
-			"attempt worktree root resolved from %s to unexpected path %s",
-			canonicalParent, guard.worktree.Path(),
-		)
+	guard := &attemptWorktreeRootGuard{
+		binding: binding, worktree: root, worktreePath: canonicalWorktree,
 	}
 	if err := guard.validateLayout(); err != nil {
+		_ = guard.Close()
 		return nil, err
 	}
-	if err := guard.Verify(ctx, adapter); err != nil {
-		return nil, fmt.Errorf("verify opened attempt worktree roots: %w", err)
-	}
-	closeGuard = false
 	return guard, nil
 }
 
@@ -154,164 +95,63 @@ func (adapter LocalAttemptGitAdapter) inspectRegisteredWorktrees(
 
 func (guard *attemptWorktreeRootGuard) Verify(
 	ctx context.Context,
-	adapter LocalAttemptGitAdapter,
 ) error {
-	if guard == nil || guard.target == nil || guard.common == nil {
+	if guard == nil {
 		return fmt.Errorf("attempt worktree root guard is closed")
 	}
-	for _, root := range append(
-		[]*VerifiedRoot{guard.target, guard.common, guard.worktree},
-		guard.registeredRoots...,
-	) {
-		if root == nil {
-			continue
-		}
-		if err := root.VerifyPath(); err != nil {
-			return err
-		}
-	}
-	commitAdapter := LocalCommitGitAdapter{git: adapter}
-	confirmedBinding, err := commitAdapter.captureTrustedWorktreeBinding(
-		ctx, guard.binding.root,
-	)
-	if err != nil {
-		return fmt.Errorf("reinspect attempt worktree Git binding: %w", err)
-	}
-	if confirmedBinding != guard.binding {
-		return fmt.Errorf("attempt worktree Git binding changed during root admission")
-	}
-	confirmedRegistered, err := adapter.inspectRegisteredWorktrees(
-		ctx, guard.binding.root,
-	)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !sameRegisteredWorktrees(guard.registered, confirmedRegistered) {
-		return fmt.Errorf("registered Git worktrees changed during root admission")
+	if guard.worktree != nil {
+		if err := guard.worktree.VerifyPath(); err != nil {
+			return err
+		}
 	}
 	return guard.validateLayout()
 }
 
 func (guard *attemptWorktreeRootGuard) validateLayout() error {
-	if guard == nil || guard.target == nil || guard.common == nil {
+	if guard == nil {
 		return fmt.Errorf("attempt worktree root guard is closed")
 	}
 	if guard.worktree == nil {
 		return nil
 	}
-	sensitive := append(
-		[]*VerifiedRoot{guard.target, guard.common},
-		guard.registeredRoots...,
-	)
-	for _, root := range sensitive {
-		// The storage root may contain sibling attempt worktrees. It is unsafe
-		// only when the storage root is itself inside a Git-owned root, or when
-		// this exact candidate contains or is contained by one.
-		if guard.worktree.Identity() == root.Identity() ||
-			pathContains(root.Path(), guard.worktree.Path()) {
-			return unsafeAttemptWorktreeRootOverlap(
-				guard.worktree.Path(), guard.worktreePath, root.Role(), root.Path(),
-			)
-		}
-		if pathContains(root.Path(), guard.worktreePath) ||
-			pathContains(guard.worktreePath, root.Path()) {
-			return unsafeAttemptWorktreeRootOverlap(
-				guard.worktree.Path(), guard.worktreePath, root.Role(), root.Path(),
-			)
-		}
+	if guard.worktree.Path() != filepath.Dir(guard.worktreePath) {
+		return fmt.Errorf("derived attempt worktree parent changed during admission")
 	}
 	return nil
 }
 
 func (guard *attemptWorktreeRootGuard) Close() error {
-	if guard == nil {
+	if guard == nil || guard.worktree == nil {
 		return nil
 	}
-	var closeErrors []error
-	for index := len(guard.registeredRoots) - 1; index >= 0; index-- {
-		closeErrors = append(closeErrors, guard.registeredRoots[index].Close())
-	}
-	guard.registeredRoots = nil
-	if guard.worktree != nil {
-		closeErrors = append(closeErrors, guard.worktree.Close())
-		guard.worktree = nil
-	}
-	if guard.common != nil {
-		closeErrors = append(closeErrors, guard.common.Close())
-		guard.common = nil
-	}
-	if guard.target != nil {
-		closeErrors = append(closeErrors, guard.target.Close())
-		guard.target = nil
-	}
-	return errors.Join(closeErrors...)
+	err := guard.worktree.Close()
+	guard.worktree = nil
+	return err
 }
 
 func rejectAttemptWorktreeRootOverlap(
 	worktreeRoot string,
 	worktree string,
 	binding trustedWorktreeBinding,
-	registered map[string]registeredWorktree,
 ) error {
-	sensitive := []struct {
-		role RootRole
-		path string
+	for _, protected := range []struct {
+		label string
+		path  string
 	}{
-		{role: RootRoleTarget, path: binding.root},
-		{role: RootRoleGitCommon, path: binding.commonDir},
-	}
-	for _, registeredPath := range sortedRegisteredWorktreePaths(registered) {
-		sensitive = append(sensitive, struct {
-			role RootRole
-			path string
-		}{role: RootRoleRegisteredWorktree, path: registeredPath})
-	}
-	for _, root := range sensitive {
-		if pathContains(root.path, worktreeRoot) ||
-			pathContains(root.path, worktree) ||
-			pathContains(worktree, root.path) {
-			return unsafeAttemptWorktreeRootOverlap(
-				worktreeRoot, worktree, root.role, root.path,
+		{label: "target", path: binding.root},
+		{label: "Git administration", path: binding.commonDir},
+	} {
+		if pathContains(protected.path, worktreeRoot) ||
+			pathContains(protected.path, worktree) ||
+			pathContains(worktree, protected.path) {
+			return fmt.Errorf(
+				"unsafe attempt worktree overlap: derived root %s (candidate %s) and %s path %s",
+				worktreeRoot, worktree, protected.label, protected.path,
 			)
 		}
 	}
 	return nil
-}
-
-func unsafeAttemptWorktreeRootOverlap(
-	worktreeRoot string,
-	worktree string,
-	role RootRole,
-	path string,
-) error {
-	return fmt.Errorf(
-		"unsafe attempt worktree overlap: worktree root %s (candidate %s) and %s root %s",
-		worktreeRoot, worktree, role, path,
-	)
-}
-
-func sortedRegisteredWorktreePaths(
-	registered map[string]registeredWorktree,
-) []string {
-	paths := make([]string, 0, len(registered))
-	for registeredPath := range registered {
-		paths = append(paths, registeredPath)
-	}
-	sort.Strings(paths)
-	return paths
-}
-
-func sameRegisteredWorktrees(
-	left map[string]registeredWorktree,
-	right map[string]registeredWorktree,
-) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for path, record := range left {
-		if confirmed, exists := right[path]; !exists || confirmed != record {
-			return false
-		}
-	}
-	return true
 }

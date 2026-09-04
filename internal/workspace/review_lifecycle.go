@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -170,7 +171,7 @@ func DispatchAttemptReviewGate(
 			if pending != dispatch {
 				return ReviewGateDispatchResult{}, fmt.Errorf("attempt %s has an unresolved review gate dispatch", attempt.attemptID)
 			}
-			return materializeReviewGateCopy(ctx, materializer, projection.core, attempt, pending, config.Policy())
+			return materializeReviewGateCopy(ctx, journal, materializer, attempt, pending, config.Policy())
 		}
 	}
 	event, err := NewReviewGateDispatchedJournalEvent(dispatch)
@@ -180,7 +181,7 @@ func DispatchAttemptReviewGate(
 	if _, err := appendReviewJournalEvent(journal, snapshot, event, request.OccurredAt); err != nil {
 		return ReviewGateDispatchResult{}, err
 	}
-	return materializeReviewGateCopy(ctx, materializer, projection.core, attempt, dispatch, config.Policy())
+	return materializeReviewGateCopy(ctx, journal, materializer, attempt, dispatch, config.Policy())
 }
 
 func validateWitnessReviewInputTransport(
@@ -205,16 +206,17 @@ func validateWitnessReviewInputTransport(
 
 func materializeReviewGateCopy(
 	ctx context.Context,
+	journal *WorkspaceJournal,
 	materializer AttemptGitPort,
-	runtime WorkspaceRuntimeProjection,
 	attempt RuntimeAttemptProjection,
 	dispatch ReviewGateDispatch,
 	policy []byte,
 ) (ReviewGateDispatchResult, error) {
-	if runtime.worktreeRoot.IsZero() {
-		return ReviewGateDispatchResult{}, fmt.Errorf("review gate dispatch has no verified frozen-copy root")
+	worktreeRoot, err := derivedWorkspaceWorktreeRootForJournal(journal)
+	if err != nil {
+		return ReviewGateDispatchResult{}, err
 	}
-	frozenCopy, err := reviewGateFrozenCopyPath(runtime.worktreeRoot.Path(), dispatch.digest)
+	frozenCopy, err := reviewGateFrozenCopyPath(worktreeRoot, dispatch.digest)
 	if err != nil {
 		return ReviewGateDispatchResult{}, err
 	}
@@ -279,7 +281,7 @@ func RecordAttemptReviewGate(
 	}
 	if existing, recorded := state.Record(request.DispatchDigest); recorded {
 		if existing.verdict == request.Verdict && existing.evidenceDigest == request.EvidenceDigest {
-			if err := discardReviewGateFrozenCopy(projection.core.worktreeRoot, dispatch); err != nil {
+			if err := discardReviewGateFrozenCopyForJournal(journal, dispatch); err != nil {
 				return ReviewGateRecord{}, err
 			}
 			return existing, nil
@@ -300,7 +302,7 @@ func RecordAttemptReviewGate(
 	if _, err := appendReviewJournalEvent(journal, snapshot, event, request.OccurredAt); err != nil {
 		return ReviewGateRecord{}, err
 	}
-	if err := discardReviewGateFrozenCopy(projection.core.worktreeRoot, dispatch); err != nil {
+	if err := discardReviewGateFrozenCopyForJournal(journal, dispatch); err != nil {
 		return ReviewGateRecord{}, fmt.Errorf("discard terminal review gate frozen copy: %w", err)
 	}
 	return gateRecord, nil
@@ -311,13 +313,17 @@ func RecordAttemptReviewGate(
 // replaced directory identities from escaping the verified worktree root.
 // A missing copy is normal after an earlier successful terminal-record retry.
 func discardReviewGateFrozenCopy(
-	worktreeRoot WorkspaceWorktreeRootBinding,
+	worktreeRoot string,
 	dispatch ReviewGateDispatch,
 ) error {
-	if worktreeRoot.IsZero() {
-		return fmt.Errorf("review gate frozen copy has no verified worktree root")
+	worktreeRoot = filepath.Clean(strings.TrimSpace(worktreeRoot))
+	if !filepath.IsAbs(worktreeRoot) {
+		return fmt.Errorf("review gate frozen copy has no absolute derived worktree root")
 	}
-	root, err := OpenVerifiedRoot(RootRoleWorktree, worktreeRoot.Path(), false)
+	root, err := OpenVerifiedRoot(RootRoleWorktree, worktreeRoot, false)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("open review gate frozen-copy root: %w", err)
 	}
@@ -354,6 +360,17 @@ func discardReviewGateFrozenCopy(
 		return fmt.Errorf("discard review gate frozen copy: %w", err)
 	}
 	return root.VerifyPath()
+}
+
+func discardReviewGateFrozenCopyForJournal(
+	journal *WorkspaceJournal,
+	dispatch ReviewGateDispatch,
+) error {
+	worktreeRoot, err := derivedWorkspaceWorktreeRootForJournal(journal)
+	if err != nil {
+		return err
+	}
+	return discardReviewGateFrozenCopy(worktreeRoot, dispatch)
 }
 
 // ConfirmReviewMergeReadiness is the direct readiness path. Integration also

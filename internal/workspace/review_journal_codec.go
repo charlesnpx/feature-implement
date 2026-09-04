@@ -64,12 +64,7 @@ func marshalReviewJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, bo
 	var value any
 	switch event := event.(type) {
 	case ReviewHeadAdoptedJournalEvent:
-		value = reviewHeadAdoptedPayloadWire{
-			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
-			AttemptID: event.attemptID.String(), PlanID: event.mergeUnit.planID.String(),
-			MergeUnitID: event.mergeUnit.mergeUnitID.String(), PriorHead: event.priorHead.String(),
-			Head: event.head.String(), Tree: event.tree.String(), SnapshotDigest: event.snapshotDigest.String(),
-		}
+		value = reviewHeadAdoptedPayload(event)
 	case ReviewGateDispatchedJournalEvent:
 		value = reviewGateDispatchedPayloadWire{Dispatch: reviewGateDispatchToWire(event.dispatch)}
 	case ReviewGateRecordedJournalEvent:
@@ -86,6 +81,17 @@ func marshalReviewJournalEvent(event WorkspaceJournalEvent) (json.RawMessage, bo
 	}
 	payload, err := json.Marshal(value)
 	return json.RawMessage(payload), true, err
+}
+
+func reviewHeadAdoptedPayload(
+	event ReviewHeadAdoptedJournalEvent,
+) reviewHeadAdoptedPayloadWire {
+	return reviewHeadAdoptedPayloadWire{
+		WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
+		AttemptID: event.attemptID.String(), PlanID: event.mergeUnit.planID.String(),
+		MergeUnitID: event.mergeUnit.mergeUnitID.String(), PriorHead: event.priorHead.String(),
+		Head: event.head.String(), Tree: event.tree.String(), SnapshotDigest: event.snapshotDigest.String(),
+	}
 }
 
 func decodeReviewJournalEvent(

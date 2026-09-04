@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charlesnpx/feature-implement/internal/workspace"
 	"github.com/charlesnpx/feature-implement/internal/workspacecmd"
 )
 
@@ -291,33 +292,28 @@ func TestWorkspaceSchemaExampleAndJournalBackedStatus(t *testing.T) {
 	stdout = runFeatureOutput(t, "workspace", "validate", "--bundle", bundleDir, "--write-locks", "--json")
 	var validation struct {
 		Status   string `json:"status"`
-		LockRoot string `json:"lock_root"`
+		LockPath string `json:"lock_path"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &validation); err != nil || validation.Status != "valid" {
 		t.Fatalf("workspace validation failed: err=%v output=%s", err, stdout)
 	}
-	if validation.LockRoot != filepath.Join(bundleDir, "generated") {
-		t.Fatalf("lock root = %q", validation.LockRoot)
+	if validation.LockPath != filepath.Join(bundleDir, "feature.workspace.lock.json") {
+		t.Fatalf("lock path = %q", validation.LockPath)
 	}
-	for _, path := range []string{
-		filepath.Join(validation.LockRoot, "feature.workspace.lock.json"),
-		filepath.Join(validation.LockRoot, "plans", "alpha-plan.lock.json"),
-		filepath.Join(validation.LockRoot, "feature.materialization.v2.json"),
-	} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("expected generated projection %s: %v", path, err)
-		}
+	if _, err := os.Stat(validation.LockPath); err != nil {
+		t.Fatalf("expected canonical workspace lock %s: %v", validation.LockPath, err)
 	}
 	commitWorkspaceBundleFixture(t, bundleDir)
 
-	workspaceDir := filepath.Join(canonicalFeatureTestTempDir(t), "workspace-state")
-	worktreeRoot := canonicalFeatureTestTempDir(t)
+	workspaceDir, err := workspace.DerivedWorkspaceRuntimeDirectory(bundleDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	input := writeJSONInput(t, map[string]any{
 		"schema_version": 2,
 		"occurred_at":    "2026-07-22T12:00:00Z",
-		"worktree_root":  worktreeRoot,
 	})
-	stdout = runFeatureOutput(t, "workspace", "init", "--bundle", bundleDir, "--workspace", workspaceDir, "--input", input, "--json")
+	stdout = runFeatureOutput(t, "workspace", "init", "--bundle", bundleDir, "--input", input, "--json")
 	var initialized struct {
 		Status         string `json:"status"`
 		PlanCheckpoint string `json:"plan_checkpoint"`
@@ -341,7 +337,7 @@ func TestWorkspaceSchemaExampleAndJournalBackedStatus(t *testing.T) {
 	if len(initialized.Report.Scheduler.Units) != 1 || initialized.Report.Scheduler.Units[0].Status != "ready" {
 		t.Fatalf("unexpected initialized scheduler: %+v", initialized.Report.Scheduler.Units)
 	}
-	status := runFeatureOutput(t, "workspace", "status", "--workspace", workspaceDir, "--bundle", bundleDir, "--json")
+	status := runFeatureOutput(t, "workspace", "status", "--bundle", bundleDir, "--json")
 	var report map[string]any
 	if err := json.Unmarshal([]byte(status), &report); err != nil || report["report_digest"] == "" {
 		t.Fatalf("journal-backed status is invalid: err=%v output=%s", err, status)
@@ -365,12 +361,15 @@ func TestWorkspaceSchemaExampleAndJournalBackedStatus(t *testing.T) {
 
 func TestWorkspaceMutationInputIsStrictAndDoesNotCreateStateOnFailure(t *testing.T) {
 	bundleDir := writeWorkspaceBundleFixture(t)
-	workspaceDir := filepath.Join(canonicalFeatureTestTempDir(t), "invalid-workspace")
+	workspaceDir, deriveErr := workspace.DerivedWorkspaceRuntimeDirectory(bundleDir)
+	if deriveErr != nil {
+		t.Fatal(deriveErr)
+	}
 	input := filepath.Join(canonicalFeatureTestTempDir(t), "invalid.json")
 	if err := os.WriteFile(input, []byte(`{"schema_version":2,"occurred_at":"2026-07-22T12:00:00Z","occurred_at":"2026-07-22T13:00:00Z"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	stdout, stderr, err := runFeature(t, "workspace", "init", "--bundle", bundleDir, "--workspace", workspaceDir, "--input", input, "--json")
+	stdout, stderr, err := runFeature(t, "workspace", "init", "--bundle", bundleDir, "--input", input, "--json")
 	if err == nil || !strings.Contains(stderr, "duplicate key") {
 		t.Fatalf("duplicate request field was not rejected: err=%v stdout=%s stderr=%s", err, stdout, stderr)
 	}
@@ -381,38 +380,11 @@ func TestWorkspaceMutationInputIsStrictAndDoesNotCreateStateOnFailure(t *testing
 	if err := os.WriteFile(input, []byte(`{"schema_version":2,"occurred_at":"2026-07-22T12:00:00Z","unexpected":true}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, stderr, err = runFeature(t, "workspace", "init", "--bundle", bundleDir, "--workspace", workspaceDir, "--input", input)
+	_, stderr, err = runFeature(t, "workspace", "init", "--bundle", bundleDir, "--input", input)
 	if err == nil || !strings.Contains(stderr, "unknown field") {
 		t.Fatalf("unknown request field was not rejected: err=%v stderr=%s", err, stderr)
 	}
 
-	if err := os.WriteFile(input, []byte(`{
-  "schema_version": 2,
-  "occurred_at": "2026-07-22T12:00:00Z",
-  "worktree_root": "relative/attempts"
-}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	_, stderr, err = runFeature(
-		t,
-		"workspace", "init",
-		"--bundle", bundleDir,
-		"--workspace", workspaceDir,
-		"--input", input,
-	)
-	if err == nil ||
-		!strings.Contains(stderr, "worktree_root must be absolute") {
-		t.Fatalf(
-			"relative worktree root error = %v stderr=%s",
-			err, stderr,
-		)
-	}
-	if _, statErr := os.Stat(workspaceDir); !os.IsNotExist(statErr) {
-		t.Fatalf(
-			"relative worktree root created workspace state: %v",
-			statErr,
-		)
-	}
 }
 
 func TestHelperProcess(t *testing.T) {

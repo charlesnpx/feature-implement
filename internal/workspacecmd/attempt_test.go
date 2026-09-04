@@ -215,10 +215,9 @@ merge_units:
 	}
 	write("config/execution.yaml", executionConfig)
 	if _, err := Execute(context.Background(), Options{
-		Action:           "validate",
-		BundleDir:        bundleRoot,
-		WriteLocks:       true,
-		GeneratorVersion: "test",
+		Action:     "validate",
+		BundleDir:  bundleRoot,
+		WriteLocks: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -229,16 +228,14 @@ merge_units:
 	runGitTest(t, bundleRoot, "commit", "-m", "Committed plan locks")
 
 	workspaceDir := canonicalWorkspaceCommandTempDir(t)
-	worktreeRoot := canonicalWorkspaceCommandTempDir(t)
 	if _, err := Execute(context.Background(), Options{
 		Action:       "init",
 		BundleDir:    bundleRoot,
 		WorkspaceDir: workspaceDir,
-		Input: []byte(fmt.Sprintf(`{
+		Input: []byte(`{
   "schema_version": 2,
-  "occurred_at": "2026-07-25T18:00:00Z",
-  "worktree_root": %q
-}`, worktreeRoot)),
+	  "occurred_at": "2026-07-25T18:00:00Z"
+}`),
 	}); err != nil {
 		t.Fatal(err)
 	}

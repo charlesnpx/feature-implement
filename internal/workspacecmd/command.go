@@ -2,7 +2,6 @@ package workspacecmd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -18,13 +17,12 @@ const requestSchemaVersion = 2
 const MaxCommandInputBytes = workspace.MaxArtifactBytes
 
 type Options struct {
-	Action           string
-	Subaction        string
-	BundleDir        string
-	WorkspaceDir     string
-	Input            []byte
-	WriteLocks       bool
-	GeneratorVersion string
+	Action       string
+	Subaction    string
+	BundleDir    string
+	WorkspaceDir string
+	Input        []byte
+	WriteLocks   bool
 }
 
 type ValidationResult struct {
@@ -34,10 +32,9 @@ type ValidationResult struct {
 	WorkspaceID      string   `json:"workspace_id"`
 	Generation       string   `json:"generation"`
 	DescriptorDigest string   `json:"descriptor_digest"`
-	LockRoot         string   `json:"lock_root,omitempty"`
+	LockPath         string   `json:"lock_path,omitempty"`
 	Created          []string `json:"created,omitempty"`
 	Updated          []string `json:"updated,omitempty"`
-	Deleted          []string `json:"deleted,omitempty"`
 }
 
 type InitializationResult struct {
@@ -95,8 +92,12 @@ func Execute(ctx context.Context, options Options) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if options.GeneratorVersion == "" {
-		options.GeneratorVersion = "dev"
+	if action != "validate" {
+		workspaceDir, directoryErr := resolvedWorkspaceDirectory(bundle, options.WorkspaceDir)
+		if directoryErr != nil {
+			return nil, directoryErr
+		}
+		options.WorkspaceDir = workspaceDir
 	}
 	switch action {
 	case "validate":
@@ -211,9 +212,7 @@ func RequestSchemas() map[string]any {
 		return occurred(map[string]any{"attempt_id": stringProperty()})
 	}
 	schemas := map[string]any{
-		"init": request([]string{"occurred_at", "worktree_root"}, occurred(map[string]any{
-			"worktree_root": stringProperty(),
-		})),
+		"init":    request([]string{"occurred_at"}, occurred(map[string]any{})),
 		"recover": request([]string{"occurred_at"}, occurred(map[string]any{})),
 		"attempt.start": request([]string{"occurred_at", "plan_id", "merge_unit_id", "attempt_number", "goal"}, occurred(map[string]any{
 			"plan_id": stringProperty(), "merge_unit_id": stringProperty(), "attempt_number": integerProperty(1),
@@ -264,9 +263,17 @@ func validateBundle(
 	if err := bundle.VerifyRoot(); err != nil {
 		return ValidationResult{}, err
 	}
-	if _, err := workspace.ValidateLocalTarget(
-		ctx, bundle.Definition().Workspace(),
-	); err != nil {
+	workspaceDir, err := resolvedWorkspaceDirectory(bundle, options.WorkspaceDir)
+	if err != nil {
+		return ValidationResult{}, err
+	}
+	validateTarget := func() error {
+		_, err := workspace.ValidateLocalTargetForWorkspaceRuntime(
+			ctx, workspaceDir, bundle.Definition(),
+		)
+		return err
+	}
+	if err := validateTarget(); err != nil {
 		return ValidationResult{}, fmt.Errorf(
 			"validate local target: %w", err,
 		)
@@ -274,45 +281,36 @@ func validateBundle(
 	result := ValidationResult{
 		SchemaVersion: requestSchemaVersion, Status: "valid", BundleRoot: bundle.Root(),
 		WorkspaceID: bundle.Definition().Workspace().ID().String(), Generation: bundle.Definition().Generation().String(),
-		DescriptorDigest: bundle.DescriptorDigest().String(), Created: []string{}, Updated: []string{}, Deleted: []string{},
+		DescriptorDigest: bundle.DescriptorDigest().String(), Created: []string{}, Updated: []string{},
 	}
 	if !options.WriteLocks {
 		if err := bundle.VerifyRoot(); err != nil {
 			return ValidationResult{}, err
 		}
-		if _, err := workspace.ValidateLocalTarget(
-			ctx, bundle.Definition().Workspace(),
-		); err != nil {
+		if err := validateTarget(); err != nil {
 			return ValidationResult{}, fmt.Errorf(
 				"revalidate local target: %w", err,
 			)
 		}
 		return result, nil
 	}
-	artifacts, err := workspace.WorkspaceBundleLockArtifacts(bundle)
-	if err != nil {
-		return ValidationResult{}, err
-	}
-	lockRoot := filepath.Join(bundle.Root(), workspace.WorkspaceGeneratedDirectory)
-	materialized, err := workspace.SynchronizeMaterialization(
-		lockRoot,
-		workspace.PlanCheckpointGeneratorVersion,
-		artifacts,
-		workspace.MaterializationOptions{},
+	materialized, err := workspace.WriteWorkspaceBundleLock(
+		bundle, workspace.WorkspaceLockWriteOptions{},
 	)
 	if err != nil {
 		return ValidationResult{}, err
 	}
-	result.Created = materialized.Created()
-	result.Updated = materialized.Updated()
-	result.Deleted = materialized.Deleted()
-	result.LockRoot = lockRoot
+	result.LockPath = filepath.Join(bundle.Root(), workspace.WorkspaceLockFileName)
+	if materialized.Created() {
+		result.Created = []string{workspace.WorkspaceLockFileName}
+	}
+	if materialized.Updated() {
+		result.Updated = []string{workspace.WorkspaceLockFileName}
+	}
 	if err := bundle.VerifyRoot(); err != nil {
 		return ValidationResult{}, err
 	}
-	if _, err := workspace.ValidateLocalTarget(
-		ctx, bundle.Definition().Workspace(),
-	); err != nil {
+	if err := validateTarget(); err != nil {
 		return ValidationResult{}, fmt.Errorf(
 			"revalidate local target: %w", err,
 		)
@@ -323,7 +321,6 @@ func validateBundle(
 type initializeRequest struct {
 	SchemaVersion int    `json:"schema_version"`
 	OccurredAt    string `json:"occurred_at"`
-	WorktreeRoot  string `json:"worktree_root"`
 }
 
 func initializeWorkspace(
@@ -331,7 +328,7 @@ func initializeWorkspace(
 	bundle workspace.WorkspaceBundle,
 	options Options,
 ) (result InitializationResult, resultErr error) {
-	workspaceDir, err := absoluteDirectory(options.WorkspaceDir, "workspace")
+	workspaceDir, err := resolvedWorkspaceDirectory(bundle, options.WorkspaceDir)
 	if err != nil {
 		return InitializationResult{}, err
 	}
@@ -343,36 +340,7 @@ func initializeWorkspace(
 	if err != nil {
 		return InitializationResult{}, err
 	}
-	worktreeRoot := filepath.Clean(strings.TrimSpace(request.WorktreeRoot))
-	if !filepath.IsAbs(worktreeRoot) {
-		return InitializationResult{}, fmt.Errorf(
-			"workspace init worktree_root must be absolute",
-		)
-	}
 	definition := bundle.Definition()
-	roots, err := workspace.OpenWorkspaceInitializationRootGuard(
-		bundle.Root(), workspaceDir, definition.Workspace().RepositoryRoot(),
-		worktreeRoot,
-	)
-	if err != nil {
-		return InitializationResult{}, err
-	}
-	defer roots.Close()
-	if err := roots.VerifyBeforeRuntimeCreation(); err != nil {
-		return InitializationResult{}, err
-	}
-	defer func() {
-		var verifyErr error
-		if resultErr == nil {
-			verifyErr = roots.VerifyAfterRuntimeCreation()
-		} else {
-			verifyErr = roots.VerifyAfterEffects()
-		}
-		if verifyErr != nil {
-			result = InitializationResult{}
-			resultErr = errors.Join(resultErr, verifyErr)
-		}
-	}()
 	if err := bundle.VerifyRoot(); err != nil {
 		return InitializationResult{}, err
 	}
@@ -384,9 +352,6 @@ func initializeWorkspace(
 			if err := bundle.VerifyRoot(); err != nil {
 				return err
 			}
-			if err := roots.VerifyBeforeRuntimeCreation(); err != nil {
-				return err
-			}
 			var initializeErr error
 			initialized, initializeErr = workspace.InitializeWorkspaceV2WithOptions(
 				ctx,
@@ -395,16 +360,12 @@ func initializeWorkspace(
 				occurredAt,
 				workspace.WorkspaceInitializationOptions{
 					PlanCheckpoint: &checkpoint,
-					WorktreeRoot:   worktreeRoot,
 				},
 			)
 			return initializeErr
 		},
 	)
 	if err != nil {
-		return InitializationResult{}, err
-	}
-	if err := roots.VerifyAfterRuntimeCreation(); err != nil {
 		return InitializationResult{}, err
 	}
 	if err := bundle.VerifyRoot(); err != nil {
@@ -428,7 +389,7 @@ func readWorkspaceView(
 	bundle workspace.WorkspaceBundle,
 	workspaceDir string,
 ) (workspace.WorkspaceView, error) {
-	directory, err := absoluteDirectory(workspaceDir, "workspace")
+	directory, err := resolvedWorkspaceDirectory(bundle, workspaceDir)
 	if err != nil {
 		return workspace.WorkspaceView{}, err
 	}
@@ -458,7 +419,7 @@ func recoverWorkspace(
 	bundle workspace.WorkspaceBundle,
 	options Options,
 ) (MutationResult, error) {
-	directory, err := absoluteDirectory(options.WorkspaceDir, "workspace")
+	directory, err := resolvedWorkspaceDirectory(bundle, options.WorkspaceDir)
 	if err != nil {
 		return MutationResult{}, err
 	}
@@ -557,6 +518,23 @@ func absoluteDirectory(value, label string) (string, error) {
 		return "", err
 	}
 	return filepath.Clean(absolute), nil
+}
+
+func resolvedWorkspaceDirectory(
+	bundle workspace.WorkspaceBundle,
+	configured string,
+) (string, error) {
+	if strings.TrimSpace(configured) != "" {
+		directory, err := absoluteDirectory(configured, "workspace")
+		if err != nil {
+			return "", err
+		}
+		if err := workspace.ValidateWorkspaceRuntimeRoot(directory); err != nil {
+			return "", err
+		}
+		return directory, nil
+	}
+	return workspace.DerivedWorkspaceRuntimeDirectory(bundle.Root())
 }
 
 func parseID(value, label string) (workspace.ID, error) {

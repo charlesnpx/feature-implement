@@ -90,7 +90,6 @@ type attemptHarness struct {
 	base       workspace.GitObjectID
 	unit       workspace.MergeUnitReference
 	goal       workspace.GoalBinding
-	worktrees  string
 }
 
 func newAttemptHarness(t *testing.T, unitID string) attemptHarness {
@@ -115,11 +114,10 @@ func newAttemptHarnessFromFixture(t *testing.T, fixture definitionFixture, unitI
 	t.Helper()
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	worktrees := t.TempDir()
 	initialized, err := workspace.InitializeWorkspaceV2WithOptions(
 		context.Background(), workspaceDir, definition,
 		mustTime(t, "2026-07-21T10:00:00Z"),
-		workspace.WorkspaceInitializationOptions{WorktreeRoot: worktrees},
+		workspace.WorkspaceInitializationOptions{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -140,7 +138,7 @@ func newAttemptHarnessFromFixture(t *testing.T, fixture definitionFixture, unitI
 	}
 	return attemptHarness{
 		definition: definition, journal: journal, workspace: workspaceDir, git: &fakeAttemptGit{}, base: base,
-		unit: mustMergeUnitReference(t, "alpha-plan", unitID), goal: goal, worktrees: worktrees,
+		unit: mustMergeUnitReference(t, "alpha-plan", unitID), goal: goal,
 	}
 }
 
@@ -420,11 +418,11 @@ func TestStartAttemptRollsBackAnInterruptedScratchDirectory(t *testing.T) {
 	t.Parallel()
 
 	definition := mustDefinition(t, newDefinitionFixture(t).sources)
-	workspaceDir, worktreeRoot := t.TempDir(), t.TempDir()
+	workspaceDir := t.TempDir()
 	if _, err := workspace.InitializeWorkspaceV2WithOptions(
 		context.Background(), workspaceDir, definition,
 		mustTime(t, "2026-07-21T10:10:00Z"),
-		workspace.WorkspaceInitializationOptions{WorktreeRoot: worktreeRoot},
+		workspace.WorkspaceInitializationOptions{},
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1103,11 +1101,10 @@ func TestSerialSegmentsFenceOnlyMatchingSegments(t *testing.T) {
 	))
 	definition := mustDefinition(t, fixture.sources)
 	workspaceDir := t.TempDir()
-	worktreeRoot := t.TempDir()
 	if _, err := workspace.InitializeWorkspaceV2WithOptions(
 		context.Background(), workspaceDir, definition,
 		mustTime(t, "2026-07-21T13:10:00Z"),
-		workspace.WorkspaceInitializationOptions{WorktreeRoot: worktreeRoot},
+		workspace.WorkspaceInitializationOptions{},
 	); err != nil {
 		t.Fatal(err)
 	}

@@ -32,7 +32,6 @@ func TestWorkspaceInitializationUsesCommittedPlanHeadCheckpoint(t *testing.T) {
 	request, err := json.Marshal(map[string]any{
 		"schema_version": 2,
 		"occurred_at":    "2026-07-23T14:03:00Z",
-		"worktree_root":  workspaceTestWorktreeRoot(t, runtimeRoot),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -163,10 +162,9 @@ merge_units:
       max_attempts: 1
 `)
 	if _, err := workspacecmd.Execute(context.Background(), workspacecmd.Options{
-		Action:           "validate",
-		BundleDir:        root,
-		WriteLocks:       true,
-		GeneratorVersion: "test",
+		Action:     "validate",
+		BundleDir:  root,
+		WriteLocks: true,
 	}); err != nil {
 		t.Fatalf("write generated locks: %v", err)
 	}

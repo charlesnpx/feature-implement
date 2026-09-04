@@ -64,7 +64,7 @@ func CompleteWorkspace(
 			}
 	}
 	target, exists := runtime.LocalTarget()
-	if !exists || !target.Created() {
+	if !exists {
 		return WorkspaceCompletionResult{}, fmt.Errorf(
 			"workspace completion requires a durable local target",
 		)
@@ -218,12 +218,6 @@ func readCompletionRuntime(
 			fmt.Errorf(
 				"completion definition does not match the active workspace generation",
 			)
-	}
-	if err := verifyWorkspaceWorktreeRootBinding(
-		runtime.worktreeRoot,
-	); err != nil {
-		return JournalSnapshot{}, ReviewRuntimeProjection{},
-			WorkspaceRuntimeProjection{}, err
 	}
 	return snapshot, reviews, runtime, nil
 }

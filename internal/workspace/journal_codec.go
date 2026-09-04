@@ -32,12 +32,12 @@ type journalRecordBodyWire struct {
 }
 
 type workspaceInitializedPayloadWire struct {
-	WorkspaceID                  string `json:"workspace_id"`
-	Generation                   string `json:"generation"`
-	DefinitionDigest             string `json:"definition_digest"`
-	PlanCheckpoint               string `json:"plan_checkpoint,omitempty"`
-	PlanCheckpointArtifactDigest string `json:"plan_checkpoint_artifact_digest,omitempty"`
-	WorktreeRoot                 string `json:"worktree_root"`
+	WorkspaceID                  string                  `json:"workspace_id"`
+	Generation                   string                  `json:"generation"`
+	DefinitionDigest             string                  `json:"definition_digest"`
+	PlanCheckpoint               string                  `json:"plan_checkpoint,omitempty"`
+	PlanCheckpointArtifactDigest string                  `json:"plan_checkpoint_artifact_digest,omitempty"`
+	LocalTarget                  *localTargetBindingWire `json:"local_target,omitempty"`
 }
 
 type journalTailRecoveredPayloadWire struct {
@@ -116,11 +116,16 @@ func marshalWorkspaceJournalEvent(event WorkspaceJournalEvent) (json.RawMessage,
 	var value any
 	switch event := event.(type) {
 	case WorkspaceInitializedJournalEvent:
+		var target *localTargetBindingWire
+		if !event.localTarget.IsZero() {
+			wire := localTargetBindingToWire(event.localTarget)
+			target = &wire
+		}
 		value = workspaceInitializedPayloadWire{
 			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
 			DefinitionDigest: event.definitionDigest.String(), PlanCheckpoint: event.planCheckpoint.String(),
 			PlanCheckpointArtifactDigest: event.planCheckpointArtifactDigest.String(),
-			WorktreeRoot:                 event.worktreeRoot.Path(),
+			LocalTarget:                  target,
 		}
 	case JournalTailRecoveredEvent:
 		value = journalTailRecoveredPayloadWire{
@@ -129,11 +134,7 @@ func marshalWorkspaceJournalEvent(event WorkspaceJournalEvent) (json.RawMessage,
 			DiscardDigest: event.discardDigest.String(), ResultingHead: event.resultingHead.String(),
 		}
 	default:
-		payload, supported, err := marshalLocalTargetJournalEvent(event)
-		if supported {
-			return payload, err
-		}
-		payload, supported, err = marshalAttemptJournalEvent(event)
+		payload, supported, err := marshalAttemptJournalEvent(event)
 		if supported {
 			return payload, err
 		}
@@ -226,11 +227,12 @@ func decodeWorkspaceJournalEvent(eventType JournalEventType, payload json.RawMes
 		if err != nil {
 			return nil, err
 		}
-		worktreeRoot, err := NewWorkspaceWorktreeRootBinding(wire.WorktreeRoot)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"workspace initialization worktree root: %w", err,
-			)
+		target := LocalTargetBinding{}
+		if wire.LocalTarget != nil {
+			target, err = localTargetBindingFromWire(*wire.LocalTarget)
+			if err != nil {
+				return nil, fmt.Errorf("workspace initialization local target: %w", err)
+			}
 		}
 		var checkpoint []PlanCheckpointJournalBinding
 		if strings.TrimSpace(wire.PlanCheckpoint) != "" {
@@ -248,9 +250,9 @@ func decodeWorkspaceJournalEvent(eventType JournalEventType, payload json.RawMes
 		} else if strings.TrimSpace(wire.PlanCheckpointArtifactDigest) != "" {
 			return nil, fmt.Errorf("plan checkpoint artifact digest requires plan checkpoint")
 		}
-		return NewWorkspaceInitializedJournalEvent(
+		return NewWorkspaceInitializedJournalEventWithTarget(
 			workspaceID, generation, definitionDigest,
-			worktreeRoot, checkpoint...,
+			target, checkpoint...,
 		)
 	case JournalEventTailRecovered:
 		var wire journalTailRecoveredPayloadWire
@@ -275,11 +277,7 @@ func decodeWorkspaceJournalEvent(eventType JournalEventType, payload json.RawMes
 		}
 		return NewJournalTailRecoveredEvent(workspaceID, generation, wire.DiscardOffset, wire.DiscardSize, discardDigest, resultingHead)
 	default:
-		event, supported, err := decodeLocalTargetJournalEvent(eventType, payload)
-		if supported {
-			return event, err
-		}
-		event, supported, err = decodeAttemptJournalEvent(eventType, payload)
+		event, supported, err := decodeAttemptJournalEvent(eventType, payload)
 		if supported {
 			return event, err
 		}

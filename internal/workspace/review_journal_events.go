@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -55,6 +56,21 @@ func (event ReviewHeadAdoptedJournalEvent) validate() error {
 		return fmt.Errorf("head adoption requires exact workspace, attempt, Git, and snapshot bindings")
 	}
 	return nil
+}
+
+// EvidenceDigest binds the exact adopted artifact without incorporating the
+// journal envelope. In particular, attempt worktree paths are operational
+// details derived from the runtime location, so they must not change a
+// deterministic integration commit for the same accepted artifact.
+func (event ReviewHeadAdoptedJournalEvent) EvidenceDigest() (Digest, error) {
+	if err := event.validate(); err != nil {
+		return Digest{}, err
+	}
+	canonical, err := json.Marshal(reviewHeadAdoptedPayload(event))
+	if err != nil {
+		return Digest{}, err
+	}
+	return DigestBytes(canonical), nil
 }
 
 // ReviewGateDispatchedJournalEvent records a repeatable adapter request before

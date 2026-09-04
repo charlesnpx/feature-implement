@@ -44,8 +44,6 @@ func assessWorkspaceCompletion(
 	target, targetReady := runtime.LocalTarget()
 	if !targetReady {
 		add("local_effect:feature_ref_intent_missing")
-	} else if !target.Created() {
-		add("local_effect:feature_ref_creation_pending")
 	}
 
 	dependencies, references := definitionDependencyGraph(definition)
@@ -185,7 +183,7 @@ func assessWorkspaceCompletion(
 			add("integration_frontier:unordered_records")
 		}
 		if index == 0 {
-			if targetReady && target.Created() &&
+			if targetReady &&
 				transition.intent.expectedFeatureHead !=
 					target.binding.baseCommit {
 				add("integration_frontier:wrong_initial_parent")
@@ -198,7 +196,7 @@ func assessWorkspaceCompletion(
 		previousMerge = transition.intent.expectedMerge
 		chain = append(chain, transition.intent)
 	}
-	if targetReady && target.Created() {
+	if targetReady {
 		if len(transitions) == 0 {
 			add("integration_frontier:empty")
 		} else {
@@ -278,10 +276,20 @@ func validateCompletionAttempt(
 	adopted, exists := exactAdoptedHeadRecord(
 		snapshot, attempt.attemptID, repository,
 	)
-	if !exists ||
-		intent.acceptanceMode !=
-			IntegrationAcceptanceAdoptedHead ||
-		intent.adoptedHeadEventDigest != adopted.eventHash ||
+	if !exists {
+		return fmt.Errorf("adopted_head_evidence_mismatch")
+	}
+	adoption, ok := adopted.Event().(ReviewHeadAdoptedJournalEvent)
+	if !ok {
+		return fmt.Errorf("adopted_head_evidence_mismatch")
+	}
+	evidenceDigest, err := adoption.EvidenceDigest()
+	if err != nil {
+		return fmt.Errorf("adopted_head_evidence_mismatch")
+	}
+	if intent.acceptanceMode !=
+		IntegrationAcceptanceAdoptedHead ||
+		intent.adoptedHeadEventDigest != evidenceDigest ||
 		!intent.reviewReadinessDigest.IsZero() {
 		return fmt.Errorf("adopted_head_evidence_mismatch")
 	}

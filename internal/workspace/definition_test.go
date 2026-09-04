@@ -1,12 +1,10 @@
 package workspace_test
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -165,28 +163,6 @@ func TestValidateDefinitionBuildsContentAddressedEffectiveInputs(t *testing.T) {
 			t.Fatalf("artifact is not fully hashed: kind=%s path=%s", artifact.Kind(), artifact.Path())
 		}
 	}
-	workspaceLock := workspace.ProjectWorkspaceLock(definition)
-	if workspaceLock.SchemaVersion() != 2 || workspaceLock.Generation() != definition.Generation() || len(workspaceLock.Artifacts()) != 3 {
-		t.Fatalf("workspace projection = %#v", workspaceLock)
-	}
-	planLocks := workspace.ProjectPlanLocks(definition)
-	if len(planLocks) != 1 || planLocks[0].PlanID().String() != "alpha-plan" || planLocks[0].Generation() != definition.Generation() {
-		t.Fatalf("plan projections = %#v", planLocks)
-	}
-	workspaceLockJSON, err := json.Marshal(workspaceLock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	planLockJSON, err := json.Marshal(planLocks[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, encoded := range [][]byte{workspaceLockJSON, planLockJSON} {
-		text := string(encoded)
-		if !strings.Contains(text, definition.Generation().String()) || strings.Contains(text, "runtime") || strings.Contains(text, "status") || strings.Contains(text, "base_ref") || strings.Contains(text, "remote") {
-			t.Fatalf("projection JSON has mutable or misplaced state: %s", text)
-		}
-	}
 }
 
 func TestReviewGatePolicySourcesInheritOrReplaceAsWholeValues(t *testing.T) {
@@ -326,10 +302,8 @@ func assertLocalTargetInitializationJournal(
 ) {
 	t.Helper()
 	records := snapshot.Records()
-	if len(records) != 3 ||
-		records[0].EventType() != workspace.JournalEventWorkspaceInitialized ||
-		records[1].EventType() != workspace.JournalEventFeatureRefCreationIntended ||
-		records[2].EventType() != workspace.JournalEventFeatureRefCreated {
+	if len(records) != 1 ||
+		records[0].EventType() != workspace.JournalEventWorkspaceInitialized {
 		t.Fatalf("local target initialization journal = %#v", records)
 	}
 }
@@ -587,14 +561,6 @@ func TestDefinitionDefensivelyCopiesNestedInputsAndOutputs(t *testing.T) {
 	}
 }
 
-func TestV2PlanAndLockProjectionsCannotOwnRuntimeOrWorkspaceState(t *testing.T) {
-	t.Parallel()
-
-	assertTypeOmitsFields(t, reflect.TypeOf(workspace.Plan{}), "base", "remote", "policy", "runtime", "state", "status")
-	assertTypeOmitsFields(t, reflect.TypeOf(workspace.PlanLockProjection{}), "base", "remote", "policy", "runtime", "state", "status")
-	assertTypeOmitsFields(t, reflect.TypeOf(workspace.WorkspaceLockProjection{}), "runtime", "state", "status", "approval", "attempt")
-}
-
 func artifactByKind(t *testing.T, definition workspace.EffectiveWorkspaceDefinition, kind workspace.ArtifactKind) workspace.NormalizedArtifact {
 	t.Helper()
 	for _, artifact := range definition.Artifacts() {
@@ -642,16 +608,4 @@ func configuredReviewGateFixture(t *testing.T) (definitionFixture, []byte, []byt
 		{Path: "policies/unit-two-review.md", Bytes: unitPolicy},
 	}
 	return fixture, rootPolicy, unitPolicy
-}
-
-func assertTypeOmitsFields(t *testing.T, typ reflect.Type, forbidden ...string) {
-	t.Helper()
-	for index := 0; index < typ.NumField(); index++ {
-		name := strings.ToLower(typ.Field(index).Name)
-		for _, fragment := range forbidden {
-			if strings.Contains(name, fragment) {
-				t.Fatalf("%s unexpectedly owns field %s", typ, typ.Field(index).Name)
-			}
-		}
-	}
 }

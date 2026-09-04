@@ -128,7 +128,7 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"evidence-backed Critical and High fixes",
 			"preceding review reported a Critical or High finding",
 			"feature workspace validate --bundle <bundle-dir> --write-locks --json",
-			"commit the plan sources and generated locks",
+			"commit the plan sources and the single generated `feature.workspace.lock.json`",
 			"verify the plan repository is clean",
 			"mode: \"local\"",
 			"base_ref: \"refs/heads/main\"",
@@ -167,7 +167,7 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"Apply evidence-backed Critical and High fixes",
 			"no Critical or High findings",
 			"feature workspace validate --bundle <bundle-dir> --write-locks --json",
-			"commit the plan sources and generated locks",
+			"commit the plan sources and the single generated `feature.workspace.lock.json`",
 			"Bundle contract",
 		})
 	}
@@ -183,7 +183,7 @@ func TestRunInstallStagedAllTargets(t *testing.T) {
 			"workspace-v2 bundle",
 			"feature.workspace.bundle.json",
 			"feature workspace validate --bundle <bundle-dir> --write-locks --json",
-			"dedicated `<runtime-dir>` and `<worktree-root>` outside the primary",
+			"CLI derives the runtime as a sibling of `<bundle-dir>`",
 			"primary checkout may be dirty",
 			"feature workspace schema requests --json",
 			"feature workspace recover",

@@ -56,7 +56,7 @@ func usage(w io.Writer) {
   feature workspace schema [bundle|requests|reports] [--json]
   feature workspace example
   feature workspace validate --bundle <dir> [--write-locks] [--json]
-  feature workspace <action> [<subaction>] --bundle <dir> --workspace <dir> [--input <json-file|->] [--json]
+  feature workspace <action> [<subaction>] --bundle <dir> [--input <json-file|->] [--json]
   feature version`)
 }
 
@@ -238,11 +238,10 @@ func workspaceCommand(args []string) error {
 	fs := flag.NewFlagSet("workspace "+action, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	bundle := fs.String("bundle", "", "Directory containing feature.workspace.bundle.json")
-	workspaceDir := fs.String("workspace", "", "Journal-backed workspace state directory")
 	inputPath := fs.String("input", "", "Strict JSON request file, or - for stdin")
-	writeLocks := fs.Bool("write-locks", false, "Synchronize immutable generated lock projections")
+	writeLocks := fs.Bool("write-locks", false, "Write the canonical workspace lock")
 	fs.Bool("json", false, "Emit JSON (workspace commands always emit JSON)")
-	if err := parsePermissive(fs, remaining, "bundle", "workspace", "input"); err != nil {
+	if err := parsePermissive(fs, remaining, "bundle", "input"); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
@@ -261,7 +260,7 @@ func workspaceCommand(args []string) error {
 	}
 	result, err := workspacecmd.Execute(context.Background(), workspacecmd.Options{
 		Action: action, Subaction: subaction, BundleDir: *bundle,
-		WorkspaceDir: *workspaceDir, Input: input, WriteLocks: *writeLocks, GeneratorVersion: Version,
+		Input: input, WriteLocks: *writeLocks,
 	})
 	if err != nil {
 		return err
@@ -412,12 +411,12 @@ func usageWorkspace(w io.Writer) {
   feature workspace schema [bundle|requests|reports] [--json]
   feature workspace example
   feature workspace validate --bundle <dir> [--write-locks] [--json]
-  feature workspace init|recover --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
-  feature workspace status --bundle <dir> --workspace <dir> [--json]
-  feature workspace attempt start|adopt-head|pause|resume|abandon --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
-  feature workspace review dispatch|record|record-document|ready --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
-  feature workspace integrate merge-unit --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
-  feature workspace complete verify --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
+  feature workspace init|recover --bundle <dir> --input <json-file|-> [--json]
+  feature workspace status --bundle <dir> [--json]
+  feature workspace attempt start|adopt-head|pause|resume|abandon --bundle <dir> --input <json-file|-> [--json]
+  feature workspace review dispatch|record|record-document|ready --bundle <dir> --input <json-file|-> [--json]
+  feature workspace integrate merge-unit --bundle <dir> --input <json-file|-> [--json]
+  feature workspace complete verify --bundle <dir> --input <json-file|-> [--json]
 
 The attempt pause request requires kind: checkpoint or escalation.
 

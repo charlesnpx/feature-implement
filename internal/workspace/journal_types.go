@@ -14,8 +14,6 @@ type JournalEventType string
 
 const (
 	JournalEventWorkspaceInitialized         JournalEventType = "workspace.initialized.v2"
-	JournalEventFeatureRefCreationIntended   JournalEventType = "feature_ref_creation_intended"
-	JournalEventFeatureRefCreated            JournalEventType = "feature_ref_created"
 	JournalEventTailRecovered                JournalEventType = "journal.tail_recovered.v2"
 	JournalEventAttemptStart                 JournalEventType = "attempt.start.v3"
 	JournalEventAttemptBoundary              JournalEventType = "attempt.paused.v3"
@@ -42,7 +40,7 @@ type WorkspaceInitializedJournalEvent struct {
 	definitionDigest             Digest
 	planCheckpoint               Digest
 	planCheckpointArtifactDigest Digest
-	worktreeRoot                 WorkspaceWorktreeRootBinding
+	localTarget                  LocalTargetBinding
 }
 
 type PlanCheckpointJournalBinding struct {
@@ -50,10 +48,24 @@ type PlanCheckpointJournalBinding struct {
 	ArtifactDigest Digest
 }
 
-func NewWorkspaceInitializedJournalEvent(
+// NewWorkspaceInitializedJournalEventWithTarget records the one admitted
+// local target binding with workspace initialization. The feature ref remains
+// absent until the first integration publishes its deterministic merge.
+func NewWorkspaceInitializedJournalEventWithTarget(
 	workspaceID ID,
 	generation, definitionDigest Digest,
-	worktreeRoot WorkspaceWorktreeRootBinding,
+	target LocalTargetBinding,
+	planCheckpoint ...PlanCheckpointJournalBinding,
+) (WorkspaceInitializedJournalEvent, error) {
+	return newWorkspaceInitializedJournalEvent(
+		workspaceID, generation, definitionDigest, target, planCheckpoint...,
+	)
+}
+
+func newWorkspaceInitializedJournalEvent(
+	workspaceID ID,
+	generation, definitionDigest Digest,
+	target LocalTargetBinding,
 	planCheckpoint ...PlanCheckpointJournalBinding,
 ) (WorkspaceInitializedJournalEvent, error) {
 	if len(planCheckpoint) > 1 {
@@ -61,7 +73,7 @@ func NewWorkspaceInitializedJournalEvent(
 	}
 	event := WorkspaceInitializedJournalEvent{
 		workspaceID: workspaceID, generation: generation,
-		definitionDigest: definitionDigest, worktreeRoot: worktreeRoot,
+		definitionDigest: definitionDigest, localTarget: target,
 	}
 	if len(planCheckpoint) == 1 {
 		event.planCheckpoint = planCheckpoint[0].CheckpointID
@@ -82,10 +94,8 @@ func (event WorkspaceInitializedJournalEvent) validate() error {
 	if event.workspaceID.IsZero() || event.generation.IsZero() || event.definitionDigest.IsZero() {
 		return fmt.Errorf("workspace initialization requires workspace, generation, and definition bindings")
 	}
-	if event.worktreeRoot.IsZero() {
-		return fmt.Errorf(
-			"workspace initialization requires a verified worktree root",
-		)
+	if !event.localTarget.IsZero() && event.localTarget.baseCommit.IsZero() {
+		return fmt.Errorf("workspace initialization local target is incomplete")
 	}
 	if event.planCheckpoint.IsZero() != event.planCheckpointArtifactDigest.IsZero() {
 		return fmt.Errorf("workspace initialization plan checkpoint requires checkpoint and artifact digests")
@@ -103,8 +113,8 @@ func (event WorkspaceInitializedJournalEvent) PlanCheckpoint() Digest {
 func (event WorkspaceInitializedJournalEvent) PlanCheckpointArtifactDigest() Digest {
 	return event.planCheckpointArtifactDigest
 }
-func (event WorkspaceInitializedJournalEvent) WorktreeRoot() WorkspaceWorktreeRootBinding {
-	return event.worktreeRoot
+func (event WorkspaceInitializedJournalEvent) LocalTarget() LocalTargetBinding {
+	return event.localTarget
 }
 
 type JournalTailRecoveredEvent struct {
@@ -188,10 +198,6 @@ func newJournalAppend(
 			return JournalAppend{}, fmt.Errorf("journal recovery events must use the explicit recovery workflow")
 		case AttemptResumedJournalEvent:
 			return JournalAppend{}, fmt.Errorf("attempt resume must use the verified resume workflow")
-		case FeatureRefCreationIntendedJournalEvent, FeatureRefCreatedJournalEvent:
-			return JournalAppend{}, fmt.Errorf(
-				"feature-ref events must use the recoverable local target initialization workflow",
-			)
 		case AttemptStartJournalEvent:
 			return JournalAppend{}, fmt.Errorf("attempt start must use the detached-worktree workflow")
 		case AttemptBoundaryReachedJournalEvent:
@@ -227,8 +233,7 @@ func newJournalAppend(
 
 func supportedWorkspaceJournalEvent(event WorkspaceJournalEvent) bool {
 	switch event.(type) {
-	case WorkspaceInitializedJournalEvent, JournalTailRecoveredEvent,
-		FeatureRefCreationIntendedJournalEvent, FeatureRefCreatedJournalEvent:
+	case WorkspaceInitializedJournalEvent, JournalTailRecoveredEvent:
 		return true
 	default:
 		return isAttemptJournalEvent(event) || isReviewJournalEvent(event) ||
@@ -268,9 +273,6 @@ func cloneWorkspaceJournalEvent(event WorkspaceJournalEvent) WorkspaceJournalEve
 	case JournalTailRecoveredEvent:
 		return value
 	default:
-		if cloned := cloneLocalTargetJournalEvent(event); cloned != nil {
-			return cloned
-		}
 		if cloned := cloneAttemptJournalEvent(event); cloned != nil {
 			return cloned
 		}
