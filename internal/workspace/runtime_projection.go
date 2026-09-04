@@ -142,14 +142,13 @@ func (completion RuntimeWorkspaceCompletionProjection) EventDigest() Digest {
 }
 
 type WorkspaceRuntimeProjection struct {
-	workspaceID                  ID
-	activeGeneration             Digest
-	planCheckpoint               Digest
-	planCheckpointArtifactDigest Digest
-	localTarget                  RuntimeLocalTargetProjection
-	recoveries                   []RuntimeRecoveryProjection
-	attempts                     []RuntimeAttemptProjection
-	completion                   *RuntimeWorkspaceCompletionProjection
+	workspaceID      ID
+	activeGeneration Digest
+	planCheckpoint   Digest
+	localTarget      RuntimeLocalTargetProjection
+	recoveries       []RuntimeRecoveryProjection
+	attempts         []RuntimeAttemptProjection
+	completion       *RuntimeWorkspaceCompletionProjection
 }
 
 func (projection WorkspaceRuntimeProjection) WorkspaceID() ID { return projection.workspaceID }
@@ -158,9 +157,6 @@ func (projection WorkspaceRuntimeProjection) ActiveGeneration() Digest {
 }
 func (projection WorkspaceRuntimeProjection) PlanCheckpoint() Digest {
 	return projection.planCheckpoint
-}
-func (projection WorkspaceRuntimeProjection) PlanCheckpointArtifactDigest() Digest {
-	return projection.planCheckpointArtifactDigest
 }
 func (projection WorkspaceRuntimeProjection) LocalTarget() (
 	RuntimeLocalTargetProjection,
@@ -256,7 +252,6 @@ func reduceWorkspaceRuntime(current WorkspaceRuntimeProjection, record JournalRe
 		next.workspaceID = event.workspaceID
 		next.activeGeneration = event.generation
 		next.planCheckpoint = event.planCheckpoint
-		next.planCheckpointArtifactDigest = event.planCheckpointArtifactDigest
 		if !event.localTarget.IsZero() {
 			next.localTarget = RuntimeLocalTargetProjection{
 				binding:       event.localTarget,
@@ -403,23 +398,22 @@ func canonicalWorkspaceRuntime(projection WorkspaceRuntimeProjection) ([]byte, e
 		EventDigest  string `json:"event_digest"`
 	}
 	type runtimeJSON struct {
-		SchemaVersion                int               `json:"schema_version"`
-		WorkspaceID                  string            `json:"workspace_id"`
-		ActiveGeneration             string            `json:"active_generation"`
-		PlanCheckpoint               string            `json:"plan_checkpoint,omitempty"`
-		PlanCheckpointArtifactDigest string            `json:"plan_checkpoint_artifact_digest,omitempty"`
-		LocalTarget                  *localTargetJSON  `json:"local_target,omitempty"`
-		Recoveries                   []recoveryJSON    `json:"recoveries"`
-		Attempts                     []json.RawMessage `json:"attempts"`
-		Completion                   *completionJSON   `json:"completion,omitempty"`
+		SchemaVersion    int               `json:"schema_version"`
+		WorkspaceID      string            `json:"workspace_id"`
+		ActiveGeneration string            `json:"active_generation"`
+		PlanCheckpoint   string            `json:"plan_checkpoint,omitempty"`
+		LocalTarget      *localTargetJSON  `json:"local_target,omitempty"`
+		Recoveries       []recoveryJSON    `json:"recoveries"`
+		Attempts         []json.RawMessage `json:"attempts"`
+		Completion       *completionJSON   `json:"completion,omitempty"`
 	}
 	value := runtimeJSON{
-		SchemaVersion: JournalSchemaVersion, WorkspaceID: projection.workspaceID.String(),
-		ActiveGeneration:             projection.activeGeneration.String(),
-		PlanCheckpoint:               projection.planCheckpoint.String(),
-		PlanCheckpointArtifactDigest: projection.planCheckpointArtifactDigest.String(),
-		Recoveries:                   make([]recoveryJSON, 0, len(projection.recoveries)),
-		Attempts:                     make([]json.RawMessage, 0, len(projection.attempts)),
+		SchemaVersion:    JournalSchemaVersion,
+		WorkspaceID:      projection.workspaceID.String(),
+		ActiveGeneration: projection.activeGeneration.String(),
+		PlanCheckpoint:   projection.planCheckpoint.String(),
+		Recoveries:       make([]recoveryJSON, 0, len(projection.recoveries)),
+		Attempts:         make([]json.RawMessage, 0, len(projection.attempts)),
 	}
 	if !projection.localTarget.IsZero() {
 		value.LocalTarget = &localTargetJSON{

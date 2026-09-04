@@ -175,7 +175,6 @@ type UnitExecution struct {
 
 func (unit UnitExecution) PlanID() ID              { return unit.planID }
 func (unit UnitExecution) MergeUnitID() ID         { return unit.mergeUnitID }
-func (unit UnitExecution) ProfileID() ID           { return unit.profileID }
 func (unit UnitExecution) Policy() ExecutionPolicy { return unit.policy }
 func (unit UnitExecution) Boundary() AttemptBoundaryPolicy {
 	return unit.boundary

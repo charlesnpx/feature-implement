@@ -211,6 +211,9 @@ func workspaceCommand(args []string) error {
 		return nil
 	}
 	action := args[0]
+	if !workspacecmd.IsSupportedAction(action) {
+		return fmt.Errorf("unsupported workspace command %q", action)
+	}
 	remaining := args[1:]
 	subaction := ""
 	if hasHelpFlag(remaining) {

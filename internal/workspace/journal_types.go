@@ -35,17 +35,15 @@ type WorkspaceJournalEvent interface {
 }
 
 type WorkspaceInitializedJournalEvent struct {
-	workspaceID                  ID
-	generation                   Digest
-	definitionDigest             Digest
-	planCheckpoint               Digest
-	planCheckpointArtifactDigest Digest
-	localTarget                  LocalTargetBinding
+	workspaceID      ID
+	generation       Digest
+	definitionDigest Digest
+	planCheckpoint   Digest
+	localTarget      LocalTargetBinding
 }
 
 type PlanCheckpointJournalBinding struct {
-	CheckpointID   Digest
-	ArtifactDigest Digest
+	CheckpointID Digest
 }
 
 // NewWorkspaceInitializedJournalEventWithTarget records the one admitted
@@ -77,7 +75,6 @@ func newWorkspaceInitializedJournalEvent(
 	}
 	if len(planCheckpoint) == 1 {
 		event.planCheckpoint = planCheckpoint[0].CheckpointID
-		event.planCheckpointArtifactDigest = planCheckpoint[0].ArtifactDigest
 	}
 	if err := event.validate(); err != nil {
 		return WorkspaceInitializedJournalEvent{}, err
@@ -97,9 +94,6 @@ func (event WorkspaceInitializedJournalEvent) validate() error {
 	if !event.localTarget.IsZero() && event.localTarget.baseCommit.IsZero() {
 		return fmt.Errorf("workspace initialization local target is incomplete")
 	}
-	if event.planCheckpoint.IsZero() != event.planCheckpointArtifactDigest.IsZero() {
-		return fmt.Errorf("workspace initialization plan checkpoint requires checkpoint and artifact digests")
-	}
 	return nil
 }
 func (event WorkspaceInitializedJournalEvent) WorkspaceID() ID    { return event.workspaceID }
@@ -109,9 +103,6 @@ func (event WorkspaceInitializedJournalEvent) DefinitionDigest() Digest {
 }
 func (event WorkspaceInitializedJournalEvent) PlanCheckpoint() Digest {
 	return event.planCheckpoint
-}
-func (event WorkspaceInitializedJournalEvent) PlanCheckpointArtifactDigest() Digest {
-	return event.planCheckpointArtifactDigest
 }
 func (event WorkspaceInitializedJournalEvent) LocalTarget() LocalTargetBinding {
 	return event.localTarget

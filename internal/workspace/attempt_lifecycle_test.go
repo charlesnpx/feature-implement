@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
@@ -524,55 +523,6 @@ func newRawAttemptTreeRepository(
 		t.Fatal(err)
 	}
 	return repositoryRoot, base
-}
-
-func newRealAttemptRepository(
-	t *testing.T,
-) (repositoryRoot string, linkedRoot string, base workspace.GitObjectID) {
-	t.Helper()
-	parent := t.TempDir()
-	repositoryRoot = filepath.Join(parent, "repository")
-	remoteRoot := filepath.Join(parent, "remote.git")
-	linkedRoot = filepath.Join(parent, "linked")
-	runGitSetup(t, "", "init", "--initial-branch=main", repositoryRoot)
-	runGitSetup(t, "", "init", "--bare", remoteRoot)
-	runGitSetup(t, repositoryRoot, "config", "user.name", "Attempt Test")
-	runGitSetup(t, repositoryRoot, "config", "user.email", "attempt@example.invalid")
-	if err := os.WriteFile(
-		filepath.Join(repositoryRoot, "tracked.txt"),
-		[]byte("committed\n"),
-		0o644,
-	); err != nil {
-		t.Fatal(err)
-	}
-	runGitSetup(t, repositoryRoot, "add", "tracked.txt")
-	runGitSetup(t, repositoryRoot, "commit", "-m", "initial")
-	runGitSetup(t, repositoryRoot, "remote", "add", "origin", remoteRoot)
-	runGitSetup(t, repositoryRoot, "push", "-u", "origin", "main")
-	runGitSetup(t, repositoryRoot, "worktree", "add", "-b", "linked-fixture", linkedRoot, "main")
-	baseText := strings.TrimSpace(string(
-		runGitSetup(t, repositoryRoot, "rev-parse", "HEAD"),
-	))
-	var err error
-	base, err = workspace.ParseGitObjectID("sha1:" + baseText)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return repositoryRoot, linkedRoot, base
-}
-
-func directoryEntryNames(t *testing.T, root string) []string {
-	t.Helper()
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		names = append(names, entry.Name())
-	}
-	slices.Sort(names)
-	return names
 }
 
 func journalRecordCount(t *testing.T, journal *workspace.WorkspaceJournal) int {

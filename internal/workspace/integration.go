@@ -491,12 +491,6 @@ func NewIntegrationGitInspection(
 func (inspection IntegrationGitInspection) FeatureHead() GitObjectID {
 	return inspection.featureHead
 }
-func (inspection IntegrationGitInspection) RefState() IntegrationRefState {
-	return inspection.refState
-}
-func (inspection IntegrationGitInspection) ExpectedCommitExists() bool {
-	return inspection.expectedCommit
-}
 
 type IntegrationGitPort interface {
 	InspectAttempt(

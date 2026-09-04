@@ -215,11 +215,10 @@ func (event AttemptBoundaryReachedJournalEvent) Kind() AttemptBoundaryKind {
 func (event AttemptBoundaryReachedJournalEvent) Checkpoint() AttemptCheckpointMode {
 	return event.checkpoint
 }
-func (event AttemptBoundaryReachedJournalEvent) SerialSegment() ID      { return event.serialSegment }
-func (event AttemptBoundaryReachedJournalEvent) LeaseID() ID            { return event.leaseID }
-func (AttemptBoundaryReachedJournalEvent) FencesAndReleasesLease() bool { return true }
-func (event AttemptBoundaryReachedJournalEvent) Goal() GoalBinding      { return event.goal }
-func (event AttemptBoundaryReachedJournalEvent) Head() GitObjectID      { return event.head }
+func (event AttemptBoundaryReachedJournalEvent) SerialSegment() ID { return event.serialSegment }
+func (event AttemptBoundaryReachedJournalEvent) LeaseID() ID       { return event.leaseID }
+func (event AttemptBoundaryReachedJournalEvent) Goal() GoalBinding { return event.goal }
+func (event AttemptBoundaryReachedJournalEvent) Head() GitObjectID { return event.head }
 func (event AttemptBoundaryReachedJournalEvent) Evidence() []Evidence {
 	return cloneEvidence(event.evidence)
 }

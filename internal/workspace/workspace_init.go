@@ -56,8 +56,6 @@ func InitializeWorkspaceV2WithOptions(
 	}
 	checkpoint := VerifiedPlanLockCheckpoint{}
 	checkpointID := Digest{}
-	checkpointArtifactDigest := Digest{}
-	checkpointArtifactBytes := []byte(nil)
 	hasPlanCheckpoint := options.PlanCheckpoint != nil
 	if hasPlanCheckpoint {
 		checkpoint = *options.PlanCheckpoint
@@ -74,8 +72,6 @@ func InitializeWorkspaceV2WithOptions(
 			)
 		}
 		checkpointID = checkpoint.CheckpointID()
-		checkpointArtifactDigest = checkpoint.ArtifactDigest()
-		checkpointArtifactBytes = checkpoint.ArtifactBytes()
 	}
 	requiresCheckpoint := false
 	for _, artifact := range definition.artifacts {
@@ -190,7 +186,7 @@ func InitializeWorkspaceV2WithOptions(
 		eventCheckpoint := []PlanCheckpointJournalBinding(nil)
 		if hasPlanCheckpoint {
 			eventCheckpoint = append(eventCheckpoint, PlanCheckpointJournalBinding{
-				CheckpointID: checkpointID, ArtifactDigest: checkpointArtifactDigest,
+				CheckpointID: checkpointID,
 			})
 		}
 		event, err := NewWorkspaceInitializedJournalEventWithTarget(
@@ -227,9 +223,6 @@ func InitializeWorkspaceV2WithOptions(
 	if requiresCheckpoint && runtime.planCheckpoint != checkpointID {
 		return WorkspaceInitializationResult{}, fmt.Errorf("initialized runtime does not match the verified plan checkpoint")
 	}
-	if requiresCheckpoint && runtime.planCheckpointArtifactDigest != checkpointArtifactDigest {
-		return WorkspaceInitializationResult{}, fmt.Errorf("initialized runtime does not match the verified plan checkpoint artifact")
-	}
 	targetRuntime, ok := runtime.LocalTarget()
 	if !ok ||
 		targetRuntime.binding.root != definition.workspace.target.root ||
@@ -239,17 +232,6 @@ func InitializeWorkspaceV2WithOptions(
 		return WorkspaceInitializationResult{}, fmt.Errorf(
 			"initialized runtime does not match the verified local target",
 		)
-	}
-	if hasPlanCheckpoint {
-		if err := journal.runtime.state.PublishReplaceable(
-			PlanCheckpointArtifactFileName,
-			checkpointArtifactBytes,
-			0o600,
-			MaxArtifactBytes,
-			PublicationOptions{},
-		); err != nil {
-			return WorkspaceInitializationResult{}, err
-		}
 	}
 	projectionDigest, err := writeWorkspaceRuntimeProjectionAt(journal.runtime, snapshot, runtime)
 	if err != nil {

@@ -16,6 +16,26 @@ const requestSchemaVersion = 2
 // a workspace request reaches strict decoding.
 const MaxCommandInputBytes = workspace.MaxArtifactBytes
 
+var supportedActions = stringSet(
+	"schema",
+	"example",
+	"validate",
+	"init",
+	"status",
+	"recover",
+	"attempt",
+	"review",
+	"integrate",
+	"complete",
+)
+
+// IsSupportedAction reports whether action is part of the workspace command
+// surface shared by the CLI and the command layer.
+func IsSupportedAction(action string) bool {
+	_, ok := supportedActions[strings.TrimSpace(action)]
+	return ok
+}
+
 type Options struct {
 	Action       string
 	Subaction    string
@@ -61,6 +81,9 @@ func Execute(ctx context.Context, options Options) (any, error) {
 		return nil, fmt.Errorf("workspace command requires context")
 	}
 	action := strings.TrimSpace(options.Action)
+	if !IsSupportedAction(action) {
+		return nil, fmt.Errorf("unsupported workspace command %q", action)
+	}
 	switch action {
 	case "schema":
 		switch strings.TrimSpace(options.Subaction) {
@@ -73,12 +96,12 @@ func Execute(ctx context.Context, options Options) (any, error) {
 		default:
 			return nil, fmt.Errorf("unsupported workspace schema %q", options.Subaction)
 		}
+	case "example":
+		return BundleExample(), nil
 	case "validate", "init", "status", "recover":
 		// handled below
 	case "attempt", "review", "integrate", "complete":
 		// handled below
-	default:
-		return nil, fmt.Errorf("unsupported workspace command %q", action)
 	}
 	if err := validateWorkspaceSubaction(action, options.Subaction); err != nil {
 		return nil, err

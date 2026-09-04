@@ -1,7 +1,6 @@
 package workspace
 
 import (
-	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -52,28 +51,4 @@ func isPortableRelativePath(relative string) bool {
 		}
 	}
 	return true
-}
-
-type FileInfo struct {
-	size       int64
-	regular    bool
-	symlink    bool
-	permission uint32
-}
-
-func NewFileInfo(size int64, regular, symlink bool, permission uint32) (FileInfo, error) {
-	if size < 0 || (regular && symlink) {
-		return FileInfo{}, fmt.Errorf("invalid file information")
-	}
-	return FileInfo{size: size, regular: regular, symlink: symlink, permission: permission}, nil
-}
-
-func (info FileInfo) Size() int64        { return info.size }
-func (info FileInfo) Regular() bool      { return info.regular }
-func (info FileInfo) Symlink() bool      { return info.symlink }
-func (info FileInfo) Permission() uint32 { return info.permission }
-
-type FilesystemPort interface {
-	ReadFile(context.Context, RootedPath) ([]byte, error)
-	Inspect(context.Context, RootedPath) (FileInfo, error)
 }

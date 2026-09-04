@@ -1,7 +1,6 @@
 package workspace
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -167,48 +166,6 @@ func (adapter *RootedFilesystemAdapter) Close() error {
 		return fmt.Errorf("close rooted filesystem: %w", err)
 	}
 	return nil
-}
-
-func (adapter *RootedFilesystemAdapter) ReadFile(ctx context.Context, rooted RootedPath) ([]byte, error) {
-	if err := contextError(ctx); err != nil {
-		return nil, err
-	}
-	relative, err := adapter.relative(rooted)
-	if err != nil {
-		return nil, err
-	}
-	return adapter.readBounded(relative, int64(^uint64(0)>>1)-1)
-}
-
-func (adapter *RootedFilesystemAdapter) Inspect(ctx context.Context, rooted RootedPath) (FileInfo, error) {
-	if err := contextError(ctx); err != nil {
-		return FileInfo{}, err
-	}
-	relative, err := adapter.relative(rooted)
-	if err != nil {
-		return FileInfo{}, err
-	}
-	info, exists, err := adapter.inspectExact(relative)
-	if err != nil {
-		return FileInfo{}, err
-	}
-	if !exists {
-		return FileInfo{}, &os.PathError{Op: "inspect", Path: relative, Err: os.ErrNotExist}
-	}
-	return NewFileInfo(
-		info.Size(), info.Mode().IsRegular(), info.Mode()&os.ModeSymlink != 0,
-		uint32(info.Mode().Perm()),
-	)
-}
-
-func (adapter *RootedFilesystemAdapter) relative(rooted RootedPath) (string, error) {
-	if adapter == nil || adapter.root == nil {
-		return "", fmt.Errorf("rooted filesystem is closed")
-	}
-	if rooted.Root() == "" || filepath.Clean(rooted.Root()) != adapter.rootPath {
-		return "", fmt.Errorf("rooted path belongs to a different filesystem root")
-	}
-	return rooted.Relative(), nil
 }
 
 type rootedDirectoryEntry struct {
@@ -1659,16 +1616,4 @@ func synchronizeRootHandle(directory *os.Root) error {
 		return fmt.Errorf("synchronize rooted directory: %w", err)
 	}
 	return nil
-}
-
-func contextError(ctx context.Context) error {
-	if ctx == nil {
-		return fmt.Errorf("context is required")
-	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-		return nil
-	}
 }

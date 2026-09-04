@@ -32,12 +32,11 @@ type journalRecordBodyWire struct {
 }
 
 type workspaceInitializedPayloadWire struct {
-	WorkspaceID                  string                  `json:"workspace_id"`
-	Generation                   string                  `json:"generation"`
-	DefinitionDigest             string                  `json:"definition_digest"`
-	PlanCheckpoint               string                  `json:"plan_checkpoint,omitempty"`
-	PlanCheckpointArtifactDigest string                  `json:"plan_checkpoint_artifact_digest,omitempty"`
-	LocalTarget                  *localTargetBindingWire `json:"local_target,omitempty"`
+	WorkspaceID      string                  `json:"workspace_id"`
+	Generation       string                  `json:"generation"`
+	DefinitionDigest string                  `json:"definition_digest"`
+	PlanCheckpoint   string                  `json:"plan_checkpoint,omitempty"`
+	LocalTarget      *localTargetBindingWire `json:"local_target,omitempty"`
 }
 
 type journalTailRecoveredPayloadWire struct {
@@ -124,8 +123,7 @@ func marshalWorkspaceJournalEvent(event WorkspaceJournalEvent) (json.RawMessage,
 		value = workspaceInitializedPayloadWire{
 			WorkspaceID: event.workspaceID.String(), Generation: event.generation.String(),
 			DefinitionDigest: event.definitionDigest.String(), PlanCheckpoint: event.planCheckpoint.String(),
-			PlanCheckpointArtifactDigest: event.planCheckpointArtifactDigest.String(),
-			LocalTarget:                  target,
+			LocalTarget: target,
 		}
 	case JournalTailRecoveredEvent:
 		value = journalTailRecoveredPayloadWire{
@@ -240,15 +238,9 @@ func decodeWorkspaceJournalEvent(eventType JournalEventType, payload json.RawMes
 			if err != nil {
 				return nil, fmt.Errorf("plan checkpoint: %w", err)
 			}
-			artifactDigest, err := ParseDigest(wire.PlanCheckpointArtifactDigest)
-			if err != nil {
-				return nil, fmt.Errorf("plan checkpoint artifact digest: %w", err)
-			}
 			checkpoint = append(checkpoint, PlanCheckpointJournalBinding{
-				CheckpointID: parsed, ArtifactDigest: artifactDigest,
+				CheckpointID: parsed,
 			})
-		} else if strings.TrimSpace(wire.PlanCheckpointArtifactDigest) != "" {
-			return nil, fmt.Errorf("plan checkpoint artifact digest requires plan checkpoint")
 		}
 		return NewWorkspaceInitializedJournalEventWithTarget(
 			workspaceID, generation, definitionDigest,

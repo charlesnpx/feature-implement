@@ -13,9 +13,9 @@ import (
 )
 
 const (
-	RuntimeFormatSchemaVersion    = 8
-	RuntimeFormatFileName         = "feature.runtime.v8.json"
-	RuntimeInitializationLockName = "runtime-initialize.v8.lock"
+	RuntimeFormatSchemaVersion    = 9
+	RuntimeFormatFileName         = "feature.runtime.v9.json"
+	RuntimeInitializationLockName = "runtime-initialize.v9.lock"
 	MaxRuntimeFormatMarkerBytes   = 16 * 1024
 )
 
@@ -163,31 +163,6 @@ func (storage *RuntimeStorage) WorkspaceDir() string {
 		return ""
 	}
 	return storage.workspaceDir
-}
-
-func (storage *RuntimeStorage) OpenStateDirectory(relative string, create bool) (*VerifiedRoot, error) {
-	if err := storage.Verify(); err != nil {
-		return nil, err
-	}
-	rooted, err := NewRootedPath(storage.state.Path(), relative)
-	if err != nil {
-		return nil, err
-	}
-	if create {
-		if err := storage.state.EnsureDirectory(rooted.Relative(), 0o700); err != nil {
-			return nil, err
-		}
-	}
-	directoryPath := filepath.Join(storage.state.Path(), filepath.FromSlash(rooted.Relative()))
-	root, err := OpenVerifiedRoot(RootRoleRuntime, directoryPath, false)
-	if err != nil {
-		return nil, err
-	}
-	if err := storage.Verify(); err != nil {
-		_ = root.Close()
-		return nil, err
-	}
-	return root, nil
 }
 
 func (storage *RuntimeStorage) Verify() error {

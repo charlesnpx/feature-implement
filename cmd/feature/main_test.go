@@ -92,6 +92,45 @@ func TestWrongWorkspaceSubactionsFailClearly(
 	}
 }
 
+func TestWorkspaceActionsRejectUnknownBeforeArgumentParsing(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantError  string
+		wantOutput string
+	}{
+		{
+			name:      "unknown action with positional tail",
+			args:      []string{"workspace", "reconcile", "stage"},
+			wantError: `unsupported workspace command "reconcile"`,
+		},
+		{
+			name:      "unknown action with flags",
+			args:      []string{"workspace", "reconcile", "--bundle", "ignored"},
+			wantError: `unsupported workspace command "reconcile"`,
+		},
+		{
+			name:       "known action still works",
+			args:       []string{"workspace", "schema", "bundle", "--json"},
+			wantOutput: `"$schema"`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stdout, stderr, err := runFeature(t, test.args...)
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(stderr, test.wantError) {
+					t.Fatalf("feature %s error = %v, stderr=%s", strings.Join(test.args, " "), err, stderr)
+				}
+				return
+			}
+			if err != nil || !strings.Contains(stdout, test.wantOutput) {
+				t.Fatalf("feature %s = err=%v stdout=%s stderr=%s", strings.Join(test.args, " "), err, stdout, stderr)
+			}
+		})
+	}
+}
+
 func TestPlanExampleSchemaAndImmutableLock(t *testing.T) {
 	stdout, stderr, err := runFeature(t, "plan", "example")
 	if err != nil {
@@ -225,10 +264,6 @@ func TestWorkspaceSchemaExampleAndJournalBackedStatus(t *testing.T) {
 	}
 	commitWorkspaceBundleFixture(t, bundleDir)
 
-	workspaceDir, err := workspace.DerivedWorkspaceRuntimeDirectory(bundleDir)
-	if err != nil {
-		t.Fatal(err)
-	}
 	input := writeJSONInput(t, map[string]any{
 		"schema_version": 2,
 		"occurred_at":    "2026-07-22T12:00:00Z",
@@ -250,9 +285,6 @@ func TestWorkspaceSchemaExampleAndJournalBackedStatus(t *testing.T) {
 	}
 	if !strings.HasPrefix(initialized.PlanCheckpoint, "sha256:") {
 		t.Fatalf("workspace plan checkpoint is not a digest: %q", initialized.PlanCheckpoint)
-	}
-	if _, err := os.Stat(filepath.Join(workspaceDir, "state", "plan-checkpoint.v5.json")); err != nil {
-		t.Fatalf("expected runtime checkpoint artifact: %v", err)
 	}
 	if len(initialized.Report.Scheduler.Units) != 1 || initialized.Report.Scheduler.Units[0].Status != "ready" {
 		t.Fatalf("unexpected initialized scheduler: %+v", initialized.Report.Scheduler.Units)

@@ -23,7 +23,6 @@ func TestWorkspaceInitializationUsesCommittedPlanHeadCheckpoint(t *testing.T) {
 		t.Fatalf("verify committed checkpoint: %v", err)
 	}
 	if verified.CheckpointID().IsZero() ||
-		verified.ArtifactDigest().IsZero() ||
 		!strings.HasPrefix(verified.CheckpointID().String(), "sha256:") {
 		t.Fatalf("verified checkpoint is incomplete: %#v", verified)
 	}
@@ -49,15 +48,6 @@ func TestWorkspaceInitializationUsesCommittedPlanHeadCheckpoint(t *testing.T) {
 	if initialized.PlanCheckpoint != verified.CheckpointID().String() {
 		t.Fatalf("initialized checkpoint = %s, want %s", initialized.PlanCheckpoint, verified.CheckpointID())
 	}
-	artifactPath := filepath.Join(runtimeRoot, workspace.WorkspaceStateDirectoryName, workspace.PlanCheckpointArtifactFileName)
-	artifact, err := os.ReadFile(artifactPath)
-	if err != nil {
-		t.Fatalf("read runtime checkpoint artifact: %v", err)
-	}
-	if workspace.DigestBytes(artifact) != verified.ArtifactDigest() {
-		t.Fatalf("runtime checkpoint artifact digest = %s, want %s", workspace.DigestBytes(artifact), verified.ArtifactDigest())
-	}
-
 	snapshot, err := workspace.ReadWorkspaceJournalSnapshot(runtimeRoot)
 	if err != nil {
 		t.Fatalf("read initialized journal: %v", err)
@@ -66,11 +56,9 @@ func TestWorkspaceInitializationUsesCommittedPlanHeadCheckpoint(t *testing.T) {
 	if !ok {
 		t.Fatalf("first event = %T", snapshot.Records()[0].Event())
 	}
-	if event.PlanCheckpoint() != verified.CheckpointID() ||
-		event.PlanCheckpointArtifactDigest() != verified.ArtifactDigest() {
-		t.Fatalf("initialization event checkpoint = %s/%s, want %s/%s",
-			event.PlanCheckpoint(), event.PlanCheckpointArtifactDigest(),
-			verified.CheckpointID(), verified.ArtifactDigest())
+	if event.PlanCheckpoint() != verified.CheckpointID() {
+		t.Fatalf("initialization event checkpoint = %s, want %s",
+			event.PlanCheckpoint(), verified.CheckpointID())
 	}
 }
 
