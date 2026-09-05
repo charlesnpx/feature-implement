@@ -304,7 +304,10 @@ func TestWorkspaceCompletionRetryRecoversBeforeAndAfterAppendFaults(
 		workspace.CompletionFaultBeforeAppend,
 		workspace.CompletionFaultAfterAppend,
 	} {
+		point := point
 		t.Run(string(point), func(t *testing.T) {
+			t.Parallel()
+
 			harness := newCompletedWorkspaceHarness(t)
 			before := journalRecordCount(
 				t, harness.core.journal,
@@ -386,6 +389,8 @@ func TestLocalRecoveryResumesPendingMaterializationAndIntegration(
 	t.Parallel()
 
 	t.Run("materialization", func(t *testing.T) {
+		t.Parallel()
+
 		core := newAttemptHarness(t, "unit-one")
 		beforeStart := journalRecordCount(t, core.journal)
 		crash := errors.New("materialization crash")
@@ -493,6 +498,8 @@ func TestLocalRecoveryResumesPendingMaterializationAndIntegration(
 	})
 
 	t.Run("integration", func(t *testing.T) {
+		t.Parallel()
+
 		harness := newNoReviewIntegrationHarness(t, false)
 		if _, err := workspace.IntegrateMergeUnit(
 			context.Background(),

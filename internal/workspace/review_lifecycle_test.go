@@ -217,7 +217,10 @@ func TestReviewGateDispatchRejectsConfiguredFinalHistoryBeforeAdoptionOrJournal(
 			want: "did not exit zero",
 		},
 	} {
+		test := test
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			harness := newReviewGateHarnessFromFixture(
 				t, configuredCommitProtocolFixture(t), "natural-language",
 			)

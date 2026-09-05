@@ -19,6 +19,8 @@ type attemptBoundaryCommandFixture struct {
 }
 
 func TestExecuteAttemptPauseRequiresKindAndRecordsPause(t *testing.T) {
+	t.Parallel()
+
 	fixture := newAttemptBoundaryCommandFixture(t, false)
 	options := Options{
 		Action:       "attempt",

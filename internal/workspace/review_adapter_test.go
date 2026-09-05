@@ -125,7 +125,10 @@ func TestWitnessAdapterRejectsMismatchedReportBindingsBeforeRecording(t *testing
 		},
 	}
 	for _, test := range tests {
+		test := test
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			harness := newWitnessReviewHarness(t)
 			dispatched := harness.dispatch(t, "2026-09-03T12:00:01Z")
 			repository := &reviewAdapterRepositoryStub{reviewInput: []byte("diff --git a/a b/a\n+change\n")}

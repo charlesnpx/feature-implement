@@ -344,7 +344,10 @@ func TestWorkspaceRuntimeViewsProjectPausedBoundaryKinds(
 		{name: "planned checkpoint", boundaryKind: workspace.AttemptBoundaryKindCheckpoint},
 		{name: "raised escalation", boundaryKind: workspace.AttemptBoundaryKindEscalation},
 	} {
+		test := test
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			harness := newAttemptHarness(t, "unit-one")
 			attempt := harness.reserve(t, "2026-07-21T11:01:00Z")
 			snapshot, err := harness.journal.ReadSnapshot()

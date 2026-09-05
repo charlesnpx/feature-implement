@@ -28,6 +28,13 @@ func newDefinitionFixtureForHash(
 	repositoryRoot, baseCommit := initializeTargetRepository(
 		t, algorithm,
 	)
+	return newDefinitionFixtureForRepository(repositoryRoot, baseCommit)
+}
+
+func newDefinitionFixtureForRepository(
+	repositoryRoot string,
+	baseCommit workspace.GitObjectID,
+) definitionFixture {
 	workspaceYAML := fmt.Sprintf(`schema_version: 2
 id: example-workspace
 mode: local
@@ -243,40 +250,7 @@ func initializeTargetRepository(
 	algorithm workspace.GitHashAlgorithm,
 ) (string, workspace.GitObjectID) {
 	t.Helper()
-	root := t.TempDir()
-	canonical, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		t.Fatalf("canonicalize target repository: %v", err)
-	}
-	runTargetGitTest(
-		t, canonical,
-		"init", "--quiet", "--initial-branch=main",
-		"--object-format="+string(algorithm), ".",
-	)
-	if err := os.WriteFile(
-		filepath.Join(canonical, "seed.txt"),
-		[]byte("local target seed\n"),
-		0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
-	runTargetGitTest(t, canonical, "add", "--", "seed.txt")
-	runTargetGitTest(
-		t, canonical,
-		"-c", "user.name=Feature Implement Test",
-		"-c", "user.email=feature-implement@localhost",
-		"commit", "--quiet", "-m", "seed local target",
-	)
-	raw := strings.TrimSpace(
-		runTargetGitTest(t, canonical, "rev-parse", "HEAD"),
-	)
-	object, err := workspace.ParseGitObjectID(
-		string(algorithm) + ":" + raw,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return canonical, object
+	return copyTargetRepositoryTemplate(t, algorithm)
 }
 
 func runTargetGitTest(

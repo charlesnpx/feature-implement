@@ -15,6 +15,8 @@ import (
 )
 
 func TestLocalReviewRepositoryAdoptsActualCleanDescendantHead(t *testing.T) {
+	t.Parallel()
+
 	repository := canonicalWorkspaceCommandTempDir(t)
 	runGitTest(t, repository, "init", "-b", "main")
 	runGitTest(t, repository, "config", "user.name", "Feature Test")
@@ -61,6 +63,8 @@ func TestLocalReviewRepositoryAdoptsActualCleanDescendantHead(t *testing.T) {
 }
 
 func TestWitnessReviewDispatchPacketRoundTripsThroughRecordDocument(t *testing.T) {
+	t.Parallel()
+
 	fixture := newAttemptBoundaryCommandFixture(t, true)
 	dispatchResult, err := Execute(context.Background(), Options{
 		Action:       "review",

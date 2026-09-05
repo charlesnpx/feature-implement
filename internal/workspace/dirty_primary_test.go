@@ -15,6 +15,8 @@ func TestInitializationAndIntegrationLeaveDirtyPrimaryCheckoutUntouched(t *testi
 	t.Parallel()
 
 	t.Run("initialization", func(t *testing.T) {
+		t.Parallel()
+
 		definition := mustDefinition(t, newDefinitionFixture(t).sources)
 		primary := definition.Workspace().RepositoryRoot()
 		before := dirtyPrimaryCheckout(t, primary, "initialization")
@@ -32,6 +34,8 @@ func TestInitializationAndIntegrationLeaveDirtyPrimaryCheckoutUntouched(t *testi
 	})
 
 	t.Run("first integration", func(t *testing.T) {
+		t.Parallel()
+
 		scenario := newRealIntegrationScenario(
 			t, workspace.GitHashSHA1, true, workspace.GitObjectID{},
 		)
