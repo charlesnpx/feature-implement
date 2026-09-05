@@ -179,9 +179,6 @@ func (intent MergeUnitIntegrationIntent) ExpectedFeatureHead() GitObjectID {
 func (intent MergeUnitIntegrationIntent) ExpectedFeatureRefAbsent() bool {
 	return intent.expectedFeatureRefAbsent
 }
-func (intent MergeUnitIntegrationIntent) AttemptWorktreeBinding() AttemptWorktreeGitBinding {
-	return intent.attemptWorktreeBinding
-}
 func (intent MergeUnitIntegrationIntent) AcceptedHead() GitObjectID {
 	return intent.acceptedHead
 }
@@ -491,12 +488,6 @@ func NewIntegrationGitInspection(
 func (inspection IntegrationGitInspection) FeatureHead() GitObjectID {
 	return inspection.featureHead
 }
-func (inspection IntegrationGitInspection) RefState() IntegrationRefState {
-	return inspection.refState
-}
-func (inspection IntegrationGitInspection) ExpectedCommitExists() bool {
-	return inspection.expectedCommit
-}
 
 type IntegrationGitPort interface {
 	InspectAttempt(
@@ -538,14 +529,8 @@ type RuntimeIntegrationProjection struct {
 func (projection RuntimeIntegrationProjection) Intent() MergeUnitIntegrationIntent {
 	return projection.intent
 }
-func (projection RuntimeIntegrationProjection) IntentRecord() uint64 {
-	return projection.intentRecord
-}
 func (projection RuntimeIntegrationProjection) Integrated() bool {
 	return projection.integratedRecord != 0
-}
-func (projection RuntimeIntegrationProjection) IntegratedRecord() uint64 {
-	return projection.integratedRecord
 }
 func (projection RuntimeIntegrationProjection) MergeCommit() GitObjectID {
 	return projection.intent.expectedMerge

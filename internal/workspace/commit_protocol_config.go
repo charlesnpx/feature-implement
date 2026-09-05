@@ -68,7 +68,6 @@ func NewCommitMessagePolicy(subject string, body CommitBodyPolicy, exactBody *st
 
 func (policy CommitMessagePolicy) Subject() string              { return policy.subject }
 func (policy CommitMessagePolicy) BodyPolicy() CommitBodyPolicy { return policy.body }
-func (policy CommitMessagePolicy) ExactBody() string            { return policy.exactBody }
 
 func (policy CommitMessagePolicy) Validate(subject, body string) error {
 	if subject != policy.subject {
@@ -243,12 +242,6 @@ func NewCommitPathPolicy(allowed, frozen []string) (CommitPathPolicy, error) {
 	return CommitPathPolicy{allowed: allowedPatterns, frozen: frozenPatterns, digest: DigestBytes(content)}, nil
 }
 
-func (policy CommitPathPolicy) Allowed() []CommitPathPattern {
-	return append([]CommitPathPattern(nil), policy.allowed...)
-}
-func (policy CommitPathPolicy) Frozen() []CommitPathPattern {
-	return append([]CommitPathPattern(nil), policy.frozen...)
-}
 func (policy CommitPathPolicy) Digest() Digest { return policy.digest }
 
 func (policy CommitPathPolicy) Validate(pathValue string) error {
@@ -297,7 +290,6 @@ func NewCommitCheck(id, runner ID, command Argv) (CommitCheck, error) {
 }
 
 func (check CommitCheck) ID() ID         { return check.id }
-func (check CommitCheck) Runner() ID     { return check.runner }
 func (check CommitCheck) Command() Argv  { return Argv{values: check.command.Values()} }
 func (check CommitCheck) Digest() Digest { return check.digest }
 

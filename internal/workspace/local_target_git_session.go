@@ -245,37 +245,6 @@ func (session *localTargetGitSession) runPreparedReferenceTransaction(
 	return finish("commit", "commit: ok")
 }
 
-func (session *localTargetGitSession) resolveBase(
-	ctx context.Context,
-) (GitObjectID, error) {
-	output, exitCode, err := session.run(ctx, nil, "show-ref", "--verify", session.binding.baseRef)
-	if err != nil {
-		return GitObjectID{}, err
-	}
-	if exitCode != 0 {
-		return GitObjectID{}, fmt.Errorf(
-			"base_ref %s does not resolve to a local ref (Git status %d: %s)",
-			session.binding.baseRef, exitCode, strings.TrimSpace(string(output)),
-		)
-	}
-	fields := strings.Fields(string(output))
-	if len(fields) != 2 || fields[1] != session.binding.baseRef {
-		return GitObjectID{}, fmt.Errorf("Git returned malformed base_ref data")
-	}
-	object, err := qualifyGitObjectID(session.binding.objectFormat, fields[0])
-	if err != nil {
-		return GitObjectID{}, fmt.Errorf("parse base_ref object: %w", err)
-	}
-	output, exitCode, err = session.run(ctx, nil, "cat-file", "-t", gitObjectHex(object))
-	if err != nil {
-		return GitObjectID{}, err
-	}
-	if exitCode != 0 || strings.TrimSpace(string(output)) != "commit" {
-		return GitObjectID{}, fmt.Errorf("Git object %s is not an available commit", object)
-	}
-	return object, nil
-}
-
 func (session *localTargetGitSession) inspectFeatureRef(
 	ctx context.Context,
 ) (bool, GitObjectID, error) {

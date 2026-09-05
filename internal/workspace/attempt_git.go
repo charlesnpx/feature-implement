@@ -64,11 +64,8 @@ func newAttemptGitInspection(
 func (inspection AttemptGitInspection) WorktreeExists() bool      { return inspection.worktreeExists }
 func (inspection AttemptGitInspection) WorktreeHead() GitObjectID { return inspection.worktreeHead }
 func (inspection AttemptGitInspection) WorktreeTree() GitObjectID { return inspection.worktreeTree }
-func (inspection AttemptGitInspection) WorktreeGitBinding() AttemptWorktreeGitBinding {
-	return inspection.worktreeBinding
-}
-func (inspection AttemptGitInspection) Clean() bool    { return inspection.clean }
-func (inspection AttemptGitInspection) Digest() Digest { return inspection.digest }
+func (inspection AttemptGitInspection) Clean() bool               { return inspection.clean }
+func (inspection AttemptGitInspection) Digest() Digest            { return inspection.digest }
 
 // NewScratchAttemptGitInspection records an independent, detached attempt
 // repository.

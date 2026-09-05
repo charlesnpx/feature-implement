@@ -2,7 +2,7 @@
 
 `feature-implement` is a self-contained Go CLI with delegated Codex and Claude
 skills for planning implementation work and executing it in a local Git
-repository. Workspace v2 uses immutable source definitions, a typed append-only
+repository. The local workspace uses immutable source definitions, a typed append-only
 journal, isolated attempt worktrees, exact-head review, and deterministic local
 integration.
 
@@ -38,7 +38,7 @@ feature plan materialize --manifest feature.plan.yaml --out-root <dir> --json
 feature validate <plan-dir> [--write-lock] --json
 ```
 
-Workspace execution uses these version-two surfaces:
+Workspace execution uses these surfaces:
 
 ```text
 feature workspace schema bundle|requests|reports [--json]
@@ -229,7 +229,7 @@ feature workspace validate --bundle "$bundle_root" --write-locks --json
 Commit both the plan sources and `feature.workspace.lock.json`, and keep the plan repository
 clean before initializing a runtime. `workspace init` verifies that the clean
 plan `HEAD` contains the exact source and lock bytes, then derives the runtime
-plan checkpoint artifact from that committed state.
+plan checkpoint from that committed state.
 
 The lock is one canonical JSON file. It is written through a synced temporary
 file and atomic rename; a lock whose current bytes differ from its committed
@@ -249,7 +249,7 @@ derived plan checkpoint and needs no root paths in its request:
 ```
 
 Runtime state is append-only under `<runtime-root>/state/`. A runtime without
-the local v8 format marker is rejected with a regeneration diagnostic; it is
+the local v9 format marker is rejected with a regeneration diagnostic; it is
 not interpreted or migrated.
 
 ## Local execution
@@ -302,11 +302,11 @@ completion proves the recorded Git topology and workflow state only.
 
 ### Operations and migration
 
-Workspace v2 is a local-only execution model. Operators commit exact plan
+The local workspace is a local-only execution model. Operators commit exact plan
 sources and canonical lock bytes in a clean plan repository, initialize a fresh
-local v8 runtime, recover before each work cycle, and use journal-derived
+local v9 runtime, recover before each work cycle, and use journal-derived
 reports as the source of truth. Earlier draft runtime state is intentionally not
-migrated; a runtime without the local v8 marker must be regenerated from the
+migrated; a runtime without the local v9 marker must be regenerated from the
 committed plan and current lock.
 
 ### Supported repository profile
@@ -337,7 +337,7 @@ an external attestation.
 
 ### Deferred GitHub design
 
-Any hosted-forge lifecycle is outside the v0.2 executable surface. It must be
+Any hosted-forge lifecycle is outside the executable surface. It must be
 introduced as a separate design with its own state, checks, and admission rules;
 it cannot reinterpret local completion as hosted approval or release evidence.
 

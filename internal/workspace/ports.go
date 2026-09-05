@@ -1,11 +1,9 @@
 package workspace
 
 import (
-	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // RootedPath is an adapter input that keeps a normalized relative path bound to
@@ -53,52 +51,4 @@ func isPortableRelativePath(relative string) bool {
 		}
 	}
 	return true
-}
-
-type FileInfo struct {
-	size       int64
-	regular    bool
-	symlink    bool
-	permission uint32
-}
-
-func NewFileInfo(size int64, regular, symlink bool, permission uint32) (FileInfo, error) {
-	if size < 0 || (regular && symlink) {
-		return FileInfo{}, fmt.Errorf("invalid file information")
-	}
-	return FileInfo{size: size, regular: regular, symlink: symlink, permission: permission}, nil
-}
-
-func (info FileInfo) Size() int64        { return info.size }
-func (info FileInfo) Regular() bool      { return info.regular }
-func (info FileInfo) Symlink() bool      { return info.symlink }
-func (info FileInfo) Permission() uint32 { return info.permission }
-
-type FilesystemPort interface {
-	ReadFile(context.Context, RootedPath) ([]byte, error)
-	Inspect(context.Context, RootedPath) (FileInfo, error)
-}
-
-type ProcessResult struct {
-	exitCode     int
-	stdoutDigest Digest
-	stderrDigest Digest
-}
-
-func NewProcessResult(exitCode int, stdout, stderr []byte) ProcessResult {
-	return ProcessResult{exitCode: exitCode, stdoutDigest: DigestBytes(stdout), stderrDigest: DigestBytes(stderr)}
-}
-
-func (result ProcessResult) ExitCode() int        { return result.exitCode }
-func (result ProcessResult) StdoutDigest() Digest { return result.stdoutDigest }
-func (result ProcessResult) StderrDigest() Digest { return result.stderrDigest }
-
-// ProcessPort is a local execution boundary. Implementations must use the
-// isolated process environment and deny write-capable network access.
-type ProcessPort interface {
-	Run(context.Context, Command) (ProcessResult, error)
-}
-
-type ClockPort interface {
-	Now() time.Time
 }

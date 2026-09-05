@@ -1,7 +1,7 @@
 interface:
   display_name: "Feature"
-  short_description: "Create workspace-v2 bundles"
-  default_prompt: "Use $feature to create and validate an implementation-ready workspace-v2 bundle."
+  short_description: "Create local workspace bundles"
+  default_prompt: "Use $feature to create and validate an implementation-ready local workspace bundle."
 
 policy:
   allow_implicit_invocation: false

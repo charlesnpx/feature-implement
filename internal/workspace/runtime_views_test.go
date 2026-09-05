@@ -55,14 +55,7 @@ func TestWorkspaceRuntimeViewsExposeOnlyLocalStateAndReplayDeterministically(
 	if err != nil {
 		t.Fatal(err)
 	}
-	reviewDigest, err := workspace.VerifyReviewRuntimeConformance(
-		snapshot, harness.definition,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.Workflow.ProjectionDigest != coreDigest.String() ||
-		first.Workflow.ReviewProjectionDigest != reviewDigest.String() {
+	if first.Workflow.ProjectionDigest != coreDigest.String() {
 		t.Fatalf("workspace view projection digests = %+v", first.Workflow)
 	}
 	var consumer struct {

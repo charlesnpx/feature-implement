@@ -52,14 +52,3 @@ func parseGitHead(t *testing.T, repository string) workspace.GitObjectID {
 func rawGitObject(object workspace.GitObjectID) string {
 	return strings.TrimPrefix(object.String(), string(object.Algorithm())+":")
 }
-
-func configuredUnitExecution(t *testing.T, definition workspace.EffectiveWorkspaceDefinition) workspace.UnitExecution {
-	t.Helper()
-	for _, unit := range definition.ExecutionConfig().MergeUnits() {
-		if unit.MergeUnitID().String() == "unit-one" {
-			return unit
-		}
-	}
-	t.Fatal("configured unit is missing")
-	return workspace.UnitExecution{}
-}

@@ -177,8 +177,7 @@ func NewEnvironmentVariable(name, value string) (EnvironmentVariable, error) {
 	return EnvironmentVariable{name: name, value: value}, nil
 }
 
-func (variable EnvironmentVariable) Name() string  { return variable.name }
-func (variable EnvironmentVariable) Value() string { return variable.value }
+func (variable EnvironmentVariable) Name() string { return variable.name }
 
 type ReplayPolicy uint8
 
@@ -231,13 +230,9 @@ func (command Command) Argv() Argv {
 	return Argv{values: command.argv.Values()}
 }
 
-func (command Command) Directory() string { return command.directory }
-
 func (command Command) Environment() []EnvironmentVariable {
 	return append([]EnvironmentVariable(nil), command.environment...)
 }
-
-func (command Command) ReplayPolicy() ReplayPolicy { return command.replay }
 
 type EvidenceItem struct {
 	name  ID
@@ -254,8 +249,7 @@ func NewEvidenceItem(name ID, value string) (EvidenceItem, error) {
 	return EvidenceItem{name: name, value: value}, nil
 }
 
-func (item EvidenceItem) Name() ID      { return item.name }
-func (item EvidenceItem) Value() string { return item.value }
+func (item EvidenceItem) Name() ID { return item.name }
 
 type Evidence struct {
 	kind   ID

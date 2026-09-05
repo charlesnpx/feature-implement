@@ -52,10 +52,7 @@ type RuntimeBoundaryProjection struct {
 	evidenceDigest Digest
 }
 
-func (boundary RuntimeBoundaryProjection) BoundaryID() ID        { return boundary.boundaryID }
-func (boundary RuntimeBoundaryProjection) Ordinal() uint64       { return boundary.ordinal }
-func (boundary RuntimeBoundaryProjection) Record() uint64        { return boundary.record }
-func (boundary RuntimeBoundaryProjection) ResumedRecord() uint64 { return boundary.resumedRecord }
+func (boundary RuntimeBoundaryProjection) Record() uint64 { return boundary.record }
 func (boundary RuntimeBoundaryProjection) Kind() AttemptBoundaryKind {
 	return boundary.kind
 }
@@ -67,11 +64,8 @@ func (boundary RuntimeBoundaryProjection) LeaseID() ID       { return boundary.l
 func (boundary RuntimeBoundaryProjection) LeaseFencedAndReleased() bool {
 	return boundary.record != 0
 }
-func (boundary RuntimeBoundaryProjection) Goal() GoalBinding { return boundary.goal }
-func (boundary RuntimeBoundaryProjection) Head() GitObjectID { return boundary.head }
-func (boundary RuntimeBoundaryProjection) Evidence() []Evidence {
-	return cloneEvidence(boundary.evidence)
-}
+func (boundary RuntimeBoundaryProjection) Goal() GoalBinding      { return boundary.goal }
+func (boundary RuntimeBoundaryProjection) Head() GitObjectID      { return boundary.head }
 func (boundary RuntimeBoundaryProjection) EvidenceDigest() Digest { return boundary.evidenceDigest }
 
 type RuntimeAttemptProjection struct {
@@ -111,12 +105,8 @@ func (attempt RuntimeAttemptProjection) SerialSegmentHeld() bool    { return att
 func (attempt RuntimeAttemptProjection) Phase() AttemptRuntimePhase { return attempt.phase }
 func (attempt RuntimeAttemptProjection) StartRecord() uint64        { return attempt.startRecord }
 func (attempt RuntimeAttemptProjection) VerifiedHead() GitObjectID  { return attempt.verifiedHead }
-func (attempt RuntimeAttemptProjection) InspectionDigest() Digest   { return attempt.inspectionDigest }
 func (attempt RuntimeAttemptProjection) LeaseID() ID                { return attempt.leaseID }
 func (attempt RuntimeAttemptProjection) Goal() GoalBinding          { return attempt.goal }
-func (attempt RuntimeAttemptProjection) Boundaries() []RuntimeBoundaryProjection {
-	return cloneRuntimeBoundaries(attempt.boundaries)
-}
 func (attempt RuntimeAttemptProjection) Integration() (
 	RuntimeIntegrationProjection,
 	bool,

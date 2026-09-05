@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const WorkspaceRuntimeProjectionFileName = "runtime-projection.v6.json"
+const WorkspaceRuntimeProjectionFileName = "runtime-projection.json"
 
 type WorkspaceInitializationResult struct {
 	storedGeneration StoredGeneration
@@ -17,9 +17,6 @@ type WorkspaceInitializationResult struct {
 	projectionDigest Digest
 }
 
-func (result WorkspaceInitializationResult) StoredGeneration() StoredGeneration {
-	return result.storedGeneration
-}
 func (result WorkspaceInitializationResult) Snapshot() JournalSnapshot { return result.snapshot }
 func (result WorkspaceInitializationResult) Runtime() WorkspaceRuntimeProjection {
 	return cloneWorkspaceRuntime(result.runtime)
@@ -56,8 +53,6 @@ func InitializeWorkspaceV2WithOptions(
 	}
 	checkpoint := VerifiedPlanLockCheckpoint{}
 	checkpointID := Digest{}
-	checkpointArtifactDigest := Digest{}
-	checkpointArtifactBytes := []byte(nil)
 	hasPlanCheckpoint := options.PlanCheckpoint != nil
 	if hasPlanCheckpoint {
 		checkpoint = *options.PlanCheckpoint
@@ -74,8 +69,6 @@ func InitializeWorkspaceV2WithOptions(
 			)
 		}
 		checkpointID = checkpoint.CheckpointID()
-		checkpointArtifactDigest = checkpoint.ArtifactDigest()
-		checkpointArtifactBytes = checkpoint.ArtifactBytes()
 	}
 	requiresCheckpoint := false
 	for _, artifact := range definition.artifacts {
@@ -190,7 +183,7 @@ func InitializeWorkspaceV2WithOptions(
 		eventCheckpoint := []PlanCheckpointJournalBinding(nil)
 		if hasPlanCheckpoint {
 			eventCheckpoint = append(eventCheckpoint, PlanCheckpointJournalBinding{
-				CheckpointID: checkpointID, ArtifactDigest: checkpointArtifactDigest,
+				CheckpointID: checkpointID,
 			})
 		}
 		event, err := NewWorkspaceInitializedJournalEventWithTarget(
@@ -227,9 +220,6 @@ func InitializeWorkspaceV2WithOptions(
 	if requiresCheckpoint && runtime.planCheckpoint != checkpointID {
 		return WorkspaceInitializationResult{}, fmt.Errorf("initialized runtime does not match the verified plan checkpoint")
 	}
-	if requiresCheckpoint && runtime.planCheckpointArtifactDigest != checkpointArtifactDigest {
-		return WorkspaceInitializationResult{}, fmt.Errorf("initialized runtime does not match the verified plan checkpoint artifact")
-	}
 	targetRuntime, ok := runtime.LocalTarget()
 	if !ok ||
 		targetRuntime.binding.root != definition.workspace.target.root ||
@@ -239,17 +229,6 @@ func InitializeWorkspaceV2WithOptions(
 		return WorkspaceInitializationResult{}, fmt.Errorf(
 			"initialized runtime does not match the verified local target",
 		)
-	}
-	if hasPlanCheckpoint {
-		if err := journal.runtime.state.PublishReplaceable(
-			PlanCheckpointArtifactFileName,
-			checkpointArtifactBytes,
-			0o600,
-			MaxArtifactBytes,
-			PublicationOptions{},
-		); err != nil {
-			return WorkspaceInitializationResult{}, err
-		}
 	}
 	projectionDigest, err := writeWorkspaceRuntimeProjectionAt(journal.runtime, snapshot, runtime)
 	if err != nil {
@@ -423,19 +402,6 @@ func RebuildWorkspaceRuntimeProjectionFile(journal *WorkspaceJournal) (Digest, e
 		return Digest{}, err
 	}
 	return writeWorkspaceRuntimeProjectionAt(journal.runtime, snapshot, runtime)
-}
-
-func writeWorkspaceRuntimeProjection(
-	workspaceDir string,
-	snapshot JournalSnapshot,
-	runtime WorkspaceRuntimeProjection,
-) (Digest, error) {
-	storage, err := OpenRuntimeStorage(workspaceDir, true)
-	if err != nil {
-		return Digest{}, err
-	}
-	defer storage.Close()
-	return writeWorkspaceRuntimeProjectionAt(storage, snapshot, runtime)
 }
 
 func writeWorkspaceRuntimeProjectionAt(

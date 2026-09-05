@@ -31,8 +31,6 @@ func main() {
 		err = validateCommand(os.Args[2:])
 	case "workspace":
 		err = workspaceCommand(os.Args[2:])
-	case "status", "implement":
-		err = fmt.Errorf("feature %s was removed; use feature workspace with a schema-version-2 bundle", os.Args[1])
 	case "version":
 		fmt.Println(Version)
 	case "-h", "--help", "help":
@@ -213,15 +211,11 @@ func workspaceCommand(args []string) error {
 		return nil
 	}
 	action := args[0]
+	if !workspacecmd.IsSupportedAction(action) {
+		return fmt.Errorf("unsupported workspace command %q", action)
+	}
 	remaining := args[1:]
 	subaction := ""
-	switch action {
-	case "queue", "receipts", "reconcile", "control", "provider":
-		return fmt.Errorf(
-			"workspace %s was removed from the local-only workflow",
-			action,
-		)
-	}
 	if hasHelpFlag(remaining) {
 		usageWorkspace(os.Stdout)
 		return nil

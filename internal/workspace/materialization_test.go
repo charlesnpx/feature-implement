@@ -1,7 +1,6 @@
 package workspace_test
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,50 +14,6 @@ import (
 )
 
 const testGeneratorVersion = "materialization-test/v2"
-
-var _ workspace.FilesystemPort = (*workspace.RootedFilesystemAdapter)(nil)
-
-func TestRootedFilesystemAdapterRejectsCrossRootAndSymlinkTraversal(t *testing.T) {
-	t.Parallel()
-
-	root := canonicalMaterializationTestTempDir(t)
-	if err := os.WriteFile(filepath.Join(root, "safe.txt"), []byte("safe\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	external := canonicalMaterializationTestTempDir(t)
-	if err := os.WriteFile(filepath.Join(external, "outside.txt"), []byte("outside\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(external, filepath.Join(root, "link")); err != nil {
-		t.Fatal(err)
-	}
-	adapter, err := workspace.OpenRootedFilesystemAdapter(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer adapter.Close()
-	safe, err := workspace.NewRootedPath(root, "safe.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if content, err := adapter.ReadFile(context.Background(), safe); err != nil || string(content) != "safe\n" {
-		t.Fatalf("safe read content=%q err=%v", content, err)
-	}
-	linked, err := workspace.NewRootedPath(root, "link/outside.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := adapter.ReadFile(context.Background(), linked); err == nil || !strings.Contains(err.Error(), "symlink") {
-		t.Fatalf("symlink traversal error = %v", err)
-	}
-	other, err := workspace.NewRootedPath(external, "outside.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := adapter.ReadFile(context.Background(), other); err == nil || !strings.Contains(err.Error(), "different filesystem root") {
-		t.Fatalf("cross-root read error = %v", err)
-	}
-}
 
 func TestMaterializationRejectsSymlinkedDestinationRootsAndAncestors(t *testing.T) {
 	t.Parallel()
@@ -126,7 +81,7 @@ func TestMaterializationRejectsHiddenDestinationAncestors(t *testing.T) {
 	}
 }
 
-func TestMaterializationBootstrapsAbsentOrEmptyDestinationWithV2Inventory(t *testing.T) {
+func TestMaterializationBootstrapsAbsentOrEmptyDestination(t *testing.T) {
 	t.Parallel()
 
 	for _, existing := range []bool{false, true} {

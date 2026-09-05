@@ -11,10 +11,7 @@ import (
 	"strings"
 )
 
-const (
-	PlanCheckpointArtifactFileName = "plan-checkpoint.v5.json"
-	maxPlanGitOutputBytes          = 8 * 1024 * 1024
-)
+const maxPlanGitOutputBytes = 8 * 1024 * 1024
 
 type VerifiedPlanLockCheckpoint struct {
 	root           string
@@ -24,37 +21,10 @@ type VerifiedPlanLockCheckpoint struct {
 	generation     Digest
 	lockDigest     Digest
 	checkpointID   Digest
-	artifactDigest Digest
-	artifactBytes  []byte
 }
 
-func (checkpoint VerifiedPlanLockCheckpoint) Root() string         { return checkpoint.root }
-func (checkpoint VerifiedPlanLockCheckpoint) Head() GitObjectID    { return checkpoint.head }
-func (checkpoint VerifiedPlanLockCheckpoint) Commit() GitObjectID  { return checkpoint.head }
-func (checkpoint VerifiedPlanLockCheckpoint) SourceDigest() Digest { return checkpoint.sourceDigest }
-func (checkpoint VerifiedPlanLockCheckpoint) SemanticDigest() Digest {
-	return checkpoint.semanticDigest
-}
 func (checkpoint VerifiedPlanLockCheckpoint) Generation() Digest   { return checkpoint.generation }
-func (checkpoint VerifiedPlanLockCheckpoint) LockDigest() Digest   { return checkpoint.lockDigest }
 func (checkpoint VerifiedPlanLockCheckpoint) CheckpointID() Digest { return checkpoint.checkpointID }
-func (checkpoint VerifiedPlanLockCheckpoint) ArtifactDigest() Digest {
-	return checkpoint.artifactDigest
-}
-func (checkpoint VerifiedPlanLockCheckpoint) ArtifactBytes() []byte {
-	return append([]byte(nil), checkpoint.artifactBytes...)
-}
-
-type planCheckpointArtifactWire struct {
-	SchemaVersion  int    `json:"schema_version"`
-	Kind           string `json:"kind"`
-	PlanHead       string `json:"plan_head"`
-	SourceDigest   string `json:"source_digest"`
-	SemanticDigest string `json:"semantic_digest"`
-	Generation     string `json:"generation"`
-	LockDigest     string `json:"lock_digest"`
-	CheckpointID   string `json:"checkpoint_id"`
-}
 
 func VerifyPlanLockCheckpoint(
 	ctx context.Context,
@@ -123,19 +93,6 @@ func VerifyPlanLockCheckpoint(
 	if err != nil {
 		return VerifiedPlanLockCheckpoint{}, err
 	}
-	artifactBytes, err := json.Marshal(planCheckpointArtifactWire{
-		SchemaVersion:  RuntimeFormatSchemaVersion,
-		Kind:           "workspace_plan_checkpoint",
-		PlanHead:       head.String(),
-		SourceDigest:   sourceDigest.String(),
-		SemanticDigest: semanticDigest.String(),
-		Generation:     bundle.definition.generation.String(),
-		LockDigest:     lockDigest.String(),
-		CheckpointID:   checkpointID.String(),
-	})
-	if err != nil {
-		return VerifiedPlanLockCheckpoint{}, err
-	}
 	checkpoint := VerifiedPlanLockCheckpoint{
 		root:           bundle.root,
 		head:           head,
@@ -144,8 +101,6 @@ func VerifyPlanLockCheckpoint(
 		generation:     bundle.definition.generation,
 		lockDigest:     lockDigest,
 		checkpointID:   checkpointID,
-		artifactDigest: DigestBytes(artifactBytes),
-		artifactBytes:  artifactBytes,
 	}
 	if err := checkpoint.validate(); err != nil {
 		return VerifiedPlanLockCheckpoint{}, err
@@ -178,8 +133,7 @@ func (checkpoint VerifiedPlanLockCheckpoint) validate() error {
 	if checkpoint.root == "" || checkpoint.head.IsZero() ||
 		checkpoint.sourceDigest.IsZero() || checkpoint.semanticDigest.IsZero() ||
 		checkpoint.generation.IsZero() || checkpoint.lockDigest.IsZero() ||
-		checkpoint.checkpointID.IsZero() || checkpoint.artifactDigest.IsZero() ||
-		len(checkpoint.artifactBytes) == 0 {
+		checkpoint.checkpointID.IsZero() {
 		return fmt.Errorf("verified plan lock checkpoint is incomplete")
 	}
 	expected, err := deterministicPlanCheckpointID(

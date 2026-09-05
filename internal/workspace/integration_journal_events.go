@@ -174,9 +174,6 @@ func (event MergeUnitIntegratedJournalEvent) AttemptID() ID {
 func (event MergeUnitIntegratedJournalEvent) MergeUnit() MergeUnitReference {
 	return event.mergeUnit
 }
-func (event MergeUnitIntegratedJournalEvent) IntentDigest() Digest {
-	return event.intentDigest
-}
 func (event MergeUnitIntegratedJournalEvent) FeatureRef() string {
 	return event.featureRef
 }

@@ -64,7 +64,6 @@ func (err IncompleteJournalTailError) Error() string {
 	return fmt.Sprintf("journal has an incomplete EOF record at offset %d (%d bytes, %s)", err.offset, err.size, err.digest)
 }
 
-func (err IncompleteJournalTailError) Offset() int64         { return err.offset }
 func (err IncompleteJournalTailError) Size() int64           { return err.size }
 func (err IncompleteJournalTailError) Digest() Digest        { return err.digest }
 func (err IncompleteJournalTailError) ResultingHead() Digest { return err.resultingHead }
