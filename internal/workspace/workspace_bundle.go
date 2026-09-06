@@ -101,12 +101,28 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 	if err != nil {
 		return WorkspaceBundle{}, err
 	}
-	sourceOwners := make(map[string]string)
+	// Generated artifacts occupy these paths before any bundle source is
+	// claimed. A source must not be able to become the object later written by
+	// lock publication.
+	reservedSourcePaths := map[string]struct{}{
+		materializationCollisionKey(WorkspaceBundleFileName):          {},
+		materializationCollisionKey(WorkspaceLockFileName):            {},
+		materializationCollisionKey(workspaceLockPublicationLockName): {},
+	}
+	type sourceClaim struct {
+		path  string
+		owner string
+	}
+	sourceOwners := make(map[string]sourceClaim)
 	claimSourcePath := func(path, owner string) error {
-		if prior, exists := sourceOwners[path]; exists {
-			return fmt.Errorf("workspace bundle source path %s is claimed by both %s and %s", path, prior, owner)
+		key := materializationCollisionKey(path)
+		if _, reserved := reservedSourcePaths[key]; reserved {
+			return fmt.Errorf("workspace bundle source path %s is a reserved generated file", path)
 		}
-		sourceOwners[path] = owner
+		if prior, exists := sourceOwners[key]; exists {
+			return fmt.Errorf("workspace bundle source path %s is claimed by both %s and %s", path, prior.owner, owner)
+		}
+		sourceOwners[key] = sourceClaim{path: path, owner: owner}
 		return nil
 	}
 	if err := claimSourcePath(workspacePath, "workspace"); err != nil {
@@ -193,8 +209,8 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 	}
 	sourcePaths := make([]string, 0, len(sourceOwners)+1)
 	sourcePaths = append(sourcePaths, WorkspaceBundleFileName)
-	for sourcePath := range sourceOwners {
-		sourcePaths = append(sourcePaths, sourcePath)
+	for _, source := range sourceOwners {
+		sourcePaths = append(sourcePaths, source.path)
 	}
 	sort.Strings(sourcePaths)
 	sourceFiles := make(map[string][]byte, len(sourcePaths))
@@ -281,9 +297,6 @@ func normalizeBundleSourcePath(field, value string) (string, error) {
 		if strings.HasPrefix(component, ".") {
 			return "", fmt.Errorf("workspace bundle %s cannot reference hidden path %s", field, path)
 		}
-	}
-	if path == WorkspaceBundleFileName || path == WorkspaceLockFileName {
-		return "", fmt.Errorf("workspace bundle %s cannot reference its descriptor", field)
 	}
 	return path, nil
 }

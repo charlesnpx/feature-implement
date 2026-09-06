@@ -433,7 +433,16 @@ func TestReplaceablePublicationRaceLeavesOneCompleteStableObject(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	candidates := [][]byte{[]byte("candidate-a\n"), []byte("candidate-b\n")}
+	candidates := [][]byte{
+		[]byte("candidate-a\n"),
+		[]byte("candidate-b\n"),
+		[]byte("candidate-c\n"),
+		[]byte("candidate-d\n"),
+		[]byte("candidate-e\n"),
+		[]byte("candidate-f\n"),
+		[]byte("candidate-g\n"),
+		[]byte("candidate-h\n"),
+	}
 	start := make(chan struct{})
 	results := make(chan error, len(candidates))
 	var group sync.WaitGroup
@@ -461,16 +470,103 @@ func TestReplaceablePublicationRaceLeavesOneCompleteStableObject(t *testing.T) {
 			successes++
 		}
 	}
-	if successes == 0 {
-		t.Fatal("concurrent publications produced no stable winner")
+	if successes != len(candidates) {
+		t.Fatalf("concurrent publications succeeded %d of %d times", successes, len(candidates))
 	}
 	content, err := root.ReadReplaceable("projection.json", 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(content) != string(candidates[0]) && string(content) != string(candidates[1]) {
+	matched := false
+	for _, candidate := range candidates {
+		if string(content) == string(candidate) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
 		t.Fatalf("concurrent publication content = %q", content)
 	}
+	entries, err := root.adapter.readDirectory(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.name, "runtime-publication-") {
+			t.Fatalf("concurrent publication left control file %s", entry.name)
+		}
+	}
+}
+
+func TestReadOnlyJournalWithoutPublicationControlsDoesNotCreateSidecar(t *testing.T) {
+	runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "runtime")
+	writer, err := OpenWorkspaceJournal(runtimePath, JournalReadWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	statePath := WorkspaceStateDirectory(runtimePath)
+	before := runtimeStateFileBytes(t, statePath)
+	for name := range before {
+		if strings.HasSuffix(name, ".publication.lock") ||
+			strings.HasPrefix(name, "runtime-publication-") {
+			t.Fatalf("fresh runtime state unexpectedly contains publication control %s", name)
+		}
+	}
+	stateInfo, err := os.Stat(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(statePath, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(statePath, stateInfo.Mode().Perm()) }()
+
+	snapshot, err := ReadWorkspaceJournalSnapshot(runtimePath)
+	if err != nil {
+		t.Fatalf("read-only journal without publication controls: %v", err)
+	}
+	if snapshot.Head() != JournalGenesisHash() || len(snapshot.Records()) != 0 {
+		t.Fatalf("fresh read-only journal snapshot = %#v", snapshot)
+	}
+
+	after := runtimeStateFileBytes(t, statePath)
+	if len(after) != len(before) {
+		t.Fatalf("read-only journal changed state directory entries from %#v to %#v", before, after)
+	}
+	for name, beforeContent := range before {
+		afterContent, exists := after[name]
+		if !exists || !bytes.Equal(afterContent, beforeContent) {
+			t.Fatalf("read-only journal changed state file %s from %q to %q", name, beforeContent, afterContent)
+		}
+	}
+}
+
+func runtimeStateFileBytes(t *testing.T, directory string) map[string][]byte {
+	t.Helper()
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := make(map[string][]byte, len(entries))
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.Mode().IsRegular() {
+			t.Fatalf("runtime state entry %s is not a regular file", entry.Name())
+		}
+		content, err := os.ReadFile(filepath.Join(directory, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[entry.Name()] = content
+	}
+	return files
 }
 
 func TestWorkspaceJournalDetectsLockPathReplacement(t *testing.T) {
