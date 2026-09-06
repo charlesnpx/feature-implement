@@ -29,48 +29,48 @@ func (mode IntegrationAcceptanceMode) valid() bool {
 }
 
 type MergeUnitIntegrationIntentOptions struct {
-	WorkspaceID            ID
-	Generation             Digest
-	AttemptID              ID
-	MergeUnit              MergeUnitReference
-	FeatureRef             string
-	ExpectedFeatureHead    GitObjectID
-	ExpectedFeatureMarker  string
-	AttemptWorktreeBinding AttemptWorktreeGitBinding
-	AcceptedHead           GitObjectID
-	AcceptedTree           GitObjectID
-	ReviewReadinessDigest  Digest
-	AdoptedHeadEventDigest Digest
-	OccurredAt             time.Time
+	WorkspaceID              ID
+	Generation               Digest
+	AttemptID                ID
+	MergeUnit                MergeUnitReference
+	FeatureRef               string
+	ExpectedFeatureHead      GitObjectID
+	ExpectedFeatureRefAbsent bool
+	AttemptWorktreeBinding   AttemptWorktreeGitBinding
+	AcceptedHead             GitObjectID
+	AcceptedTree             GitObjectID
+	ReviewReadinessDigest    Digest
+	AdoptedHeadEventDigest   Digest
+	OccurredAt               time.Time
 }
 
 // MergeUnitIntegrationIntent is the complete deterministic input to one
 // local two-parent integration commit. It is journaled before either the
 // commit object or feature-ref update is allowed.
 type MergeUnitIntegrationIntent struct {
-	workspaceID            ID
-	generation             Digest
-	attemptID              ID
-	mergeUnit              MergeUnitReference
-	featureRef             string
-	expectedFeatureHead    GitObjectID
-	expectedFeatureMarker  string
-	attemptWorktreeBinding AttemptWorktreeGitBinding
-	acceptedHead           GitObjectID
-	acceptedTree           GitObjectID
-	acceptanceMode         IntegrationAcceptanceMode
-	reviewReadinessDigest  Digest
-	adoptedHeadEventDigest Digest
-	parents                [2]GitObjectID
-	message                string
-	authorName             string
-	authorEmail            string
-	authorAt               time.Time
-	committerName          string
-	committerEmail         string
-	committerAt            time.Time
-	expectedMerge          GitObjectID
-	digest                 Digest
+	workspaceID              ID
+	generation               Digest
+	attemptID                ID
+	mergeUnit                MergeUnitReference
+	featureRef               string
+	expectedFeatureHead      GitObjectID
+	expectedFeatureRefAbsent bool
+	attemptWorktreeBinding   AttemptWorktreeGitBinding
+	acceptedHead             GitObjectID
+	acceptedTree             GitObjectID
+	acceptanceMode           IntegrationAcceptanceMode
+	reviewReadinessDigest    Digest
+	adoptedHeadEventDigest   Digest
+	parents                  [2]GitObjectID
+	message                  string
+	authorName               string
+	authorEmail              string
+	authorAt                 time.Time
+	committerName            string
+	committerEmail           string
+	committerAt              time.Time
+	expectedMerge            GitObjectID
+	digest                   Digest
 }
 
 func NewMergeUnitIntegrationIntent(
@@ -98,16 +98,6 @@ func NewMergeUnitIntegrationIntent(
 			"integration may update only a feature branch ref",
 		)
 	}
-	expectedFeatureMarker := strings.TrimSpace(
-		options.ExpectedFeatureMarker,
-	)
-	if expectedFeatureMarker == "" ||
-		expectedFeatureMarker != options.ExpectedFeatureMarker ||
-		strings.ContainsAny(expectedFeatureMarker, "\x00\r\n") {
-		return MergeUnitIntegrationIntent{}, fmt.Errorf(
-			"integration requires an exact prior feature-ref marker",
-		)
-	}
 	algorithm := options.ExpectedFeatureHead.Algorithm()
 	if options.AcceptedHead.Algorithm() != algorithm ||
 		options.AcceptedTree.Algorithm() != algorithm {
@@ -132,11 +122,11 @@ func NewMergeUnitIntegrationIntent(
 	intent := MergeUnitIntegrationIntent{
 		workspaceID: options.WorkspaceID, generation: options.Generation,
 		attemptID: options.AttemptID, mergeUnit: options.MergeUnit,
-		featureRef:             featureRef,
-		expectedFeatureHead:    options.ExpectedFeatureHead,
-		expectedFeatureMarker:  expectedFeatureMarker,
-		attemptWorktreeBinding: options.AttemptWorktreeBinding,
-		acceptedHead:           options.AcceptedHead, acceptedTree: options.AcceptedTree,
+		featureRef:               featureRef,
+		expectedFeatureHead:      options.ExpectedFeatureHead,
+		expectedFeatureRefAbsent: options.ExpectedFeatureRefAbsent,
+		attemptWorktreeBinding:   options.AttemptWorktreeBinding,
+		acceptedHead:             options.AcceptedHead, acceptedTree: options.AcceptedTree,
 		acceptanceMode:         mode,
 		reviewReadinessDigest:  options.ReviewReadinessDigest,
 		adoptedHeadEventDigest: options.AdoptedHeadEventDigest,
@@ -186,11 +176,8 @@ func (intent MergeUnitIntegrationIntent) FeatureRef() string {
 func (intent MergeUnitIntegrationIntent) ExpectedFeatureHead() GitObjectID {
 	return intent.expectedFeatureHead
 }
-func (intent MergeUnitIntegrationIntent) ExpectedFeatureMarker() string {
-	return intent.expectedFeatureMarker
-}
-func (intent MergeUnitIntegrationIntent) AttemptWorktreeBinding() AttemptWorktreeGitBinding {
-	return intent.attemptWorktreeBinding
+func (intent MergeUnitIntegrationIntent) ExpectedFeatureRefAbsent() bool {
+	return intent.expectedFeatureRefAbsent
 }
 func (intent MergeUnitIntegrationIntent) AcceptedHead() GitObjectID {
 	return intent.acceptedHead
@@ -265,7 +252,6 @@ func (intent MergeUnitIntegrationIntent) validate() error {
 		intent.attemptID.IsZero() || intent.mergeUnit.planID.IsZero() ||
 		intent.mergeUnit.mergeUnitID.IsZero() ||
 		intent.expectedFeatureHead.IsZero() ||
-		intent.expectedFeatureMarker == "" ||
 		intent.attemptWorktreeBinding.IsZero() ||
 		intent.acceptedHead.IsZero() || intent.acceptedTree.IsZero() ||
 		intent.expectedMerge.IsZero() || intent.digest.IsZero() ||
@@ -275,13 +261,6 @@ func (intent MergeUnitIntegrationIntent) validate() error {
 	if intent.featureRef == "" ||
 		!strings.HasPrefix(intent.featureRef, "refs/heads/feature/") {
 		return fmt.Errorf("integration intent has an invalid feature ref")
-	}
-	if strings.TrimSpace(intent.expectedFeatureMarker) !=
-		intent.expectedFeatureMarker ||
-		strings.ContainsAny(intent.expectedFeatureMarker, "\x00\r\n") {
-		return fmt.Errorf(
-			"integration intent has an invalid prior feature-ref marker",
-		)
 	}
 	if err := intent.attemptWorktreeBinding.validate(); err != nil {
 		return err
@@ -372,45 +351,45 @@ func canonicalIntegrationMessage(
 }
 
 type integrationIntentDigestWire struct {
-	SchemaVersion          int                           `json:"schema_version"`
-	WorkspaceID            string                        `json:"workspace_id"`
-	Generation             string                        `json:"generation"`
-	AttemptID              string                        `json:"attempt_id"`
-	PlanID                 string                        `json:"plan_id"`
-	MergeUnitID            string                        `json:"merge_unit_id"`
-	FeatureRef             string                        `json:"feature_ref"`
-	ExpectedFeatureHead    string                        `json:"expected_feature_head"`
-	ExpectedFeatureMarker  string                        `json:"expected_feature_marker"`
-	AttemptWorktreeBinding attemptWorktreeGitBindingWire `json:"attempt_worktree_binding"`
-	AcceptedHead           string                        `json:"accepted_head"`
-	AcceptedTree           string                        `json:"accepted_tree"`
-	AcceptanceMode         IntegrationAcceptanceMode     `json:"acceptance_mode"`
-	ReviewReadinessDigest  string                        `json:"review_readiness_digest,omitempty"`
-	AdoptedHeadEventDigest string                        `json:"adopted_head_event_digest,omitempty"`
-	Parents                []string                      `json:"parents"`
-	Message                string                        `json:"message"`
-	AuthorName             string                        `json:"author_name"`
-	AuthorEmail            string                        `json:"author_email"`
-	AuthorAt               string                        `json:"author_at"`
-	CommitterName          string                        `json:"committer_name"`
-	CommitterEmail         string                        `json:"committer_email"`
-	CommitterAt            string                        `json:"committer_at"`
-	ExpectedMerge          string                        `json:"expected_merge"`
+	SchemaVersion            int                           `json:"schema_version"`
+	WorkspaceID              string                        `json:"workspace_id"`
+	Generation               string                        `json:"generation"`
+	AttemptID                string                        `json:"attempt_id"`
+	PlanID                   string                        `json:"plan_id"`
+	MergeUnitID              string                        `json:"merge_unit_id"`
+	FeatureRef               string                        `json:"feature_ref"`
+	ExpectedFeatureHead      string                        `json:"expected_feature_head"`
+	ExpectedFeatureRefAbsent bool                          `json:"expected_feature_ref_absent"`
+	AttemptWorktreeBinding   attemptWorktreeGitBindingWire `json:"attempt_worktree_binding"`
+	AcceptedHead             string                        `json:"accepted_head"`
+	AcceptedTree             string                        `json:"accepted_tree"`
+	AcceptanceMode           IntegrationAcceptanceMode     `json:"acceptance_mode"`
+	ReviewReadinessDigest    string                        `json:"review_readiness_digest,omitempty"`
+	AdoptedHeadEventDigest   string                        `json:"adopted_head_event_digest,omitempty"`
+	Parents                  []string                      `json:"parents"`
+	Message                  string                        `json:"message"`
+	AuthorName               string                        `json:"author_name"`
+	AuthorEmail              string                        `json:"author_email"`
+	AuthorAt                 string                        `json:"author_at"`
+	CommitterName            string                        `json:"committer_name"`
+	CommitterEmail           string                        `json:"committer_email"`
+	CommitterAt              string                        `json:"committer_at"`
+	ExpectedMerge            string                        `json:"expected_merge"`
 }
 
 func integrationIntentDigestValue(
 	intent MergeUnitIntegrationIntent,
 ) integrationIntentDigestWire {
 	return integrationIntentDigestWire{
-		SchemaVersion:         JournalSchemaVersion,
-		WorkspaceID:           intent.workspaceID.String(),
-		Generation:            intent.generation.String(),
-		AttemptID:             intent.attemptID.String(),
-		PlanID:                intent.mergeUnit.planID.String(),
-		MergeUnitID:           intent.mergeUnit.mergeUnitID.String(),
-		FeatureRef:            intent.featureRef,
-		ExpectedFeatureHead:   intent.expectedFeatureHead.String(),
-		ExpectedFeatureMarker: intent.expectedFeatureMarker,
+		SchemaVersion:            JournalSchemaVersion,
+		WorkspaceID:              intent.workspaceID.String(),
+		Generation:               intent.generation.String(),
+		AttemptID:                intent.attemptID.String(),
+		PlanID:                   intent.mergeUnit.planID.String(),
+		MergeUnitID:              intent.mergeUnit.mergeUnitID.String(),
+		FeatureRef:               intent.featureRef,
+		ExpectedFeatureHead:      intent.expectedFeatureHead.String(),
+		ExpectedFeatureRefAbsent: intent.expectedFeatureRefAbsent,
 		AttemptWorktreeBinding: attemptWorktreeGitBindingToWire(
 			intent.attemptWorktreeBinding,
 		),
@@ -466,18 +445,16 @@ func gitCommitObjectID(
 type IntegrationRefState string
 
 const (
+	IntegrationRefExpectedAbsent  IntegrationRefState = "expected_absent"
 	IntegrationRefExpectedHead    IntegrationRefState = "expected_head"
 	IntegrationRefExpectedMerge   IntegrationRefState = "expected_merge"
-	IntegrationRefAncestorDrift   IntegrationRefState = "ancestor_drift"
-	IntegrationRefDescendantDrift IntegrationRefState = "descendant_drift"
-	IntegrationRefUnrelatedDrift  IntegrationRefState = "unrelated_drift"
+	IntegrationRefUnexpectedDrift IntegrationRefState = "unexpected_drift"
 )
 
 func (state IntegrationRefState) valid() bool {
 	switch state {
-	case IntegrationRefExpectedHead, IntegrationRefExpectedMerge,
-		IntegrationRefAncestorDrift, IntegrationRefDescendantDrift,
-		IntegrationRefUnrelatedDrift:
+	case IntegrationRefExpectedAbsent, IntegrationRefExpectedHead, IntegrationRefExpectedMerge,
+		IntegrationRefUnexpectedDrift:
 		return true
 	default:
 		return false
@@ -495,7 +472,8 @@ func NewIntegrationGitInspection(
 	refState IntegrationRefState,
 	expectedCommit bool,
 ) (IntegrationGitInspection, error) {
-	if featureHead.IsZero() || !refState.valid() {
+	if !refState.valid() ||
+		(refState != IntegrationRefExpectedAbsent && featureHead.IsZero()) {
 		return IntegrationGitInspection{}, fmt.Errorf(
 			"integration Git inspection requires a feature head and ref state",
 		)
@@ -510,18 +488,11 @@ func NewIntegrationGitInspection(
 func (inspection IntegrationGitInspection) FeatureHead() GitObjectID {
 	return inspection.featureHead
 }
-func (inspection IntegrationGitInspection) RefState() IntegrationRefState {
-	return inspection.refState
-}
-func (inspection IntegrationGitInspection) ExpectedCommitExists() bool {
-	return inspection.expectedCommit
-}
 
 type IntegrationGitPort interface {
 	InspectAttempt(
 		context.Context,
 		LocalTargetBinding,
-		string,
 		string,
 		GitObjectID,
 		GitObjectID,
@@ -529,19 +500,16 @@ type IntegrationGitPort interface {
 	InspectIntegration(
 		context.Context,
 		LocalTargetBinding,
-		string,
 		MergeUnitIntegrationIntent,
 	) (IntegrationGitInspection, error)
 	CreateIntegrationCommit(
 		context.Context,
 		LocalTargetBinding,
-		string,
 		MergeUnitIntegrationIntent,
 	) error
 	PublishIntegration(
 		context.Context,
 		LocalTargetBinding,
-		string,
 		MergeUnitIntegrationIntent,
 		IntegrationLifecycleFaultInjector,
 	) error
@@ -561,14 +529,8 @@ type RuntimeIntegrationProjection struct {
 func (projection RuntimeIntegrationProjection) Intent() MergeUnitIntegrationIntent {
 	return projection.intent
 }
-func (projection RuntimeIntegrationProjection) IntentRecord() uint64 {
-	return projection.intentRecord
-}
 func (projection RuntimeIntegrationProjection) Integrated() bool {
 	return projection.integratedRecord != 0
-}
-func (projection RuntimeIntegrationProjection) IntegratedRecord() uint64 {
-	return projection.integratedRecord
 }
 func (projection RuntimeIntegrationProjection) MergeCommit() GitObjectID {
 	return projection.intent.expectedMerge

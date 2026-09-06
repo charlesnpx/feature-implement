@@ -2,6 +2,7 @@ package workspace_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -10,71 +11,86 @@ import (
 	"testing"
 
 	"github.com/charlesnpx/feature-implement/internal/workspace"
+	"github.com/charlesnpx/feature-implement/internal/workspacecmd"
 )
 
 type integrationGitStub struct {
-	featureHead    workspace.GitObjectID
-	expectedCommit bool
-	inspectCalls   int
-	createCalls    int
-	publishCalls   int
-	verifyCalls    int
-	verifiedStart  workspace.GitObjectID
-	verifiedEnd    workspace.GitObjectID
-	forcedState    workspace.IntegrationRefState
+	featureHead       workspace.GitObjectID
+	featureRefPresent bool
+	expectedCommit    bool
+	inspectCalls      int
+	createCalls       int
+	publishCalls      int
+	verifyCalls       int
+	verifiedStart     workspace.GitObjectID
+	verifiedEnd       workspace.GitObjectID
+	forcedState       workspace.IntegrationRefState
 }
 
 type concurrentIntegrationGitStub struct {
-	mu             sync.Mutex
-	featureHead    workspace.GitObjectID
-	initialSeen    map[string]bool
-	initialCount   int
-	initialRelease chan struct{}
-	objects        map[string]bool
+	mu                sync.Mutex
+	featureHead       workspace.GitObjectID
+	featureRefPresent bool
+	initialSeen       map[string]bool
+	initialCount      int
+	initialRelease    chan struct{}
+	objects           map[string]bool
 }
 
 func (git *integrationGitStub) InspectAttempt(
 	_ context.Context,
 	target workspace.LocalTargetBinding,
-	worktree, branch string,
+	worktree string,
 	expectedHead, expectedTree workspace.GitObjectID,
 ) (workspace.AttemptGitInspection, error) {
 	return stubIntegrationAttemptInspection(
-		target, worktree, branch, expectedHead, expectedTree,
+		target, worktree, expectedHead, expectedTree,
 	)
 }
 
 func (git *integrationGitStub) InspectIntegration(
 	_ context.Context,
 	_ workspace.LocalTargetBinding,
-	_ string,
 	intent workspace.MergeUnitIntegrationIntent,
 ) (workspace.IntegrationGitInspection, error) {
 	git.inspectCalls++
 	state := git.forcedState
 	if state == "" {
-		switch git.featureHead {
-		case intent.ExpectedFeatureHead():
-			state = workspace.IntegrationRefExpectedHead
-		case intent.ExpectedMerge():
-			state = workspace.IntegrationRefExpectedMerge
-		default:
-			state = workspace.IntegrationRefUnrelatedDrift
+		if !git.featureRefPresent {
+			if intent.ExpectedFeatureRefAbsent() {
+				state = workspace.IntegrationRefExpectedAbsent
+			} else {
+				state = workspace.IntegrationRefUnexpectedDrift
+			}
+		} else {
+			switch git.featureHead {
+			case intent.ExpectedFeatureHead():
+				state = workspace.IntegrationRefExpectedHead
+			case intent.ExpectedMerge():
+				state = workspace.IntegrationRefExpectedMerge
+			default:
+				state = workspace.IntegrationRefUnexpectedDrift
+			}
 		}
 	}
+	featureHead := git.featureHead
+	if !git.featureRefPresent {
+		featureHead = workspace.GitObjectID{}
+	}
 	return workspace.NewIntegrationGitInspection(
-		git.featureHead, state, git.expectedCommit,
+		featureHead, state, git.expectedCommit,
 	)
 }
 
 func (git *integrationGitStub) CreateIntegrationCommit(
 	_ context.Context,
 	_ workspace.LocalTargetBinding,
-	_ string,
 	intent workspace.MergeUnitIntegrationIntent,
 ) error {
 	git.createCalls++
-	if git.featureHead != intent.ExpectedFeatureHead() {
+	if (intent.ExpectedFeatureRefAbsent() && git.featureRefPresent) ||
+		(!intent.ExpectedFeatureRefAbsent() && !git.featureRefPresent) ||
+		git.featureHead != intent.ExpectedFeatureHead() {
 		return errors.New("stub feature head moved before commit creation")
 	}
 	git.expectedCommit = true
@@ -84,12 +100,13 @@ func (git *integrationGitStub) CreateIntegrationCommit(
 func (git *integrationGitStub) PublishIntegration(
 	_ context.Context,
 	_ workspace.LocalTargetBinding,
-	_ string,
 	intent workspace.MergeUnitIntegrationIntent,
 	fault workspace.IntegrationLifecycleFaultInjector,
 ) error {
 	git.publishCalls++
-	if git.featureHead != intent.ExpectedFeatureHead() ||
+	if (intent.ExpectedFeatureRefAbsent() && git.featureRefPresent) ||
+		(!intent.ExpectedFeatureRefAbsent() && !git.featureRefPresent) ||
+		git.featureHead != intent.ExpectedFeatureHead() ||
 		!git.expectedCommit {
 		return errors.New("stub integration publication precondition failed")
 	}
@@ -105,6 +122,7 @@ func (git *integrationGitStub) PublishIntegration(
 		}
 	}
 	git.featureHead = intent.ExpectedMerge()
+	git.featureRefPresent = true
 	return nil
 }
 
@@ -121,7 +139,7 @@ func (git *integrationGitStub) VerifyCompletedIntegration(
 	git.verifyCalls++
 	git.verifiedStart = chain[0].ExpectedMerge()
 	git.verifiedEnd = chain[len(chain)-1].ExpectedMerge()
-	if git.featureHead != git.verifiedEnd ||
+	if !git.featureRefPresent || git.featureHead != git.verifiedEnd ||
 		!git.expectedCommit {
 		return errors.New(
 			"stub completed integration verification failed",
@@ -133,18 +151,17 @@ func (git *integrationGitStub) VerifyCompletedIntegration(
 func (git *concurrentIntegrationGitStub) InspectAttempt(
 	_ context.Context,
 	target workspace.LocalTargetBinding,
-	worktree, branch string,
+	worktree string,
 	expectedHead, expectedTree workspace.GitObjectID,
 ) (workspace.AttemptGitInspection, error) {
 	return stubIntegrationAttemptInspection(
-		target, worktree, branch, expectedHead, expectedTree,
+		target, worktree, expectedHead, expectedTree,
 	)
 }
 
 func (git *concurrentIntegrationGitStub) InspectIntegration(
 	_ context.Context,
 	_ workspace.LocalTargetBinding,
-	_ string,
 	intent workspace.MergeUnitIntegrationIntent,
 ) (workspace.IntegrationGitInspection, error) {
 	key := intent.AttemptID().String()
@@ -158,6 +175,13 @@ func (git *concurrentIntegrationGitStub) InspectIntegration(
 		release := git.initialRelease
 		git.mu.Unlock()
 		<-release
+		if intent.ExpectedFeatureRefAbsent() {
+			return workspace.NewIntegrationGitInspection(
+				workspace.GitObjectID{},
+				workspace.IntegrationRefExpectedAbsent,
+				false,
+			)
+		}
 		return workspace.NewIntegrationGitInspection(
 			intent.ExpectedFeatureHead(),
 			workspace.IntegrationRefExpectedHead,
@@ -165,14 +189,22 @@ func (git *concurrentIntegrationGitStub) InspectIntegration(
 		)
 	}
 	head := git.featureHead
+	present := git.featureRefPresent
 	objectExists := git.objects[intent.Digest().String()]
 	git.mu.Unlock()
-	state := workspace.IntegrationRefUnrelatedDrift
-	switch head {
-	case intent.ExpectedFeatureHead():
-		state = workspace.IntegrationRefExpectedHead
-	case intent.ExpectedMerge():
-		state = workspace.IntegrationRefExpectedMerge
+	state := workspace.IntegrationRefUnexpectedDrift
+	if !present {
+		if intent.ExpectedFeatureRefAbsent() {
+			state = workspace.IntegrationRefExpectedAbsent
+		}
+		head = workspace.GitObjectID{}
+	} else {
+		switch head {
+		case intent.ExpectedFeatureHead():
+			state = workspace.IntegrationRefExpectedHead
+		case intent.ExpectedMerge():
+			state = workspace.IntegrationRefExpectedMerge
+		}
 	}
 	return workspace.NewIntegrationGitInspection(
 		head, state, objectExists,
@@ -181,29 +213,28 @@ func (git *concurrentIntegrationGitStub) InspectIntegration(
 
 func stubIntegrationAttemptInspection(
 	target workspace.LocalTargetBinding,
-	worktree, branch string,
+	worktree string,
 	expectedHead, expectedTree workspace.GitObjectID,
 ) (workspace.AttemptGitInspection, error) {
+	_ = target
 	binding, err := workspace.NewAttemptWorktreeGitBinding(
 		workspace.AttemptWorktreeGitBindingOptions{
-			Worktree: worktree,
-			GitDirectory: filepath.Join(
-				target.CommonDirectory(), "worktrees", branch,
-			),
-			CommonDirectory: target.CommonDirectory(),
+			Worktree:        worktree,
+			GitDirectory:    filepath.Join(worktree, ".git"),
+			CommonDirectory: filepath.Join(worktree, ".git"),
 			AdministrationDigest: workspace.DigestBytes(
-				[]byte("stub administration " + worktree),
+				[]byte("scratch administration " + worktree),
 			),
 			ConfigurationDigest: workspace.DigestBytes(
-				[]byte("stub configuration " + worktree),
+				[]byte("scratch configuration " + worktree),
 			),
 		},
 	)
 	if err != nil {
 		return workspace.AttemptGitInspection{}, err
 	}
-	return workspace.NewBoundAttemptGitInspection(
-		expectedHead, branch, expectedHead, expectedTree,
+	return workspace.NewScratchAttemptGitInspection(
+		expectedHead, expectedTree,
 		binding, true,
 	)
 }
@@ -211,12 +242,13 @@ func stubIntegrationAttemptInspection(
 func (git *concurrentIntegrationGitStub) CreateIntegrationCommit(
 	_ context.Context,
 	_ workspace.LocalTargetBinding,
-	_ string,
 	intent workspace.MergeUnitIntegrationIntent,
 ) error {
 	git.mu.Lock()
 	defer git.mu.Unlock()
-	if git.featureHead != intent.ExpectedFeatureHead() {
+	if (intent.ExpectedFeatureRefAbsent() && git.featureRefPresent) ||
+		(!intent.ExpectedFeatureRefAbsent() && !git.featureRefPresent) ||
+		git.featureHead != intent.ExpectedFeatureHead() {
 		return errors.New("concurrent feature head moved before commit")
 	}
 	git.objects[intent.Digest().String()] = true
@@ -226,13 +258,14 @@ func (git *concurrentIntegrationGitStub) CreateIntegrationCommit(
 func (git *concurrentIntegrationGitStub) PublishIntegration(
 	_ context.Context,
 	_ workspace.LocalTargetBinding,
-	_ string,
 	intent workspace.MergeUnitIntegrationIntent,
 	fault workspace.IntegrationLifecycleFaultInjector,
 ) error {
 	git.mu.Lock()
 	defer git.mu.Unlock()
-	if git.featureHead != intent.ExpectedFeatureHead() ||
+	if (intent.ExpectedFeatureRefAbsent() && git.featureRefPresent) ||
+		(!intent.ExpectedFeatureRefAbsent() && !git.featureRefPresent) ||
+		git.featureHead != intent.ExpectedFeatureHead() ||
 		!git.objects[intent.Digest().String()] {
 		return errors.New("concurrent publication precondition failed")
 	}
@@ -248,6 +281,7 @@ func (git *concurrentIntegrationGitStub) PublishIntegration(
 		}
 	}
 	git.featureHead = intent.ExpectedMerge()
+	git.featureRefPresent = true
 	return nil
 }
 
@@ -258,7 +292,7 @@ func (git *concurrentIntegrationGitStub) VerifyCompletedIntegration(
 ) error {
 	git.mu.Lock()
 	defer git.mu.Unlock()
-	if len(chain) == 0 ||
+	if len(chain) == 0 || !git.featureRefPresent ||
 		git.featureHead != chain[len(chain)-1].ExpectedMerge() {
 		return errors.New(
 			"concurrent completed integration verification failed",
@@ -279,7 +313,20 @@ type noReviewIntegrationHarness struct {
 	attempt    workspace.RuntimeAttemptProjection
 	repository *reviewRepositoryStub
 	git        *integrationGitStub
-	adoption   workspace.AttemptHeadAdoptionResult
+}
+
+type noReviewIntegrationHarnessSnapshot struct {
+	definition         workspace.EffectiveWorkspaceDefinition
+	workspace          string
+	repositoryRoot     string
+	base               workspace.GitObjectID
+	unit               workspace.MergeUnitReference
+	goal               workspace.GoalBinding
+	attemptID          workspace.ID
+	verifiedHead       workspace.GitObjectID
+	repositorySnapshot workspace.ReviewRepositorySnapshot
+	repositoryImage    string
+	workspaceImage     string
 }
 
 func TestNoReviewIntegrationRequiresDurableSameHeadAdoption(t *testing.T) {
@@ -287,9 +334,6 @@ func TestNoReviewIntegrationRequiresDurableSameHeadAdoption(t *testing.T) {
 
 	harness := newAttemptHarness(t, "unit-one")
 	attempt := harness.reserve(t, "2026-07-25T10:00:00Z")
-	attempt = harness.materialize(
-		t, attempt.AttemptID(), "2026-07-25T10:00:01Z",
-	)
 	tree := mustGitObject(t, 'b')
 	repositorySnapshot, err := workspace.NewReviewRepositorySnapshot(
 		attempt.VerifiedHead(), tree, true,
@@ -343,8 +387,7 @@ func TestNoReviewIntegrationRequiresDurableSameHeadAdoption(t *testing.T) {
 	}
 	if result.Intent().AcceptanceMode() !=
 		workspace.IntegrationAcceptanceAdoptedHead ||
-		result.Intent().AdoptedHeadEventDigest() !=
-			adoption.Record().EventHash() ||
+		result.Intent().AdoptedHeadEventDigest().IsZero() ||
 		!result.Intent().ReviewReadinessDigest().IsZero() {
 		t.Fatalf(
 			"same-head integration acceptance = %#v",
@@ -367,15 +410,12 @@ func TestIntegrationCompletionAccountsForAndReleasesLeaseAndSerialSegment(
 	))
 	fixture.sources.ExecutionConfig.Bytes = []byte(strings.Replace(
 		string(fixture.sources.ExecutionConfig.Bytes),
-		"    boundary:\n      checkpoint: complete_goal_and_wait\n      escalation: allowed",
-		"    boundary:\n      checkpoint: complete_goal_and_wait\n      escalation: allowed\n      serial_segment: serial-alpha",
+		"    boundary:\n      checkpoint: pause_only\n      escalation: allowed\n    policy:\n      require_passing_checks: true\n      allow_write_network: false\n      max_attempts: 2",
+		"    boundary:\n      checkpoint: pause_only\n      escalation: allowed\n      serial_segment: serial-alpha\n    policy:\n      require_passing_checks: true\n      allow_write_network: false\n      max_attempts: 2",
 		1,
 	))
 	core := newAttemptHarnessFromFixture(t, fixture, "unit-one")
 	attempt := core.reserve(t, "2026-07-25T10:10:00Z")
-	attempt = core.materialize(
-		t, attempt.AttemptID(), "2026-07-25T10:10:01Z",
-	)
 	head, tree := mustGitObject(t, 'c'), mustGitObject(t, 'd')
 	repository := adoptedIntegrationRepository(
 		t, core, attempt, head, tree, "2026-07-25T10:10:02Z",
@@ -389,13 +429,7 @@ func TestIntegrationCompletionAccountsForAndReleasesLeaseAndSerialSegment(
 		t.Fatal(err)
 	}
 	attempt, _ = runtime.Attempt(attempt.AttemptID())
-	leaseResource := workspace.LeaseJournalResource(attempt.LeaseID())
-	segmentResource := workspace.SerialSegmentJournalResource(
-		attempt.SerialSegment(),
-	)
-	leaseRevision := snapshot.Revision(leaseResource)
-	segmentRevision := snapshot.Revision(segmentResource)
-	result, err := workspace.IntegrateMergeUnit(
+	_, err = workspace.IntegrateMergeUnit(
 		context.Background(), core.journal, core.definition,
 		repository, &integrationGitStub{featureHead: core.base},
 		workspace.IntegrateMergeUnitRequest{
@@ -406,45 +440,9 @@ func TestIntegrationCompletionAccountsForAndReleasesLeaseAndSerialSegment(
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertResourceRevision := func(
-		resource workspace.JournalResource,
-		revision uint64,
-	) {
-		t.Helper()
-		foundRead, foundWrite := false, false
-		for _, binding := range result.Record().ReadSet() {
-			if binding.Resource() == resource &&
-				binding.Revision() == revision {
-				foundRead = true
-			}
-		}
-		for _, written := range result.Record().WriteSet() {
-			if written == resource {
-				foundWrite = true
-			}
-		}
-		if !foundRead || !foundWrite {
-			t.Fatalf(
-				"integration completion resource %s/%s read=%t write=%t",
-				resource.Kind(), resource.Identity(),
-				foundRead, foundWrite,
-			)
-		}
-	}
-	assertResourceRevision(leaseResource, leaseRevision)
-	assertResourceRevision(segmentResource, segmentRevision)
 	completedSnapshot, err := core.journal.ReadSnapshot()
 	if err != nil {
 		t.Fatal(err)
-	}
-	if completedSnapshot.Revision(leaseResource) != leaseRevision+1 ||
-		completedSnapshot.Revision(segmentResource) !=
-			segmentRevision+1 {
-		t.Fatalf(
-			"integration completion revisions: lease=%d segment=%d",
-			completedSnapshot.Revision(leaseResource),
-			completedSnapshot.Revision(segmentResource),
-		)
 	}
 	completedRuntime, err := workspace.RebuildWorkspaceRuntime(
 		completedSnapshot,
@@ -473,78 +471,54 @@ func TestIntegrationCompletionAccountsForAndReleasesLeaseAndSerialSegment(
 	}
 }
 
-func TestConfiguredCommitProtocolRequiresDurableSameHeadAdoption(
-	t *testing.T,
-) {
+func TestIntegrationDoesNotRunConfiguredChecksAfterIntent(t *testing.T) {
 	t.Parallel()
 
-	scenario := newJournalCommitScenario(t)
-	committed, err := workspace.ExecuteAttemptCommitStep(
-		context.Background(),
-		scenario.harness.journal,
-		scenario.harness.definition,
-		scenario.shell,
-		scenario.request,
-	)
+	core := newAttemptHarnessFromFixture(t, configuredCommitProtocolFixture(t), "unit-one")
+	attempt := core.reserve(t, "2026-07-25T10:30:00Z")
+	tree := mustGitObject(t, 'b')
+	snapshot, err := workspace.NewReviewRepositorySnapshot(attempt.VerifiedHead(), tree, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	attempt := committed.Attempt()
-	protocol, configured := committed.Protocol()
-	if !configured ||
-		protocol.Phase() != workspace.CommitProtocolComplete ||
-		attempt.VerifiedHead() != scenario.commit {
-		t.Fatalf(
-			"completed configured protocol = %#v configured=%t attempt=%#v",
-			protocol, configured, attempt,
-		)
+	repository := &reviewRepositoryStub{
+		snapshot: snapshot,
+		finalHistory: func(run int) error {
+			if run > 2 {
+				return errors.New("configured check full-suite did not exit zero")
+			}
+			return nil
+		},
 	}
-	repositorySnapshot, err := workspace.NewReviewRepositorySnapshot(
-		scenario.commit, scenario.git.commit.Tree(), true,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository := &reviewRepositoryStub{snapshot: repositorySnapshot}
-	adoption, err := workspace.AdoptAttemptHead(
-		context.Background(),
-		scenario.harness.journal,
-		scenario.harness.definition,
-		repository,
+	if _, err := workspace.AdoptAttemptHead(
+		context.Background(), core.journal, core.definition, repository,
 		workspace.AdoptAttemptHeadRequest{
-			AttemptID:  attempt.AttemptID(),
-			OccurredAt: mustTime(t, "2026-07-25T10:30:00Z"),
+			AttemptID: attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-25T10:30:01Z"),
 		},
-	)
-	if err != nil || !adoption.Adopted() ||
-		adoption.Head() != scenario.commit ||
-		adoption.Record().Sequence() == 0 {
-		t.Fatalf(
-			"configured-protocol same-head adoption = %#v error=%v",
-			adoption, err,
-		)
+	); err != nil {
+		t.Fatalf("adopt configured final history: %v", err)
 	}
-	git := &integrationGitStub{featureHead: scenario.harness.base}
+	if repository.finalHistoryRuns != 1 {
+		t.Fatalf("head adoption final-history runs = %d, want 1", repository.finalHistoryRuns)
+	}
+
+	git := &integrationGitStub{featureHead: core.base}
 	result, err := workspace.IntegrateMergeUnit(
-		context.Background(),
-		scenario.harness.journal,
-		scenario.harness.definition,
-		repository,
-		git,
+		context.Background(), core.journal, core.definition, repository, git,
 		workspace.IntegrateMergeUnitRequest{
-			AttemptID:  attempt.AttemptID(),
-			OccurredAt: mustTime(t, "2026-07-25T10:30:01Z"),
+			AttemptID: attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-25T10:30:02Z"),
 		},
 	)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("integration with post-intent check failure = %v", err)
 	}
-	if result.Intent().AdoptedHeadEventDigest() !=
-		adoption.Record().EventHash() ||
-		result.Intent().AcceptedHead() != scenario.commit {
+	if result.Attempt().Phase() != workspace.AttemptCompleted {
+		t.Fatalf("integration did not complete after pre-intent checks: %#v", result.Attempt())
+	}
+	if repository.finalHistoryRuns != 2 || git.createCalls != 1 || git.publishCalls != 1 {
 		t.Fatalf(
-			"configured-protocol integration acceptance = %#v",
-			result.Intent(),
+			"integration ran configured checks=%d creates=%d publishes=%d",
+			repository.finalHistoryRuns, git.createCalls, git.publishCalls,
 		)
 	}
 }
@@ -565,6 +539,7 @@ func TestIntegrationRecoversEveryDurableEffectBoundaryDeterministically(
 		workspace.IntegrationFaultBeforeCompletion,
 		workspace.IntegrationFaultAfterCompletion,
 	}
+	snapshot := snapshotNoReviewIntegrationHarness(t, newNoReviewIntegrationHarness(t, false))
 	for _, point := range points {
 		t.Run(string(point), func(t *testing.T) {
 			requireFullSuiteCase(
@@ -574,7 +549,7 @@ func TestIntegrationRecoversEveryDurableEffectBoundaryDeterministically(
 				"intermediate integration durability boundary",
 			)
 
-			harness := newNoReviewIntegrationHarness(t, false)
+			harness := snapshot.restore(t)
 			_, err := workspace.IntegrateMergeUnit(
 				context.Background(),
 				harness.journal,
@@ -699,21 +674,11 @@ func TestPendingIntegrationIntentSerializesOtherMergeUnits(t *testing.T) {
 
 	firstCore := newIndependentAttemptHarness(t, "unit-one")
 	first := firstCore.reserve(t, "2026-07-25T12:30:00Z")
-	first = firstCore.materialize(
-		t, first.AttemptID(), "2026-07-25T12:30:01Z",
-	)
 	secondCore := firstCore
 	secondCore.unit = mustMergeUnitReference(
 		t, "alpha-plan", "unit-two",
 	)
 	second := secondCore.reserve(t, "2026-07-25T12:30:02Z")
-	secondCore.git.inspection, _ = workspace.NewAttemptGitInspection(
-		false, workspace.GitObjectID{}, false, false, "",
-		workspace.GitObjectID{}, false,
-	)
-	second = secondCore.materialize(
-		t, second.AttemptID(), "2026-07-25T12:30:03Z",
-	)
 	firstRepository := adoptedIntegrationRepository(
 		t, firstCore, first, mustGitObject(t, 'c'),
 		mustGitObject(t, 'd'), "2026-07-25T12:30:04Z",
@@ -753,12 +718,12 @@ func TestPendingIntegrationIntentSerializesOtherMergeUnits(t *testing.T) {
 	if journalRecordCount(t, firstCore.journal) != before {
 		t.Fatal("rejected concurrent integration appended journal state")
 	}
-	replayedReservation, err := workspace.ReserveAttempt(
+	replayedReservation, err := workspace.StartAttempt(
 		context.Background(),
 		firstCore.journal,
 		firstCore.definition,
 		secondCore.git,
-		workspace.ReserveAttemptRequest{
+		workspace.StartAttemptRequest{
 			MergeUnit:     second.MergeUnit(),
 			AttemptNumber: second.AttemptNumber(),
 			Goal:          second.Goal(),
@@ -781,12 +746,12 @@ func TestPendingIntegrationIntentSerializesOtherMergeUnits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := workspace.ReserveAttempt(
+	if _, err := workspace.StartAttempt(
 		context.Background(),
 		firstCore.journal,
 		firstCore.definition,
 		secondCore.git,
-		workspace.ReserveAttemptRequest{
+		workspace.StartAttemptRequest{
 			MergeUnit:     second.MergeUnit(),
 			AttemptNumber: 2,
 			Goal:          replacementGoal,
@@ -823,21 +788,11 @@ func TestConcurrentIntegrationsPublishExactlyOneIntent(t *testing.T) {
 
 	firstCore := newIndependentAttemptHarness(t, "unit-one")
 	first := firstCore.reserve(t, "2026-07-25T12:45:00Z")
-	first = firstCore.materialize(
-		t, first.AttemptID(), "2026-07-25T12:45:01Z",
-	)
 	secondCore := firstCore
 	secondCore.unit = mustMergeUnitReference(
 		t, "alpha-plan", "unit-two",
 	)
 	second := secondCore.reserve(t, "2026-07-25T12:45:02Z")
-	secondCore.git.inspection, _ = workspace.NewAttemptGitInspection(
-		false, workspace.GitObjectID{}, false, false, "",
-		workspace.GitObjectID{}, false,
-	)
-	second = secondCore.materialize(
-		t, second.AttemptID(), "2026-07-25T12:45:03Z",
-	)
 	firstRepository := adoptedIntegrationRepository(
 		t, firstCore, first, mustGitObject(t, 'c'),
 		mustGitObject(t, 'd'), "2026-07-25T12:45:04Z",
@@ -941,17 +896,25 @@ func TestConcurrentIntegrationsPublishExactlyOneIntent(t *testing.T) {
 			superseded, exists,
 		)
 	}
-	if revision := snapshot.Revision(
-		workspace.LeaseJournalResource(loser.LeaseID()),
-	); revision == 0 {
-		t.Fatal("concurrent loser lease resource was not released")
-	}
-	scheduler, err := workspace.RebuildSchedulerView(
+	view, err := workspace.RebuildWorkspaceView(
 		snapshot, firstCore.definition,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	viewHasSupersededAttempt := false
+	for _, candidate := range view.Attempts {
+		if candidate.AttemptID == loser.AttemptID().String() {
+			viewHasSupersededAttempt = candidate.Phase == workspace.AttemptSuperseded
+		}
+	}
+	if !viewHasSupersededAttempt {
+		t.Fatalf("workspace view omits superseded concurrent loser: %#v", view.Attempts)
+	}
+	if err := validatePublishedWorkspaceAttemptSchema(view, loser.AttemptID()); err != nil {
+		t.Fatalf("published workspace schema rejects reachable superseded view: %v", err)
+	}
+	scheduler := view.Scheduler
 	loserReady := false
 	for _, unit := range scheduler.Units {
 		if unit.PlanID == loser.MergeUnit().PlanID().String() &&
@@ -970,12 +933,12 @@ func TestConcurrentIntegrationsPublishExactlyOneIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	replacement, err := workspace.ReserveAttempt(
+	replacement, err := workspace.StartAttempt(
 		context.Background(),
 		firstCore.journal,
 		firstCore.definition,
 		loserCore.git,
-		workspace.ReserveAttemptRequest{
+		workspace.StartAttemptRequest{
 			MergeUnit:     loser.MergeUnit(),
 			AttemptNumber: 2,
 			Goal:          replacementGoal,
@@ -993,195 +956,131 @@ func TestConcurrentIntegrationsPublishExactlyOneIntent(t *testing.T) {
 	}
 }
 
-func TestIntegrationMakesReviewExhaustedLoserRetryableAtNewFrontier(
+func validatePublishedWorkspaceAttemptSchema(view workspace.WorkspaceView, attemptID workspace.ID) error {
+	var selected *workspace.WorkspaceAttempt
+	for index := range view.Attempts {
+		if view.Attempts[index].AttemptID == attemptID.String() {
+			selected = &view.Attempts[index]
+			break
+		}
+	}
+	if selected == nil {
+		return fmt.Errorf("workspace view has no attempt %s", attemptID)
+	}
+	viewSchema := workspacecmd.WorkspaceViewSchema()
+	properties := viewSchema["properties"].(map[string]any)
+	attemptSchema := properties["attempts"].(map[string]any)["items"].(map[string]any)
+	encoded, err := json.Marshal(selected)
+	if err != nil {
+		return err
+	}
+	var value any
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		return err
+	}
+	return validatePublishedSchemaValue(attemptSchema, value, "attempt")
+}
+
+func validatePublishedSchemaValue(schema map[string]any, value any, path string) error {
+	if enum, exists := schema["enum"].([]string); exists {
+		actual, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("%s enum value is %T", path, value)
+		}
+		for _, allowed := range enum {
+			if actual == allowed {
+				break
+			}
+			if allowed == enum[len(enum)-1] {
+				return fmt.Errorf("%s value %q is outside enum %q", path, actual, enum)
+			}
+		}
+	}
+	switch schema["type"] {
+	case "object":
+		object, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s is %T, want object", path, value)
+		}
+		for _, required := range schema["required"].([]string) {
+			if _, exists := object[required]; !exists {
+				return fmt.Errorf("%s omits required field %q", path, required)
+			}
+		}
+		properties := schema["properties"].(map[string]any)
+		for name, field := range object {
+			fieldSchema, known := properties[name]
+			if !known {
+				if schema["additionalProperties"] == false {
+					return fmt.Errorf("%s has unknown field %q", path, name)
+				}
+				continue
+			}
+			if err := validatePublishedSchemaValue(fieldSchema.(map[string]any), field, path+"."+name); err != nil {
+				return err
+			}
+		}
+	case "array":
+		array, ok := value.([]any)
+		if !ok {
+			return fmt.Errorf("%s is %T, want array", path, value)
+		}
+		itemSchema := schema["items"].(map[string]any)
+		for index, item := range array {
+			if err := validatePublishedSchemaValue(itemSchema, item, fmt.Sprintf("%s[%d]", path, index)); err != nil {
+				return err
+			}
+		}
+	case "string":
+		text, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("%s is %T, want string", path, value)
+		}
+		if minimum, exists := schema["minLength"].(int); exists && len(text) < minimum {
+			return fmt.Errorf("%s length %d is below %d", path, len(text), minimum)
+		}
+	case "integer":
+		number, ok := value.(float64)
+		if !ok || number != float64(int(number)) {
+			return fmt.Errorf("%s is %v, want integer", path, value)
+		}
+		if minimum, exists := schema["minimum"].(int); exists && number < float64(minimum) {
+			return fmt.Errorf("%s value %v is below %d", path, number, minimum)
+		}
+	case "boolean":
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("%s is %T, want boolean", path, value)
+		}
+	}
+	return nil
+}
+
+func TestIntegrationMakesTerminalGateAttemptRetryableThroughGenericAbandonment(
 	t *testing.T,
 ) {
 	t.Parallel()
-	requireFullSuite(t, "multi-integration frontier permutation")
-
-	fixture := configuredReviewFixture(t)
-	fixture.sources.Plans[0].Bytes = []byte(strings.Replace(
-		string(fixture.sources.Plans[0].Bytes),
-		"    dependencies:\n      - story-one",
-		"    dependencies: []",
-		1,
-	))
-	loserCore := newAttemptHarnessFromFixture(
-		t, fixture, "unit-one",
-	)
-	loser := loserCore.reserve(t, "2026-07-25T12:50:00Z")
-	loser = loserCore.materialize(
-		t, loser.AttemptID(), "2026-07-25T12:50:01Z",
-	)
-	loserTree := mustGitObject(t, 'b')
-	loserSnapshot, err := workspace.NewReviewRepositorySnapshot(
-		loser.VerifiedHead(), loserTree, true,
-	)
+	harness := newGatedReviewHarness(t)
+	dispatched := harness.dispatch(t, "2026-07-25T12:50:01Z")
+	harness.record(t, dispatched.Dispatch(), workspace.ReviewGateFailedToRun, "2026-07-25T12:50:02Z")
+	if _, err := workspace.AbandonAttempt(
+		harness.journal, harness.definition,
+		workspace.AbandonAttemptRequest{AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-07-25T12:50:03Z")},
+	); err != nil {
+		t.Fatalf("generic abandonment after terminal gate: %v", err)
+	}
+	replacementGoal, err := workspace.NewGoalBinding(workspace.MustID("terminal-gate-replacement"), workspace.GoalScopeMergeUnit)
 	if err != nil {
 		t.Fatal(err)
 	}
-	loserReview := &reviewHarness{
-		attemptHarness: loserCore,
-		attempt:        loser,
-		repository: &reviewRepositoryStub{
-			snapshot: loserSnapshot,
-		},
-		tree: loserTree,
-	}
-	start, err := workspace.StartAttemptReviewRound(
-		context.Background(),
-		loserCore.journal,
-		loserCore.definition,
-		loserReview.repository,
-		workspace.StartAttemptReviewRoundRequest{
-			AttemptID:  loser.AttemptID(),
-			OccurredAt: mustTime(t, "2026-07-25T12:50:02Z"),
+	replacement, err := workspace.StartAttempt(
+		context.Background(), harness.journal, harness.definition, harness.git,
+		workspace.StartAttemptRequest{
+			MergeUnit: harness.attempt.MergeUnit(), AttemptNumber: 2, Goal: replacementGoal,
+			OccurredAt: mustTime(t, "2026-07-25T12:50:04Z"),
 		},
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := start.Request()
-	for invocation := 1; invocation <= 3; invocation++ {
-		submission := reviewSubmission(
-			t,
-			request,
-			workspace.MustID("security-one"),
-			workspace.ReviewResultInfrastructureFailure,
-			nil,
-			workspace.DigestBytes(
-				[]byte(fmt.Sprintf(
-					"loser-review-failure-%d", invocation,
-				)),
-			),
-		)
-		loserReview.record(
-			t,
-			request,
-			submission,
-			fmt.Sprintf(
-				"2026-07-25T12:50:%02dZ", invocation+2,
-			),
-		)
-		state := mustReviewState(
-			t, loserCore.journal, loserCore.definition,
-			loser.AttemptID(),
-		)
-		if invocation == 3 {
-			if _, exhausted := state.Exhaustion(); !exhausted {
-				t.Fatal("losing attempt did not exhaust its review budget")
-			}
-			break
-		}
-		var ok bool
-		request, ok, err = state.NextRequest()
-		if err != nil || !ok {
-			t.Fatalf(
-				"next losing review request = %#v ok=%t err=%v",
-				request, ok, err,
-			)
-		}
-	}
-
-	winnerCore := loserCore
-	winnerCore.unit = mustMergeUnitReference(
-		t, "alpha-plan", "unit-two",
-	)
-	winnerCore.goal, _ = workspace.NewGoalBinding(
-		workspace.MustID("winner-goal"),
-		workspace.GoalScopeMergeUnit,
-	)
-	winner := winnerCore.reserve(t, "2026-07-25T12:50:06Z")
-	winnerCore.git.inspection, _ = workspace.NewAttemptGitInspection(
-		false, workspace.GitObjectID{}, false, false, "",
-		workspace.GitObjectID{}, false,
-	)
-	winner = winnerCore.materialize(
-		t, winner.AttemptID(), "2026-07-25T12:50:07Z",
-	)
-	winnerRepository := adoptedIntegrationRepository(
-		t, winnerCore, winner, mustGitObject(t, 'c'),
-		mustGitObject(t, 'd'), "2026-07-25T12:50:08Z",
-	)
-	git := &integrationGitStub{featureHead: loserCore.base}
-	integrated, err := workspace.IntegrateMergeUnit(
-		context.Background(),
-		winnerCore.journal,
-		winnerCore.definition,
-		winnerRepository,
-		git,
-		workspace.IntegrateMergeUnitRequest{
-			AttemptID:  winner.AttemptID(),
-			OccurredAt: mustTime(t, "2026-07-25T12:50:09Z"),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	snapshot, err := loserCore.journal.ReadSnapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	scheduler, err := workspace.RebuildSchedulerView(
-		snapshot, loserCore.definition,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	loserUnit := schedulerUnitByID(
-		t, scheduler, "unit-one",
-	)
-	if loserUnit.Status != workspace.SchedulerUnitReady ||
-		loserUnit.AttemptID != "" {
-		t.Fatalf(
-			"superseded exhausted loser scheduler view = %#v",
-			loserUnit,
-		)
-	}
-	gates, err := workspace.RebuildGateView(
-		snapshot, loserCore.definition,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	loserGate := gateUnitByID(t, gates, "unit-one")
-	if loserGate.AttemptID != "" ||
-		gateCheckByName(
-			t, loserGate, "commit",
-		).Reason != "no_attempt" ||
-		gateCheckByName(
-			t, loserGate, "review",
-		).Reason != "no_attempt" {
-		t.Fatalf(
-			"superseded exhausted loser gates = %#v",
-			loserGate,
-		)
-	}
-	replacementGoal, _ := workspace.NewGoalBinding(
-		workspace.MustID("exhausted-loser-replacement"),
-		workspace.GoalScopeMergeUnit,
-	)
-	replacement, err := workspace.ReserveAttempt(
-		context.Background(),
-		loserCore.journal,
-		loserCore.definition,
-		loserCore.git,
-		workspace.ReserveAttemptRequest{
-			MergeUnit:     loser.MergeUnit(),
-			AttemptNumber: 2,
-			Goal:          replacementGoal,
-			OccurredAt: mustTime(
-				t, "2026-07-25T12:50:10Z",
-			),
-		},
-	)
-	if err != nil ||
-		replacement.Base() != integrated.MergeCommit() {
-		t.Fatalf(
-			"review-exhausted loser replacement = %#v error=%v",
-			replacement, err,
-		)
+	if err != nil || replacement.AttemptNumber() != 2 {
+		t.Fatalf("replacement after terminal gate = %#v error=%v", replacement, err)
 	}
 }
 
@@ -1193,9 +1092,6 @@ func TestCompletedIntegrationRetryFollowsLaterDurableFrontier(
 
 	firstCore := newIndependentAttemptHarness(t, "unit-one")
 	first := firstCore.reserve(t, "2026-07-25T12:55:00Z")
-	first = firstCore.materialize(
-		t, first.AttemptID(), "2026-07-25T12:55:01Z",
-	)
 	firstRepository := adoptedIntegrationRepository(
 		t, firstCore, first, mustGitObject(t, 'c'),
 		mustGitObject(t, 'd'), "2026-07-25T12:55:02Z",
@@ -1230,13 +1126,6 @@ func TestCompletedIntegrationRetryFollowsLaterDurableFrontier(
 		workspace.GoalScopeMergeUnit,
 	)
 	second := secondCore.reserve(t, "2026-07-25T12:55:04Z")
-	secondCore.git.inspection, _ = workspace.NewAttemptGitInspection(
-		false, workspace.GitObjectID{}, false, false, "",
-		workspace.GitObjectID{}, false,
-	)
-	second = secondCore.materialize(
-		t, second.AttemptID(), "2026-07-25T12:55:05Z",
-	)
 	secondRepository := adoptedIntegrationRepository(
 		t, secondCore, second, mustGitObject(t, 'e'),
 		mustGitObject(t, 'f'), "2026-07-25T12:55:06Z",
@@ -1293,7 +1182,7 @@ func TestCompletedIntegrationRetryFollowsLaterDurableFrontier(
 func TestReviewReadyIntegrationBindsExactHeadTreeAndReadiness(t *testing.T) {
 	t.Parallel()
 
-	harness := newReviewHarness(t)
+	harness := newGatedReviewHarness(t)
 	git := &integrationGitStub{featureHead: harness.base}
 	_, err := workspace.IntegrateMergeUnit(
 		context.Background(), harness.journal, harness.definition,
@@ -1307,39 +1196,8 @@ func TestReviewReadyIntegrationBindsExactHeadTreeAndReadiness(t *testing.T) {
 		t.Fatal("integration without review readiness succeeded")
 	}
 
-	start, err := workspace.StartAttemptReviewRound(
-		context.Background(), harness.journal, harness.definition,
-		harness.repository,
-		workspace.StartAttemptReviewRoundRequest{
-			AttemptID:  harness.attempt.AttemptID(),
-			OccurredAt: mustTime(t, "2026-07-25T13:00:01Z"),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	first := reviewSubmission(
-		t, start.Request(), workspace.MustID("security-one"),
-		workspace.ReviewResultCompleted, nil, workspace.Digest{},
-	)
-	harness.record(
-		t, start.Request(), first, "2026-07-25T13:00:02Z",
-	)
-	state := mustReviewState(
-		t, harness.journal, harness.definition,
-		harness.attempt.AttemptID(),
-	)
-	secondRequest, ok, err := state.NextRequest()
-	if err != nil || !ok {
-		t.Fatalf("second review request = %#v ok=%t err=%v", secondRequest, ok, err)
-	}
-	second := reviewSubmission(
-		t, secondRequest, workspace.MustID("correctness-one"),
-		workspace.ReviewResultCompleted, nil, workspace.Digest{},
-	)
-	harness.record(
-		t, secondRequest, second, "2026-07-25T13:00:03Z",
-	)
+	dispatched := harness.dispatch(t, "2026-07-25T13:00:01Z")
+	harness.record(t, dispatched.Dispatch(), workspace.ReviewGateSatisfied, "2026-07-25T13:00:02Z")
 	readiness, err := workspace.ConfirmReviewMergeReadiness(
 		context.Background(), harness.journal, harness.definition,
 		harness.repository, harness.attempt.AttemptID(),
@@ -1364,7 +1222,7 @@ func TestReviewReadyIntegrationBindsExactHeadTreeAndReadiness(t *testing.T) {
 			OccurredAt: mustTime(t, "2026-07-25T13:00:04Z"),
 		},
 	); err == nil ||
-		!strings.Contains(err.Error(), "exact-head review readiness") {
+		!strings.Contains(err.Error(), "exact head and tree") {
 		t.Fatalf("stale review readiness error = %v", err)
 	}
 	harness.repository.snapshot = exact
@@ -1439,13 +1297,14 @@ func TestCompletedIntegrationUnblocksDependentSchedulerUnit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	scheduler, err := workspace.RebuildSchedulerView(
+	view, err := workspace.RebuildWorkspaceView(
 		snapshot, harness.definition,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var first, second workspace.SchedulerUnitView
+	scheduler := view.Scheduler
+	var first, second workspace.WorkspaceUnitState
 	for _, unit := range scheduler.Units {
 		switch unit.MergeUnitID {
 		case "unit-one":
@@ -1462,12 +1321,7 @@ func TestCompletedIntegrationUnblocksDependentSchedulerUnit(t *testing.T) {
 			first, second,
 		)
 	}
-	report, err := workspace.RebuildWorkspaceReport(
-		snapshot, harness.definition,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	report := view
 	if report.Target.FeatureHead != result.MergeCommit().String() {
 		t.Fatalf(
 			"reported feature frontier = %s, want %s",
@@ -1516,6 +1370,37 @@ func adoptedIntegrationRepository(
 	return repository
 }
 
+func configuredCommitProtocolFixture(t *testing.T) definitionFixture {
+	t.Helper()
+	fixture := newDefinitionFixture(t)
+	configuration := string(fixture.sources.ExecutionConfig.Bytes)
+	needle := "      max_attempts: 3\n  - plan_id: alpha-plan\n    merge_unit_id: unit-two"
+	replacement := `      max_attempts: 3
+    commit_protocol:
+      steps:
+        - id: implementation
+          subject: Implement protocol
+          body_policy: forbidden
+          allowed_paths:
+            - src/**
+          frozen_paths: []
+          checks:
+            - id: full-suite
+              runner: codex
+              command:
+                - go
+                - test
+                - ./...
+  - plan_id: alpha-plan
+    merge_unit_id: unit-two`
+	updated := strings.Replace(configuration, needle, replacement, 1)
+	if updated == configuration {
+		t.Fatal("failed to configure final-history fixture")
+	}
+	fixture.sources.ExecutionConfig.Bytes = []byte(updated)
+	return fixture
+}
+
 func newNoReviewIntegrationHarness(
 	t *testing.T,
 	sameHead bool,
@@ -1523,9 +1408,6 @@ func newNoReviewIntegrationHarness(
 	t.Helper()
 	core := newAttemptHarness(t, "unit-one")
 	attempt := core.reserve(t, "2026-07-25T09:00:00Z")
-	attempt = core.materialize(
-		t, attempt.AttemptID(), "2026-07-25T09:00:01Z",
-	)
 	head := mustGitObject(t, 'c')
 	if sameHead {
 		head = attempt.VerifiedHead()
@@ -1538,7 +1420,7 @@ func newNoReviewIntegrationHarness(
 		t.Fatal(err)
 	}
 	repository := &reviewRepositoryStub{snapshot: repositorySnapshot}
-	adoption, err := workspace.AdoptAttemptHead(
+	_, err = workspace.AdoptAttemptHead(
 		context.Background(), core.journal, core.definition, repository,
 		workspace.AdoptAttemptHeadRequest{
 			AttemptID:  attempt.AttemptID(),
@@ -1567,7 +1449,75 @@ func newNoReviewIntegrationHarness(
 		git: &integrationGitStub{
 			featureHead: core.base,
 		},
-		adoption: adoption,
+	}
+}
+
+// snapshotNoReviewIntegrationHarness captures the accepted fake-adapter
+// fixture once. Each durable integration fault gets a restored journal and
+// local-target repository at the original absolute paths, so the table keeps
+// its partitions without sharing mutable state between subtests.
+func snapshotNoReviewIntegrationHarness(
+	t *testing.T,
+	harness *noReviewIntegrationHarness,
+) noReviewIntegrationHarnessSnapshot {
+	t.Helper()
+	if err := harness.journal.Close(); err != nil {
+		t.Fatalf("close no-review integration harness before snapshot: %v", err)
+	}
+	imageRoot := canonicalMaterializationTestTempDir(t)
+	repositoryImage := filepath.Join(imageRoot, "repository")
+	workspaceImage := filepath.Join(imageRoot, "workspace")
+	copyTestFilesystemTree(t, harness.definition.Workspace().RepositoryRoot(), repositoryImage)
+	copyTestFilesystemTree(t, harness.workspace, workspaceImage)
+	return noReviewIntegrationHarnessSnapshot{
+		definition:         harness.definition,
+		workspace:          harness.workspace,
+		repositoryRoot:     harness.definition.Workspace().RepositoryRoot(),
+		base:               harness.base,
+		unit:               harness.unit,
+		goal:               harness.goal,
+		attemptID:          harness.attempt.AttemptID(),
+		verifiedHead:       harness.attempt.VerifiedHead(),
+		repositorySnapshot: harness.repository.snapshot,
+		repositoryImage:    repositoryImage,
+		workspaceImage:     workspaceImage,
+	}
+}
+
+func (snapshot noReviewIntegrationHarnessSnapshot) restore(t *testing.T) *noReviewIntegrationHarness {
+	t.Helper()
+	restoreTestFilesystemTree(t, snapshot.repositoryImage, snapshot.repositoryRoot)
+	restoreTestFilesystemTree(t, snapshot.workspaceImage, snapshot.workspace)
+	journal, err := workspace.OpenWorkspaceJournal(snapshot.workspace, workspace.JournalReadWrite)
+	if err != nil {
+		t.Fatalf("open restored no-review integration journal: %v", err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	journalSnapshot, err := journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := workspace.RebuildWorkspaceRuntime(journalSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, exists := runtime.Attempt(snapshot.attemptID)
+	if !exists || attempt.VerifiedHead() != snapshot.verifiedHead {
+		t.Fatalf("restored no-review attempt = %#v exists=%t", attempt, exists)
+	}
+	return &noReviewIntegrationHarness{
+		attemptHarness: attemptHarness{
+			definition: snapshot.definition,
+			journal:    journal,
+			workspace:  snapshot.workspace,
+			git:        &fakeAttemptGit{},
+			base:       snapshot.base,
+			unit:       snapshot.unit,
+			goal:       snapshot.goal,
+		},
+		attempt:    attempt,
+		repository: &reviewRepositoryStub{snapshot: snapshot.repositorySnapshot},
+		git:        &integrationGitStub{featureHead: snapshot.base},
 	}
 }
 

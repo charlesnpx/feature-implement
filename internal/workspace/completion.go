@@ -44,8 +44,6 @@ func assessWorkspaceCompletion(
 	target, targetReady := runtime.LocalTarget()
 	if !targetReady {
 		add("local_effect:feature_ref_intent_missing")
-	} else if !target.Created() {
-		add("local_effect:feature_ref_creation_pending")
 	}
 
 	dependencies, references := definitionDependencyGraph(definition)
@@ -76,12 +74,6 @@ func assessWorkspaceCompletion(
 			!attempt.integration.Integrated() {
 			add(fmt.Sprintf(
 				"local_effect:integration_pending:%s",
-				attempt.attemptID,
-			))
-		}
-		if attempt.phase == AttemptMaterializing {
-			add(fmt.Sprintf(
-				"local_effect:attempt_materialization_pending:%s",
 				attempt.attemptID,
 			))
 		}
@@ -191,7 +183,7 @@ func assessWorkspaceCompletion(
 			add("integration_frontier:unordered_records")
 		}
 		if index == 0 {
-			if targetReady && target.Created() &&
+			if targetReady &&
 				transition.intent.expectedFeatureHead !=
 					target.binding.baseCommit {
 				add("integration_frontier:wrong_initial_parent")
@@ -204,7 +196,7 @@ func assessWorkspaceCompletion(
 		previousMerge = transition.intent.expectedMerge
 		chain = append(chain, transition.intent)
 	}
-	if targetReady && target.Created() {
+	if targetReady {
 		if len(transitions) == 0 {
 			add("integration_frontier:empty")
 		} else {
@@ -253,33 +245,15 @@ func validateCompletionAttempt(
 	if err != nil {
 		return fmt.Errorf("execution_missing")
 	}
-	loop, reviewConfigured := unit.ReviewLoop()
-	if protocol, configured := unit.CommitProtocol(); configured {
-		if attempt.commitProtocol == nil ||
-			attempt.commitProtocol.protocol.digest != protocol.digest ||
-			attempt.commitProtocol.phase != CommitProtocolComplete ||
-			(!reviewConfigured &&
-				attempt.commitProtocol.Head() != intent.acceptedHead) {
-			return fmt.Errorf("commit_protocol_incomplete")
-		}
-	} else if attempt.commitProtocol != nil {
-		return fmt.Errorf("unconfigured_commit_protocol")
-	}
+	gate, reviewConfigured := unit.ReviewGate()
 	if reviewConfigured {
 		state, exists := reviews.State(attempt.attemptID)
-		if !exists || !state.MergeReady() ||
-			state.loop.digest != loop.digest ||
-			state.head != intent.acceptedHead ||
-			state.tree != intent.acceptedTree {
+		if !exists {
 			return fmt.Errorf("review_readiness_mismatch")
 		}
-		if err := validateAttemptReviewProtocolState(
-			definition, unit, attempt, state, true, false,
-		); err != nil {
-			return fmt.Errorf("review_protocol_mismatch")
-		}
-		readiness, err := newReviewMergeReadiness(
-			definition, attempt, state,
+		readiness, err := newReviewGateReadiness(
+			definition, attempt, state, gate,
+			intent.acceptedHead, intent.acceptedTree,
 		)
 		if err != nil ||
 			intent.acceptanceMode !=
@@ -302,10 +276,20 @@ func validateCompletionAttempt(
 	adopted, exists := exactAdoptedHeadRecord(
 		snapshot, attempt.attemptID, repository,
 	)
-	if !exists ||
-		intent.acceptanceMode !=
-			IntegrationAcceptanceAdoptedHead ||
-		intent.adoptedHeadEventDigest != adopted.eventHash ||
+	if !exists {
+		return fmt.Errorf("adopted_head_evidence_mismatch")
+	}
+	adoption, ok := adopted.Event().(ReviewHeadAdoptedJournalEvent)
+	if !ok {
+		return fmt.Errorf("adopted_head_evidence_mismatch")
+	}
+	evidenceDigest, err := adoption.EvidenceDigest()
+	if err != nil {
+		return fmt.Errorf("adopted_head_evidence_mismatch")
+	}
+	if intent.acceptanceMode !=
+		IntegrationAcceptanceAdoptedHead ||
+		intent.adoptedHeadEventDigest != evidenceDigest ||
 		!intent.reviewReadinessDigest.IsZero() {
 		return fmt.Errorf("adopted_head_evidence_mismatch")
 	}
@@ -329,12 +313,9 @@ func sortedUniqueCompletionBlockers(values []string) []string {
 func workspaceCompletionViewState(
 	snapshot JournalSnapshot,
 	definition EffectiveWorkspaceDefinition,
-	reviews ReviewRuntimeProjection,
+	assessment workspaceCompletionAssessment,
 	runtime WorkspaceRuntimeProjection,
 ) ([]string, bool, Digest, error) {
-	assessment := assessWorkspaceCompletion(
-		snapshot, definition, reviews, runtime,
-	)
 	blockers := append([]string(nil), assessment.blockers...)
 	completion, recorded := runtime.Completion()
 	if !recorded {

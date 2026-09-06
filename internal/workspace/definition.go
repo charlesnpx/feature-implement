@@ -15,6 +15,7 @@ type DefinitionSources struct {
 	Workspace       SourceArtifact
 	Plans           []SourceArtifact
 	ExecutionConfig SourceArtifact
+	ReviewPolicies  []SourceArtifact
 }
 
 type ArtifactKind string
@@ -24,6 +25,7 @@ const (
 	ArtifactWorkspace       ArtifactKind = "workspace"
 	ArtifactPlan            ArtifactKind = "plan"
 	ArtifactExecutionConfig ArtifactKind = "execution_config"
+	ArtifactReviewPolicy    ArtifactKind = "review_policy"
 )
 
 type NormalizedArtifact struct {
@@ -119,11 +121,33 @@ func ValidateDefinition(sources DefinitionSources) (EffectiveWorkspaceDefinition
 	if prior, exists := artifactPaths[executionPath]; exists {
 		return EffectiveWorkspaceDefinition{}, fmt.Errorf("artifact source path %s is claimed by both %s and execution config", executionPath, prior)
 	}
+	artifactPaths[executionPath] = "execution config"
 	if executionPath != workspace.executionConfig {
 		return EffectiveWorkspaceDefinition{}, fmt.Errorf("execution config input %s does not match workspace discovery path %s", executionPath, workspace.executionConfig)
 	}
 	executionSource := append([]byte(nil), sources.ExecutionConfig.Bytes...)
 	execution, err := DecodeExecutionConfig(executionSource)
+	if err != nil {
+		return EffectiveWorkspaceDefinition{}, err
+	}
+	policySources := make([]SourceArtifact, 0, len(sources.ReviewPolicies))
+	for index, source := range sources.ReviewPolicies {
+		sourcePath, sourceErr := normalizeSourcePath(source.Path)
+		if sourceErr != nil {
+			return EffectiveWorkspaceDefinition{}, fmt.Errorf("review gate policy source %d: %w", index, sourceErr)
+		}
+		if prior, exists := artifactPaths[sourcePath]; exists {
+			return EffectiveWorkspaceDefinition{}, fmt.Errorf(
+				"artifact source path %s is claimed by both %s and review gate policy input %d",
+				sourcePath, prior, index,
+			)
+		}
+		artifactPaths[sourcePath] = fmt.Sprintf("review gate policy input %d", index)
+		policySources = append(policySources, SourceArtifact{
+			Path: sourcePath, Bytes: append([]byte(nil), source.Bytes...),
+		})
+	}
+	execution, err = bindExecutionReviewGatePolicies(execution, policySources)
 	if err != nil {
 		return EffectiveWorkspaceDefinition{}, err
 	}
@@ -137,6 +161,19 @@ func ValidateDefinition(sources DefinitionSources) (EffectiveWorkspaceDefinition
 	artifacts = append(artifacts, newArtifact(
 		ArtifactExecutionConfig, workspace.id, executionPath, executionSource, executionCanonical,
 	))
+	for _, source := range policySources {
+		// A policy is opaque UTF-8 prose, not a JSON document. Keep its source
+		// hash and gate digest over the exact bytes, but encode the persisted
+		// canonical artifact as a JSON string because generation storage carries
+		// canonical artifacts as JSON values.
+		policyCanonical, canonicalErr := json.Marshal(string(source.Bytes))
+		if canonicalErr != nil {
+			return EffectiveWorkspaceDefinition{}, fmt.Errorf("canonicalize review gate policy %s: %w", source.Path, canonicalErr)
+		}
+		artifacts = append(artifacts, newArtifact(
+			ArtifactReviewPolicy, workspace.id, source.Path, source.Bytes, policyCanonical,
+		))
+	}
 
 	sort.Slice(artifacts, func(i, j int) bool {
 		left := string(artifacts[i].kind) + "\x00" + artifacts[i].id.String() + "\x00" + artifacts[i].path
@@ -349,18 +386,16 @@ func canonicalPlanBytes(plan Plan) ([]byte, error) {
 }
 
 type canonicalExecution struct {
-	SchemaVersion  int                      `json:"schema_version"`
-	Policy         canonicalPolicy          `json:"policy"`
-	Profiles       []canonicalProfile       `json:"profiles"`
-	ReviewProfiles []canonicalReviewProfile `json:"review_profiles,omitempty"`
-	MergeUnits     []canonicalUnitExecution `json:"merge_units"`
+	SchemaVersion int                      `json:"schema_version"`
+	Policy        canonicalPolicy          `json:"policy"`
+	Profiles      []canonicalProfile       `json:"profiles"`
+	ReviewGate    *canonicalReviewGate     `json:"review_gate,omitempty"`
+	MergeUnits    []canonicalUnitExecution `json:"merge_units"`
 }
 type canonicalPolicy struct {
 	RequirePassingChecks bool   `json:"require_passing_checks"`
 	AllowWriteNetwork    bool   `json:"allow_write_network"`
 	MaxAttempts          uint16 `json:"max_attempts"`
-	MaxReviewRounds      uint16 `json:"max_review_rounds"`
-	MaxReviewFixes       uint16 `json:"max_review_fixes"`
 }
 
 type canonicalAttemptBoundaryPolicy struct {
@@ -379,27 +414,21 @@ type canonicalProfile struct {
 	Policy   canonicalPolicy                 `json:"policy"`
 	Boundary *canonicalProfileBoundaryPolicy `json:"boundary,omitempty"`
 }
-type canonicalReviewProfile struct {
-	ID             string               `json:"id"`
-	Runner         string               `json:"runner"`
-	ReviewerPolicy ReviewReviewerPolicy `json:"reviewer_policy"`
-}
 type canonicalUnitExecution struct {
-	PlanID            string                         `json:"plan_id"`
-	MergeUnitID       string                         `json:"merge_unit_id"`
-	Profile           string                         `json:"profile"`
-	Policy            canonicalPolicy                `json:"policy"`
-	Boundary          canonicalAttemptBoundaryPolicy `json:"boundary"`
-	CommitProtocol    *canonicalCommitProtocol       `json:"commit_protocol,omitempty"`
-	ReviewFixProtocol *canonicalReviewFixProtocol    `json:"review_fix_protocol,omitempty"`
-	ReviewLoop        *canonicalReviewLoop           `json:"review_loop,omitempty"`
+	PlanID         string                         `json:"plan_id"`
+	MergeUnitID    string                         `json:"merge_unit_id"`
+	Profile        string                         `json:"profile"`
+	Policy         canonicalPolicy                `json:"policy"`
+	Boundary       canonicalAttemptBoundaryPolicy `json:"boundary"`
+	CommitProtocol *canonicalCommitProtocol       `json:"commit_protocol,omitempty"`
+	ReviewGate     *canonicalReviewGate           `json:"review_gate,omitempty"`
 }
 
-type canonicalReviewLoop struct {
-	Profiles                 []string `json:"profiles"`
-	MaxReviewRounds          uint16   `json:"max_review_rounds"`
-	MaxReviewFixes           uint16   `json:"max_review_fixes"`
-	MaxInfrastructureRetries uint16   `json:"max_infrastructure_retries"`
+type canonicalReviewGate struct {
+	Adapter      string `json:"adapter"`
+	Recipe       string `json:"recipe"`
+	PolicyFile   string `json:"policy_file"`
+	PolicyDigest string `json:"policy_digest"`
 }
 
 type canonicalCommitProtocol struct {
@@ -417,24 +446,19 @@ type canonicalCommitStep struct {
 }
 
 type canonicalCommitCheck struct {
-	ID          string               `json:"id"`
-	Runner      string               `json:"runner"`
-	Parser      CheckParserKind      `json:"parser"`
-	Command     []string             `json:"command"`
-	Expectation CheckExpectationKind `json:"expectation"`
-	FailureIDs  []string             `json:"failure_ids"`
-}
-
-type canonicalReviewFixProtocol struct {
-	SubjectPrefix string                 `json:"subject_prefix"`
-	BodyPolicy    CommitBodyPolicy       `json:"body_policy"`
-	AllowedPaths  []string               `json:"allowed_paths"`
-	FrozenPaths   []string               `json:"frozen_paths"`
-	Checks        []canonicalCommitCheck `json:"checks"`
+	ID      string   `json:"id"`
+	Runner  string   `json:"runner"`
+	Command []string `json:"command"`
 }
 
 func canonicalExecutionBytes(config ExecutionConfig) ([]byte, error) {
 	value := canonicalExecution{SchemaVersion: 2, Policy: canonicalizePolicy(config.policy)}
+	if config.reviewGate != nil {
+		if !config.reviewGate.bound() {
+			return nil, fmt.Errorf("root review gate is not bound to a policy source")
+		}
+		value.ReviewGate = canonicalizeReviewGate(*config.reviewGate)
+	}
 	for _, profile := range config.profiles {
 		canonicalProfile := canonicalProfile{
 			ID: profile.id.String(), Runner: profile.runner.String(), Policy: canonicalizePolicy(profile.policy),
@@ -445,11 +469,6 @@ func canonicalExecutionBytes(config ExecutionConfig) ([]byte, error) {
 		}
 		value.Profiles = append(value.Profiles, canonicalProfile)
 	}
-	for _, profile := range config.reviewProfiles {
-		value.ReviewProfiles = append(value.ReviewProfiles, canonicalReviewProfile{
-			ID: profile.id.String(), Runner: profile.runner.String(), ReviewerPolicy: profile.reviewerPolicy,
-		})
-	}
 	for _, unit := range config.mergeUnits {
 		canonicalUnit := canonicalUnitExecution{
 			PlanID: unit.planID.String(), MergeUnitID: unit.mergeUnitID.String(), Profile: unit.profileID.String(),
@@ -459,20 +478,11 @@ func canonicalExecutionBytes(config ExecutionConfig) ([]byte, error) {
 			protocol := canonicalizeCommitProtocol(*unit.commitProtocol)
 			canonicalUnit.CommitProtocol = &protocol
 		}
-		if unit.reviewFixProtocol != nil {
-			protocol := canonicalizeReviewFixProtocol(*unit.reviewFixProtocol)
-			canonicalUnit.ReviewFixProtocol = &protocol
-		}
-		if unit.reviewLoop != nil {
-			loop := canonicalReviewLoop{
-				Profiles:        make([]string, 0, len(unit.reviewLoop.profiles)),
-				MaxReviewRounds: unit.reviewLoop.maxRounds, MaxReviewFixes: unit.reviewLoop.maxFixes,
-				MaxInfrastructureRetries: unit.reviewLoop.maxInfrastructureRetries,
+		if unit.reviewGate != nil {
+			if !unit.reviewGate.bound() {
+				return nil, fmt.Errorf("merge unit %s/%s review gate is not bound to a policy source", unit.planID, unit.mergeUnitID)
 			}
-			for _, profile := range unit.reviewLoop.profiles {
-				loop.Profiles = append(loop.Profiles, profile.id.String())
-			}
-			canonicalUnit.ReviewLoop = &loop
+			canonicalUnit.ReviewGate = canonicalizeReviewGate(*unit.reviewGate)
 		}
 		value.MergeUnits = append(value.MergeUnits, canonicalUnit)
 	}
@@ -518,34 +528,25 @@ func canonicalizeCommitChecks(checks []CommitCheck) []canonicalCommitCheck {
 	result := make([]canonicalCommitCheck, 0, len(checks))
 	for _, check := range checks {
 		result = append(result, canonicalCommitCheck{
-			ID: check.id.String(), Runner: check.runner.String(), Parser: check.parser,
-			Command: check.command.Values(), Expectation: check.expectation.kind,
-			FailureIDs: check.expectation.FailureIDs(),
+			ID: check.id.String(), Runner: check.runner.String(), Command: check.command.Values(),
 		})
 	}
 	return result
-}
-
-func canonicalizeReviewFixProtocol(protocol ReviewFixProtocol) canonicalReviewFixProtocol {
-	allowed := make([]string, 0, len(protocol.paths.allowed))
-	for _, pattern := range protocol.paths.allowed {
-		allowed = append(allowed, pattern.value)
-	}
-	frozen := make([]string, 0, len(protocol.paths.frozen))
-	for _, pattern := range protocol.paths.frozen {
-		frozen = append(frozen, pattern.value)
-	}
-	return canonicalReviewFixProtocol{
-		SubjectPrefix: protocol.subjectPrefix, BodyPolicy: protocol.body,
-		AllowedPaths: allowed, FrozenPaths: frozen, Checks: canonicalizeCommitChecks(protocol.checks),
-	}
 }
 
 func canonicalizePolicy(policy ExecutionPolicy) canonicalPolicy {
 	return canonicalPolicy{
 		RequirePassingChecks: policy.requirePassingChecks,
 		AllowWriteNetwork:    policy.allowWriteNetwork, MaxAttempts: policy.maxAttempts,
-		MaxReviewRounds: policy.maxReviewRounds, MaxReviewFixes: policy.maxReviewFixes,
+	}
+}
+
+func canonicalizeReviewGate(config ReviewGateConfig) *canonicalReviewGate {
+	return &canonicalReviewGate{
+		Adapter:      config.adapter.String(),
+		Recipe:       config.recipe.String(),
+		PolicyFile:   config.policyPath,
+		PolicyDigest: config.policyDigest.String(),
 	}
 }
 

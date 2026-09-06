@@ -18,11 +18,13 @@ type attemptBoundaryCommandFixture struct {
 	attemptID    workspace.ID
 }
 
-func TestExecuteAttemptBoundaryRequiresKindAndRecordsBoundary(t *testing.T) {
-	fixture := newAttemptBoundaryCommandFixture(t)
+func TestExecuteAttemptPauseRequiresKindAndRecordsPause(t *testing.T) {
+	t.Parallel()
+
+	fixture := newAttemptBoundaryCommandFixture(t, false)
 	options := Options{
 		Action:       "attempt",
-		Subaction:    "boundary",
+		Subaction:    "pause",
 		BundleDir:    fixture.bundleRoot,
 		WorkspaceDir: fixture.workspaceDir,
 		Input: attemptBoundaryCommandInput(
@@ -34,8 +36,8 @@ func TestExecuteAttemptBoundaryRequiresKindAndRecordsBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	mutation, ok := result.(MutationResult)
-	if !ok || mutation.Status != "recorded" || mutation.Action != "attempt.boundary" {
-		t.Fatalf("boundary command result = %#v", result)
+	if !ok || mutation.Status != "recorded" || mutation.Action != "attempt.pause" {
+		t.Fatalf("pause command result = %#v", result)
 	}
 
 	journal, err := workspace.OpenWorkspaceJournal(
@@ -57,11 +59,11 @@ func TestExecuteAttemptBoundaryRequiresKindAndRecordsBoundary(t *testing.T) {
 	}
 	attempt, exists := runtime.Attempt(fixture.attemptID)
 	if !exists {
-		t.Fatalf("recorded boundary has no attempt %s", fixture.attemptID)
+		t.Fatalf("recorded pause has no attempt %s", fixture.attemptID)
 	}
 	boundary, exists := attempt.CurrentBoundary()
 	if !exists || boundary.Kind() != workspace.AttemptBoundaryKindCheckpoint {
-		t.Fatalf("recorded command boundary = %#v exists=%v", boundary, exists)
+		t.Fatalf("recorded command pause = %#v exists=%v", boundary, exists)
 	}
 
 	for _, test := range []struct {
@@ -81,25 +83,33 @@ func TestExecuteAttemptBoundaryRequiresKindAndRecordsBoundary(t *testing.T) {
 			options.Input = test.input
 			_, err := Execute(context.Background(), options)
 			if err == nil {
-				t.Fatal("boundary command accepted an invalid kind")
+				t.Fatal("pause command accepted an invalid kind")
 			}
 			for _, required := range []string{"kind", "checkpoint", "escalation"} {
 				if !strings.Contains(err.Error(), required) {
-					t.Fatalf("boundary kind error = %q, missing %q", err, required)
+					t.Fatalf("pause kind error = %q, missing %q", err, required)
 				}
 			}
 		})
 	}
 }
 
-func newAttemptBoundaryCommandFixture(t *testing.T) attemptBoundaryCommandFixture {
+func newAttemptBoundaryCommandFixture(t *testing.T, witnessGate bool) attemptBoundaryCommandFixture {
 	t.Helper()
 	repositoryRoot := canonicalWorkspaceCommandTempDir(t)
 	runGitTest(t, repositoryRoot, "init", "-b", "main")
 	runGitTest(t, repositoryRoot, "config", "user.name", "Feature Test")
 	runGitTest(t, repositoryRoot, "config", "user.email", "feature@example.test")
+	tracked := filepath.Join(repositoryRoot, "tracked.txt")
+	if witnessGate {
+		if err := os.WriteFile(tracked, []byte("seed\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runGitTest(t, repositoryRoot, "add", "tracked.txt")
+		runGitTest(t, repositoryRoot, "commit", "-m", "Seed")
+	}
 	if err := os.WriteFile(
-		filepath.Join(repositoryRoot, "tracked.txt"),
+		tracked,
 		[]byte("base\n"), 0o600,
 	); err != nil {
 		t.Fatal(err)
@@ -111,7 +121,11 @@ func newAttemptBoundaryCommandFixture(t *testing.T) attemptBoundaryCommandFixtur
 	)
 
 	bundleRoot := canonicalWorkspaceCommandTempDir(t)
-	for _, directory := range []string{"plans", "config"} {
+	directories := []string{"plans", "config"}
+	if witnessGate {
+		directories = append(directories, "policies")
+	}
+	for _, directory := range directories {
 		if err := os.MkdirAll(filepath.Join(bundleRoot, directory), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -163,13 +177,11 @@ merge_units:
     story_ids:
       - story-one
 `)
-	write("config/execution.yaml", `schema_version: 2
+	executionConfig := `schema_version: 2
 policy:
   require_passing_checks: true
   allow_write_network: false
   max_attempts: 2
-  max_review_rounds: 2
-  max_review_fixes: 1
 profiles:
   - id: standard
     runner: codex
@@ -177,8 +189,6 @@ profiles:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 2
-      max_review_rounds: 2
-      max_review_fixes: 1
 merge_units:
   - plan_id: alpha-plan
     merge_unit_id: unit-one
@@ -191,14 +201,25 @@ merge_units:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 2
-      max_review_rounds: 2
-      max_review_fixes: 1
-`)
+`
+	if witnessGate {
+		updated := strings.Replace(
+			executionConfig,
+			"    profile: standard\n    boundary:",
+			"    profile: standard\n    review_gate:\n      adapter: witness\n      recipe: default\n      policy_file: policies/review.md\n    boundary:",
+			1,
+		)
+		if updated == executionConfig {
+			t.Fatal("failed to configure witness review gate")
+		}
+		executionConfig = updated
+		write("policies/review.md", "Review the exact artifact for the merge-unit acceptance criteria.\n")
+	}
+	write("config/execution.yaml", executionConfig)
 	if _, err := Execute(context.Background(), Options{
-		Action:           "validate",
-		BundleDir:        bundleRoot,
-		WriteLocks:       true,
-		GeneratorVersion: "test",
+		Action:     "validate",
+		BundleDir:  bundleRoot,
+		WriteLocks: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -209,16 +230,14 @@ merge_units:
 	runGitTest(t, bundleRoot, "commit", "-m", "Committed plan locks")
 
 	workspaceDir := canonicalWorkspaceCommandTempDir(t)
-	worktreeRoot := canonicalWorkspaceCommandTempDir(t)
 	if _, err := Execute(context.Background(), Options{
 		Action:       "init",
 		BundleDir:    bundleRoot,
 		WorkspaceDir: workspaceDir,
-		Input: []byte(fmt.Sprintf(`{
+		Input: []byte(`{
   "schema_version": 2,
-  "occurred_at": "2026-07-25T18:00:00Z",
-  "worktree_root": %q
-}`, worktreeRoot)),
+	  "occurred_at": "2026-07-25T18:00:00Z"
+}`),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -250,21 +269,11 @@ merge_units:
 		t.Fatal(err)
 	}
 	attemptGit := workspace.DefaultLocalAttemptGitAdapter()
-	attempt, err := workspace.ReserveAttempt(
+	attempt, err := workspace.StartAttempt(
 		context.Background(), journal, bundle.Definition(), attemptGit,
-		workspace.ReserveAttemptRequest{
+		workspace.StartAttemptRequest{
 			MergeUnit: mergeUnit, AttemptNumber: 1, Goal: goal,
 			OccurredAt: time.Date(2026, time.July, 25, 18, 0, 1, 0, time.UTC),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	attempt, err = workspace.MaterializeAttempt(
-		context.Background(), journal, bundle.Definition(), attemptGit,
-		workspace.MaterializeAttemptRequest{
-			AttemptID:  attempt.AttemptID(),
-			OccurredAt: time.Date(2026, time.July, 25, 18, 0, 2, 0, time.UTC),
 		},
 	)
 	if err != nil {

@@ -11,7 +11,6 @@ import (
 const (
 	WorkspaceBundleFileName      = "feature.workspace.bundle.json"
 	WorkspaceLockFileName        = "feature.workspace.lock.json"
-	WorkspaceGeneratedDirectory  = "generated"
 	MaxWorkspaceBundleBytes      = 1 << 20
 	WorkspaceBundleSchemaVersion = 2
 )
@@ -71,6 +70,12 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 	if err != nil {
 		return WorkspaceBundle{}, err
 	}
+	if err := rejectReservedDerivedBundleRoot(bundleRoot); err != nil {
+		return WorkspaceBundle{}, err
+	}
+	if err := rejectAncestorWorkspaceBundleRoot(bundleRoot); err != nil {
+		return WorkspaceBundle{}, err
+	}
 	filesystem, err := OpenVerifiedRoot(RootRolePlan, bundleRoot, false)
 	if err != nil {
 		return WorkspaceBundle{}, fmt.Errorf("open workspace bundle: %w", err)
@@ -96,12 +101,28 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 	if err != nil {
 		return WorkspaceBundle{}, err
 	}
-	sourceOwners := make(map[string]string)
+	// Generated artifacts occupy these paths before any bundle source is
+	// claimed. A source must not be able to become the object later written by
+	// lock publication.
+	reservedSourcePaths := map[string]struct{}{
+		materializationCollisionKey(WorkspaceBundleFileName):          {},
+		materializationCollisionKey(WorkspaceLockFileName):            {},
+		materializationCollisionKey(workspaceLockPublicationLockName): {},
+	}
+	type sourceClaim struct {
+		path  string
+		owner string
+	}
+	sourceOwners := make(map[string]sourceClaim)
 	claimSourcePath := func(path, owner string) error {
-		if prior, exists := sourceOwners[path]; exists {
-			return fmt.Errorf("workspace bundle source path %s is claimed by both %s and %s", path, prior, owner)
+		key := materializationCollisionKey(path)
+		if _, reserved := reservedSourcePaths[key]; reserved {
+			return fmt.Errorf("workspace bundle source path %s is a reserved generated file", path)
 		}
-		sourceOwners[path] = owner
+		if prior, exists := sourceOwners[key]; exists {
+			return fmt.Errorf("workspace bundle source path %s is claimed by both %s and %s", path, prior.owner, owner)
+		}
+		sourceOwners[key] = sourceClaim{path: path, owner: owner}
 		return nil
 	}
 	if err := claimSourcePath(workspacePath, "workspace"); err != nil {
@@ -117,6 +138,28 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 	executionBytes, err := readWorkspaceBundleFile(filesystem, executionPath, MaxArtifactBytes)
 	if err != nil {
 		return WorkspaceBundle{}, fmt.Errorf("read execution config %s: %w", executionPath, err)
+	}
+	executionConfig, err := DecodeExecutionConfig(executionBytes)
+	if err != nil {
+		return WorkspaceBundle{}, fmt.Errorf("decode execution config %s: %w", executionPath, err)
+	}
+	policyPaths := reviewGatePolicyPaths(executionConfig)
+	policies := make([]SourceArtifact, 0, len(policyPaths))
+	for index, configuredPath := range policyPaths {
+		policyPath, pathErr := normalizeBundleSourcePath(
+			fmt.Sprintf("review_gate policy %d", index), configuredPath,
+		)
+		if pathErr != nil {
+			return WorkspaceBundle{}, pathErr
+		}
+		if claimErr := claimSourcePath(policyPath, fmt.Sprintf("review_gate policy %d", index)); claimErr != nil {
+			return WorkspaceBundle{}, claimErr
+		}
+		content, readErr := readWorkspaceBundleFile(filesystem, policyPath, MaxArtifactBytes)
+		if readErr != nil {
+			return WorkspaceBundle{}, fmt.Errorf("read review gate policy %s: %w", policyPath, readErr)
+		}
+		policies = append(policies, SourceArtifact{Path: policyPath, Bytes: content})
 	}
 
 	planPaths := make([]string, 0, len(wire.Plans))
@@ -149,6 +192,7 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 		Workspace:       SourceArtifact{Path: workspacePath, Bytes: workspaceBytes},
 		Plans:           plans,
 		ExecutionConfig: SourceArtifact{Path: executionPath, Bytes: executionBytes},
+		ReviewPolicies:  policies,
 	}
 	definition, err := ValidateDefinition(sources)
 	if err != nil {
@@ -165,8 +209,8 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 	}
 	sourcePaths := make([]string, 0, len(sourceOwners)+1)
 	sourcePaths = append(sourcePaths, WorkspaceBundleFileName)
-	for sourcePath := range sourceOwners {
-		sourcePaths = append(sourcePaths, sourcePath)
+	for _, source := range sourceOwners {
+		sourcePaths = append(sourcePaths, source.path)
 	}
 	sort.Strings(sourcePaths)
 	sourceFiles := make(map[string][]byte, len(sourcePaths))
@@ -176,6 +220,9 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 	for _, plan := range plans {
 		sourceFiles[plan.Path] = append([]byte(nil), plan.Bytes...)
 	}
+	for _, policy := range policies {
+		sourceFiles[policy.Path] = append([]byte(nil), policy.Bytes...)
+	}
 	return WorkspaceBundle{
 		root:             filesystem.Path(),
 		descriptorDigest: DigestBytes(descriptor),
@@ -183,6 +230,23 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 		sourceFiles:      sourceFiles,
 		sources:          cloneDefinitionSources(sources), definition: definition,
 	}, nil
+}
+
+func rejectReservedDerivedBundleRoot(bundleRoot string) error {
+	base := filepath.Base(bundleRoot)
+	for _, suffix := range []string{
+		derivedRuntimeDirectorySuffix,
+		derivedAttemptRootSuffix,
+	} {
+		if strings.HasSuffix(base, suffix) {
+			return fmt.Errorf(
+				"workspace bundle root basename %q ends in reserved derived suffix %q",
+				base,
+				suffix,
+			)
+		}
+	}
+	return nil
 }
 
 type canonicalWorkspaceBundle struct {
@@ -234,12 +298,6 @@ func normalizeBundleSourcePath(field, value string) (string, error) {
 			return "", fmt.Errorf("workspace bundle %s cannot reference hidden path %s", field, path)
 		}
 	}
-	if path == WorkspaceBundleFileName {
-		return "", fmt.Errorf("workspace bundle %s cannot reference its descriptor", field)
-	}
-	if strings.Split(filepath.ToSlash(path), "/")[0] == WorkspaceGeneratedDirectory {
-		return "", fmt.Errorf("workspace bundle %s cannot reference tool-owned generated path %s", field, path)
-	}
 	return path, nil
 }
 
@@ -262,9 +320,13 @@ func cloneDefinitionSources(source DefinitionSources) DefinitionSources {
 		Workspace:       SourceArtifact{Path: source.Workspace.Path, Bytes: append([]byte(nil), source.Workspace.Bytes...)},
 		ExecutionConfig: SourceArtifact{Path: source.ExecutionConfig.Path, Bytes: append([]byte(nil), source.ExecutionConfig.Bytes...)},
 		Plans:           make([]SourceArtifact, 0, len(source.Plans)),
+		ReviewPolicies:  make([]SourceArtifact, 0, len(source.ReviewPolicies)),
 	}
 	for _, plan := range source.Plans {
 		result.Plans = append(result.Plans, SourceArtifact{Path: plan.Path, Bytes: append([]byte(nil), plan.Bytes...)})
+	}
+	for _, policy := range source.ReviewPolicies {
+		result.ReviewPolicies = append(result.ReviewPolicies, SourceArtifact{Path: policy.Path, Bytes: append([]byte(nil), policy.Bytes...)})
 	}
 	return result
 }
@@ -282,32 +344,4 @@ func WorkspaceBundleSchema() map[string]any {
 			"execution_config": map[string]any{"type": "string", "minLength": 1},
 		},
 	}
-}
-
-func WorkspaceBundleLockArtifacts(bundle WorkspaceBundle) ([]MaterializationArtifact, error) {
-	if bundle.definition.generation.IsZero() || bundle.root == "" {
-		return nil, fmt.Errorf("validated workspace bundle is required")
-	}
-	workspaceLock, err := json.Marshal(ProjectWorkspaceLock(bundle.definition))
-	if err != nil {
-		return nil, err
-	}
-	workspaceArtifact, err := NewMaterializationArtifact("workspace-lock", WorkspaceLockFileName, append(workspaceLock, '\n'))
-	if err != nil {
-		return nil, err
-	}
-	artifacts := []MaterializationArtifact{workspaceArtifact}
-	for _, lock := range ProjectPlanLocks(bundle.definition) {
-		content, err := json.Marshal(lock)
-		if err != nil {
-			return nil, err
-		}
-		path := filepath.ToSlash(filepath.Join("plans", lock.PlanID().String()+".lock.json"))
-		artifact, err := NewMaterializationArtifact("plan-lock-"+lock.PlanID().String(), path, append(content, '\n'))
-		if err != nil {
-			return nil, err
-		}
-		artifacts = append(artifacts, artifact)
-	}
-	return artifacts, nil
 }

@@ -12,8 +12,7 @@ import (
 // the one completion record required by the pending integration intent. New
 // attempts are barred while an intent is pending, so the set of possible
 // superseded attempts cannot grow. The mutable fields on those attempts are
-// expanded to their largest valid encodings and every resource revision uses
-// the widest uint64 representation.
+// expanded to their largest valid encodings.
 func integrationCompletionReservationBytes(
 	runtime WorkspaceRuntimeProjection,
 ) (int64, error) {
@@ -73,11 +72,8 @@ func integrationCompletionReservationBytes(
 func longestIntegrationNonterminalPhase() AttemptRuntimePhase {
 	longest := AttemptRuntimePhase("")
 	for _, phase := range []AttemptRuntimePhase{
-		AttemptReserved,
-		AttemptMaterializing,
 		AttemptActive,
 		AttemptPaused,
-		AttemptReviewExhausted,
 	} {
 		if len(phase) > len(longest) {
 			longest = phase
@@ -106,24 +102,6 @@ func maximumIntegrationReservationID(index int, excluded ID) ID {
 func maximumEncodedIntegrationCompletionBytes(
 	event MergeUnitIntegratedJournalEvent,
 ) (int64, error) {
-	reads, writes, ok := integrationJournalEventResources(event)
-	if !ok {
-		return 0, fmt.Errorf(
-			"integration completion capacity requires a completion event",
-		)
-	}
-	readSet := make(
-		[]JournalResourceRevision, 0, len(reads),
-	)
-	for _, resource := range reads {
-		revision, err := NewJournalResourceRevision(
-			resource, math.MaxUint64,
-		)
-		if err != nil {
-			return 0, err
-		}
-		readSet = append(readSet, revision)
-	}
 	record := JournalRecord{
 		sequence: math.MaxUint64,
 		occurredAt: time.Date(
@@ -134,8 +112,6 @@ func maximumEncodedIntegrationCompletionBytes(
 			[]byte("maximum integration completion previous hash"),
 		),
 		generation: event.boundGeneration(),
-		readSet:    readSet,
-		writeSet:   writes,
 		event:      cloneWorkspaceJournalEvent(event),
 	}
 	body, err := marshalJournalRecordBody(record)

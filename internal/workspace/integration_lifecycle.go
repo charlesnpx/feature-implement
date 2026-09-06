@@ -84,7 +84,7 @@ func IntegrateMergeUnit(
 		)
 	}
 	target, ok := runtime.LocalTarget()
-	if !ok || !target.Created() {
+	if !ok {
 		return MergeUnitIntegrationResult{}, fmt.Errorf(
 			"integration requires a durable local target",
 		)
@@ -94,51 +94,49 @@ func IntegrateMergeUnit(
 	if attempt.integration == nil {
 		evidence, err := confirmIntegrationAcceptance(
 			ctx, snapshot, reviews, definition, repository,
-			attempt, false,
+			attempt, false, true,
 		)
 		if err != nil {
 			return MergeUnitIntegrationResult{}, err
 		}
 		attemptInspection, err := git.InspectAttempt(
-			ctx, binding, attempt.worktree, attempt.branch,
+			ctx, binding, attempt.worktree,
 			evidence.head, evidence.tree,
-		)
-		if err != nil {
-			return MergeUnitIntegrationResult{}, err
-		}
-		expectedFeatureMarker, err := expectedLocalTargetReflogMarker(
-			runtime, target,
 		)
 		if err != nil {
 			return MergeUnitIntegrationResult{}, err
 		}
 		intent, err := NewMergeUnitIntegrationIntent(
 			MergeUnitIntegrationIntentOptions{
-				WorkspaceID:            runtime.workspaceID,
-				Generation:             runtime.activeGeneration,
-				AttemptID:              attempt.attemptID,
-				MergeUnit:              attempt.mergeUnit,
-				FeatureRef:             binding.featureRef,
-				ExpectedFeatureHead:    target.createdHead,
-				ExpectedFeatureMarker:  expectedFeatureMarker,
-				AttemptWorktreeBinding: attemptInspection.worktreeBinding,
-				AcceptedHead:           evidence.head,
-				AcceptedTree:           evidence.tree,
-				ReviewReadinessDigest:  evidence.reviewReadiness,
-				AdoptedHeadEventDigest: evidence.adoptedHeadEvent,
-				OccurredAt:             request.OccurredAt,
+				WorkspaceID:              runtime.workspaceID,
+				Generation:               runtime.activeGeneration,
+				AttemptID:                attempt.attemptID,
+				MergeUnit:                attempt.mergeUnit,
+				FeatureRef:               binding.featureRef,
+				ExpectedFeatureHead:      target.createdHead,
+				ExpectedFeatureRefAbsent: target.headRecord == target.createdRecord,
+				AttemptWorktreeBinding:   attemptInspection.worktreeBinding,
+				AcceptedHead:             evidence.head,
+				AcceptedTree:             evidence.tree,
+				ReviewReadinessDigest:    evidence.reviewReadiness,
+				AdoptedHeadEventDigest:   evidence.adoptedHeadEvent,
+				OccurredAt:               request.OccurredAt,
 			},
 		)
 		if err != nil {
 			return MergeUnitIntegrationResult{}, err
 		}
 		inspection, err := git.InspectIntegration(
-			ctx, binding, attempt.branch, intent,
+			ctx, binding, intent,
 		)
 		if err != nil {
 			return MergeUnitIntegrationResult{}, err
 		}
-		if inspection.refState != IntegrationRefExpectedHead {
+		expectedState := IntegrationRefExpectedHead
+		if intent.expectedFeatureRefAbsent {
+			expectedState = IntegrationRefExpectedAbsent
+		}
+		if inspection.refState != expectedState {
 			return MergeUnitIntegrationResult{},
 				integrationDriftError(inspection)
 		}
@@ -211,18 +209,18 @@ func IntegrateMergeUnit(
 
 	if _, err := confirmIntegrationAcceptance(
 		ctx, snapshot, reviews, definition, repository,
-		attempt, true,
+		attempt, true, false,
 	); err != nil {
 		return MergeUnitIntegrationResult{}, err
 	}
 	inspection, err := git.InspectIntegration(
-		ctx, binding, attempt.branch, intent,
+		ctx, binding, intent,
 	)
 	if err != nil {
 		return MergeUnitIntegrationResult{}, err
 	}
 	switch inspection.refState {
-	case IntegrationRefExpectedHead:
+	case IntegrationRefExpectedAbsent, IntegrationRefExpectedHead:
 		if !inspection.expectedCommit {
 			if err := injectIntegrationLifecycleFault(
 				request.Fault,
@@ -231,7 +229,7 @@ func IntegrateMergeUnit(
 				return MergeUnitIntegrationResult{}, err
 			}
 			if err := git.CreateIntegrationCommit(
-				ctx, binding, attempt.branch, intent,
+				ctx, binding, intent,
 			); err != nil {
 				return MergeUnitIntegrationResult{}, err
 			}
@@ -258,7 +256,7 @@ func IntegrateMergeUnit(
 		}
 		if _, err := confirmIntegrationAcceptance(
 			ctx, snapshot, reviews, definition, repository,
-			attempt, true,
+			attempt, true, false,
 		); err != nil {
 			return MergeUnitIntegrationResult{}, err
 		}
@@ -277,7 +275,7 @@ func IntegrateMergeUnit(
 		}
 		attemptInspection, err := git.InspectAttempt(
 			ctx, binding, intent.attemptWorktreeBinding.worktree,
-			attempt.branch, intent.acceptedHead, intent.acceptedTree,
+			intent.acceptedHead, intent.acceptedTree,
 		)
 		if err != nil {
 			return MergeUnitIntegrationResult{}, err
@@ -289,7 +287,7 @@ func IntegrateMergeUnit(
 			)
 		}
 		if err := git.PublishIntegration(
-			ctx, binding, attempt.branch, intent, request.Fault,
+			ctx, binding, intent, request.Fault,
 		); err != nil {
 			return MergeUnitIntegrationResult{}, err
 		}
@@ -310,7 +308,7 @@ func IntegrateMergeUnit(
 	}
 
 	verified, err := git.InspectIntegration(
-		ctx, binding, attempt.branch, intent,
+		ctx, binding, intent,
 	)
 	if err != nil {
 		return MergeUnitIntegrationResult{}, err
@@ -343,7 +341,7 @@ func IntegrateMergeUnit(
 	}
 	if _, err := confirmIntegrationAcceptance(
 		ctx, snapshot, reviews, definition, repository,
-		attempt, true,
+		attempt, true, false,
 	); err != nil {
 		return MergeUnitIntegrationResult{}, err
 	}
@@ -353,7 +351,7 @@ func IntegrateMergeUnit(
 		return MergeUnitIntegrationResult{}, err
 	}
 	completionInspection, err := git.InspectIntegration(
-		ctx, binding, attempt.branch, intent,
+		ctx, binding, intent,
 	)
 	if err != nil {
 		return MergeUnitIntegrationResult{}, err
@@ -529,12 +527,6 @@ func readIntegrationRuntime(
 		return JournalSnapshot{}, ReviewRuntimeProjection{},
 			WorkspaceRuntimeProjection{}, err
 	}
-	if err := verifyWorkspaceWorktreeRootBinding(
-		runtime.worktreeRoot,
-	); err != nil {
-		return JournalSnapshot{}, ReviewRuntimeProjection{},
-			WorkspaceRuntimeProjection{}, err
-	}
 	return snapshot, reviews, runtime, nil
 }
 
@@ -546,6 +538,7 @@ func confirmIntegrationAcceptance(
 	repository ReviewRepositoryPort,
 	attempt RuntimeAttemptProjection,
 	pendingIntent bool,
+	verifyFinalHistory bool,
 ) (integrationAcceptanceEvidence, error) {
 	if attempt.phase != AttemptActive || attempt.verifiedHead.IsZero() {
 		return integrationAcceptanceEvidence{}, fmt.Errorf(
@@ -577,7 +570,7 @@ func confirmIntegrationAcceptance(
 		return integrationAcceptanceEvidence{}, err
 	}
 	repositoryRequest, err := NewReviewRepositoryRequest(
-		attempt.worktree, attempt.branch, attempt.verifiedHead,
+		attempt.worktree, attempt.verifiedHead,
 	)
 	if err != nil {
 		return integrationAcceptanceEvidence{}, err
@@ -594,28 +587,31 @@ func confirmIntegrationAcceptance(
 			"integration requires the exact clean accepted attempt head",
 		)
 	}
+	// Configured checks are arbitrary commands. They must finish before the
+	// integration intent becomes durable; later confirmations compare only the
+	// immutable accepted Git and review evidence to that intent.
+	if verifyFinalHistory {
+		if err := verifyAttemptFinalHistory(
+			ctx, repository, unit, attempt, repositorySnapshot.head,
+		); err != nil {
+			return integrationAcceptanceEvidence{}, fmt.Errorf("integration final history: %w", err)
+		}
+	}
 	evidence := integrationAcceptanceEvidence{
 		head: repositorySnapshot.head,
 		tree: repositorySnapshot.tree,
 	}
-	if loop, configured := unit.ReviewLoop(); configured {
+	if gate, configured := unit.ReviewGate(); configured {
 		state, exists := reviews.State(attempt.attemptID)
-		if !exists || !state.MergeReady() ||
-			state.loop.digest != loop.digest ||
-			state.head != repositorySnapshot.head ||
-			state.tree != repositorySnapshot.tree {
+		if !exists {
 			return integrationAcceptanceEvidence{}, fmt.Errorf(
 				"attempt %s has no exact-head review readiness for integration",
 				attempt.attemptID,
 			)
 		}
-		if err := validateAttemptReviewProtocolState(
-			definition, unit, attempt, state, true, false,
-		); err != nil {
-			return integrationAcceptanceEvidence{}, err
-		}
-		readiness, err := newReviewMergeReadiness(
-			definition, attempt, state,
+		readiness, err := newReviewGateReadiness(
+			definition, attempt, state, gate,
+			repositorySnapshot.head, repositorySnapshot.tree,
 		)
 		if err != nil {
 			return integrationAcceptanceEvidence{}, err
@@ -627,22 +623,6 @@ func confirmIntegrationAcceptance(
 				"unconfigured review evidence cannot authorize integration",
 			)
 		}
-		if protocol, configured := unit.CommitProtocol(); configured {
-			if attempt.commitProtocol == nil ||
-				attempt.commitProtocol.protocol.digest != protocol.digest ||
-				attempt.commitProtocol.phase != CommitProtocolComplete ||
-				attempt.commitProtocol.Head() != attempt.verifiedHead {
-				return integrationAcceptanceEvidence{}, fmt.Errorf(
-					"attempt %s has not completed its configured commit protocol",
-					attempt.attemptID,
-				)
-			}
-		} else if attempt.commitProtocol != nil {
-			return integrationAcceptanceEvidence{}, fmt.Errorf(
-				"attempt %s has an unconfigured commit protocol",
-				attempt.attemptID,
-			)
-		}
 		record, exists := exactAdoptedHeadRecord(
 			snapshot, attempt.attemptID, repositorySnapshot,
 		)
@@ -652,7 +632,19 @@ func confirmIntegrationAcceptance(
 				attempt.attemptID,
 			)
 		}
-		evidence.adoptedHeadEvent = record.eventHash
+		adoption, ok := record.event.(ReviewHeadAdoptedJournalEvent)
+		if !ok {
+			return integrationAcceptanceEvidence{}, fmt.Errorf(
+				"attempt %s adopted-head record has the wrong event type",
+				attempt.attemptID,
+			)
+		}
+		evidence.adoptedHeadEvent, err = adoption.EvidenceDigest()
+		if err != nil {
+			return integrationAcceptanceEvidence{}, fmt.Errorf(
+				"digest exact adopted-head evidence: %w", err,
+			)
+		}
 	}
 	if pendingIntent {
 		intent := attempt.integration.intent
@@ -675,15 +667,15 @@ func requireIntegrationGateReady(
 	definition EffectiveWorkspaceDefinition,
 	attempt RuntimeAttemptProjection,
 ) error {
-	gates, err := RebuildGateView(snapshot, definition)
+	view, err := RebuildWorkspaceView(snapshot, definition)
 	if err != nil {
 		return err
 	}
-	for _, unit := range gates.Units {
+	for _, unit := range view.Gates.Units {
 		if unit.PlanID == attempt.mergeUnit.planID.String() &&
 			unit.MergeUnitID == attempt.mergeUnit.mergeUnitID.String() {
 			if unit.AttemptID != attempt.attemptID.String() ||
-				!unit.MergeReady {
+				!integrationPreflightReady(unit) {
 				return fmt.Errorf(
 					"merge unit %s is not ready for local integration",
 					attempt.mergeUnit,
@@ -698,6 +690,37 @@ func requireIntegrationGateReady(
 	)
 }
 
+// integrationPreflightReady admits the one declarative gate that is proved by
+// this integration operation itself. The check stays pending in the durable
+// view because final-history results are deliberately not journaled.
+func integrationPreflightReady(unit WorkspaceUnitGates) bool {
+	if unit.MergeReady {
+		return true
+	}
+	deferredCommit := false
+	for _, gate := range unit.Checks {
+		switch gate.Name {
+		case "commit":
+			if gate.Status == GatePending &&
+				gate.Reason == "final_history_validated_at_integration" {
+				deferredCommit = true
+				continue
+			}
+			return false
+		case "integration":
+			if gate.Status == GatePending && gate.Reason == "not_integrated" {
+				continue
+			}
+			return false
+		default:
+			if gate.Status != GatePassed {
+				return false
+			}
+		}
+	}
+	return deferredCommit
+}
+
 func appendIntegrationJournalEvent(
 	journal *WorkspaceJournal,
 	snapshot JournalSnapshot,
@@ -705,22 +728,7 @@ func appendIntegrationJournalEvent(
 	event WorkspaceJournalEvent,
 	occurredAt time.Time,
 ) (JournalRecord, error) {
-	reads, writes, ok := integrationJournalEventResources(event)
-	if !ok {
-		return JournalRecord{}, fmt.Errorf(
-			"unsupported integration journal event %T", event,
-		)
-	}
-	readSet := make([]JournalResourceRevision, 0, len(reads))
-	for _, resource := range reads {
-		revision, _ := NewJournalResourceRevision(
-			resource, snapshot.Revision(resource),
-		)
-		readSet = append(readSet, revision)
-	}
-	appendRequest, err := newPrivilegedJournalAppend(
-		event, occurredAt, readSet, writes,
-	)
+	appendRequest, err := newWorkflowJournalAppend(event, occurredAt)
 	if err != nil {
 		return JournalRecord{}, err
 	}

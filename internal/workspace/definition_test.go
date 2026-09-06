@@ -1,12 +1,10 @@
 package workspace_test
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -30,6 +28,13 @@ func newDefinitionFixtureForHash(
 	repositoryRoot, baseCommit := initializeTargetRepository(
 		t, algorithm,
 	)
+	return newDefinitionFixtureForRepository(repositoryRoot, baseCommit)
+}
+
+func newDefinitionFixtureForRepository(
+	repositoryRoot string,
+	baseCommit workspace.GitObjectID,
+) definitionFixture {
 	workspaceYAML := fmt.Sprintf(`schema_version: 2
 id: example-workspace
 mode: local
@@ -82,8 +87,6 @@ policy:
   require_passing_checks: true
   allow_write_network: false
   max_attempts: 5
-  max_review_rounds: 4
-  max_review_fixes: 3
 profiles:
   - id: standard
     runner: codex
@@ -91,8 +94,6 @@ profiles:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 4
-      max_review_rounds: 3
-      max_review_fixes: 3
 merge_units:
   - plan_id: alpha-plan
     merge_unit_id: unit-one
@@ -105,20 +106,16 @@ merge_units:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 3
-      max_review_rounds: 3
-      max_review_fixes: 2
   - plan_id: alpha-plan
     merge_unit_id: unit-two
     profile: standard
     boundary:
-      checkpoint: complete_goal_and_wait
+      checkpoint: pause_only
       escalation: allowed
     policy:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 2
-      max_review_rounds: 2
-      max_review_fixes: 2
 `
 	return definitionFixture{
 		base: baseCommit,
@@ -173,27 +170,78 @@ func TestValidateDefinitionBuildsContentAddressedEffectiveInputs(t *testing.T) {
 			t.Fatalf("artifact is not fully hashed: kind=%s path=%s", artifact.Kind(), artifact.Path())
 		}
 	}
-	workspaceLock := workspace.ProjectWorkspaceLock(definition)
-	if workspaceLock.SchemaVersion() != 2 || workspaceLock.Generation() != definition.Generation() || len(workspaceLock.Artifacts()) != 3 {
-		t.Fatalf("workspace projection = %#v", workspaceLock)
-	}
-	planLocks := workspace.ProjectPlanLocks(definition)
-	if len(planLocks) != 1 || planLocks[0].PlanID().String() != "alpha-plan" || planLocks[0].Generation() != definition.Generation() {
-		t.Fatalf("plan projections = %#v", planLocks)
-	}
-	workspaceLockJSON, err := json.Marshal(workspaceLock)
+}
+
+func TestReviewGatePolicySourcesInheritOrReplaceAsWholeValues(t *testing.T) {
+	t.Parallel()
+
+	fixture, rootPolicy, unitPolicy := configuredReviewGateFixture(t)
+	definition, err := workspace.ValidateDefinition(fixture.sources)
 	if err != nil {
 		t.Fatal(err)
 	}
-	planLockJSON, err := json.Marshal(planLocks[0])
-	if err != nil {
-		t.Fatal(err)
+	config := definition.ExecutionConfig()
+	rootGate, configured := config.ReviewGate()
+	if !configured || rootGate.Adapter().String() != "natural-language" ||
+		rootGate.Recipe().String() != "default" ||
+		rootGate.PolicyPath() != "policies/root-review.md" ||
+		rootGate.PolicyDigest() != workspace.DigestBytes(rootPolicy) ||
+		string(rootGate.Policy()) != string(rootPolicy) {
+		t.Fatalf("root gate binding = %#v configured=%t", rootGate, configured)
 	}
-	for _, encoded := range [][]byte{workspaceLockJSON, planLockJSON} {
-		text := string(encoded)
-		if !strings.Contains(text, definition.Generation().String()) || strings.Contains(text, "runtime") || strings.Contains(text, "status") || strings.Contains(text, "base_ref") || strings.Contains(text, "remote") {
-			t.Fatalf("projection JSON has mutable or misplaced state: %s", text)
+
+	gates := make(map[string]workspace.ReviewGateConfig)
+	for _, unit := range config.MergeUnits() {
+		gate, exists := unit.ReviewGate()
+		if !exists {
+			t.Fatalf("merge unit %s has no inherited or replacement review gate", unit.MergeUnitID())
 		}
+		gates[unit.MergeUnitID().String()] = gate
+	}
+	if first := gates["unit-one"]; first.PolicyPath() != rootGate.PolicyPath() ||
+		first.PolicyDigest() != rootGate.PolicyDigest() || string(first.Policy()) != string(rootPolicy) {
+		t.Fatalf("unit-one did not inherit the root review gate: %#v", first)
+	}
+	if second := gates["unit-two"]; second.Adapter().String() != "witness" ||
+		second.Recipe().String() != "strict-report" ||
+		second.PolicyPath() != "policies/unit-two-review.md" ||
+		second.PolicyDigest() != workspace.DigestBytes(unitPolicy) ||
+		string(second.Policy()) != string(unitPolicy) {
+		t.Fatalf("unit-two did not replace the root review gate: %#v", second)
+	}
+
+	policyArtifacts := make(map[string]workspace.NormalizedArtifact)
+	for _, artifact := range definition.Artifacts() {
+		if artifact.Kind() == workspace.ArtifactReviewPolicy {
+			policyArtifacts[artifact.Path()] = artifact
+		}
+	}
+	for path, content := range map[string][]byte{
+		"policies/root-review.md":     rootPolicy,
+		"policies/unit-two-review.md": unitPolicy,
+	} {
+		artifact, exists := policyArtifacts[path]
+		if !exists || artifact.SourceHash() != workspace.DigestBytes(content) {
+			t.Fatalf("policy artifact %s = %#v exists=%t", path, artifact, exists)
+		}
+	}
+}
+
+func TestReviewGatePolicySourcesRejectPartialOverride(t *testing.T) {
+	t.Parallel()
+
+	fixture, _, _ := configuredReviewGateFixture(t)
+	partial := cloneDefinitionSources(fixture.sources)
+	configuration := string(partial.ExecutionConfig.Bytes)
+	complete := "    review_gate:\n      adapter: witness\n      recipe: strict-report\n      policy_file: policies/unit-two-review.md\n"
+	updated := strings.Replace(configuration, complete, "    review_gate:\n      adapter: witness\n", 1)
+	if updated == configuration {
+		t.Fatal("failed to construct partial review gate override")
+	}
+	partial.ExecutionConfig.Bytes = []byte(updated)
+	if _, err := workspace.ValidateDefinition(partial); err == nil ||
+		!strings.Contains(err.Error(), "must name adapter, recipe, and policy_file together") {
+		t.Fatalf("partial review gate override error = %v", err)
 	}
 }
 
@@ -202,40 +250,7 @@ func initializeTargetRepository(
 	algorithm workspace.GitHashAlgorithm,
 ) (string, workspace.GitObjectID) {
 	t.Helper()
-	root := t.TempDir()
-	canonical, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		t.Fatalf("canonicalize target repository: %v", err)
-	}
-	runTargetGitTest(
-		t, canonical,
-		"init", "--quiet", "--initial-branch=main",
-		"--object-format="+string(algorithm), ".",
-	)
-	if err := os.WriteFile(
-		filepath.Join(canonical, "seed.txt"),
-		[]byte("local target seed\n"),
-		0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
-	runTargetGitTest(t, canonical, "add", "--", "seed.txt")
-	runTargetGitTest(
-		t, canonical,
-		"-c", "user.name=Feature Implement Test",
-		"-c", "user.email=feature-implement@localhost",
-		"commit", "--quiet", "-m", "seed local target",
-	)
-	raw := strings.TrimSpace(
-		runTargetGitTest(t, canonical, "rev-parse", "HEAD"),
-	)
-	object, err := workspace.ParseGitObjectID(
-		string(algorithm) + ":" + raw,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return canonical, object
+	return copyTargetRepositoryTemplate(t, algorithm)
 }
 
 func runTargetGitTest(
@@ -261,10 +276,8 @@ func assertLocalTargetInitializationJournal(
 ) {
 	t.Helper()
 	records := snapshot.Records()
-	if len(records) != 3 ||
-		records[0].EventType() != workspace.JournalEventWorkspaceInitialized ||
-		records[1].EventType() != workspace.JournalEventFeatureRefCreationIntended ||
-		records[2].EventType() != workspace.JournalEventFeatureRefCreated {
+	if len(records) != 1 ||
+		records[0].EventType() != workspace.JournalEventWorkspaceInitialized {
 		t.Fatalf("local target initialization journal = %#v", records)
 	}
 }
@@ -293,23 +306,6 @@ func TestSourceAndSemanticHashesHaveDistinctContracts(t *testing.T) {
 	}
 	if first.Generation() == second.Generation() {
 		t.Fatal("generation must bind exact source hashes")
-	}
-}
-
-func TestNoReviewExecutionCanonicalFormOmitsUnusedAndRemovedFields(t *testing.T) {
-	t.Parallel()
-
-	fixture := newDefinitionFixture(t)
-	definition, err := workspace.ValidateDefinition(fixture.sources)
-	if err != nil {
-		t.Fatal(err)
-	}
-	execution := artifactByKind(t, definition, workspace.ArtifactExecutionConfig)
-	canonical := string(execution.CanonicalBytes())
-	for _, field := range []string{"review_profiles", "require_signed_receipts"} {
-		if strings.Contains(canonical, field) {
-			t.Fatalf("canonical execution retained %q: %s", field, canonical)
-		}
 	}
 }
 
@@ -354,8 +350,6 @@ merge_units:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 2
-      max_review_rounds: 2
-      max_review_fixes: 2
 `)...)
 	if _, err := workspace.ValidateDefinition(sources); err == nil || !strings.Contains(err.Error(), "unknown merge unit beta-plan/missing-unit") {
 		t.Fatalf("unknown cross-plan target error = %v", err)
@@ -392,8 +386,6 @@ func TestEffectiveDefinitionRejectsCombinedCrossPlanCycle(t *testing.T) {
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 2
-      max_review_rounds: 2
-      max_review_fixes: 2
   - plan_id: beta-plan
     merge_unit_id: unit-two
     profile: standard
@@ -404,8 +396,6 @@ func TestEffectiveDefinitionRejectsCombinedCrossPlanCycle(t *testing.T) {
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 2
-      max_review_rounds: 2
-      max_review_fixes: 2
 `)...)
 	if _, err := workspace.ValidateDefinition(sources); err == nil || !strings.Contains(err.Error(), "workspace merge-unit dependency cycle") {
 		t.Fatalf("combined cross-plan cycle error = %v", err)
@@ -545,14 +535,6 @@ func TestDefinitionDefensivelyCopiesNestedInputsAndOutputs(t *testing.T) {
 	}
 }
 
-func TestV2PlanAndLockProjectionsCannotOwnRuntimeOrWorkspaceState(t *testing.T) {
-	t.Parallel()
-
-	assertTypeOmitsFields(t, reflect.TypeOf(workspace.Plan{}), "base", "remote", "policy", "runtime", "state", "status")
-	assertTypeOmitsFields(t, reflect.TypeOf(workspace.PlanLockProjection{}), "base", "remote", "policy", "runtime", "state", "status")
-	assertTypeOmitsFields(t, reflect.TypeOf(workspace.WorkspaceLockProjection{}), "runtime", "state", "status", "approval", "attempt")
-}
-
 func artifactByKind(t *testing.T, definition workspace.EffectiveWorkspaceDefinition, kind workspace.ArtifactKind) workspace.NormalizedArtifact {
 	t.Helper()
 	for _, artifact := range definition.Artifacts() {
@@ -572,17 +554,32 @@ func cloneDefinitionSources(source workspace.DefinitionSources) workspace.Defini
 	for index := range result.Plans {
 		result.Plans[index].Bytes = append([]byte(nil), source.Plans[index].Bytes...)
 	}
+	result.ReviewPolicies = append([]workspace.SourceArtifact(nil), source.ReviewPolicies...)
+	for index := range result.ReviewPolicies {
+		result.ReviewPolicies[index].Bytes = append([]byte(nil), source.ReviewPolicies[index].Bytes...)
+	}
 	return result
 }
 
-func assertTypeOmitsFields(t *testing.T, typ reflect.Type, forbidden ...string) {
+func configuredReviewGateFixture(t *testing.T) (definitionFixture, []byte, []byte) {
 	t.Helper()
-	for index := 0; index < typ.NumField(); index++ {
-		name := strings.ToLower(typ.Field(index).Name)
-		for _, fragment := range forbidden {
-			if strings.Contains(name, fragment) {
-				t.Fatalf("%s unexpectedly owns field %s", typ, typ.Field(index).Name)
-			}
-		}
+
+	fixture := newDefinitionFixture(t)
+	rootPolicy := []byte("Review this exact artifact under the root policy.\n")
+	unitPolicy := []byte("Review this exact artifact under the unit-two policy.\n")
+	configuration := string(fixture.sources.ExecutionConfig.Bytes)
+	rootGate := "review_gate:\n  adapter: natural-language\n  recipe: default\n  policy_file: policies/root-review.md\n"
+	updated := strings.Replace(configuration, "merge_units:\n", rootGate+"merge_units:\n", 1)
+	unitTwo := "  - plan_id: alpha-plan\n    merge_unit_id: unit-two\n    profile: standard\n"
+	unitTwoReplacement := unitTwo + "    review_gate:\n      adapter: witness\n      recipe: strict-report\n      policy_file: policies/unit-two-review.md\n"
+	updated = strings.Replace(updated, unitTwo, unitTwoReplacement, 1)
+	if updated == configuration || !strings.Contains(updated, unitTwoReplacement) {
+		t.Fatal("failed to configure review gate fixture")
 	}
+	fixture.sources.ExecutionConfig.Bytes = []byte(updated)
+	fixture.sources.ReviewPolicies = []workspace.SourceArtifact{
+		{Path: "policies/root-review.md", Bytes: rootPolicy},
+		{Path: "policies/unit-two-review.md", Bytes: unitPolicy},
+	}
+	return fixture, rootPolicy, unitPolicy
 }

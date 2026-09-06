@@ -2,7 +2,7 @@
 
 `feature-implement` is a self-contained Go CLI with delegated Codex and Claude
 skills for planning implementation work and executing it in a local Git
-repository. Workspace v2 uses immutable source definitions, a typed append-only
+repository. The local workspace uses immutable source definitions, a typed append-only
 journal, isolated attempt worktrees, exact-head review, and deterministic local
 integration.
 
@@ -38,18 +38,17 @@ feature plan materialize --manifest feature.plan.yaml --out-root <dir> --json
 feature validate <plan-dir> [--write-lock] --json
 ```
 
-Workspace execution uses these version-two surfaces:
+Workspace execution uses these surfaces:
 
 ```text
 feature workspace schema bundle|requests|reports [--json]
 feature workspace example
 feature workspace validate --bundle <bundle-root> [--write-locks] [--json]
-feature workspace init|recover --bundle <bundle-root> --workspace <runtime-root> --input <file|-> [--json]
-feature workspace status|scheduler|gates|report --bundle <bundle-root> --workspace <runtime-root> [--json]
+feature workspace init|recover --bundle <bundle-root> --input <file|-> [--json]
+feature workspace status --bundle <bundle-root> [--json]
 
-feature workspace attempt reserve|materialize|adopt-head|boundary|next-goal|acknowledge|owner-response|resume ...
-feature workspace commit next ...
-feature workspace review start|reserve|record|reserve-fix|apply-fix|record-fix|ready ...
+feature workspace attempt start|adopt-head|pause|resume|abandon ...
+feature workspace review dispatch|record|record-document|ready ...
 feature workspace integrate merge-unit ...
 feature workspace complete verify ...
 ```
@@ -73,7 +72,9 @@ sample-workspace/
 │   └── sample-plan.yaml
 ├── config/
 │   └── execution.yaml
-└── generated/                  # tool-owned immutable lock projections
+├── policies/
+│   └── review.md
+└── feature.workspace.lock.json # one canonical normalized definition lock
 ```
 
 The descriptor contains only local source discovery:
@@ -87,9 +88,9 @@ The descriptor contains only local source discovery:
 }
 ```
 
-Every descriptor path is relative, non-hidden, outside `generated/`, uniquely
-owned by one source role, and rooted beneath the bundle. Source paths cannot
-traverse symlinks or collide across roles.
+Every descriptor path is relative, non-hidden, uniquely owned by one source
+role, and rooted beneath the bundle. Source paths cannot traverse symlinks or
+collide across roles.
 
 The workspace manifest binds one local target repository, a stable fully
 qualified base ref and exact base commit, an AI-selected feature branch, plan
@@ -111,10 +112,10 @@ plans:
 dependencies: []
 ```
 
-The pinned base commit must equal `base_ref` during validation and
-initialization. Later movement of that ref is reported as drift; an active
-workspace is never silently rebased. The primary checkout may be dirty and is
-never cleaned, stashed, switched, or used as an attempt worktree.
+The pinned base commit must equal `base_ref` during validation and initialization.
+Post-initialization validation requires the pinned base commit object to remain present; the base ref's movement or deletion after initialization is irrelevant and never fatal.
+The primary checkout may be dirty and is never cleaned, stashed, switched, or used
+as an attempt worktree.
 
 Plan sources own stories, story dependencies, and merge-unit composition:
 
@@ -140,7 +141,8 @@ merge_units:
 ```
 
 Execution configuration assigns every merge unit exactly one profile, an
-execution policy that may only narrow its parent, and an explicit boundary:
+execution policy that may only narrow its parent, an explicit boundary, and an
+optional review-gate adapter contract:
 
 ```yaml
 schema_version: 2
@@ -148,8 +150,6 @@ policy:
   require_passing_checks: true
   allow_write_network: false
   max_attempts: 3
-  max_review_rounds: 3
-  max_review_fixes: 2
 profiles:
   - id: standard
     runner: codex
@@ -157,10 +157,12 @@ profiles:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 3
-      max_review_rounds: 3
-      max_review_fixes: 2
     boundary:
       escalation: allowed
+review_gate:
+  adapter: natural-language
+  recipe: default
+  policy_file: policies/review.md
 merge_units:
   - plan_id: sample-plan
     merge_unit_id: first-contract
@@ -173,38 +175,47 @@ merge_units:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 3
-      max_review_rounds: 3
-      max_review_fixes: 2
 ```
 
 `checkpoint` is the owner's planned gate; `escalation` is the agent's
-permission to stop on its own when something genuinely goes wrong. The six
+permission to stop on its own when something genuinely goes wrong. The four
 workflow combinations are:
 
 | checkpoint | escalation | behavior |
 |---|---|---|
 | `none` | `allowed` | Runs unit to unit without stopping; the agent may still stop if it hits something real. The block-of-units default. |
 | `none` | `forbidden` | Cannot stop for any reason — finish or fail. For unattended and CI runs. |
-| `pause_only` | `allowed` | Stops here, owner responds `continue`, and resumes on the same goal. |
-| `pause_only` | `forbidden` | Stops at this planned owner gate; the agent may not raise its own stop. After the owner responds `continue`, it resumes on the same goal. |
-| `complete_goal_and_wait` | `allowed` | Goal finishes here; after the owner responds, a next goal is reserved and acknowledged, and the attempt resumes on the new goal. |
-| `complete_goal_and_wait` | `forbidden` | Goal finishes at this planned handoff; the agent may not raise its own stop. After the owner responds, a next goal is reserved and acknowledged before the attempt resumes on it. |
+| `pause_only` | `allowed` | Records a planned pause and resumes on the same goal. |
+| `pause_only` | `forbidden` | Records the planned pause; the agent may not raise its own stop. Resumes on the same goal. |
 
 An execution profile may optionally declare `boundary` with `escalation` only.
 A merge unit may narrow `allowed` to `forbidden`, but never widen `forbidden`
-to `allowed`. Profiles deliberately do not declare `checkpoint`, because
-`pause_only` and `complete_goal_and_wait` do not order against each other.
+to `allowed`. Profiles deliberately do not declare `checkpoint`; planned
+checkpoints remain on individual merge units.
 
-Commit protocols, review-fix protocols, and review loops are optional strict
-schemas within each merge-unit entry. Without a commit protocol, ordinary
-local commits are allowed. Without a configured review loop,
+Commit protocols and review gates are optional strict schemas within each
+merge-unit entry. A configured commit protocol validates the final clean
+base-to-head history—ordered checkpoints, exact messages, path constraints,
+and isolated checks that exit zero—before gate dispatch or integration.
+
+A `review_gate` names `adapter`, `recipe`, and `policy_file` together. A merge
+unit either inherits the complete root gate or names another complete gate; a
+partial override is rejected. The policy file is ordinary bundle source text:
+its exact bytes are digested, retained in the generation, and handed to the
+adapter without interpretation by `feature-implement`. The natural-language
+adapter is the default implementation. Its policy specifies any iteration the
+adapter performs; that policy is the adapter's concern, not local scheduling
+logic.
+
+Each dispatch records intent before a frozen copy is materialized. Its terminal
+record is exactly one of `satisfied`, `not_satisfied`, or `failed_to_run`, and
+always carries an evidence digest. The latter two are terminal facts rather
+than special scheduler paths. Without a configured review gate,
 `attempt adopt-head` records the exact clean accepted head and tree before
 integration.
 
-Agent-driven broad review is capped at three iterations. Start another
-iteration only when the preceding review found a Critical or High issue.
-After a review with no Critical or High findings, apply worthwhile Medium and
-Low fixes once, perform targeted confirmation, and stop the broad-review loop.
+Witness review input is transported as a JSON string, so dispatch rejects
+non-UTF-8 review input.
 
 ## Locks and runtime state
 
@@ -215,67 +226,74 @@ Git history. After an accepted source change, regenerate locks with:
 feature workspace validate --bundle "$bundle_root" --write-locks --json
 ```
 
-Commit both the plan sources and generated locks, and keep the plan repository
+Commit both the plan sources and `feature.workspace.lock.json`, and keep the plan repository
 clean before initializing a runtime. `workspace init` verifies that the clean
 plan `HEAD` contains the exact source and lock bytes, then derives the runtime
-plan checkpoint artifact from that committed state.
+plan checkpoint from that committed state.
 
-The generated ownership inventory permits replacement only while each existing
-generated file still matches its last generated hash. Modified projections,
-hidden paths, symlink traversal, missing inventory, and unowned conflicts fail
-closed. Do not edit `generated/` by hand.
+The lock is one canonical JSON file. It is written through a synced temporary
+file and atomic rename; a lock whose current bytes differ from its committed
+value is refused rather than replaced. Do not edit
+`feature.workspace.lock.json` by hand.
 
-Keep runtime state and attempt worktrees outside the source bundle and the
-target repository. Initialization records the verified worktree root and the
-derived plan checkpoint:
+Runtime state is derived as the sibling
+`<bundle-root>.feature-runtime`; its attempt and review-copy root is derived as
+`<bundle-root>.feature-runtime-attempt-worktrees`. Initialization records the
+derived plan checkpoint and needs no root paths in its request:
 
 ```json
 {
   "schema_version": 2,
-  "occurred_at": "2026-07-24T12:00:00Z",
-  "worktree_root": "/absolute/path/to/attempt-worktrees"
+  "occurred_at": "2026-07-24T12:00:00Z"
 }
 ```
 
-Runtime state is append-only under `<runtime-root>/state/`. A runtime without
-the local v5 format marker is rejected with a regeneration diagnostic; it is
-not interpreted or migrated.
+Under `<runtime-root>/state/`, the journal is append-only; projections and
+recovery controls are disposable or replaceable; raw review documents are
+content-addressed retained evidence. A runtime without the local v9 format
+marker is rejected with a regeneration diagnostic; it is not interpreted or
+migrated.
 
 ## Local execution
 
-1. Run `recover`, then read `status`, `scheduler`, `gates`, and `report`.
-2. Select a `ready` merge unit. Submit `attempt reserve` with its plan ID,
-   merge-unit ID, next attempt number, and goal. The base, branch, and worktree
-   root are derived from locked runtime state.
-3. Submit `attempt materialize`. Work only in the returned worktree and branch.
-4. Use `commit next` for a configured commit step. Otherwise make ordinary
-   local commits and keep the worktree clean.
-5. For configured review, use `review start`, `reserve`, `record`, bounded fix
-   actions, and `ready`. Reviewer labels are descriptive local metadata, and
-   every result binds the exact request, head, tree, and evidence.
-6. Without configured review, submit `attempt adopt-head` for the exact clean
-   descendant selected for integration.
-7. Before integration, submit `attempt boundary` only when the merge unit
+1. Run `recover`, then read `status`.
+2. Select a `ready` merge unit. Submit `attempt start` with its plan ID,
+   merge-unit ID, next attempt number, and goal. The base and detached scratch
+   worktree are derived from locked runtime state.
+3. Work only in the returned detached worktree. Its working history is scratch
+   until an exact clean head is selected for integration.
+4. Make ordinary local commits and keep the worktree clean. When a
+   `commit_protocol` is configured, the final base-to-head history is checked
+   against its ordered checkpoints and configured checks before review or
+   integration.
+5. For a configured review gate, submit `review dispatch` after the attempt is
+   clean. It records the request first and returns a separately materialized
+   frozen copy plus the opaque policy text; give the adapter only that copy.
+   When the adapter has a durable evidence record, submit `review record` with
+   its digest, or use `review record-document` for a Witness
+   `review-report-v1` document. The latter strictly validates and retains raw
+   report bytes. A changed head or tree requires a fresh dispatch.
+6. `review ready` is a read-only check for a satisfied gate against the exact
+   current artifact. It does not conduct review. `not_satisfied` and
+   `failed_to_run` remain distinguishable terminal facts; use ordinary owner
+   decisions and attempt lifecycle actions rather than a review-specific loop.
+7. Without a configured review gate, submit `attempt adopt-head` for the exact
+   clean descendant selected for integration.
+8. Before integration, submit `attempt pause` only when the merge unit
    configures a checkpoint other than `none`, or when the agent genuinely needs
    an allowed escalation. The request requires `kind`: use `checkpoint` for the
-   configured gate and `escalation` for a genuine agent-raised stop. Record it
+   configured planned stop and `escalation` for a genuine agent-raised stop. Record it
    while the attempt is active, before `integrate merge-unit`.
-8. Resolve every returned local directive. For a `complete_goal_and_wait`
-   checkpoint, after the owner response choose the next `GoalBinding`, submit
-   `attempt next-goal`, act on the returned `create_next_goal` directive, submit
-   the matching `next_goal_created` acknowledgement with `attempt acknowledge`,
-   and only then submit `attempt resume`. For any other recorded boundary,
-   submit `attempt resume` after every required acknowledgement and owner
-   response is recorded. If no boundary is needed, proceed directly. Only then
-   submit `integrate merge-unit` for the exact accepted head and tree.
-   Integration creates a deterministic two-parent local commit and
-   compare-and-swap updates only the workspace-owned feature ref.
-   Acknowledgements and owner responses bind the exact directive, goal, head,
-   and idempotency inputs.
-9. After every unit is integrated and every boundary is resolved, run
+9. Resume the attempt directly when a pause was recorded. Use `attempt abandon`
+   only to terminally exit a non-integrated attempt; it leaves its detached
+   scratch directory intact for inspection. If no pause is needed, proceed
+   directly. Only then submit `integrate merge-unit` for the exact accepted head and tree. Integration
+   creates a deterministic two-parent local commit and compare-and-swap updates
+   only the workspace-owned feature ref.
+10. After every unit is integrated and every pause is resolved, run
    `complete verify` to record local workspace completion.
 
-Every mutation returns a fresh journal-derived report. Treat that report as the
+Every mutation returns a fresh journal-derived workspace view. Treat that view as the
 source of truth instead of reconstructing state from remembered commands.
 
 The journal hash chain and stored digests detect accidental corruption; they
@@ -286,34 +304,32 @@ completion proves the recorded Git topology and workflow state only.
 
 ### Operations and migration
 
-Workspace v2 is a local-only execution model. Operators commit exact plan
-sources and generated lock bytes in a clean plan repository, initialize a fresh
-local v5 runtime, recover before each work cycle, and use journal-derived
+The local workspace is a local-only execution model. Operators commit exact plan
+sources and canonical lock bytes in a clean plan repository, initialize a fresh
+local v9 runtime, recover before each work cycle, and use journal-derived
 reports as the source of truth. Earlier draft runtime state is intentionally not
-migrated; a runtime without the local v5 marker must be regenerated from the
+migrated; a runtime without the local v9 marker must be regenerated from the
 committed plan and current lock.
 
 ### Supported repository profile
 
-The target must be a local non-bare Git repository with a complete object
-database, SHA-1 or SHA-256 objects, ordinary ref and reflog storage, and no
-active partial-clone, promisor, shallow, submodule, external object-storage,
-repository-attribute, configured-filter, configured-signature-verifier, or
-replacement-history profile. Linked worktrees are supported when their
-administration and common directories remain exactly bound to the verified
-target repository.
+The target must be a primary local non-bare Git worktree with the exact pinned
+base commit present, SHA-1 or SHA-256 objects, an initially absent feature ref
+or the exact recorded integrated head, and no checked-out feature branch.
+Required operations run with isolated configuration, hooks and signing disabled,
+replacement refs disabled, and external diff or text conversion disabled.
 
 ### Stable-base policy
 
 The fully qualified `base_ref` must point to the exact `base_commit` during
-validation and initialization. After initialization, movement of the base ref is
-reported as drift only. The runtime never rebases active work, adopts a moved
-base, or mutates the primary checkout to make the base match.
+validation and initialization. Post-initialization validation requires the pinned base commit object to remain present; the base ref's movement or deletion after initialization is irrelevant and never fatal.
+The runtime never rebases active work, adopts a moved base, or mutates the primary
+checkout to make the base match.
 
 ### Threat model
 
 The implementation defends local state against malformed source bundles,
-generated-file drift, journal tail corruption, stale compare-and-swap inputs,
+lock drift, journal tail corruption, stale compare-and-swap inputs,
 symlink traversal, unsafe Git configuration, repository hooks, ambient helper
 programs, and write-capable network use by configured checks. It does not
 authenticate operators, reviewers, or owners; detect same-user replacement of
@@ -323,7 +339,7 @@ an external attestation.
 
 ### Deferred GitHub design
 
-Any hosted-forge lifecycle is outside the v0.2 executable surface. It must be
+Any hosted-forge lifecycle is outside the executable surface. It must be
 introduced as a separate design with its own state, checks, and admission rules;
 it cannot reinterpret local completion as hosted approval or release evidence.
 

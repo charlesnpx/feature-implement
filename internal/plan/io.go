@@ -37,14 +37,6 @@ func readPlanManifest(planDir string) (Manifest, error) {
 	return manifest, nil
 }
 
-func writeYAML(path string, value any) error {
-	b, err := yaml.Marshal(value)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, b, 0o644)
-}
-
 func writeJSON(path string, value any) error {
 	b, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {

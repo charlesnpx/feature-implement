@@ -2,16 +2,19 @@ package workspace
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
-func TestRuntimeStorageCreatesV5MarkerAndRejectsLegacyWithoutMutation(t *testing.T) {
+func TestRuntimeStorageCreatesCurrentMarkerAndRejectsUnmarkedRuntimeWithoutMutation(t *testing.T) {
 	parent := canonicalRuntimeTestTempDir(t)
 	legacy := filepath.Join(parent, "legacy")
 	if err := os.MkdirAll(filepath.Join(legacy, WorkspaceStateDirectoryName), 0o700); err != nil {
@@ -27,17 +30,14 @@ func TestRuntimeStorageCreatesV5MarkerAndRejectsLegacyWithoutMutation(t *testing
 		t.Fatal(err)
 	}
 	if _, err := OpenRuntimeStorage(legacy, true); err == nil ||
-		!strings.Contains(
-			err.Error(),
-			"Runtime format predates the debloated local contract; regenerate from the committed plan and current lock.",
-		) {
+		err.Error() != "runtime format is incompatible; regenerate from committed sources" {
 		t.Fatalf("legacy runtime error = %v", err)
 	}
 	if content, err := os.ReadFile(legacyJournal); err != nil || !bytes.Equal(content, legacyContent) {
 		t.Fatalf("legacy runtime changed: %q, %v", content, err)
 	}
 	if _, err := os.Lstat(filepath.Join(legacy, RuntimeFormatFileName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("legacy runtime acquired v5 marker: %v", err)
+		t.Fatalf("legacy runtime acquired v9 marker: %v", err)
 	}
 
 	fresh := filepath.Join(parent, "fresh")
@@ -61,14 +61,18 @@ func TestRuntimeStorageCreatesV5MarkerAndRejectsLegacyWithoutMutation(t *testing
 	}
 	marker, err := os.ReadFile(filepath.Join(fresh, RuntimeFormatFileName))
 	if err != nil {
-		t.Fatalf("read v5 runtime marker: %v", err)
+		t.Fatalf("read v9 runtime marker: %v", err)
 	}
 	var wire runtimeFormatMarkerWire
 	if err := json.Unmarshal(marker, &wire); err != nil {
-		t.Fatalf("decode v5 runtime marker: %v", err)
+		t.Fatalf("decode v9 runtime marker: %v", err)
 	}
-	if wire.SchemaVersion != 5 {
-		t.Fatalf("runtime marker schema version = %d, want 5", wire.SchemaVersion)
+	if wire.SchemaVersion != RuntimeFormatSchemaVersion {
+		t.Fatalf(
+			"runtime marker schema version = %d, want %d",
+			wire.SchemaVersion,
+			RuntimeFormatSchemaVersion,
+		)
 	}
 	if _, err := os.Lstat(filepath.Join(fresh, WorkspaceStateDirectoryName, "runtime-state.identity.v3.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("fresh runtime acquired removed identity marker: %v", err)
@@ -94,14 +98,11 @@ func TestRuntimeStorageRejectsV4MarkerAtFormatGate(t *testing.T) {
 	}
 
 	if _, err := OpenRuntimeStorage(runtimePath, false); err == nil ||
-		!strings.Contains(
-			err.Error(),
-			"Runtime format predates the debloated local contract; regenerate from the committed plan and current lock.",
-		) {
+		err.Error() != "runtime format is incompatible; regenerate from committed sources" {
 		t.Fatalf("v4 runtime format gate error = %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(runtimePath, RuntimeFormatFileName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("v4 runtime acquired v5 marker: %v", err)
+		t.Fatalf("v4 runtime acquired v9 marker: %v", err)
 	}
 }
 
@@ -158,15 +159,157 @@ func TestRuntimeInitializationRejectsUnknownNonEmptyState(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := OpenRuntimeStorage(runtimePath, true); err == nil ||
-		!strings.Contains(err.Error(), "Runtime format predates the debloated local contract") {
+		err.Error() != "runtime format is incompatible; regenerate from committed sources" {
 		t.Fatalf("unknown state error = %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(runtimePath, RuntimeFormatFileName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("unknown state acquired v5 marker: %v", err)
+		t.Fatalf("unknown state acquired v9 marker: %v", err)
 	}
 }
 
-func TestConcurrentRuntimeInitializationPublishesOneV5Runtime(t *testing.T) {
+func TestRuntimeInitializationRecoversLeftoverStagingFile(t *testing.T) {
+	runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "runtime")
+	if err := os.MkdirAll(runtimePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker, err := marshalRuntimeFormatMarker()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stagePath := filepath.Join(runtimePath, runtimeStagePrefix+strings.Repeat("a", 32))
+	if err := os.WriteFile(stagePath, marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	storage, err := OpenRuntimeStorage(runtimePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Verify(); err != nil {
+		_ = storage.Close()
+		t.Fatal(err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOlderRuntimeMarkersRefuseAdmissionWithoutMutation(t *testing.T) {
+	runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "runtime")
+	markerName := "feature.runtime.v8.json"
+	marker, err := json.Marshal(runtimeFormatMarkerWire{
+		SchemaVersion: 8,
+		Kind:          localRuntimeFormatKind,
+		StateRoot:     WorkspaceStateDirectoryName,
+		Capabilities:  append([]string(nil), requiredRuntimeCapabilities...),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(runtimePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimePath, markerName), marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacyProjectionPath := filepath.Join(
+		runtimePath, WorkspaceStateDirectoryName, "runtime-projection.v6.json",
+	)
+	if err := os.MkdirAll(filepath.Dir(legacyProjectionPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyProjectionPath, []byte("stale v6 projection\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	definition := EffectiveWorkspaceDefinition{
+		workspace: WorkspaceManifest{target: LocalTarget{
+			root: canonicalRuntimeTestTempDir(t),
+		}},
+		generation: DigestBytes([]byte("v8 marker with stale projection incompatible runtime generation")),
+	}
+	before := snapshotRuntimeTree(t, runtimePath)
+
+	if _, err := ValidateLocalTargetForWorkspaceRuntime(
+		context.Background(), runtimePath, definition,
+	); err == nil || err.Error() != "runtime format is incompatible; regenerate from committed sources" {
+		t.Fatalf("runtime validation error = %v", err)
+	}
+	assertRuntimeTreeUnchanged(t, runtimePath, before)
+
+	if _, err := InitializeWorkspaceV2WithOptions(
+		context.Background(),
+		runtimePath,
+		definition,
+		time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC),
+		WorkspaceInitializationOptions{},
+	); err == nil || err.Error() != "runtime format is incompatible; regenerate from committed sources" {
+		t.Fatalf("runtime initialization error = %v", err)
+	}
+	assertRuntimeTreeUnchanged(t, runtimePath, before)
+	if content, err := os.ReadFile(filepath.Join(runtimePath, markerName)); err != nil || !bytes.Equal(content, marker) {
+		t.Fatalf("runtime marker changed: %q, %v", content, err)
+	}
+	for _, path := range []string{
+		RuntimeFormatFileName,
+		RuntimeInitializationLockName,
+	} {
+		if _, err := os.Lstat(filepath.Join(runtimePath, path)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("older runtime acquired v9 artifact %s: %v", path, err)
+		}
+	}
+}
+
+type runtimeTreeEntry struct {
+	mode    fs.FileMode
+	content []byte
+}
+
+func snapshotRuntimeTree(t *testing.T, root string) map[string]runtimeTreeEntry {
+	t.Helper()
+	entries := make(map[string]runtimeTreeEntry)
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		snapshot := runtimeTreeEntry{mode: info.Mode()}
+		if info.Mode().IsRegular() {
+			snapshot.content, err = os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+		}
+		entries[filepath.ToSlash(relative)] = snapshot
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entries
+}
+
+func assertRuntimeTreeUnchanged(t *testing.T, root string, before map[string]runtimeTreeEntry) {
+	t.Helper()
+	after := snapshotRuntimeTree(t, root)
+	if len(before) != len(after) {
+		t.Fatalf("runtime tree entry count changed: before=%d after=%d", len(before), len(after))
+	}
+	for path, expected := range before {
+		actual, exists := after[path]
+		if !exists || actual.mode != expected.mode || !bytes.Equal(actual.content, expected.content) {
+			t.Fatalf("runtime path changed: %s before=%#v after=%#v exists=%t", path, expected, actual, exists)
+		}
+	}
+}
+
+func TestConcurrentRuntimeInitializationPublishesOneRuntime(t *testing.T) {
 	runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "runtime")
 	const contenders = 8
 	start := make(chan struct{})
@@ -290,7 +433,16 @@ func TestReplaceablePublicationRaceLeavesOneCompleteStableObject(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	candidates := [][]byte{[]byte("candidate-a\n"), []byte("candidate-b\n")}
+	candidates := [][]byte{
+		[]byte("candidate-a\n"),
+		[]byte("candidate-b\n"),
+		[]byte("candidate-c\n"),
+		[]byte("candidate-d\n"),
+		[]byte("candidate-e\n"),
+		[]byte("candidate-f\n"),
+		[]byte("candidate-g\n"),
+		[]byte("candidate-h\n"),
+	}
 	start := make(chan struct{})
 	results := make(chan error, len(candidates))
 	var group sync.WaitGroup
@@ -318,16 +470,103 @@ func TestReplaceablePublicationRaceLeavesOneCompleteStableObject(t *testing.T) {
 			successes++
 		}
 	}
-	if successes == 0 {
-		t.Fatal("concurrent publications produced no stable winner")
+	if successes != len(candidates) {
+		t.Fatalf("concurrent publications succeeded %d of %d times", successes, len(candidates))
 	}
 	content, err := root.ReadReplaceable("projection.json", 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(content) != string(candidates[0]) && string(content) != string(candidates[1]) {
+	matched := false
+	for _, candidate := range candidates {
+		if string(content) == string(candidate) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
 		t.Fatalf("concurrent publication content = %q", content)
 	}
+	entries, err := root.adapter.readDirectory(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.name, "runtime-publication-") {
+			t.Fatalf("concurrent publication left control file %s", entry.name)
+		}
+	}
+}
+
+func TestReadOnlyJournalWithoutPublicationControlsDoesNotCreateSidecar(t *testing.T) {
+	runtimePath := filepath.Join(canonicalRuntimeTestTempDir(t), "runtime")
+	writer, err := OpenWorkspaceJournal(runtimePath, JournalReadWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	statePath := WorkspaceStateDirectory(runtimePath)
+	before := runtimeStateFileBytes(t, statePath)
+	for name := range before {
+		if strings.HasSuffix(name, ".publication.lock") ||
+			strings.HasPrefix(name, "runtime-publication-") {
+			t.Fatalf("fresh runtime state unexpectedly contains publication control %s", name)
+		}
+	}
+	stateInfo, err := os.Stat(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(statePath, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(statePath, stateInfo.Mode().Perm()) }()
+
+	snapshot, err := ReadWorkspaceJournalSnapshot(runtimePath)
+	if err != nil {
+		t.Fatalf("read-only journal without publication controls: %v", err)
+	}
+	if snapshot.Head() != JournalGenesisHash() || len(snapshot.Records()) != 0 {
+		t.Fatalf("fresh read-only journal snapshot = %#v", snapshot)
+	}
+
+	after := runtimeStateFileBytes(t, statePath)
+	if len(after) != len(before) {
+		t.Fatalf("read-only journal changed state directory entries from %#v to %#v", before, after)
+	}
+	for name, beforeContent := range before {
+		afterContent, exists := after[name]
+		if !exists || !bytes.Equal(afterContent, beforeContent) {
+			t.Fatalf("read-only journal changed state file %s from %q to %q", name, beforeContent, afterContent)
+		}
+	}
+}
+
+func runtimeStateFileBytes(t *testing.T, directory string) map[string][]byte {
+	t.Helper()
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := make(map[string][]byte, len(entries))
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.Mode().IsRegular() {
+			t.Fatalf("runtime state entry %s is not a regular file", entry.Name())
+		}
+		content, err := os.ReadFile(filepath.Join(directory, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[entry.Name()] = content
+	}
+	return files
 }
 
 func TestWorkspaceJournalDetectsLockPathReplacement(t *testing.T) {

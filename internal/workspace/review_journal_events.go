@@ -1,12 +1,16 @@
 package workspace
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 )
 
 const reviewJournalRecordSafetyBytes = 8 * 1024
 
+// ReviewHeadAdoptedJournalEvent remains the non-gate acceptance record used by
+// merge units that do not configure a gate. It carries no review assessment
+// state; its historic event name is retained for existing runtime journals.
 type ReviewHeadAdoptedJournalEvent struct {
 	workspaceID    ID
 	generation     Digest
@@ -49,447 +53,197 @@ func (event ReviewHeadAdoptedJournalEvent) validate() error {
 		event.mergeUnit.planID.IsZero() || event.mergeUnit.mergeUnitID.IsZero() || event.priorHead.IsZero() ||
 		event.head.IsZero() || event.tree.IsZero() || event.snapshotDigest.IsZero() ||
 		event.priorHead.Algorithm() != event.head.Algorithm() || event.head.Algorithm() != event.tree.Algorithm() {
-		return fmt.Errorf("review head adoption requires exact workspace, attempt, Git, and snapshot bindings")
+		return fmt.Errorf("head adoption requires exact workspace, attempt, Git, and snapshot bindings")
 	}
 	return nil
 }
 
-type ReviewRoundStartedJournalEvent struct {
-	workspaceID ID
-	generation  Digest
-	attemptID   ID
-	mergeUnit   MergeUnitReference
-	loop        ReviewLoop
-	ordinal     uint16
-	head        GitObjectID
-	tree        GitObjectID
+// EvidenceDigest binds the exact adopted artifact without incorporating the
+// journal envelope. In particular, attempt worktree paths are operational
+// details derived from the runtime location, so they must not change a
+// deterministic integration commit for the same accepted artifact.
+func (event ReviewHeadAdoptedJournalEvent) EvidenceDigest() (Digest, error) {
+	if err := event.validate(); err != nil {
+		return Digest{}, err
+	}
+	canonical, err := json.Marshal(reviewHeadAdoptedPayload(event))
+	if err != nil {
+		return Digest{}, err
+	}
+	return DigestBytes(canonical), nil
 }
 
-func NewReviewRoundStartedJournalEvent(start StartReviewRound) (ReviewRoundStartedJournalEvent, error) {
-	event := ReviewRoundStartedJournalEvent{
-		workspaceID: start.workspaceID, generation: start.generation, attemptID: start.attemptID,
-		mergeUnit: start.mergeUnit, loop: cloneReviewLoop(start.loop), ordinal: start.ordinal,
-		head: start.head, tree: start.tree,
+// ReviewGateDispatchedJournalEvent records a repeatable adapter request before
+// any adapter is given a frozen copy.
+type ReviewGateDispatchedJournalEvent struct {
+	dispatch ReviewGateDispatch
+}
+
+func NewReviewGateDispatchedJournalEvent(dispatch ReviewGateDispatch) (ReviewGateDispatchedJournalEvent, error) {
+	canonical, err := canonicalReviewGateDispatch(dispatch)
+	if err != nil || dispatch.digest != DigestBytes(canonical) {
+		return ReviewGateDispatchedJournalEvent{}, fmt.Errorf("review gate dispatch event is not canonical")
 	}
-	if err := event.validate(); err != nil {
-		return ReviewRoundStartedJournalEvent{}, err
-	}
+	event := ReviewGateDispatchedJournalEvent{dispatch: dispatch}
 	if err := validateReviewJournalRecordFootprint(event); err != nil {
-		return ReviewRoundStartedJournalEvent{}, err
+		return ReviewGateDispatchedJournalEvent{}, err
 	}
 	return event, nil
 }
 
-func (ReviewRoundStartedJournalEvent) isWorkspaceJournalEvent() {}
-func (ReviewRoundStartedJournalEvent) eventType() JournalEventType {
-	return JournalEventReviewRoundStarted
+func (ReviewGateDispatchedJournalEvent) isWorkspaceJournalEvent() {}
+func (ReviewGateDispatchedJournalEvent) eventType() JournalEventType {
+	return JournalEventReviewGateDispatched
 }
-func (event ReviewRoundStartedJournalEvent) boundGeneration() Digest { return event.generation }
-func (event ReviewRoundStartedJournalEvent) validate() error {
-	start, err := NewStartReviewRound(
-		event.workspaceID, event.generation, event.attemptID, event.mergeUnit,
-		event.loop, event.ordinal, event.head, event.tree,
-	)
-	if err != nil {
+func (event ReviewGateDispatchedJournalEvent) boundGeneration() Digest {
+	return event.dispatch.generation
+}
+func (event ReviewGateDispatchedJournalEvent) validate() error {
+	canonical, err := canonicalReviewGateDispatch(event.dispatch)
+	if err != nil || event.dispatch.digest != DigestBytes(canonical) {
+		return fmt.Errorf("review gate dispatch event is not canonical")
+	}
+	return nil
+}
+func (event ReviewGateDispatchedJournalEvent) Dispatch() ReviewGateDispatch {
+	return event.dispatch
+}
+
+// ReviewGateRecordedJournalEvent is the terminal half of a dispatch. A raw
+// Witness report can be retained as the evidence artifact without exposing its
+// assessment details through the local gate model.
+type ReviewGateRecordedJournalEvent struct {
+	dispatch ReviewGateDispatch
+	record   ReviewGateRecord
+	document *ReviewDocumentArtifact
+}
+
+func NewReviewGateRecordedJournalEvent(
+	dispatch ReviewGateDispatch,
+	record ReviewGateRecord,
+) (ReviewGateRecordedJournalEvent, error) {
+	return newReviewGateRecordedJournalEvent(dispatch, record, nil)
+}
+
+func NewReviewGateRecordedDocumentJournalEvent(
+	dispatch ReviewGateDispatch,
+	record ReviewGateRecord,
+	document ReviewDocumentArtifact,
+) (ReviewGateRecordedJournalEvent, error) {
+	return newReviewGateRecordedJournalEvent(dispatch, record, &document)
+}
+
+func newReviewGateRecordedJournalEvent(
+	dispatch ReviewGateDispatch,
+	record ReviewGateRecord,
+	document *ReviewDocumentArtifact,
+) (ReviewGateRecordedJournalEvent, error) {
+	event := ReviewGateRecordedJournalEvent{dispatch: dispatch, record: record}
+	if document != nil {
+		copyDocument := *document
+		event.document = &copyDocument
+	}
+	if err := event.validate(); err != nil {
+		return ReviewGateRecordedJournalEvent{}, err
+	}
+	if err := validateReviewJournalRecordFootprint(event); err != nil {
+		return ReviewGateRecordedJournalEvent{}, err
+	}
+	return event, nil
+}
+
+func (ReviewGateRecordedJournalEvent) isWorkspaceJournalEvent() {}
+func (ReviewGateRecordedJournalEvent) eventType() JournalEventType {
+	return JournalEventReviewGateRecorded
+}
+func (event ReviewGateRecordedJournalEvent) boundGeneration() Digest {
+	return event.dispatch.generation
+}
+func (event ReviewGateRecordedJournalEvent) validate() error {
+	dispatchCanonical, dispatchErr := canonicalReviewGateDispatch(event.dispatch)
+	recordCanonical, recordErr := canonicalReviewGateRecord(event.record)
+	if dispatchErr != nil || event.dispatch.digest != DigestBytes(dispatchCanonical) ||
+		recordErr != nil || event.record.digest != DigestBytes(recordCanonical) ||
+		event.record.dispatchDigest != event.dispatch.digest ||
+		event.record.adapter != event.dispatch.adapter || event.record.recipe != event.dispatch.recipe ||
+		event.record.policyDigest != event.dispatch.policyDigest || event.record.head != event.dispatch.head ||
+		event.record.tree != event.dispatch.tree {
+		return fmt.Errorf("review gate record event does not match its exact dispatch")
+	}
+	if err := validateReviewGateRecordDocumentContract(event.dispatch, event.record, event.document); err != nil {
 		return err
 	}
-	canonical, err := canonicalReviewLoopBytes(start.loop)
-	if err != nil || DigestBytes(canonical) != event.loop.digest {
-		return fmt.Errorf("review round event loop digest does not match its configuration")
-	}
-	return nil
-}
-func (event ReviewRoundStartedJournalEvent) WorkspaceID() ID               { return event.workspaceID }
-func (event ReviewRoundStartedJournalEvent) Generation() Digest            { return event.generation }
-func (event ReviewRoundStartedJournalEvent) AttemptID() ID                 { return event.attemptID }
-func (event ReviewRoundStartedJournalEvent) MergeUnit() MergeUnitReference { return event.mergeUnit }
-func (event ReviewRoundStartedJournalEvent) Loop() ReviewLoop              { return cloneReviewLoop(event.loop) }
-func (event ReviewRoundStartedJournalEvent) Ordinal() uint16               { return event.ordinal }
-func (event ReviewRoundStartedJournalEvent) Head() GitObjectID             { return event.head }
-func (event ReviewRoundStartedJournalEvent) Tree() GitObjectID             { return event.tree }
-
-type ReviewInvocationReservedJournalEvent struct {
-	workspaceID ID
-	generation  Digest
-	attemptID   ID
-	loopDigest  Digest
-	reservation ReviewInvocationReservation
-}
-
-func NewReviewInvocationReservedJournalEvent(
-	workspaceID ID,
-	generation Digest,
-	attemptID ID,
-	loopDigest Digest,
-	reservation ReviewInvocationReservation,
-) (ReviewInvocationReservedJournalEvent, error) {
-	event := ReviewInvocationReservedJournalEvent{
-		workspaceID: workspaceID, generation: generation, attemptID: attemptID,
-		loopDigest: loopDigest, reservation: reservation,
-	}
-	if err := event.validate(); err != nil {
-		return ReviewInvocationReservedJournalEvent{}, err
-	}
-	if err := validateReviewJournalRecordFootprint(event); err != nil {
-		return ReviewInvocationReservedJournalEvent{}, err
-	}
-	return event, nil
-}
-
-func (ReviewInvocationReservedJournalEvent) isWorkspaceJournalEvent() {}
-func (ReviewInvocationReservedJournalEvent) eventType() JournalEventType {
-	return JournalEventReviewInvocationReserved
-}
-func (event ReviewInvocationReservedJournalEvent) boundGeneration() Digest { return event.generation }
-func (event ReviewInvocationReservedJournalEvent) validate() error {
-	if event.workspaceID.IsZero() || event.generation.IsZero() || event.attemptID.IsZero() || event.loopDigest.IsZero() ||
-		event.reservation.request.workspaceID != event.workspaceID ||
-		event.reservation.request.generation != event.generation || event.reservation.request.attemptID != event.attemptID ||
-		event.reservation.request.loopDigest != event.loopDigest {
-		return fmt.Errorf("review invocation reservation event requires exact workspace, attempt, and loop bindings")
-	}
-	canonical, err := canonicalReviewInvocationReservation(event.reservation)
-	if err != nil || event.reservation.digest != DigestBytes(canonical) {
-		return fmt.Errorf("review invocation reservation event is not canonical")
+	if event.document != nil {
+		if err := event.document.validate(); err != nil {
+			return err
+		}
+		if event.document.rawDocumentDigest != event.record.evidenceDigest {
+			return fmt.Errorf("review gate document evidence does not match the gate record")
+		}
 	}
 	return nil
 }
 
-func (event ReviewInvocationReservedJournalEvent) Reservation() ReviewInvocationReservation {
-	return event.reservation
+// reviewGateRecordRequiresDocumentArtifact is the shared journal-contract
+// predicate. A document-contract adapter's satisfied or not-satisfied verdict
+// is durable only with its retained raw document artifact.
+func reviewGateRecordRequiresDocumentArtifact(
+	dispatch ReviewGateDispatch,
+	record ReviewGateRecord,
+) bool {
+	return ReviewGateCarriesDocumentContract(dispatch.adapter) &&
+		(record.verdict == ReviewGateSatisfied || record.verdict == ReviewGateNotSatisfied)
 }
 
-type ReviewInvocationFailedJournalEvent struct {
-	workspaceID       ID
-	generation        Digest
-	attemptID         ID
-	loopDigest        Digest
-	reservationDigest Digest
-	failureDigest     Digest
-}
-
-func NewReviewInvocationFailedJournalEvent(
-	workspaceID ID,
-	generation Digest,
-	attemptID ID,
-	loopDigest Digest,
-	failure RecordReviewInvocationFailure,
-) (ReviewInvocationFailedJournalEvent, error) {
-	event := ReviewInvocationFailedJournalEvent{
-		workspaceID: workspaceID, generation: generation, attemptID: attemptID, loopDigest: loopDigest,
-		reservationDigest: failure.reservationDigest, failureDigest: failure.failureDigest,
-	}
-	if err := event.validate(); err != nil {
-		return ReviewInvocationFailedJournalEvent{}, err
-	}
-	if err := validateReviewJournalRecordFootprint(event); err != nil {
-		return ReviewInvocationFailedJournalEvent{}, err
-	}
-	return event, nil
-}
-
-func (ReviewInvocationFailedJournalEvent) isWorkspaceJournalEvent() {}
-func (ReviewInvocationFailedJournalEvent) eventType() JournalEventType {
-	return JournalEventReviewInvocationFailed
-}
-func (event ReviewInvocationFailedJournalEvent) boundGeneration() Digest { return event.generation }
-func (event ReviewInvocationFailedJournalEvent) validate() error {
-	if event.workspaceID.IsZero() || event.generation.IsZero() || event.attemptID.IsZero() ||
-		event.loopDigest.IsZero() || event.reservationDigest.IsZero() || event.failureDigest.IsZero() {
-		return fmt.Errorf("review invocation failure event requires exact review and failure bindings")
+func validateReviewGateRecordDocumentContract(
+	dispatch ReviewGateDispatch,
+	record ReviewGateRecord,
+	document *ReviewDocumentArtifact,
+) error {
+	if reviewGateRecordRequiresDocumentArtifact(dispatch, record) && document == nil {
+		return fmt.Errorf("review gate document contract is incompatible; regenerate from committed sources")
 	}
 	return nil
 }
-
-type ReviewResultRecordedJournalEvent struct {
-	workspaceID       ID
-	generation        Digest
-	attemptID         ID
-	loopDigest        Digest
-	round             uint16
-	profileOrdinal    uint16
-	invocation        uint16
-	reservationDigest Digest
-	result            ReviewResultSubmission
-}
-
-func NewReviewResultRecordedJournalEvent(
-	workspaceID ID, generation Digest, attemptID ID, loopDigest Digest,
-	record RecordReviewResult,
-) (ReviewResultRecordedJournalEvent, error) {
-	event := ReviewResultRecordedJournalEvent{
-		workspaceID: workspaceID, generation: generation, attemptID: attemptID, loopDigest: loopDigest,
-		round: record.round, profileOrdinal: record.profileOrdinal, invocation: record.invocation,
-		reservationDigest: record.reservationDigest, result: cloneReviewResult(record.result),
+func (event ReviewGateRecordedJournalEvent) Dispatch() ReviewGateDispatch { return event.dispatch }
+func (event ReviewGateRecordedJournalEvent) Record() ReviewGateRecord     { return event.record }
+func (event ReviewGateRecordedJournalEvent) DocumentArtifact() (ReviewDocumentArtifact, bool) {
+	if event.document == nil {
+		return ReviewDocumentArtifact{}, false
 	}
-	if err := event.validate(); err != nil {
-		return ReviewResultRecordedJournalEvent{}, err
-	}
-	if err := validateReviewJournalRecordFootprint(event); err != nil {
-		return ReviewResultRecordedJournalEvent{}, err
-	}
-	return event, nil
-}
-
-func (ReviewResultRecordedJournalEvent) isWorkspaceJournalEvent() {}
-func (ReviewResultRecordedJournalEvent) eventType() JournalEventType {
-	return JournalEventReviewResultRecorded
-}
-func (event ReviewResultRecordedJournalEvent) boundGeneration() Digest { return event.generation }
-func (event ReviewResultRecordedJournalEvent) validate() error {
-	if event.workspaceID.IsZero() || event.generation.IsZero() || event.attemptID.IsZero() || event.loopDigest.IsZero() {
-		return fmt.Errorf("review result event requires workspace, generation, attempt, and loop")
-	}
-	_, err := NewRecordReviewResult(
-		event.round, event.profileOrdinal, event.invocation, event.reservationDigest,
-		event.result,
-	)
-	return err
-}
-func (event ReviewResultRecordedJournalEvent) WorkspaceID() ID        { return event.workspaceID }
-func (event ReviewResultRecordedJournalEvent) Generation() Digest     { return event.generation }
-func (event ReviewResultRecordedJournalEvent) AttemptID() ID          { return event.attemptID }
-func (event ReviewResultRecordedJournalEvent) LoopDigest() Digest     { return event.loopDigest }
-func (event ReviewResultRecordedJournalEvent) Round() uint16          { return event.round }
-func (event ReviewResultRecordedJournalEvent) ProfileOrdinal() uint16 { return event.profileOrdinal }
-func (event ReviewResultRecordedJournalEvent) Invocation() uint16     { return event.invocation }
-func (event ReviewResultRecordedJournalEvent) ReservationDigest() Digest {
-	return event.reservationDigest
-}
-func (event ReviewResultRecordedJournalEvent) Result() ReviewResultSubmission {
-	return cloneReviewResult(event.result)
-}
-
-type ReviewFindingFixReservedJournalEvent struct {
-	workspaceID ID
-	generation  Digest
-	attemptID   ID
-	loopDigest  Digest
-	reservation ReviewFixReservation
-}
-
-func NewReviewFindingFixReservedJournalEvent(
-	reservation ReviewFixReservation,
-) (ReviewFindingFixReservedJournalEvent, error) {
-	event := ReviewFindingFixReservedJournalEvent{
-		workspaceID: reservation.workspaceID, generation: reservation.generation,
-		attemptID: reservation.attemptID, loopDigest: reservation.loopDigest,
-		reservation: *cloneReviewFixReservation(&reservation),
-	}
-	if err := event.validate(); err != nil {
-		return ReviewFindingFixReservedJournalEvent{}, err
-	}
-	if err := validateReviewJournalRecordFootprint(event); err != nil {
-		return ReviewFindingFixReservedJournalEvent{}, err
-	}
-	return event, nil
-}
-
-func (ReviewFindingFixReservedJournalEvent) isWorkspaceJournalEvent() {}
-func (ReviewFindingFixReservedJournalEvent) eventType() JournalEventType {
-	return JournalEventReviewFindingFixReserved
-}
-func (event ReviewFindingFixReservedJournalEvent) boundGeneration() Digest { return event.generation }
-func (event ReviewFindingFixReservedJournalEvent) validate() error {
-	if event.workspaceID.IsZero() || event.generation.IsZero() || event.attemptID.IsZero() || event.loopDigest.IsZero() ||
-		event.reservation.workspaceID != event.workspaceID || event.reservation.generation != event.generation ||
-		event.reservation.attemptID != event.attemptID || event.reservation.loopDigest != event.loopDigest {
-		return fmt.Errorf("review finding-fix reservation event requires exact review bindings")
-	}
-	canonical, err := canonicalReviewFixReservation(event.reservation)
-	if err != nil || event.reservation.digest != DigestBytes(canonical) {
-		return fmt.Errorf("review finding-fix reservation event is not canonical")
-	}
-	return nil
-}
-
-func (event ReviewFindingFixReservedJournalEvent) Reservation() ReviewFixReservation {
-	return *cloneReviewFixReservation(&event.reservation)
-}
-
-type ReviewFixAppliedJournalEvent struct {
-	workspaceID ID
-	generation  Digest
-	attemptID   ID
-	loopDigest  Digest
-	fix         ApplyReviewFix
-}
-
-func NewReviewFixAppliedJournalEvent(
-	workspaceID ID, generation Digest, attemptID ID, loopDigest Digest, fix ApplyReviewFix,
-) (ReviewFixAppliedJournalEvent, error) {
-	event := ReviewFixAppliedJournalEvent{
-		workspaceID: workspaceID, generation: generation, attemptID: attemptID,
-		loopDigest: loopDigest, fix: cloneApplyReviewFix(fix),
-	}
-	if err := event.validate(); err != nil {
-		return ReviewFixAppliedJournalEvent{}, err
-	}
-	if err := validateReviewJournalRecordFootprint(event); err != nil {
-		return ReviewFixAppliedJournalEvent{}, err
-	}
-	return event, nil
-}
-
-func (ReviewFixAppliedJournalEvent) isWorkspaceJournalEvent()      {}
-func (ReviewFixAppliedJournalEvent) eventType() JournalEventType   { return JournalEventReviewFixApplied }
-func (event ReviewFixAppliedJournalEvent) boundGeneration() Digest { return event.generation }
-func (event ReviewFixAppliedJournalEvent) validate() error {
-	if event.workspaceID.IsZero() || event.generation.IsZero() || event.attemptID.IsZero() || event.loopDigest.IsZero() {
-		return fmt.Errorf("review fix event requires workspace, generation, attempt, and loop")
-	}
-	_, err := NewApplyReviewFix(
-		event.fix.ordinal, event.fix.reservationDigest, event.fix.priorHead, event.fix.priorTree,
-		event.fix.head, event.fix.tree, event.fix.evidence, event.fix.findings,
-	)
-	return err
-}
-func (event ReviewFixAppliedJournalEvent) WorkspaceID() ID     { return event.workspaceID }
-func (event ReviewFixAppliedJournalEvent) Generation() Digest  { return event.generation }
-func (event ReviewFixAppliedJournalEvent) AttemptID() ID       { return event.attemptID }
-func (event ReviewFixAppliedJournalEvent) LoopDigest() Digest  { return event.loopDigest }
-func (event ReviewFixAppliedJournalEvent) Fix() ApplyReviewFix { return cloneApplyReviewFix(event.fix) }
-
-func ReviewJournalResource(attemptID ID) JournalResource {
-	resource, _ := NewJournalResource(JournalResourceReview, attemptID.String()+"/loop")
-	return resource
-}
-
-func ReviewBudgetJournalResource(attemptID ID) JournalResource {
-	resource, _ := NewJournalResource(JournalResourceBudget, attemptID.String()+"/review-loop")
-	return resource
-}
-
-func ReviewProfileResultJournalResource(attemptID ID, round, profileOrdinal, invocation uint16) JournalResource {
-	identity := fmt.Sprintf("%s/%d/%d/%d", attemptID, round, profileOrdinal, invocation)
-	resource, _ := NewJournalResource(JournalResourceReviewProfile, identity)
-	return resource
-}
-
-func ReviewInvocationJournalResource(attemptID ID, reservationDigest Digest) JournalResource {
-	resource, _ := NewJournalResource(
-		JournalResourceReviewProfile,
-		attemptID.String()+"/reservation/"+reservationDigest.String(),
-	)
-	return resource
-}
-
-func ReviewFixReservationJournalResource(attemptID ID, ordinal uint16) JournalResource {
-	identity := fmt.Sprintf("%s/fix-reservation/%d", attemptID, ordinal)
-	resource, _ := NewJournalResource(JournalResourceReview, identity)
-	return resource
+	return *event.document, true
 }
 
 func isReviewJournalEvent(event WorkspaceJournalEvent) bool {
 	switch event.(type) {
-	case ReviewHeadAdoptedJournalEvent, ReviewRoundStartedJournalEvent, ReviewInvocationReservedJournalEvent,
-		ReviewInvocationFailedJournalEvent, ReviewResultRecordedJournalEvent,
-		ReviewFindingFixReservedJournalEvent, ReviewFixAppliedJournalEvent:
+	case ReviewHeadAdoptedJournalEvent, ReviewGateDispatchedJournalEvent, ReviewGateRecordedJournalEvent:
 		return true
 	default:
 		return false
 	}
 }
 
-func reviewJournalEventResources(event WorkspaceJournalEvent) ([]JournalResource, []JournalResource, bool) {
-	var workspaceID, attemptID ID
-	var generation Digest
-	var reads []JournalResource
-	switch event := event.(type) {
-	case ReviewHeadAdoptedJournalEvent:
-		workspaceID, generation, attemptID = event.workspaceID, event.generation, event.attemptID
-		reads = []JournalResource{AttemptJournalResource(attemptID), ReviewJournalResource(attemptID)}
-	case ReviewRoundStartedJournalEvent:
-		workspaceID, generation, attemptID = event.workspaceID, event.generation, event.attemptID
-		reads = []JournalResource{
-			AttemptJournalResource(attemptID), ReviewJournalResource(attemptID), ReviewBudgetJournalResource(attemptID),
-		}
-	case ReviewInvocationReservedJournalEvent:
-		workspaceID, generation, attemptID = event.workspaceID, event.generation, event.attemptID
-		request := event.reservation.request
-		reads = []JournalResource{
-			AttemptJournalResource(attemptID), ReviewJournalResource(attemptID), ReviewBudgetJournalResource(attemptID),
-			ReviewProfileResultJournalResource(attemptID, request.round, request.profileOrdinal, request.invocation),
-			ReviewInvocationJournalResource(attemptID, event.reservation.digest),
-		}
-	case ReviewInvocationFailedJournalEvent:
-		workspaceID, generation, attemptID = event.workspaceID, event.generation, event.attemptID
-		reads = []JournalResource{
-			AttemptJournalResource(attemptID), ReviewJournalResource(attemptID), ReviewBudgetJournalResource(attemptID),
-			ReviewInvocationJournalResource(attemptID, event.reservationDigest),
-		}
-	case ReviewResultRecordedJournalEvent:
-		workspaceID, generation, attemptID = event.workspaceID, event.generation, event.attemptID
-		reads = []JournalResource{
-			AttemptJournalResource(attemptID), ReviewJournalResource(attemptID), ReviewBudgetJournalResource(attemptID),
-			ReviewProfileResultJournalResource(attemptID, event.round, event.profileOrdinal, event.invocation),
-			ReviewInvocationJournalResource(attemptID, event.reservationDigest),
-		}
-	case ReviewFindingFixReservedJournalEvent:
-		workspaceID, generation, attemptID = event.workspaceID, event.generation, event.attemptID
-		reads = []JournalResource{
-			AttemptJournalResource(attemptID), ReviewJournalResource(attemptID), ReviewBudgetJournalResource(attemptID),
-			ReviewFixJournalResource(attemptID),
-			ReviewFixReservationJournalResource(attemptID, event.reservation.ordinal),
-		}
-	case ReviewFixAppliedJournalEvent:
-		workspaceID, generation, attemptID = event.workspaceID, event.generation, event.attemptID
-		reads = []JournalResource{
-			AttemptJournalResource(attemptID), ReviewJournalResource(attemptID), ReviewBudgetJournalResource(attemptID),
-			ReviewFixJournalResource(attemptID), EvidenceJournalResource(event.fix.evidence),
-			ReviewFixReservationJournalResource(attemptID, event.fix.ordinal),
-		}
-	default:
-		return nil, nil, false
-	}
-	reads = append(reads, WorkspaceJournalResource(workspaceID), GenerationJournalResource(generation))
-	return reads, append([]JournalResource(nil), reads...), true
-}
-
 func cloneReviewJournalEvent(event WorkspaceJournalEvent) WorkspaceJournalEvent {
 	switch value := event.(type) {
 	case ReviewHeadAdoptedJournalEvent:
 		return value
-	case ReviewRoundStartedJournalEvent:
-		value.loop = cloneReviewLoop(value.loop)
+	case ReviewGateDispatchedJournalEvent:
 		return value
-	case ReviewInvocationReservedJournalEvent:
-		return value
-	case ReviewInvocationFailedJournalEvent:
-		return value
-	case ReviewResultRecordedJournalEvent:
-		value.result = cloneReviewResult(value.result)
-		return value
-	case ReviewFindingFixReservedJournalEvent:
-		value.reservation = *cloneReviewFixReservation(&value.reservation)
-		return value
-	case ReviewFixAppliedJournalEvent:
-		value.fix = cloneApplyReviewFix(value.fix)
+	case ReviewGateRecordedJournalEvent:
+		if value.document != nil {
+			document := *value.document
+			value.document = &document
+		}
 		return value
 	default:
 		return nil
 	}
 }
 
-func cloneApplyReviewFix(fix ApplyReviewFix) ApplyReviewFix {
-	fix.findings = append([]Digest(nil), fix.findings...)
-	return fix
-}
-
 func validateReviewJournalRecordFootprint(event WorkspaceJournalEvent) error {
-	reads, writes, ok := reviewJournalEventResources(event)
-	if !ok {
-		return fmt.Errorf("unsupported review journal footprint event %T", event)
-	}
-	reads, _ = normalizeJournalWriteSet(reads)
-	writes, _ = normalizeJournalWriteSet(writes)
-	readSet := make([]JournalResourceRevision, 0, len(reads))
-	for _, resource := range reads {
-		revision, _ := NewJournalResourceRevision(resource, ^uint64(0))
-		readSet = append(readSet, revision)
-	}
-	request, err := newPrivilegedJournalAppend(
-		event, time.Date(9999, time.December, 31, 23, 59, 59, 999999999, time.UTC), readSet, writes,
+	request, err := newWorkflowJournalAppend(
+		event,
+		time.Date(9999, time.December, 31, 23, 59, 59, 999999999, time.UTC),
 	)
 	if err != nil {
 		return err
@@ -503,7 +257,7 @@ func validateReviewJournalRecordFootprint(event WorkspaceJournalEvent) error {
 		return err
 	}
 	if len(encoded) > MaxJournalRecordBytes-reviewJournalRecordSafetyBytes {
-		return fmt.Errorf("review journal record footprint %d exceeds its safe bound", len(encoded))
+		return fmt.Errorf("review gate journal record footprint %d exceeds its safe bound", len(encoded))
 	}
 	return nil
 }

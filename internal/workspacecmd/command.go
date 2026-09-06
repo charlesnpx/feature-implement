@@ -2,7 +2,6 @@ package workspacecmd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -17,14 +16,33 @@ const requestSchemaVersion = 2
 // a workspace request reaches strict decoding.
 const MaxCommandInputBytes = workspace.MaxArtifactBytes
 
+var supportedActions = stringSet(
+	"schema",
+	"example",
+	"validate",
+	"init",
+	"status",
+	"recover",
+	"attempt",
+	"review",
+	"integrate",
+	"complete",
+)
+
+// IsSupportedAction reports whether action is part of the workspace command
+// surface shared by the CLI and the command layer.
+func IsSupportedAction(action string) bool {
+	_, ok := supportedActions[strings.TrimSpace(action)]
+	return ok
+}
+
 type Options struct {
-	Action           string
-	Subaction        string
-	BundleDir        string
-	WorkspaceDir     string
-	Input            []byte
-	WriteLocks       bool
-	GeneratorVersion string
+	Action       string
+	Subaction    string
+	BundleDir    string
+	WorkspaceDir string
+	Input        []byte
+	WriteLocks   bool
 }
 
 type ValidationResult struct {
@@ -34,44 +52,28 @@ type ValidationResult struct {
 	WorkspaceID      string   `json:"workspace_id"`
 	Generation       string   `json:"generation"`
 	DescriptorDigest string   `json:"descriptor_digest"`
-	LockRoot         string   `json:"lock_root,omitempty"`
+	LockPath         string   `json:"lock_path,omitempty"`
 	Created          []string `json:"created,omitempty"`
 	Updated          []string `json:"updated,omitempty"`
-	Deleted          []string `json:"deleted,omitempty"`
 }
 
 type InitializationResult struct {
-	SchemaVersion    int                       `json:"schema_version"`
-	Status           string                    `json:"status"`
-	WorkspaceDir     string                    `json:"workspace_dir"`
-	WorkspaceID      string                    `json:"workspace_id"`
-	Generation       string                    `json:"generation"`
-	PlanCheckpoint   string                    `json:"plan_checkpoint"`
-	JournalHead      string                    `json:"journal_head"`
-	ProjectionDigest string                    `json:"projection_digest"`
-	Report           workspace.WorkspaceReport `json:"report"`
+	SchemaVersion    int                     `json:"schema_version"`
+	Status           string                  `json:"status"`
+	WorkspaceDir     string                  `json:"workspace_dir"`
+	WorkspaceID      string                  `json:"workspace_id"`
+	Generation       string                  `json:"generation"`
+	PlanCheckpoint   string                  `json:"plan_checkpoint"`
+	JournalHead      string                  `json:"journal_head"`
+	ProjectionDigest string                  `json:"projection_digest"`
+	Report           workspace.WorkspaceView `json:"report"`
 }
 
 type MutationResult struct {
-	SchemaVersion int                       `json:"schema_version"`
-	Status        string                    `json:"status"`
-	Action        string                    `json:"action"`
-	Directives    []BoundaryDirectiveView   `json:"directives,omitempty"`
-	Report        workspace.WorkspaceReport `json:"report"`
-}
-
-type BoundaryDirectiveView struct {
-	Kind            string   `json:"kind"`
-	WorkspaceID     string   `json:"workspace_id"`
-	Generation      string   `json:"generation"`
-	AttemptID       string   `json:"attempt_id"`
-	BoundaryID      string   `json:"boundary_id"`
-	GoalID          string   `json:"goal_id"`
-	GoalScope       string   `json:"goal_scope"`
-	Head            string   `json:"head"`
-	DirectiveDigest string   `json:"directive_digest"`
-	IdempotencyKey  string   `json:"idempotency_key,omitempty"`
-	Choices         []string `json:"choices,omitempty"`
+	SchemaVersion int                     `json:"schema_version"`
+	Status        string                  `json:"status"`
+	Action        string                  `json:"action"`
+	Report        workspace.WorkspaceView `json:"report"`
 }
 
 func Execute(ctx context.Context, options Options) (any, error) {
@@ -79,6 +81,9 @@ func Execute(ctx context.Context, options Options) (any, error) {
 		return nil, fmt.Errorf("workspace command requires context")
 	}
 	action := strings.TrimSpace(options.Action)
+	if !IsSupportedAction(action) {
+		return nil, fmt.Errorf("unsupported workspace command %q", action)
+	}
 	switch action {
 	case "schema":
 		switch strings.TrimSpace(options.Subaction) {
@@ -87,23 +92,16 @@ func Execute(ctx context.Context, options Options) (any, error) {
 		case "requests":
 			return RequestSchemas(), nil
 		case "reports":
-			return ReportSchemas(), nil
+			return WorkspaceViewSchema(), nil
 		default:
 			return nil, fmt.Errorf("unsupported workspace schema %q", options.Subaction)
 		}
-	case "queue", "receipts", "reconcile", "control", "provider":
-		return nil, removedWorkspaceCommand(action)
-	case "validate", "init", "status", "recover", "scheduler", "gates", "report":
+	case "example":
+		return BundleExample(), nil
+	case "validate", "init", "status", "recover":
 		// handled below
-	case "attempt", "commit", "review", "integrate", "complete":
+	case "attempt", "review", "integrate", "complete":
 		// handled below
-	default:
-		return nil, fmt.Errorf("unsupported workspace command %q", action)
-	}
-	if action == "commit" && strings.TrimSpace(options.Subaction) == "rebase" {
-		return nil, fmt.Errorf(
-			"workspace commit rebase was removed; attempt bases are immutable",
-		)
 	}
 	if err := validateWorkspaceSubaction(action, options.Subaction); err != nil {
 		return nil, err
@@ -115,38 +113,24 @@ func Execute(ctx context.Context, options Options) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if options.GeneratorVersion == "" {
-		options.GeneratorVersion = "dev"
+	if action != "validate" {
+		workspaceDir, directoryErr := resolvedWorkspaceDirectory(bundle, options.WorkspaceDir)
+		if directoryErr != nil {
+			return nil, directoryErr
+		}
+		options.WorkspaceDir = workspaceDir
 	}
 	switch action {
 	case "validate":
 		return validateBundle(ctx, bundle, options)
 	case "init":
 		return initializeWorkspace(ctx, bundle, options)
-	case "status", "report":
-		return readReport(ctx, bundle, options.WorkspaceDir)
-	case "scheduler":
-		report, err := readReport(
-			ctx, bundle, options.WorkspaceDir,
-		)
-		if err != nil {
-			return nil, err
-		}
-		return report.Scheduler, nil
-	case "gates":
-		report, err := readReport(
-			ctx, bundle, options.WorkspaceDir,
-		)
-		if err != nil {
-			return nil, err
-		}
-		return report.Gates, nil
+	case "status":
+		return readWorkspaceView(ctx, bundle, options.WorkspaceDir)
 	case "recover":
 		return recoverWorkspace(ctx, bundle, options)
 	case "attempt":
 		return executeAttempt(ctx, bundle, options)
-	case "commit":
-		return executeCommit(ctx, bundle, options)
 	case "review":
 		return executeReview(ctx, bundle, options)
 	case "integrate":
@@ -158,28 +142,17 @@ func Execute(ctx context.Context, options Options) (any, error) {
 	}
 }
 
-func removedWorkspaceCommand(action string) error {
-	return fmt.Errorf(
-		"workspace %s was removed from the local-only workflow",
-		action,
-	)
-}
-
 func validateWorkspaceSubaction(action, subaction string) error {
 	subaction = strings.TrimSpace(subaction)
 	var supported map[string]struct{}
 	switch action {
 	case "attempt":
 		supported = stringSet(
-			"reserve", "materialize", "adopt-head", "boundary",
-			"next-goal", "acknowledge", "owner-response", "resume",
+			"start", "adopt-head", "pause", "resume", "abandon",
 		)
-	case "commit":
-		supported = stringSet("next")
 	case "review":
 		supported = stringSet(
-			"start", "reserve", "record", "reserve-fix",
-			"apply-fix", "record-fix", "ready",
+			"dispatch", "record", "record-document", "ready",
 		)
 	case "integrate":
 		supported = stringSet("merge-unit")
@@ -221,13 +194,8 @@ func BundleExample() string {
 // remains authoritative and rejects unknown fields and trailing JSON.
 func RequestSchemas() map[string]any {
 	stringProperty := func() map[string]any { return map[string]any{"type": "string", "minLength": 1} }
-	optionalString := func() map[string]any { return map[string]any{"type": "string"} }
 	integerProperty := func(minimum int) map[string]any { return map[string]any{"type": "integer", "minimum": minimum} }
-	booleanProperty := func() map[string]any { return map[string]any{"type": "boolean"} }
 	enumProperty := func(values ...string) map[string]any { return map[string]any{"enum": values} }
-	arrayOfStrings := func() map[string]any {
-		return map[string]any{"type": "array", "uniqueItems": true, "items": stringProperty()}
-	}
 	request := func(required []string, properties map[string]any) map[string]any {
 		properties["schema_version"] = map[string]any{"const": requestSchemaVersion}
 		return map[string]any{
@@ -250,24 +218,6 @@ func RequestSchemas() map[string]any {
 			"items": map[string]any{"type": "array", "items": evidenceItem},
 		},
 	}
-	reviewFinding := map[string]any{
-		"type": "object", "additionalProperties": false,
-		"required": []string{"severity", "category", "path", "line", "summary", "evidence_digest"},
-		"properties": map[string]any{
-			"severity": enumProperty("critical", "high", "medium", "low"), "category": stringProperty(),
-			"path": map[string]any{"type": "string"}, "line": integerProperty(0),
-			"summary": stringProperty(), "evidence_digest": stringProperty(),
-		},
-	}
-	isolation := map[string]any{
-		"type": "object", "additionalProperties": false,
-		"required": []string{"repository_read_only", "scratch_ephemeral", "repository_hooks", "write_network", "external_write"},
-		"properties": map[string]any{
-			"repository_read_only": booleanProperty(), "scratch_ephemeral": booleanProperty(),
-			"repository_hooks": booleanProperty(), "write_network": booleanProperty(),
-			"external_write": booleanProperty(),
-		},
-	}
 	occurred := func(properties map[string]any) map[string]any {
 		properties["occurred_at"] = map[string]any{"type": "string", "format": "date-time"}
 		return properties
@@ -276,70 +226,36 @@ func RequestSchemas() map[string]any {
 		return occurred(map[string]any{"attempt_id": stringProperty()})
 	}
 	schemas := map[string]any{
-		"init": request([]string{"occurred_at", "worktree_root"}, occurred(map[string]any{
-			"worktree_root": stringProperty(),
-		})),
+		"init":    request([]string{"occurred_at"}, occurred(map[string]any{})),
 		"recover": request([]string{"occurred_at"}, occurred(map[string]any{})),
-		"attempt.reserve": request([]string{"occurred_at", "plan_id", "merge_unit_id", "attempt_number", "goal"}, occurred(map[string]any{
+		"attempt.start": request([]string{"occurred_at", "plan_id", "merge_unit_id", "attempt_number", "goal"}, occurred(map[string]any{
 			"plan_id": stringProperty(), "merge_unit_id": stringProperty(), "attempt_number": integerProperty(1),
 			"goal": goal,
 		})),
-		"attempt.materialize": request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
-		"attempt.adopt-head":  request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
-		"attempt.boundary": request([]string{"occurred_at", "attempt_id", "kind", "evidence"}, occurred(map[string]any{
+		"attempt.adopt-head": request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
+		"attempt.pause": request([]string{"occurred_at", "attempt_id", "kind", "evidence"}, occurred(map[string]any{
 			"attempt_id": stringProperty(), "kind": enumProperty("checkpoint", "escalation"),
 			"evidence": map[string]any{"type": "array", "items": evidence},
 		})),
-		"attempt.next-goal": request([]string{"occurred_at", "attempt_id", "goal"}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "goal": goal,
-		})),
-		"attempt.acknowledge": request([]string{
-			"occurred_at", "attempt_id", "kind", "directive_digest", "goal", "idempotency_key",
-		}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "kind": enumProperty("goal_completed", "next_goal_created"),
-			"directive_digest": stringProperty(), "goal": goal, "idempotency_key": stringProperty(),
-		})),
-		"attempt.owner-response": request([]string{
-			"occurred_at", "attempt_id", "boundary_id", "directive_digest", "goal", "expected_head", "response",
-		}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "boundary_id": stringProperty(),
-			"directive_digest": stringProperty(), "goal": goal,
-			"expected_head": stringProperty(), "response": enumProperty("continue"),
-		})),
-		"attempt.resume": request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
-		"commit.next": request([]string{"occurred_at", "attempt_id"}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "body": optionalString(),
-		})),
-		"review.start": request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
-		"review.reserve": request([]string{"occurred_at", "attempt_id", "reviewer_instance", "idempotency_key"}, occurred(map[string]any{
-			"attempt_id": stringProperty(),
-			"reviewer_instance": map[string]any{
-				"type": "string", "minLength": 1,
-				"description": "Descriptive local reviewer label; not an authenticated identity.",
-			},
-			"idempotency_key": stringProperty(),
-		})),
+		"attempt.resume":  request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
+		"attempt.abandon": request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
+		"review.dispatch": request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
 		"review.record": request([]string{
-			"occurred_at", "attempt_id", "reservation_digest", "request_digest",
-			"reviewer_instance", "status", "findings", "isolation",
+			"occurred_at", "attempt_id", "dispatch_digest", "verdict", "evidence_digest",
 		}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "reservation_digest": stringProperty(), "request_digest": stringProperty(),
-			"reviewer_instance": map[string]any{
-				"type": "string", "minLength": 1,
-				"description": "Descriptive local reviewer label; not an authenticated identity.",
+			"attempt_id": stringProperty(), "dispatch_digest": stringProperty(),
+			"verdict":         enumProperty("satisfied", "not_satisfied", "failed_to_run"),
+			"evidence_digest": stringProperty(),
+		})),
+		"review.record-document": request([]string{
+			"occurred_at", "attempt_id", "dispatch_digest", "verdict", "document",
+		}, occurred(map[string]any{
+			"attempt_id": stringProperty(), "dispatch_digest": stringProperty(),
+			"verdict": enumProperty("satisfied", "not_satisfied"),
+			"document": map[string]any{
+				"type":        "object",
+				"description": "Raw review-report-v1 document; the Witness contract performs strict decoding and validation.",
 			},
-			"status":                 enumProperty("completed", "infrastructure_failure"),
-			"findings":               map[string]any{"type": "array", "items": reviewFinding},
-			"infrastructure_failure": optionalString(), "isolation": isolation,
-		})),
-		"review.reserve-fix": request([]string{"occurred_at", "attempt_id", "ordinal", "accepted_finding_ids"}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "ordinal": integerProperty(1), "accepted_finding_ids": arrayOfStrings(),
-		})),
-		"review.apply-fix": request([]string{"occurred_at", "attempt_id", "ordinal", "accepted_finding_ids"}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "ordinal": integerProperty(1), "accepted_finding_ids": arrayOfStrings(), "body": optionalString(),
-		})),
-		"review.record-fix": request([]string{"occurred_at", "attempt_id", "ordinal", "accepted_finding_ids"}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "ordinal": integerProperty(1), "accepted_finding_ids": arrayOfStrings(),
 		})),
 		"review.ready": request([]string{"attempt_id"}, map[string]any{"attempt_id": stringProperty()}),
 		"integrate.merge-unit": request([]string{"occurred_at", "attempt_id"}, occurred(map[string]any{
@@ -361,9 +277,17 @@ func validateBundle(
 	if err := bundle.VerifyRoot(); err != nil {
 		return ValidationResult{}, err
 	}
-	if _, err := workspace.ValidateLocalTarget(
-		ctx, bundle.Definition().Workspace(),
-	); err != nil {
+	workspaceDir, err := resolvedWorkspaceDirectory(bundle, options.WorkspaceDir)
+	if err != nil {
+		return ValidationResult{}, err
+	}
+	validateTarget := func() error {
+		_, err := workspace.ValidateLocalTargetForWorkspaceRuntime(
+			ctx, workspaceDir, bundle.Definition(),
+		)
+		return err
+	}
+	if err := validateTarget(); err != nil {
 		return ValidationResult{}, fmt.Errorf(
 			"validate local target: %w", err,
 		)
@@ -371,45 +295,36 @@ func validateBundle(
 	result := ValidationResult{
 		SchemaVersion: requestSchemaVersion, Status: "valid", BundleRoot: bundle.Root(),
 		WorkspaceID: bundle.Definition().Workspace().ID().String(), Generation: bundle.Definition().Generation().String(),
-		DescriptorDigest: bundle.DescriptorDigest().String(), Created: []string{}, Updated: []string{}, Deleted: []string{},
+		DescriptorDigest: bundle.DescriptorDigest().String(), Created: []string{}, Updated: []string{},
 	}
 	if !options.WriteLocks {
 		if err := bundle.VerifyRoot(); err != nil {
 			return ValidationResult{}, err
 		}
-		if _, err := workspace.ValidateLocalTarget(
-			ctx, bundle.Definition().Workspace(),
-		); err != nil {
+		if err := validateTarget(); err != nil {
 			return ValidationResult{}, fmt.Errorf(
 				"revalidate local target: %w", err,
 			)
 		}
 		return result, nil
 	}
-	artifacts, err := workspace.WorkspaceBundleLockArtifacts(bundle)
-	if err != nil {
-		return ValidationResult{}, err
-	}
-	lockRoot := filepath.Join(bundle.Root(), workspace.WorkspaceGeneratedDirectory)
-	materialized, err := workspace.SynchronizeMaterialization(
-		lockRoot,
-		workspace.PlanCheckpointGeneratorVersion,
-		artifacts,
-		workspace.MaterializationOptions{},
+	materialized, err := workspace.WriteWorkspaceBundleLock(
+		bundle, workspace.WorkspaceLockWriteOptions{},
 	)
 	if err != nil {
 		return ValidationResult{}, err
 	}
-	result.Created = materialized.Created()
-	result.Updated = materialized.Updated()
-	result.Deleted = materialized.Deleted()
-	result.LockRoot = lockRoot
+	result.LockPath = filepath.Join(bundle.Root(), workspace.WorkspaceLockFileName)
+	if materialized.Created() {
+		result.Created = []string{workspace.WorkspaceLockFileName}
+	}
+	if materialized.Updated() {
+		result.Updated = []string{workspace.WorkspaceLockFileName}
+	}
 	if err := bundle.VerifyRoot(); err != nil {
 		return ValidationResult{}, err
 	}
-	if _, err := workspace.ValidateLocalTarget(
-		ctx, bundle.Definition().Workspace(),
-	); err != nil {
+	if err := validateTarget(); err != nil {
 		return ValidationResult{}, fmt.Errorf(
 			"revalidate local target: %w", err,
 		)
@@ -420,7 +335,6 @@ func validateBundle(
 type initializeRequest struct {
 	SchemaVersion int    `json:"schema_version"`
 	OccurredAt    string `json:"occurred_at"`
-	WorktreeRoot  string `json:"worktree_root"`
 }
 
 func initializeWorkspace(
@@ -428,7 +342,7 @@ func initializeWorkspace(
 	bundle workspace.WorkspaceBundle,
 	options Options,
 ) (result InitializationResult, resultErr error) {
-	workspaceDir, err := absoluteDirectory(options.WorkspaceDir, "workspace")
+	workspaceDir, err := resolvedWorkspaceDirectory(bundle, options.WorkspaceDir)
 	if err != nil {
 		return InitializationResult{}, err
 	}
@@ -440,36 +354,7 @@ func initializeWorkspace(
 	if err != nil {
 		return InitializationResult{}, err
 	}
-	worktreeRoot := filepath.Clean(strings.TrimSpace(request.WorktreeRoot))
-	if !filepath.IsAbs(worktreeRoot) {
-		return InitializationResult{}, fmt.Errorf(
-			"workspace init worktree_root must be absolute",
-		)
-	}
 	definition := bundle.Definition()
-	roots, err := workspace.OpenWorkspaceInitializationRootGuard(
-		bundle.Root(), workspaceDir, definition.Workspace().RepositoryRoot(),
-		worktreeRoot,
-	)
-	if err != nil {
-		return InitializationResult{}, err
-	}
-	defer roots.Close()
-	if err := roots.VerifyBeforeRuntimeCreation(); err != nil {
-		return InitializationResult{}, err
-	}
-	defer func() {
-		var verifyErr error
-		if resultErr == nil {
-			verifyErr = roots.VerifyAfterRuntimeCreation()
-		} else {
-			verifyErr = roots.VerifyAfterEffects()
-		}
-		if verifyErr != nil {
-			result = InitializationResult{}
-			resultErr = errors.Join(resultErr, verifyErr)
-		}
-	}()
 	if err := bundle.VerifyRoot(); err != nil {
 		return InitializationResult{}, err
 	}
@@ -481,9 +366,6 @@ func initializeWorkspace(
 			if err := bundle.VerifyRoot(); err != nil {
 				return err
 			}
-			if err := roots.VerifyBeforeRuntimeCreation(); err != nil {
-				return err
-			}
 			var initializeErr error
 			initialized, initializeErr = workspace.InitializeWorkspaceV2WithOptions(
 				ctx,
@@ -492,7 +374,6 @@ func initializeWorkspace(
 				occurredAt,
 				workspace.WorkspaceInitializationOptions{
 					PlanCheckpoint: &checkpoint,
-					WorktreeRoot:   worktreeRoot,
 				},
 			)
 			return initializeErr
@@ -501,13 +382,10 @@ func initializeWorkspace(
 	if err != nil {
 		return InitializationResult{}, err
 	}
-	if err := roots.VerifyAfterRuntimeCreation(); err != nil {
-		return InitializationResult{}, err
-	}
 	if err := bundle.VerifyRoot(); err != nil {
 		return InitializationResult{}, err
 	}
-	report, err := workspace.RebuildWorkspaceReport(initialized.Snapshot(), definition)
+	report, err := workspace.RebuildWorkspaceView(initialized.Snapshot(), definition)
 	if err != nil {
 		return InitializationResult{}, err
 	}
@@ -520,25 +398,29 @@ func initializeWorkspace(
 	return result, nil
 }
 
-func readReport(
+func readWorkspaceView(
 	ctx context.Context,
 	bundle workspace.WorkspaceBundle,
 	workspaceDir string,
-) (workspace.WorkspaceReport, error) {
-	directory, err := absoluteDirectory(workspaceDir, "workspace")
+) (workspace.WorkspaceView, error) {
+	directory, err := resolvedWorkspaceDirectory(bundle, workspaceDir)
 	if err != nil {
-		return workspace.WorkspaceReport{}, err
+		return workspace.WorkspaceView{}, err
 	}
 	snapshot, err := workspace.ReadWorkspaceJournalSnapshot(directory)
 	if err != nil {
-		return workspace.WorkspaceReport{}, err
+		return workspace.WorkspaceView{}, err
 	}
-	return workspace.RebuildWorkspaceReportWithGit(
-		ctx,
-		snapshot,
-		bundle.Definition(),
-		workspace.DefaultLocalIntegrationGitAdapter(),
-	)
+	view, err := workspace.RebuildWorkspaceView(snapshot, bundle.Definition())
+	if err != nil {
+		return workspace.WorkspaceView{}, err
+	}
+	if err := workspace.ApplyWorkspaceIntegrationDrift(
+		ctx, &view, workspace.DefaultLocalIntegrationGitAdapter(),
+	); err != nil {
+		return workspace.WorkspaceView{}, err
+	}
+	return view, nil
 }
 
 type recoverRequest struct {
@@ -551,7 +433,7 @@ func recoverWorkspace(
 	bundle workspace.WorkspaceBundle,
 	options Options,
 ) (MutationResult, error) {
-	directory, err := absoluteDirectory(options.WorkspaceDir, "workspace")
+	directory, err := resolvedWorkspaceDirectory(bundle, options.WorkspaceDir)
 	if err != nil {
 		return MutationResult{}, err
 	}
@@ -585,14 +467,13 @@ func recoverWorkspace(
 	); err != nil {
 		return MutationResult{}, err
 	}
-	return mutationResult("recover", journal, bundle.Definition(), nil)
+	return mutationResult("recover", journal, bundle.Definition())
 }
 
 func mutationResult(
 	action string,
 	journal *workspace.WorkspaceJournal,
 	definition workspace.EffectiveWorkspaceDefinition,
-	directives []BoundaryDirectiveView,
 ) (MutationResult, error) {
 	if _, err := workspace.RebuildWorkspaceRuntimeProjectionFile(journal); err != nil {
 		return MutationResult{}, err
@@ -601,18 +482,19 @@ func mutationResult(
 	if err != nil {
 		return MutationResult{}, err
 	}
-	report, err := workspace.RebuildWorkspaceReportWithGit(
-		context.Background(),
-		snapshot,
-		definition,
-		workspace.DefaultLocalIntegrationGitAdapter(),
-	)
+	report, err := workspace.RebuildWorkspaceView(snapshot, definition)
 	if err != nil {
+		return MutationResult{}, err
+	}
+	if err := workspace.ApplyWorkspaceIntegrationDrift(
+		context.Background(), &report,
+		workspace.DefaultLocalIntegrationGitAdapter(),
+	); err != nil {
 		return MutationResult{}, err
 	}
 	return MutationResult{
 		SchemaVersion: requestSchemaVersion, Status: "recorded", Action: action,
-		Directives: append([]BoundaryDirectiveView(nil), directives...), Report: report,
+		Report: report,
 	}, nil
 }
 
@@ -652,6 +534,23 @@ func absoluteDirectory(value, label string) (string, error) {
 	return filepath.Clean(absolute), nil
 }
 
+func resolvedWorkspaceDirectory(
+	bundle workspace.WorkspaceBundle,
+	configured string,
+) (string, error) {
+	if strings.TrimSpace(configured) != "" {
+		directory, err := absoluteDirectory(configured, "workspace")
+		if err != nil {
+			return "", err
+		}
+		if err := workspace.ValidateWorkspaceRuntimeRoot(directory); err != nil {
+			return "", err
+		}
+		return directory, nil
+	}
+	return workspace.DerivedWorkspaceRuntimeDirectory(bundle.Root())
+}
+
 func parseID(value, label string) (workspace.ID, error) {
 	id, err := workspace.NewID(value)
 	if err != nil {
@@ -666,14 +565,6 @@ func parseDigest(value, label string) (workspace.Digest, error) {
 		return workspace.Digest{}, fmt.Errorf("%s: %w", label, err)
 	}
 	return digest, nil
-}
-
-func parseGitObject(value, label string) (workspace.GitObjectID, error) {
-	object, err := workspace.ParseGitObjectID(value)
-	if err != nil {
-		return workspace.GitObjectID{}, fmt.Errorf("%s: %w", label, err)
-	}
-	return object, nil
 }
 
 func openWritableJournal(options Options) (*workspace.WorkspaceJournal, string, error) {

@@ -2,10 +2,10 @@ package workspacecmd
 
 import "github.com/charlesnpx/feature-implement/internal/workspace"
 
-// ReportSchemas describes the complete local-only JSON report surface. Journal
-// digests are corruption-detection values for local durable state; they do not
-// authenticate an owner, reviewer, or other identity.
-func ReportSchemas() map[string]any {
+// WorkspaceViewSchema describes the one complete local-only workspace view.
+// Journal digests are corruption-detection values for local durable state;
+// they do not authenticate an owner, reviewer, or other identity.
+func WorkspaceViewSchema() map[string]any {
 	text := func() map[string]any {
 		return map[string]any{"type": "string"}
 	}
@@ -40,21 +40,17 @@ func ReportSchemas() map[string]any {
 		[]string{
 			"kind", "boundary_kind", "workspace_id", "generation", "attempt_id",
 			"boundary_id", "goal_id", "goal_scope", "head",
-			"directive_digest",
 		},
 		map[string]any{
-			"kind":             nonEmptyText(),
-			"boundary_kind":    enum("checkpoint", "escalation"),
-			"workspace_id":     nonEmptyText(),
-			"generation":       nonEmptyText(),
-			"attempt_id":       nonEmptyText(),
-			"boundary_id":      nonEmptyText(),
-			"goal_id":          nonEmptyText(),
-			"goal_scope":       enum("merge_unit", "workspace"),
-			"head":             nonEmptyText(),
-			"directive_digest": nonEmptyText(),
-			"idempotency_key":  text(),
-			"choices":          array(nonEmptyText()),
+			"kind":          enum("boundary_pending"),
+			"boundary_kind": enum("checkpoint", "escalation"),
+			"workspace_id":  nonEmptyText(),
+			"generation":    nonEmptyText(),
+			"attempt_id":    nonEmptyText(),
+			"boundary_id":   nonEmptyText(),
+			"goal_id":       nonEmptyText(),
+			"goal_scope":    enum("merge_unit", "workspace"),
+			"head":          nonEmptyText(),
 		},
 	)
 	schedulerUnit := object(
@@ -67,15 +63,14 @@ func ReportSchemas() map[string]any {
 			"plan_id":       nonEmptyText(),
 			"merge_unit_id": nonEmptyText(),
 			"status": enum(
-				"blocked", "ready", "reserved", "materializing",
-				"active", "paused", "review_exhausted", "completed",
+				"blocked", "ready",
+				"active", "paused", "completed",
 			),
 			"generation":         nonEmptyText(),
 			"dependencies":       array(nonEmptyText()),
 			"blockers":           array(nonEmptyText()),
 			"attempt_id":         nonEmptyText(),
 			"attempt_number":     integer(1),
-			"branch":             nonEmptyText(),
 			"worktree":           nonEmptyText(),
 			"head":               nonEmptyText(),
 			"boundary_pending":   boolean(),
@@ -138,7 +133,7 @@ func ReportSchemas() map[string]any {
 	workflow := object(
 		[]string{
 			"workspace_id", "generation", "journal_head",
-			"plan_checkpoint", "worktree_root", "projection_digest",
+			"plan_checkpoint", "projection_digest",
 			"review_projection_digest",
 		},
 		map[string]any{
@@ -146,38 +141,32 @@ func ReportSchemas() map[string]any {
 			"generation":               nonEmptyText(),
 			"journal_head":             nonEmptyText(),
 			"plan_checkpoint":          nonEmptyText(),
-			"worktree_root":            nonEmptyText(),
 			"projection_digest":        nonEmptyText(),
 			"review_projection_digest": nonEmptyText(),
 		},
 	)
 	target := object(
 		[]string{
-			"root", "git_directory", "common_directory",
-			"repository_format", "object_format", "linked_worktree",
+			"root", "object_format",
 			"base_ref", "base_commit", "feature_branch", "feature_ref",
 			"feature_head", "binding_digest", "ready",
 		},
 		map[string]any{
-			"root":              nonEmptyText(),
-			"git_directory":     text(),
-			"common_directory":  text(),
-			"repository_format": integer(0),
-			"object_format":     enum("", "sha1", "sha256"),
-			"linked_worktree":   boolean(),
-			"base_ref":          nonEmptyText(),
-			"base_commit":       nonEmptyText(),
-			"feature_branch":    nonEmptyText(),
-			"feature_ref":       nonEmptyText(),
-			"feature_head":      text(),
-			"binding_digest":    text(),
-			"ready":             boolean(),
+			"root":           nonEmptyText(),
+			"object_format":  enum("", "sha1", "sha256"),
+			"base_ref":       nonEmptyText(),
+			"base_commit":    nonEmptyText(),
+			"feature_branch": nonEmptyText(),
+			"feature_ref":    nonEmptyText(),
+			"feature_head":   text(),
+			"binding_digest": text(),
+			"ready":          boolean(),
 		},
 	)
 	attempt := object(
 		[]string{
 			"attempt_id", "plan_id", "merge_unit_id", "generation",
-			"attempt_number", "base", "branch", "worktree", "phase",
+			"attempt_number", "base", "worktree", "phase",
 			"goal_id", "goal_scope", "boundary_pending",
 			"pending_directives",
 		},
@@ -188,11 +177,10 @@ func ReportSchemas() map[string]any {
 			"generation":     nonEmptyText(),
 			"attempt_number": integer(1),
 			"base":           nonEmptyText(),
-			"branch":         nonEmptyText(),
 			"worktree":       nonEmptyText(),
 			"phase": enum(
-				"reserved", "materializing", "active", "paused",
-				"review_exhausted", "completed", "failed", "abandoned",
+				"active", "paused",
+				"superseded", "completed", "failed", "abandoned",
 			),
 			"head":               nonEmptyText(),
 			"goal_id":            nonEmptyText(),
@@ -205,21 +193,24 @@ func ReportSchemas() map[string]any {
 	review := object(
 		[]string{
 			"attempt_id", "plan_id", "merge_unit_id", "generation",
-			"head", "tree", "status", "rounds_used", "fixes_used",
-			"infrastructure_retries", "merge_ready",
+			"dispatch_digest", "adapter", "recipe", "policy_digest",
+			"head", "tree", "status",
 		},
 		map[string]any{
-			"attempt_id":             nonEmptyText(),
-			"plan_id":                nonEmptyText(),
-			"merge_unit_id":          nonEmptyText(),
-			"generation":             nonEmptyText(),
-			"head":                   nonEmptyText(),
-			"tree":                   nonEmptyText(),
-			"status":                 enum("active", "ready", "exhausted", "fix_pending"),
-			"rounds_used":            integer(0),
-			"fixes_used":             integer(0),
-			"infrastructure_retries": integer(0),
-			"merge_ready":            boolean(),
+			"attempt_id":      nonEmptyText(),
+			"plan_id":         nonEmptyText(),
+			"merge_unit_id":   nonEmptyText(),
+			"generation":      nonEmptyText(),
+			"dispatch_digest": nonEmptyText(),
+			"adapter":         nonEmptyText(),
+			"recipe":          nonEmptyText(),
+			"policy_digest":   nonEmptyText(),
+			"head":            nonEmptyText(),
+			"tree":            nonEmptyText(),
+			"status":          enum("dispatched", "satisfied", "not_satisfied", "failed_to_run"),
+			"verdict":         enum("satisfied", "not_satisfied", "failed_to_run"),
+			"evidence_digest": nonEmptyText(),
+			"occurred_at":     nonEmptyText(),
 		},
 	)
 	integrationUnit := object(
@@ -251,7 +242,7 @@ func ReportSchemas() map[string]any {
 			"report_digest": nonEmptyText(),
 		},
 	)
-	report := object(
+	view := object(
 		[]string{
 			"schema_version", "workflow", "target", "attempts",
 			"reviews", "scheduler", "gates", "integration", "drift",
@@ -271,15 +262,7 @@ func ReportSchemas() map[string]any {
 			"report_digest":  nonEmptyText(),
 		},
 	)
-	return map[string]any{
-		"$schema":        "https://json-schema.org/draft/2020-12/schema",
-		"$comment":       "Owner and reviewer labels are descriptive metadata. Journal hashes detect local corruption; they are not authentication.",
-		"schema_version": workspace.JournalSchemaVersion,
-		"reports": map[string]any{
-			"status":    report,
-			"scheduler": scheduler,
-			"gates":     gates,
-			"report":    report,
-		},
-	}
+	view["$schema"] = "https://json-schema.org/draft/2020-12/schema"
+	view["$comment"] = "Owner and reviewer labels are descriptive metadata. Journal hashes detect local corruption; they are not authentication."
+	return view
 }

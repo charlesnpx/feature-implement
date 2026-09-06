@@ -89,6 +89,14 @@ func TestRemovedSurfaceScannerAllowsDevelopmentAndModuleMetadata(t *testing.T) {
 			line: `import "github.com/charlesnpx/feature-implement/internal/workspace"`,
 		},
 		{
+			path: "internal/workspace/review_adapter.go",
+			line: `import "github.com/charlesnpx/witness/contract/review"`,
+		},
+		{
+			path: "go.mod",
+			line: "require github.com/charlesnpx/witness v0.6.1",
+		},
+		{
 			path: ".github/workflows/check.yml",
 			line: "pull_request:",
 		},
@@ -135,6 +143,10 @@ func TestRemovedSurfaceScannerAllowsDevelopmentAndModuleMetadata(t *testing.T) {
 		{
 			"internal/workspace/attempt_git.go",
 			`"AUTHORIZATION", "provider"`,
+		},
+		{
+			"go.mod",
+			"require github.com/cli/go-gh v1.0.0",
 		},
 	}
 	for _, fixture := range forbidden {
@@ -197,15 +209,20 @@ func allowedRemovedSurfaceReference(relative, line string) bool {
 		return true
 	}
 	trimmed := strings.TrimSpace(line)
-	modulePath := "github.com/charlesnpx/feature-implement"
-	if normalized == "go.mod" && trimmed == "module "+modulePath {
+	modulePaths := []string{
+		"github.com/charlesnpx/feature-implement",
+		"github.com/charlesnpx/witness",
+	}
+	if normalized == "go.mod" && trimmed == "module "+modulePaths[0] {
 		return true
 	}
-	if strings.Contains(line, modulePath) &&
-		!removedRuntimeSurface.MatchString(
-			strings.ReplaceAll(line, modulePath, "local-module"),
-		) {
-		return true
+	for _, modulePath := range modulePaths {
+		if strings.Contains(line, modulePath) &&
+			!removedRuntimeSurface.MatchString(
+				strings.ReplaceAll(line, modulePath, "local-module"),
+			) {
+			return true
+		}
 	}
 	if normalized == "README.md" &&
 		strings.Contains(strings.ToLower(line), "pull-request workflow") {
@@ -216,14 +233,6 @@ func allowedRemovedSurfaceReference(relative, line string) bool {
 	}
 	if normalized == "README.md" &&
 		strings.TrimSpace(line) == "### Deferred GitHub design" {
-		return true
-	}
-	if normalized == "cmd/feature/main.go" &&
-		strings.HasPrefix(trimmed, `case "queue", "receipts", "reconcile", "control", "provider":`) {
-		return true
-	}
-	if normalized == "internal/workspacecmd/command.go" &&
-		strings.HasPrefix(trimmed, `case "queue", "receipts", "reconcile", "control", "provider":`) {
 		return true
 	}
 	if normalized == "internal/workspace/runtime_storage.go" &&

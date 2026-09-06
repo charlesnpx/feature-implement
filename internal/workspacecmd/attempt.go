@@ -48,32 +48,45 @@ type boundaryInput struct {
 	Evidence      []evidenceInput `json:"evidence"`
 }
 
-type nextGoalInput struct {
-	SchemaVersion int       `json:"schema_version"`
-	OccurredAt    string    `json:"occurred_at"`
-	AttemptID     string    `json:"attempt_id"`
-	Goal          goalInput `json:"goal"`
+type localReviewRepository struct {
+	git workspace.LocalCommitGitAdapter
 }
 
-type acknowledgeInput struct {
-	SchemaVersion   int       `json:"schema_version"`
-	OccurredAt      string    `json:"occurred_at"`
-	AttemptID       string    `json:"attempt_id"`
-	Kind            string    `json:"kind"`
-	DirectiveDigest string    `json:"directive_digest"`
-	Goal            goalInput `json:"goal"`
-	IdempotencyKey  string    `json:"idempotency_key"`
+func (adapter localReviewRepository) InspectReviewSnapshot(
+	ctx context.Context,
+	request workspace.ReviewRepositoryRequest,
+) (workspace.ReviewRepositorySnapshot, error) {
+	inspection, err := adapter.git.InspectCleanWorktreeHead(
+		ctx, request.Worktree(), request.Head(),
+	)
+	if err != nil {
+		return workspace.ReviewRepositorySnapshot{}, err
+	}
+	return workspace.NewReviewRepositorySnapshot(inspection.Commit(), inspection.Tree(), true)
 }
 
-type ownerResponseInput struct {
-	SchemaVersion   int       `json:"schema_version"`
-	OccurredAt      string    `json:"occurred_at"`
-	AttemptID       string    `json:"attempt_id"`
-	BoundaryID      string    `json:"boundary_id"`
-	DirectiveDigest string    `json:"directive_digest"`
-	Goal            goalInput `json:"goal"`
-	ExpectedHead    string    `json:"expected_head"`
-	Response        string    `json:"response"`
+func (adapter localReviewRepository) ReadReviewInput(
+	ctx context.Context,
+	worktree string,
+	base, head workspace.GitObjectID,
+) ([]byte, error) {
+	return adapter.git.ReadReviewInput(ctx, worktree, base, head)
+}
+
+func (adapter localReviewRepository) VerifyFinalHistory(
+	ctx context.Context,
+	protocol workspace.CommitProtocol,
+	worktree string,
+	base, head workspace.GitObjectID,
+) error {
+	verifier, err := workspace.NewFinalHistoryVerifier(
+		adapter.git,
+		defaultIsolatedCheckRunner(),
+	)
+	if err != nil {
+		return err
+	}
+	return verifier.Verify(ctx, protocol, worktree, base, head)
 }
 
 func executeAttempt(ctx context.Context, bundle workspace.WorkspaceBundle, options Options) (MutationResult, error) {
@@ -85,7 +98,7 @@ func executeAttempt(ctx context.Context, bundle workspace.WorkspaceBundle, optio
 	definition := bundle.Definition()
 	git := workspace.DefaultLocalAttemptGitAdapter()
 	switch options.Subaction {
-	case "reserve":
+	case "start":
 		var input reserveAttemptInput
 		if err := decodeRequest(options.Input, &input); err != nil {
 			return MutationResult{}, err
@@ -110,25 +123,13 @@ func executeAttempt(ctx context.Context, bundle workspace.WorkspaceBundle, optio
 		if err != nil {
 			return MutationResult{}, err
 		}
-		if _, err := workspace.ReserveAttempt(ctx, journal, definition, git, workspace.ReserveAttemptRequest{
+		if _, err := workspace.StartAttempt(ctx, journal, definition, git, workspace.StartAttemptRequest{
 			MergeUnit: reference, AttemptNumber: input.AttemptNumber,
 			Goal: goal, OccurredAt: occurredAt,
 		}); err != nil {
 			return MutationResult{}, err
 		}
-		return mutationResult("attempt.reserve", journal, definition, nil)
-	case "materialize":
-		input, occurredAt, attemptID, err := decodeAttemptIDInput(options.Input)
-		_ = input
-		if err != nil {
-			return MutationResult{}, err
-		}
-		if _, err := workspace.MaterializeAttempt(ctx, journal, definition, git, workspace.MaterializeAttemptRequest{
-			AttemptID: attemptID, OccurredAt: occurredAt,
-		}); err != nil {
-			return MutationResult{}, err
-		}
-		return mutationResult("attempt.materialize", journal, definition, nil)
+		return mutationResult("attempt.start", journal, definition)
 	case "adopt-head":
 		_, occurredAt, attemptID, err := decodeAttemptIDInput(options.Input)
 		if err != nil {
@@ -140,8 +141,8 @@ func executeAttempt(ctx context.Context, bundle workspace.WorkspaceBundle, optio
 		}); err != nil {
 			return MutationResult{}, err
 		}
-		return mutationResult("attempt.adopt-head", journal, definition, nil)
-	case "boundary":
+		return mutationResult("attempt.adopt-head", journal, definition)
+	case "pause":
 		input, kind, err := decodeBoundaryInput(options.Input)
 		if err != nil {
 			return MutationResult{}, err
@@ -158,120 +159,23 @@ func executeAttempt(ctx context.Context, bundle workspace.WorkspaceBundle, optio
 		if err != nil {
 			return MutationResult{}, err
 		}
-		result, err := workspace.RecordAttemptBoundary(ctx, journal, definition, git, workspace.RecordAttemptBoundaryRequest{
+		if _, err := workspace.PauseAttempt(ctx, journal, definition, git, workspace.PauseAttemptRequest{
 			AttemptID: attemptID, Kind: kind, Evidence: evidence, OccurredAt: occurredAt,
-		})
+		}); err != nil {
+			return MutationResult{}, err
+		}
+		return mutationResult("attempt.pause", journal, definition)
+	case "abandon":
+		_, occurredAt, attemptID, err := decodeAttemptIDInput(options.Input)
 		if err != nil {
 			return MutationResult{}, err
 		}
-		return mutationResult("attempt.boundary", journal, definition, directiveViews(result.Directives()))
-	case "next-goal":
-		var input nextGoalInput
-		if err := decodeRequest(options.Input, &input); err != nil {
+		if _, err := workspace.AbandonAttempt(journal, definition, workspace.AbandonAttemptRequest{
+			AttemptID: attemptID, OccurredAt: occurredAt,
+		}); err != nil {
 			return MutationResult{}, err
 		}
-		occurredAt, err := parseOccurredAt(input.SchemaVersion, input.OccurredAt)
-		if err != nil {
-			return MutationResult{}, err
-		}
-		attemptID, err := parseID(input.AttemptID, "attempt_id")
-		if err != nil {
-			return MutationResult{}, err
-		}
-		goal, err := parseGoal(input.Goal)
-		if err != nil {
-			return MutationResult{}, err
-		}
-		intent, err := workspace.ReserveNextGoalCreation(journal, definition, workspace.ReserveNextGoalCreationRequest{
-			AttemptID: attemptID, Goal: goal, OccurredAt: occurredAt,
-		})
-		if err != nil {
-			return MutationResult{}, err
-		}
-		return mutationResult("attempt.next-goal", journal, definition, []BoundaryDirectiveView{nextGoalDirectiveView(intent)})
-	case "acknowledge":
-		var input acknowledgeInput
-		if err := decodeRequest(options.Input, &input); err != nil {
-			return MutationResult{}, err
-		}
-		occurredAt, err := parseOccurredAt(input.SchemaVersion, input.OccurredAt)
-		if err != nil {
-			return MutationResult{}, err
-		}
-		attemptID, err := parseID(input.AttemptID, "attempt_id")
-		if err != nil {
-			return MutationResult{}, err
-		}
-		goal, err := parseGoal(input.Goal)
-		if err != nil {
-			return MutationResult{}, err
-		}
-		directive, err := parseDigest(
-			input.DirectiveDigest, "directive_digest",
-		)
-		if err != nil {
-			return MutationResult{}, err
-		}
-		idempotency, err := parseDigest(
-			input.IdempotencyKey, "idempotency_key",
-		)
-		if err != nil {
-			return MutationResult{}, err
-		}
-		if _, err := workspace.RecordOrchestrationAcknowledgement(
-			journal, definition,
-			workspace.RecordOrchestrationAcknowledgementRequest{
-				AttemptID: attemptID, Kind: workspace.OrchestrationAcknowledgementKind(input.Kind),
-				DirectiveDigest: directive, Goal: goal,
-				IdempotencyKey: idempotency, OccurredAt: occurredAt,
-			},
-		); err != nil {
-			return MutationResult{}, err
-		}
-		return mutationResult("attempt.acknowledge", journal, definition, nil)
-	case "owner-response":
-		var input ownerResponseInput
-		if err := decodeRequest(options.Input, &input); err != nil {
-			return MutationResult{}, err
-		}
-		occurredAt, err := parseOccurredAt(input.SchemaVersion, input.OccurredAt)
-		if err != nil {
-			return MutationResult{}, err
-		}
-		attemptID, err := parseID(input.AttemptID, "attempt_id")
-		if err != nil {
-			return MutationResult{}, err
-		}
-		boundaryID, err := parseID(input.BoundaryID, "boundary_id")
-		if err != nil {
-			return MutationResult{}, err
-		}
-		directive, err := parseDigest(
-			input.DirectiveDigest, "directive_digest",
-		)
-		if err != nil {
-			return MutationResult{}, err
-		}
-		goal, err := parseGoal(input.Goal)
-		if err != nil {
-			return MutationResult{}, err
-		}
-		head, err := parseGitObject(input.ExpectedHead, "expected_head")
-		if err != nil {
-			return MutationResult{}, err
-		}
-		if _, err := workspace.RecordOwnerBoundaryResponse(
-			journal, definition, workspace.RecordOwnerBoundaryResponseRequest{
-				AttemptID: attemptID, BoundaryID: boundaryID,
-				DirectiveDigest: directive, Goal: goal,
-				ExpectedHead: head,
-				Response:     workspace.OwnerBoundaryResponse(input.Response),
-				OccurredAt:   occurredAt,
-			},
-		); err != nil {
-			return MutationResult{}, err
-		}
-		return mutationResult("attempt.owner-response", journal, definition, nil)
+		return mutationResult("attempt.abandon", journal, definition)
 	case "resume":
 		_, occurredAt, attemptID, err := decodeAttemptIDInput(options.Input)
 		if err != nil {
@@ -282,7 +186,7 @@ func executeAttempt(ctx context.Context, bundle workspace.WorkspaceBundle, optio
 		}); err != nil {
 			return MutationResult{}, err
 		}
-		return mutationResult("attempt.resume", journal, definition, nil)
+		return mutationResult("attempt.resume", journal, definition)
 	default:
 		return MutationResult{}, fmt.Errorf("unsupported workspace attempt action %q", options.Subaction)
 	}
@@ -292,7 +196,7 @@ func decodeBoundaryInput(source []byte) (boundaryInput, workspace.AttemptBoundar
 	var input boundaryInput
 	if err := decodeRequest(source, &input); err != nil {
 		if strings.Contains(err.Error(), "required JSON field $.kind is missing") {
-			return input, "", requiredAttemptBoundaryKindError()
+			return input, "", requiredAttemptPauseKindError()
 		}
 		return input, "", err
 	}
@@ -306,21 +210,21 @@ func parseAttemptBoundaryKind(value string) (workspace.AttemptBoundaryKind, erro
 	case workspace.AttemptBoundaryKindCheckpoint, workspace.AttemptBoundaryKindEscalation:
 		return kind, nil
 	default:
-		return "", invalidAttemptBoundaryKindError()
+		return "", invalidAttemptPauseKindError()
 	}
 }
 
-func invalidAttemptBoundaryKindError() error {
+func invalidAttemptPauseKindError() error {
 	return fmt.Errorf(
-		"attempt boundary kind must be %q or %q",
+		"attempt pause kind must be %q or %q",
 		workspace.AttemptBoundaryKindCheckpoint,
 		workspace.AttemptBoundaryKindEscalation,
 	)
 }
 
-func requiredAttemptBoundaryKindError() error {
+func requiredAttemptPauseKindError() error {
 	return fmt.Errorf(
-		"attempt boundary kind is required; accepted values are %q or %q",
+		"attempt pause kind is required; accepted values are %q or %q",
 		workspace.AttemptBoundaryKindCheckpoint,
 		workspace.AttemptBoundaryKindEscalation,
 	)
@@ -377,40 +281,4 @@ func parseEvidence(inputs []evidenceInput) ([]workspace.Evidence, error) {
 		result = append(result, evidence)
 	}
 	return result, nil
-}
-
-func directiveViews(directives []workspace.AttemptBoundaryDirective) []BoundaryDirectiveView {
-	result := make([]BoundaryDirectiveView, 0, len(directives))
-	for _, directive := range directives {
-		switch value := directive.(type) {
-		case workspace.CompleteGoalAndWaitDirective:
-			result = append(result, BoundaryDirectiveView{
-				Kind: "complete_goal_and_wait", WorkspaceID: value.WorkspaceID().String(), Generation: value.Generation().String(),
-				AttemptID: value.AttemptID().String(), BoundaryID: value.BoundaryID().String(), GoalID: value.Goal().ID().String(),
-				GoalScope: string(value.Goal().Scope()), Head: value.Head().String(), DirectiveDigest: value.DirectiveDigest().String(),
-				IdempotencyKey: value.IdempotencyKey().String(), Choices: []string{},
-			})
-		case workspace.OwnerGateDirective:
-			choices := make([]string, 0, len(value.Choices()))
-			for _, choice := range value.Choices() {
-				choices = append(choices, string(choice))
-			}
-			result = append(result, BoundaryDirectiveView{
-				Kind: "owner_gate", WorkspaceID: value.WorkspaceID().String(), Generation: value.Generation().String(),
-				AttemptID: value.AttemptID().String(), BoundaryID: value.BoundaryID().String(), GoalID: value.Goal().ID().String(),
-				GoalScope: string(value.Goal().Scope()), Head: value.Head().String(), DirectiveDigest: value.DirectiveDigest().String(),
-				Choices: append([]string{}, choices...),
-			})
-		}
-	}
-	return result
-}
-
-func nextGoalDirectiveView(intent workspace.NextGoalCreationIntent) BoundaryDirectiveView {
-	return BoundaryDirectiveView{
-		Kind: "create_next_goal", WorkspaceID: intent.WorkspaceID().String(), Generation: intent.Generation().String(),
-		AttemptID: intent.AttemptID().String(), BoundaryID: intent.BoundaryID().String(), GoalID: intent.NextGoal().ID().String(),
-		GoalScope: string(intent.NextGoal().Scope()), Head: intent.Head().String(), DirectiveDigest: intent.DirectiveDigest().String(),
-		IdempotencyKey: intent.IdempotencyKey().String(), Choices: []string{},
-	}
 }

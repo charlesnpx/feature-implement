@@ -9,15 +9,13 @@ import (
 type AttemptCheckpointMode string
 
 const (
-	AttemptCheckpointNone                AttemptCheckpointMode = "none"
-	AttemptCheckpointPauseOnly           AttemptCheckpointMode = "pause_only"
-	AttemptCheckpointCompleteGoalAndWait AttemptCheckpointMode = "complete_goal_and_wait"
+	AttemptCheckpointNone      AttemptCheckpointMode = "none"
+	AttemptCheckpointPauseOnly AttemptCheckpointMode = "pause_only"
 )
 
 func (mode AttemptCheckpointMode) valid() bool {
 	return mode == AttemptCheckpointNone ||
-		mode == AttemptCheckpointPauseOnly ||
-		mode == AttemptCheckpointCompleteGoalAndWait
+		mode == AttemptCheckpointPauseOnly
 }
 
 type AttemptEscalationPolicy string
@@ -114,32 +112,22 @@ type ExecutionPolicy struct {
 	requirePassingChecks bool
 	allowWriteNetwork    bool
 	maxAttempts          uint16
-	maxReviewRounds      uint16
-	maxReviewFixes       uint16
 }
 
 func newExecutionPolicy(wire executionPolicyWire, location string) (ExecutionPolicy, error) {
 	if wire.RequirePassingChecks == nil || wire.AllowWriteNetwork == nil ||
-		wire.MaxAttempts == nil || wire.MaxReviewRounds == nil || wire.MaxReviewFixes == nil {
+		wire.MaxAttempts == nil {
 		return ExecutionPolicy{}, fmt.Errorf("%s must explicitly define every policy field", location)
 	}
-	if *wire.MaxAttempts == 0 || *wire.MaxReviewRounds == 0 || *wire.MaxReviewFixes == 0 {
+	if *wire.MaxAttempts == 0 {
 		return ExecutionPolicy{}, fmt.Errorf("%s budgets must be positive", location)
 	}
 	return ExecutionPolicy{
 		requirePassingChecks: *wire.RequirePassingChecks,
 		allowWriteNetwork:    *wire.AllowWriteNetwork,
 		maxAttempts:          *wire.MaxAttempts,
-		maxReviewRounds:      *wire.MaxReviewRounds,
-		maxReviewFixes:       *wire.MaxReviewFixes,
 	}, nil
 }
-
-func (policy ExecutionPolicy) RequirePassingChecks() bool { return policy.requirePassingChecks }
-func (policy ExecutionPolicy) AllowWriteNetwork() bool    { return policy.allowWriteNetwork }
-func (policy ExecutionPolicy) MaxAttempts() uint16        { return policy.maxAttempts }
-func (policy ExecutionPolicy) MaxReviewRounds() uint16    { return policy.maxReviewRounds }
-func (policy ExecutionPolicy) MaxReviewFixes() uint16     { return policy.maxReviewFixes }
 
 func (policy ExecutionPolicy) validateStrengthens(base ExecutionPolicy, location string) error {
 	if base.requirePassingChecks && !policy.requirePassingChecks {
@@ -150,12 +138,6 @@ func (policy ExecutionPolicy) validateStrengthens(base ExecutionPolicy, location
 	}
 	if policy.maxAttempts > base.maxAttempts {
 		return fmt.Errorf("%s weakens max_attempts", location)
-	}
-	if policy.maxReviewRounds > base.maxReviewRounds {
-		return fmt.Errorf("%s weakens max_review_rounds", location)
-	}
-	if policy.maxReviewFixes > base.maxReviewFixes {
-		return fmt.Errorf("%s weakens max_review_fixes", location)
 	}
 	return nil
 }
@@ -168,7 +150,6 @@ type ExecutionProfile struct {
 }
 
 func (profile ExecutionProfile) ID() ID                  { return profile.id }
-func (profile ExecutionProfile) Runner() ID              { return profile.runner }
 func (profile ExecutionProfile) Policy() ExecutionPolicy { return profile.policy }
 func (profile ExecutionProfile) Boundary() (ProfileBoundaryPolicy, bool) {
 	if profile.boundary == nil {
@@ -178,19 +159,17 @@ func (profile ExecutionProfile) Boundary() (ProfileBoundaryPolicy, bool) {
 }
 
 type UnitExecution struct {
-	planID            ID
-	mergeUnitID       ID
-	profileID         ID
-	policy            ExecutionPolicy
-	boundary          AttemptBoundaryPolicy
-	commitProtocol    *CommitProtocol
-	reviewFixProtocol *ReviewFixProtocol
-	reviewLoop        *ReviewLoop
+	planID         ID
+	mergeUnitID    ID
+	profileID      ID
+	policy         ExecutionPolicy
+	boundary       AttemptBoundaryPolicy
+	commitProtocol *CommitProtocol
+	reviewGate     *ReviewGateConfig
 }
 
 func (unit UnitExecution) PlanID() ID              { return unit.planID }
 func (unit UnitExecution) MergeUnitID() ID         { return unit.mergeUnitID }
-func (unit UnitExecution) ProfileID() ID           { return unit.profileID }
 func (unit UnitExecution) Policy() ExecutionPolicy { return unit.policy }
 func (unit UnitExecution) Boundary() AttemptBoundaryPolicy {
 	return unit.boundary
@@ -201,25 +180,19 @@ func (unit UnitExecution) CommitProtocol() (CommitProtocol, bool) {
 	}
 	return *cloneCommitProtocol(unit.commitProtocol), true
 }
-func (unit UnitExecution) ReviewFixProtocol() (ReviewFixProtocol, bool) {
-	if unit.reviewFixProtocol == nil {
-		return ReviewFixProtocol{}, false
+func (unit UnitExecution) ReviewGate() (ReviewGateConfig, bool) {
+	if unit.reviewGate == nil {
+		return ReviewGateConfig{}, false
 	}
-	return *cloneReviewFixProtocol(unit.reviewFixProtocol), true
-}
-func (unit UnitExecution) ReviewLoop() (ReviewLoop, bool) {
-	if unit.reviewLoop == nil {
-		return ReviewLoop{}, false
-	}
-	return cloneReviewLoop(*unit.reviewLoop), true
+	return cloneReviewGateConfig(*unit.reviewGate), true
 }
 
 // ExecutionConfig is the one policy authority for all workspace merge units.
 type ExecutionConfig struct {
-	policy         ExecutionPolicy
-	profiles       []ExecutionProfile
-	reviewProfiles []ReviewProfile
-	mergeUnits     []UnitExecution
+	policy     ExecutionPolicy
+	profiles   []ExecutionProfile
+	reviewGate *ReviewGateConfig
+	mergeUnits []UnitExecution
 }
 
 func DecodeExecutionConfig(source []byte) (ExecutionConfig, error) {
@@ -279,7 +252,7 @@ func normalizeExecutionConfig(wire executionConfigWire) (ExecutionConfig, error)
 		profiles = append(profiles, profile)
 	}
 	sort.Slice(profiles, func(i, j int) bool { return profiles[i].id.String() < profiles[j].id.String() })
-	reviewProfiles, reviewProfileByID, err := normalizeReviewProfiles(wire.ReviewProfiles)
+	rootReviewGate, err := newReviewGateConfig(wire.ReviewGate, "review_gate")
 	if err != nil {
 		return ExecutionConfig{}, err
 	}
@@ -327,21 +300,15 @@ func normalizeExecutionConfig(wire executionConfigWire) (ExecutionConfig, error)
 		if err != nil {
 			return ExecutionConfig{}, err
 		}
-		reviewFixProtocol, err := normalizeReviewFixProtocol(
-			item.ReviewFixProtocol, profile.runner, fmt.Sprintf("merge unit %s/%s review_fix_protocol", planID, mergeUnitID),
+		unitReviewGate, err := newReviewGateConfig(
+			item.ReviewGate, fmt.Sprintf("merge unit %s/%s review_gate", planID, mergeUnitID),
 		)
 		if err != nil {
 			return ExecutionConfig{}, err
 		}
-		reviewLoop, err := normalizeReviewLoop(
-			item.ReviewLoop, reviewProfileByID, unitPolicy,
-			fmt.Sprintf("merge unit %s/%s review_loop", planID, mergeUnitID),
-		)
-		if err != nil {
-			return ExecutionConfig{}, err
-		}
-		if reviewLoop != nil && reviewFixProtocol == nil {
-			return ExecutionConfig{}, fmt.Errorf("merge unit %s/%s review_loop requires review_fix_protocol", planID, mergeUnitID)
+		if unitReviewGate == nil && rootReviewGate != nil {
+			inherited := cloneReviewGateConfig(*rootReviewGate)
+			unitReviewGate = &inherited
 		}
 		key := planID.String() + "\x00" + mergeUnitID.String()
 		if _, exists := unitKeys[key]; exists {
@@ -351,7 +318,7 @@ func normalizeExecutionConfig(wire executionConfigWire) (ExecutionConfig, error)
 		units = append(units, UnitExecution{
 			planID: planID, mergeUnitID: mergeUnitID, profileID: profileID,
 			policy: unitPolicy, boundary: boundary,
-			commitProtocol: commitProtocol, reviewFixProtocol: reviewFixProtocol, reviewLoop: reviewLoop,
+			commitProtocol: commitProtocol, reviewGate: unitReviewGate,
 		})
 	}
 	sort.Slice(units, func(i, j int) bool {
@@ -360,24 +327,26 @@ func normalizeExecutionConfig(wire executionConfigWire) (ExecutionConfig, error)
 		return left < right
 	})
 
-	return ExecutionConfig{policy: policy, profiles: profiles, reviewProfiles: reviewProfiles, mergeUnits: units}, nil
+	return ExecutionConfig{policy: policy, profiles: profiles, reviewGate: rootReviewGate, mergeUnits: units}, nil
 }
 
 func (config ExecutionConfig) Policy() ExecutionPolicy { return config.policy }
 func (config ExecutionConfig) Profiles() []ExecutionProfile {
 	return append([]ExecutionProfile(nil), config.profiles...)
 }
-func (config ExecutionConfig) ReviewProfiles() []ReviewProfile {
-	return append([]ReviewProfile(nil), config.reviewProfiles...)
+func (config ExecutionConfig) ReviewGate() (ReviewGateConfig, bool) {
+	if config.reviewGate == nil {
+		return ReviewGateConfig{}, false
+	}
+	return cloneReviewGateConfig(*config.reviewGate), true
 }
 func (config ExecutionConfig) MergeUnits() []UnitExecution {
 	result := append([]UnitExecution(nil), config.mergeUnits...)
 	for index := range result {
 		result[index].commitProtocol = cloneCommitProtocol(result[index].commitProtocol)
-		result[index].reviewFixProtocol = cloneReviewFixProtocol(result[index].reviewFixProtocol)
-		if result[index].reviewLoop != nil {
-			loop := cloneReviewLoop(*result[index].reviewLoop)
-			result[index].reviewLoop = &loop
+		if result[index].reviewGate != nil {
+			gate := cloneReviewGateConfig(*result[index].reviewGate)
+			result[index].reviewGate = &gate
 		}
 	}
 	return result

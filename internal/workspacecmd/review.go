@@ -2,163 +2,103 @@ package workspacecmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/charlesnpx/feature-implement/internal/workspace"
 )
 
+// ReviewCommandResult preserves the common command envelope while exposing
+// only dispatch and terminal gate facts. This command never conducts review.
 type ReviewCommandResult struct {
-	SchemaVersion int                       `json:"schema_version"`
-	Status        string                    `json:"status"`
-	Action        string                    `json:"action"`
-	Detail        any                       `json:"detail,omitempty"`
-	Report        workspace.WorkspaceReport `json:"report"`
+	SchemaVersion int                     `json:"schema_version"`
+	Status        string                  `json:"status"`
+	Action        string                  `json:"action"`
+	Detail        any                     `json:"detail,omitempty"`
+	Report        workspace.WorkspaceView `json:"report"`
 }
 
-type ReviewRequestView struct {
-	WorkspaceID     string `json:"workspace_id"`
-	Generation      string `json:"generation"`
-	AttemptID       string `json:"attempt_id"`
-	PlanID          string `json:"plan_id"`
-	MergeUnitID     string `json:"merge_unit_id"`
-	Round           uint16 `json:"round"`
-	ProfileOrdinal  uint16 `json:"profile_ordinal"`
-	Invocation      uint16 `json:"invocation"`
-	ProfileID       string `json:"profile_id"`
-	Runner          string `json:"runner"`
-	Head            string `json:"head"`
-	Tree            string `json:"tree"`
-	LoopDigest      string `json:"loop_digest"`
-	RequestDigest   string `json:"request_digest"`
-	IsolationDigest string `json:"isolation_digest"`
+type ReviewGateDispatchView struct {
+	DispatchDigest string                           `json:"dispatch_digest"`
+	Adapter        string                           `json:"adapter"`
+	Recipe         string                           `json:"recipe"`
+	PolicyDigest   string                           `json:"policy_digest"`
+	Policy         string                           `json:"policy"`
+	Head           string                           `json:"head"`
+	Tree           string                           `json:"tree"`
+	FrozenCopy     string                           `json:"frozen_copy"`
+	WitnessPacket  *WitnessReviewDispatchPacketView `json:"witness_packet,omitempty"`
 }
 
-type ReviewReservationView struct {
-	ReservationDigest string            `json:"reservation_digest"`
-	ReviewerInstance  string            `json:"reviewer_instance"`
-	IdempotencyKey    string            `json:"idempotency_key"`
-	Request           ReviewRequestView `json:"request"`
+// WitnessReviewDispatchPacketView is the deterministic handoff used to build
+// a review-report-v1 document from a witness dispatch alone.
+type WitnessReviewDispatchPacketView struct {
+	CharterDocument json.RawMessage `json:"charter_document"`
+	RequestDocument json.RawMessage `json:"request_document"`
+	ReviewInput     string          `json:"review_input"`
 }
 
-type ReviewFixReservationView struct {
-	ReservationDigest string   `json:"reservation_digest"`
-	AttemptID         string   `json:"attempt_id"`
-	Generation        string   `json:"generation"`
-	Ordinal           uint16   `json:"ordinal"`
-	Round             uint16   `json:"round"`
-	Head              string   `json:"head"`
-	Tree              string   `json:"tree"`
-	FindingIDs        []string `json:"finding_ids"`
+type ReviewGateRecordView struct {
+	DispatchDigest string `json:"dispatch_digest"`
+	GateRecord     string `json:"gate_record_digest"`
+	Adapter        string `json:"adapter"`
+	Recipe         string `json:"recipe"`
+	PolicyDigest   string `json:"policy_digest"`
+	Head           string `json:"head"`
+	Tree           string `json:"tree"`
+	Verdict        string `json:"verdict"`
+	EvidenceDigest string `json:"evidence_digest"`
+	OccurredAt     string `json:"occurred_at"`
 }
 
 type ReviewReadinessView struct {
-	Digest      string `json:"digest"`
-	WorkspaceID string `json:"workspace_id"`
-	Generation  string `json:"generation"`
-	AttemptID   string `json:"attempt_id"`
-	PlanID      string `json:"plan_id"`
-	MergeUnitID string `json:"merge_unit_id"`
-	Head        string `json:"head"`
-	Tree        string `json:"tree"`
-	Round       uint16 `json:"round"`
-	Purpose     string `json:"purpose"`
-}
-
-type reserveReviewInput struct {
-	SchemaVersion    int    `json:"schema_version"`
-	OccurredAt       string `json:"occurred_at"`
+	Digest           string `json:"digest"`
+	WorkspaceID      string `json:"workspace_id"`
+	Generation       string `json:"generation"`
 	AttemptID        string `json:"attempt_id"`
-	ReviewerInstance string `json:"reviewer_instance"`
-	IdempotencyKey   string `json:"idempotency_key"`
+	PlanID           string `json:"plan_id"`
+	MergeUnitID      string `json:"merge_unit_id"`
+	Head             string `json:"head"`
+	Tree             string `json:"tree"`
+	DispatchDigest   string `json:"dispatch_digest"`
+	GateRecordDigest string `json:"gate_record_digest"`
 }
 
-type reviewFindingInput struct {
-	Severity       string `json:"severity"`
-	Category       string `json:"category"`
-	Path           string `json:"path"`
-	Line           uint32 `json:"line"`
-	Summary        string `json:"summary"`
+type dispatchReviewGateInput struct {
+	SchemaVersion int    `json:"schema_version"`
+	OccurredAt    string `json:"occurred_at"`
+	AttemptID     string `json:"attempt_id"`
+}
+
+type recordReviewGateInput struct {
+	SchemaVersion  int    `json:"schema_version"`
+	OccurredAt     string `json:"occurred_at"`
+	AttemptID      string `json:"attempt_id"`
+	DispatchDigest string `json:"dispatch_digest"`
+	Verdict        string `json:"verdict"`
 	EvidenceDigest string `json:"evidence_digest"`
 }
 
-type isolationInput struct {
-	RepositoryReadOnly bool `json:"repository_read_only"`
-	ScratchEphemeral   bool `json:"scratch_ephemeral"`
-	RepositoryHooks    bool `json:"repository_hooks"`
-	WriteNetwork       bool `json:"write_network"`
-	ExternalWrite      bool `json:"external_write"`
+type recordReviewDocumentInput struct {
+	SchemaVersion  int             `json:"schema_version"`
+	OccurredAt     string          `json:"occurred_at"`
+	AttemptID      string          `json:"attempt_id"`
+	DispatchDigest string          `json:"dispatch_digest"`
+	Verdict        string          `json:"verdict"`
+	Document       json.RawMessage `json:"document"`
 }
 
-type recordReviewInput struct {
-	SchemaVersion         int                  `json:"schema_version"`
-	OccurredAt            string               `json:"occurred_at"`
-	AttemptID             string               `json:"attempt_id"`
-	ReservationDigest     string               `json:"reservation_digest"`
-	RequestDigest         string               `json:"request_digest"`
-	ReviewerInstance      string               `json:"reviewer_instance"`
-	Status                string               `json:"status"`
-	Findings              []reviewFindingInput `json:"findings"`
-	InfrastructureFailure string               `json:"infrastructure_failure,omitempty"`
-	Isolation             isolationInput       `json:"isolation"`
-}
-
-type reviewFixInput struct {
-	SchemaVersion      int      `json:"schema_version"`
-	OccurredAt         string   `json:"occurred_at"`
-	AttemptID          string   `json:"attempt_id"`
-	Ordinal            uint16   `json:"ordinal"`
-	AcceptedFindingIDs []string `json:"accepted_finding_ids"`
-}
-
-type applyReviewFixInput struct {
-	SchemaVersion      int      `json:"schema_version"`
-	OccurredAt         string   `json:"occurred_at"`
-	AttemptID          string   `json:"attempt_id"`
-	Ordinal            uint16   `json:"ordinal"`
-	AcceptedFindingIDs []string `json:"accepted_finding_ids"`
-	Body               string   `json:"body,omitempty"`
-}
-
-type localReviewRepository struct {
-	git workspace.LocalCommitGitAdapter
-}
-
-func (adapter localReviewRepository) InspectReviewSnapshot(
-	ctx context.Context,
-	request workspace.ReviewRepositoryRequest,
-) (workspace.ReviewRepositorySnapshot, error) {
-	inspection, err := adapter.git.InspectCleanWorktreeHead(
-		ctx, request.Worktree(), request.Branch(), request.Head(),
-	)
-	if err != nil {
-		return workspace.ReviewRepositorySnapshot{}, err
-	}
-	return workspace.NewReviewRepositorySnapshot(inspection.Commit(), inspection.Tree(), true)
+type ReviewDocumentRecordDetail struct {
+	GateRecord      ReviewGateRecordView `json:"gate_record"`
+	RawDocumentPath string               `json:"raw_document_path"`
 }
 
 func executeReview(ctx context.Context, bundle workspace.WorkspaceBundle, options Options) (any, error) {
-	journal, _, err := openWritableJournal(options)
-	if err != nil {
-		return nil, err
-	}
-	defer journal.Close()
 	definition := bundle.Definition()
 	repository := localReviewRepository{git: workspace.DefaultLocalCommitGitAdapter()}
 	switch options.Subaction {
-	case "start":
-		_, occurredAt, attemptID, err := decodeAttemptIDInput(options.Input)
-		if err != nil {
-			return nil, err
-		}
-		started, err := workspace.StartAttemptReviewRound(ctx, journal, definition, repository, workspace.StartAttemptReviewRoundRequest{
-			AttemptID: attemptID, OccurredAt: occurredAt,
-		})
-		if err != nil {
-			return nil, err
-		}
-		return reviewCommandResult("review.start", reviewRequestView(started.Request()), journal, definition)
-	case "reserve":
-		var input reserveReviewInput
+	case "dispatch":
+		var input dispatchReviewGateInput
 		if err := decodeRequest(options.Input, &input); err != nil {
 			return nil, err
 		}
@@ -170,100 +110,34 @@ func executeReview(ctx context.Context, bundle workspace.WorkspaceBundle, option
 		if err != nil {
 			return nil, err
 		}
-		reviewer, err := parseID(input.ReviewerInstance, "reviewer_instance")
+		journal, _, err := openWritableJournal(options)
 		if err != nil {
 			return nil, err
 		}
-		idempotency, err := parseDigest(input.IdempotencyKey, "idempotency_key")
-		if err != nil {
-			return nil, err
-		}
-		reserved, err := workspace.ReserveAttemptReviewInvocation(journal, definition, workspace.ReserveAttemptReviewInvocationRequest{
-			AttemptID: attemptID, ReviewerInstance: reviewer, IdempotencyKey: idempotency, OccurredAt: occurredAt,
-		})
-		if err != nil {
-			return nil, err
-		}
-		reservation := reserved.Reservation()
-		detail := ReviewReservationView{
-			ReservationDigest: reservation.Digest().String(), ReviewerInstance: reservation.ReviewerInstance().String(),
-			IdempotencyKey: reservation.IdempotencyKey().String(), Request: reviewRequestView(reservation.Request()),
-		}
-		return reviewCommandResult("review.reserve", detail, journal, definition)
-	case "record":
-		var input recordReviewInput
-		if err := decodeRequest(options.Input, &input); err != nil {
-			return nil, err
-		}
-		occurredAt, err := parseOccurredAt(input.SchemaVersion, input.OccurredAt)
-		if err != nil {
-			return nil, err
-		}
-		attemptID, err := parseID(input.AttemptID, "attempt_id")
-		if err != nil {
-			return nil, err
-		}
-		reservation, err := parseDigest(input.ReservationDigest, "reservation_digest")
-		if err != nil {
-			return nil, err
-		}
-		requestDigest, err := parseDigest(input.RequestDigest, "request_digest")
-		if err != nil {
-			return nil, err
-		}
-		reviewer, err := parseID(input.ReviewerInstance, "reviewer_instance")
-		if err != nil {
-			return nil, err
-		}
-		findings, err := parseReviewFindings(input.Findings)
-		if err != nil {
-			return nil, err
-		}
-		infrastructure := workspace.Digest{}
-		if input.InfrastructureFailure != "" {
-			infrastructure, err = parseDigest(input.InfrastructureFailure, "infrastructure_failure")
-			if err != nil {
-				return nil, err
-			}
-		}
-		proof := workspace.NewReviewIsolationProof(
-			input.Isolation.RepositoryReadOnly, input.Isolation.ScratchEphemeral,
-			input.Isolation.RepositoryHooks, input.Isolation.WriteNetwork, input.Isolation.ExternalWrite,
+		defer journal.Close()
+		dispatched, err := workspace.DispatchAttemptReviewGate(
+			ctx, journal, definition, repository, workspace.DefaultLocalAttemptGitAdapter(),
+			workspace.ReviewGateDispatchRequest{AttemptID: attemptID, OccurredAt: occurredAt},
 		)
-		submission, err := workspace.NewReviewResultSubmission(workspace.ReviewResultSubmissionOptions{
-			RequestDigest: requestDigest, ReviewerInstance: reviewer, Status: workspace.ReviewResultStatus(input.Status),
-			Findings: findings, InfrastructureFailure: infrastructure, Isolation: proof,
-		})
 		if err != nil {
 			return nil, err
 		}
-		verified, _, err := workspace.RecordAttemptReviewResult(ctx, journal, definition, repository, workspace.RecordAttemptReviewResultRequest{
-			AttemptID: attemptID, ReservationDigest: reservation, Submission: submission, OccurredAt: occurredAt,
-		})
-		if err != nil {
-			return nil, err
-		}
-		detail := map[string]any{
-			"result_digest": verified.Submission().Digest().String(),
-		}
-		return reviewCommandResult("review.record", detail, journal, definition)
-	case "reserve-fix", "apply-fix", "record-fix":
-		var input reviewFixInput
-		body := ""
-		if options.Subaction == "apply-fix" {
-			var applyInput applyReviewFixInput
-			if err := decodeRequest(options.Input, &applyInput); err != nil {
+		detail := reviewGateDispatchView(dispatched)
+		if workspace.ReviewGateCarriesDocumentContract(dispatched.Dispatch().Adapter()) {
+			materialization, err := workspace.BuildReviewAdapterRequest(
+				ctx, journal, definition, repository, workspace.ReviewAdapterBuildRequest{
+					AttemptID: attemptID, DispatchDigest: dispatched.Dispatch().Digest(),
+				},
+			)
+			if err != nil {
 				return nil, err
 			}
-			input = reviewFixInput{
-				SchemaVersion:      applyInput.SchemaVersion,
-				OccurredAt:         applyInput.OccurredAt,
-				AttemptID:          applyInput.AttemptID,
-				Ordinal:            applyInput.Ordinal,
-				AcceptedFindingIDs: applyInput.AcceptedFindingIDs,
-			}
-			body = applyInput.Body
-		} else if err := decodeRequest(options.Input, &input); err != nil {
+			detail.WitnessPacket = witnessReviewDispatchPacketView(materialization)
+		}
+		return reviewCommandResult("review.dispatch", detail, journal, definition)
+	case "record":
+		var input recordReviewGateInput
+		if err := decodeRequest(options.Input, &input); err != nil {
 			return nil, err
 		}
 		occurredAt, err := parseOccurredAt(input.SchemaVersion, input.OccurredAt)
@@ -274,38 +148,77 @@ func executeReview(ctx context.Context, bundle workspace.WorkspaceBundle, option
 		if err != nil {
 			return nil, err
 		}
-		findingIDs, err := parseDigestList(input.AcceptedFindingIDs, "accepted_finding_ids")
+		dispatch, err := parseDigest(input.DispatchDigest, "dispatch_digest")
 		if err != nil {
 			return nil, err
 		}
-		if options.Subaction == "reserve-fix" {
-			reserved, err := workspace.ReserveAttemptReviewFix(journal, definition, workspace.ReserveAttemptReviewFixRequest{
-				AttemptID: attemptID, Ordinal: input.Ordinal, AcceptedFindingIDs: findingIDs, OccurredAt: occurredAt,
-			})
-			if err != nil {
-				return nil, err
-			}
-			return reviewCommandResult("review.reserve-fix", reviewFixReservationView(reserved.Reservation()), journal, definition)
-		}
-		if options.Subaction == "apply-fix" {
-			shell, err := workspace.NewCommitProtocolShell(workspace.DefaultLocalCommitGitAdapter(), defaultIsolatedCheckRunner())
-			if err != nil {
-				return nil, err
-			}
-			if _, err := workspace.ExecuteAttemptReviewFix(ctx, journal, definition, shell, workspace.ExecuteAttemptReviewFixRequest{
-				AttemptID: attemptID, Ordinal: input.Ordinal, Body: body,
-				AcceptedFindingIDs: findingIDs, OccurredAt: occurredAt,
-			}); err != nil {
-				return nil, err
-			}
-			return reviewCommandResult("review.apply-fix", nil, journal, definition)
-		}
-		if _, _, err := workspace.RecordReviewFixApplication(journal, definition, workspace.RecordReviewFixApplicationRequest{
-			AttemptID: attemptID, Ordinal: input.Ordinal, AcceptedFindingIDs: findingIDs, OccurredAt: occurredAt,
-		}); err != nil {
+		verdict, err := parseReviewGateVerdict(input.Verdict)
+		if err != nil {
 			return nil, err
 		}
-		return reviewCommandResult("review.record-fix", nil, journal, definition)
+		evidence, err := parseDigest(input.EvidenceDigest, "evidence_digest")
+		if err != nil {
+			return nil, err
+		}
+		journal, _, err := openWritableJournal(options)
+		if err != nil {
+			return nil, err
+		}
+		defer journal.Close()
+		recorded, err := workspace.RecordAttemptReviewGate(journal, definition, workspace.RecordAttemptReviewGateRequest{
+			AttemptID: attemptID, DispatchDigest: dispatch, Verdict: verdict,
+			EvidenceDigest: evidence, OccurredAt: occurredAt,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return reviewCommandResult("review.record", reviewGateRecordView(recorded), journal, definition)
+	case "record-document":
+		var input recordReviewDocumentInput
+		if err := decodeRequest(options.Input, &input); err != nil {
+			return nil, err
+		}
+		if len(input.Document) == 0 || len(input.Document) > workspace.MaxArtifactBytes {
+			return nil, fmt.Errorf("review document must contain at most %d raw bytes", workspace.MaxArtifactBytes)
+		}
+		occurredAt, err := parseOccurredAt(input.SchemaVersion, input.OccurredAt)
+		if err != nil {
+			return nil, err
+		}
+		attemptID, err := parseID(input.AttemptID, "attempt_id")
+		if err != nil {
+			return nil, err
+		}
+		dispatch, err := parseDigest(input.DispatchDigest, "dispatch_digest")
+		if err != nil {
+			return nil, err
+		}
+		verdict, err := parseReviewGateVerdict(input.Verdict)
+		if err != nil {
+			return nil, err
+		}
+		journal, workspaceDir, err := openWritableJournal(options)
+		if err != nil {
+			return nil, err
+		}
+		defer journal.Close()
+		recorded, _, err := workspace.RecordAttemptReviewDocument(
+			ctx, journal, definition, repository, workspace.RecordAttemptReviewDocumentRequest{
+				AttemptID: attemptID, DispatchDigest: dispatch, Verdict: verdict,
+				Document: input.Document, OccurredAt: occurredAt,
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+		artifactPath, err := workspace.ReviewDocumentArtifactPath(workspaceDir, recorded.Artifact())
+		if err != nil {
+			return nil, err
+		}
+		return reviewCommandResult("review.record-document", ReviewDocumentRecordDetail{
+			GateRecord:      reviewGateRecordView(recorded.GateRecord()),
+			RawDocumentPath: artifactPath,
+		}, journal, definition)
 	case "ready":
 		var input struct {
 			SchemaVersion int    `json:"schema_version"`
@@ -321,23 +234,27 @@ func executeReview(ctx context.Context, bundle workspace.WorkspaceBundle, option
 		if err != nil {
 			return nil, err
 		}
+		workspaceDir, err := absoluteDirectory(options.WorkspaceDir, "workspace")
+		if err != nil {
+			return nil, err
+		}
+		journal, err := workspace.OpenWorkspaceJournal(workspaceDir, workspace.JournalReadOnly)
+		if err != nil {
+			return nil, err
+		}
+		defer journal.Close()
 		readiness, err := workspace.ConfirmReviewMergeReadiness(ctx, journal, definition, repository, attemptID)
 		if err != nil {
 			return nil, err
 		}
-		return reviewReadResult("review.ready", ReviewReadinessView{
-			Digest: readiness.Digest().String(), WorkspaceID: readiness.WorkspaceID().String(), Generation: readiness.Generation().String(),
-			AttemptID: readiness.AttemptID().String(), PlanID: readiness.MergeUnit().PlanID().String(),
-			MergeUnitID: readiness.MergeUnit().MergeUnitID().String(), Head: readiness.Head().String(), Tree: readiness.Tree().String(),
-			Round: readiness.Round(), Purpose: readiness.Purpose(),
-		}, journal, definition)
+		return reviewReadResult("review.ready", reviewReadinessView(readiness), journal, definition)
 	default:
 		return nil, fmt.Errorf("unsupported workspace review action %q", options.Subaction)
 	}
 }
 
 func reviewCommandResult(action string, detail any, journal *workspace.WorkspaceJournal, definition workspace.EffectiveWorkspaceDefinition) (ReviewCommandResult, error) {
-	base, err := mutationResult(action, journal, definition, nil)
+	base, err := mutationResult(action, journal, definition)
 	if err != nil {
 		return ReviewCommandResult{}, err
 	}
@@ -346,17 +263,12 @@ func reviewCommandResult(action string, detail any, journal *workspace.Workspace
 	}, nil
 }
 
-func reviewReadResult(
-	action string,
-	detail any,
-	journal *workspace.WorkspaceJournal,
-	definition workspace.EffectiveWorkspaceDefinition,
-) (ReviewCommandResult, error) {
+func reviewReadResult(action string, detail any, journal *workspace.WorkspaceJournal, definition workspace.EffectiveWorkspaceDefinition) (ReviewCommandResult, error) {
 	snapshot, err := journal.ReadSnapshot()
 	if err != nil {
 		return ReviewCommandResult{}, err
 	}
-	report, err := workspace.RebuildWorkspaceReport(snapshot, definition)
+	report, err := workspace.RebuildWorkspaceView(snapshot, definition)
 	if err != nil {
 		return ReviewCommandResult{}, err
 	}
@@ -365,61 +277,47 @@ func reviewReadResult(
 	}, nil
 }
 
-func reviewRequestView(request workspace.ReviewRequest) ReviewRequestView {
-	return ReviewRequestView{
-		WorkspaceID: request.WorkspaceID().String(), Generation: request.Generation().String(), AttemptID: request.AttemptID().String(),
-		PlanID: request.MergeUnit().PlanID().String(), MergeUnitID: request.MergeUnit().MergeUnitID().String(), Round: request.Round(),
-		ProfileOrdinal: request.ProfileOrdinal(), Invocation: request.Invocation(), ProfileID: request.Profile().ID().String(),
-		Runner: request.Profile().Runner().String(), Head: request.Head().String(), Tree: request.Tree().String(),
-		LoopDigest: request.LoopDigest().String(), RequestDigest: request.Digest().String(),
-		IsolationDigest: request.IsolationRequirements().Digest().String(),
+func reviewGateDispatchView(result workspace.ReviewGateDispatchResult) ReviewGateDispatchView {
+	dispatch := result.Dispatch()
+	return ReviewGateDispatchView{
+		DispatchDigest: dispatch.Digest().String(), Adapter: dispatch.Adapter().String(), Recipe: dispatch.Recipe().String(),
+		PolicyDigest: dispatch.PolicyDigest().String(), Policy: string(result.Policy()),
+		Head: dispatch.Head().String(), Tree: dispatch.Tree().String(), FrozenCopy: result.FrozenCopy(),
 	}
 }
 
-func parseReviewFindings(inputs []reviewFindingInput) ([]workspace.ReviewFinding, error) {
-	result := make([]workspace.ReviewFinding, 0, len(inputs))
-	for index, input := range inputs {
-		category, err := parseID(input.Category, fmt.Sprintf("findings[%d].category", index))
-		if err != nil {
-			return nil, err
-		}
-		evidence, err := parseDigest(input.EvidenceDigest, fmt.Sprintf("findings[%d].evidence_digest", index))
-		if err != nil {
-			return nil, err
-		}
-		finding, err := workspace.NewReviewFinding(workspace.ReviewFindingOptions{
-			Severity: workspace.ReviewSeverity(input.Severity), Category: category, Path: input.Path,
-			Line: input.Line, Summary: input.Summary, EvidenceDigest: evidence,
-		})
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, finding)
+func witnessReviewDispatchPacketView(materialization workspace.ReviewAdapterMaterialization) *WitnessReviewDispatchPacketView {
+	return &WitnessReviewDispatchPacketView{
+		CharterDocument: json.RawMessage(materialization.CharterJSON()),
+		RequestDocument: json.RawMessage(materialization.RequestJSON()),
+		ReviewInput:     string(materialization.ReviewInput()),
 	}
-	return result, nil
 }
 
-func parseDigestList(values []string, label string) ([]workspace.Digest, error) {
-	result := make([]workspace.Digest, 0, len(values))
-	for index, value := range values {
-		digest, err := parseDigest(value, fmt.Sprintf("%s[%d]", label, index))
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, digest)
+func reviewGateRecordView(record workspace.ReviewGateRecord) ReviewGateRecordView {
+	return ReviewGateRecordView{
+		DispatchDigest: record.DispatchDigest().String(), GateRecord: record.Digest().String(),
+		Adapter: record.Adapter().String(), Recipe: record.Recipe().String(), PolicyDigest: record.PolicyDigest().String(),
+		Head: record.Head().String(), Tree: record.Tree().String(), Verdict: string(record.Verdict()),
+		EvidenceDigest: record.EvidenceDigest().String(), OccurredAt: record.OccurredAt().Format("2006-01-02T15:04:05.999999999Z07:00"),
 	}
-	return result, nil
 }
 
-func reviewFixReservationView(reservation workspace.ReviewFixReservation) ReviewFixReservationView {
-	findings := reservation.FindingIDs()
-	ids := make([]string, 0, len(findings))
-	for _, finding := range findings {
-		ids = append(ids, finding.String())
+func reviewReadinessView(readiness workspace.ReviewGateReadiness) ReviewReadinessView {
+	return ReviewReadinessView{
+		Digest: readiness.Digest().String(), WorkspaceID: readiness.WorkspaceID().String(), Generation: readiness.Generation().String(),
+		AttemptID: readiness.AttemptID().String(), PlanID: readiness.MergeUnit().PlanID().String(),
+		MergeUnitID: readiness.MergeUnit().MergeUnitID().String(), Head: readiness.Head().String(), Tree: readiness.Tree().String(),
+		DispatchDigest: readiness.DispatchDigest().String(), GateRecordDigest: readiness.GateRecordDigest().String(),
 	}
-	return ReviewFixReservationView{
-		ReservationDigest: reservation.Digest().String(), AttemptID: reservation.AttemptID().String(),
-		Generation: reservation.Generation().String(), Ordinal: reservation.Ordinal(), Round: reservation.Round(),
-		Head: reservation.Head().String(), Tree: reservation.Tree().String(), FindingIDs: ids,
+}
+
+func parseReviewGateVerdict(raw string) (workspace.ReviewGateVerdict, error) {
+	verdict := workspace.ReviewGateVerdict(raw)
+	switch verdict {
+	case workspace.ReviewGateSatisfied, workspace.ReviewGateNotSatisfied, workspace.ReviewGateFailedToRun:
+		return verdict, nil
+	default:
+		return "", fmt.Errorf("verdict must be satisfied, not_satisfied, or failed_to_run")
 	}
 }

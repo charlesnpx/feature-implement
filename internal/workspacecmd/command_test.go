@@ -2,7 +2,6 @@ package workspacecmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,7 +12,7 @@ import (
 	"github.com/charlesnpx/feature-implement/internal/workspace"
 )
 
-func TestLocalCommandDecodersRequireExactReceiptFreeFields(t *testing.T) {
+func TestLocalCommandDecodersRejectUnsupportedFields(t *testing.T) {
 	tests := []struct {
 		name   string
 		source string
@@ -21,13 +20,13 @@ func TestLocalCommandDecodersRequireExactReceiptFreeFields(t *testing.T) {
 		want   string
 	}{
 		{
-			name: "init requires worktree root",
+			name: "init accepts derived roots",
 			source: `{
   "schema_version": 2,
   "occurred_at": "2026-07-22T10:00:00Z"
 }`,
 			target: func() any { return &initializeRequest{} },
-			want:   "worktree_root",
+			want:   "",
 		},
 		{
 			name: "reserve rejects caller base",
@@ -44,81 +43,17 @@ func TestLocalCommandDecodersRequireExactReceiptFreeFields(t *testing.T) {
 			want:   "unknown field",
 		},
 		{
-			name: "acknowledgement requires directive",
+			name: "review gate record rejects unknown fields",
 			source: `{
   "schema_version": 2,
   "occurred_at": "2026-07-22T10:00:00Z",
   "attempt_id": "attempt-one",
-  "kind": "goal_completed",
-  "goal": {"id": "goal-one", "scope": "merge_unit"},
-  "idempotency_key": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	  "dispatch_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	  "verdict": "satisfied",
+	  "evidence_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			  "unsupported": {}
 }`,
-			target: func() any { return &acknowledgeInput{} },
-			want:   "directive_digest",
-		},
-		{
-			name: "acknowledgement rejects receipt",
-			source: `{
-  "schema_version": 2,
-  "occurred_at": "2026-07-22T10:00:00Z",
-  "attempt_id": "attempt-one",
-  "kind": "goal_completed",
-  "directive_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  "goal": {"id": "goal-one", "scope": "merge_unit"},
-  "idempotency_key": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "receipt": {}
-}`,
-			target: func() any { return &acknowledgeInput{} },
-			want:   "unknown field",
-		},
-		{
-			name: "owner response requires exact head",
-			source: `{
-  "schema_version": 2,
-  "occurred_at": "2026-07-22T10:00:00Z",
-  "attempt_id": "attempt-one",
-  "boundary_id": "boundary-one",
-  "directive_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  "goal": {"id": "goal-one", "scope": "merge_unit"},
-  "response": "continue"
-}`,
-			target: func() any { return &ownerResponseInput{} },
-			want:   "expected_head",
-		},
-		{
-			name: "review result rejects receipt",
-			source: `{
-  "schema_version": 2,
-  "occurred_at": "2026-07-22T10:00:00Z",
-  "attempt_id": "attempt-one",
-  "reservation_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "request_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  "reviewer_instance": "reviewer-one",
-  "status": "completed",
-  "findings": [],
-  "isolation": {
-    "repository_read_only": true,
-    "scratch_ephemeral": true,
-    "repository_hooks": false,
-    "write_network": false,
-    "external_write": false
-  },
-  "receipt": {}
-}`,
-			target: func() any { return &recordReviewInput{} },
-			want:   "unknown field",
-		},
-		{
-			name: "non-applying review fix rejects body",
-			source: `{
-  "schema_version": 2,
-  "occurred_at": "2026-07-22T10:00:00Z",
-  "attempt_id": "attempt-one",
-  "ordinal": 1,
-  "accepted_finding_ids": [],
-  "body": "ignored"
-}`,
-			target: func() any { return &reviewFixInput{} },
+			target: func() any { return &recordReviewGateInput{} },
 			want:   "unknown field",
 		},
 		{
@@ -144,6 +79,9 @@ func TestLocalCommandDecodersRequireExactReceiptFreeFields(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			err := decodeRequest([]byte(test.source), test.target())
+			if test.want == "" && err == nil {
+				return
+			}
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("decode error = %v, want %q", err, test.want)
 			}
@@ -160,41 +98,18 @@ func TestLocalCommandDecodersRequireExactReceiptFreeFields(t *testing.T) {
 }
 
 func TestRequestSchemasExposeOnlySupportedLocalMutations(t *testing.T) {
-	encoded, err := json.Marshal(RequestSchemas())
-	if err != nil {
-		t.Fatal(err)
-	}
-	source := string(encoded)
-	for _, forbidden := range []string{
-		`"receipt"`, `"reconcile.`, `"control.`, `"provider.`,
-		`"provider_broker"`, `"commit.rebase"`, `"base"`,
-	} {
-		if strings.Contains(source, forbidden) {
-			t.Fatalf(
-				"request schemas expose removed field %q: %s",
-				forbidden, source,
-			)
-		}
-	}
 	schemas := RequestSchemas()["requests"].(map[string]any)
 	for _, required := range []string{
 		"init",
 		"recover",
-		"attempt.reserve",
-		"attempt.materialize",
+		"attempt.start",
 		"attempt.adopt-head",
-		"attempt.boundary",
-		"attempt.next-goal",
-		"attempt.acknowledge",
-		"attempt.owner-response",
+		"attempt.pause",
 		"attempt.resume",
-		"commit.next",
-		"review.start",
-		"review.reserve",
+		"attempt.abandon",
+		"review.dispatch",
 		"review.record",
-		"review.reserve-fix",
-		"review.apply-fix",
-		"review.record-fix",
+		"review.record-document",
 		"review.ready",
 		"integrate.merge-unit",
 		"complete.verify",
@@ -203,71 +118,87 @@ func TestRequestSchemasExposeOnlySupportedLocalMutations(t *testing.T) {
 			t.Fatalf("request schemas omit %s", required)
 		}
 	}
-	if len(schemas) != 20 {
+	if len(schemas) != 13 {
 		t.Fatalf("request schema count = %d: %+v", len(schemas), schemas)
 	}
-	for _, action := range []string{
-		"review.reserve-fix",
-		"review.record-fix",
-	} {
-		properties := schemas[action].(map[string]any)["properties"].(map[string]any)
-		if _, exists := properties["body"]; exists {
-			t.Fatalf("%s schema accepts ignored body: %+v", action, properties)
-		}
-	}
-	applyProperties := schemas["review.apply-fix"].(map[string]any)["properties"].(map[string]any)
-	if _, exists := applyProperties["body"]; !exists {
-		t.Fatalf("review.apply-fix schema omits body: %+v", applyProperties)
+	recordDocument := schemas["review.record-document"].(map[string]any)
+	verdicts := recordDocument["properties"].(map[string]any)["verdict"].(map[string]any)["enum"].([]string)
+	if strings.Join(verdicts, ",") != "satisfied,not_satisfied" {
+		t.Fatalf("review document verdicts = %v", verdicts)
 	}
 }
 
 func TestDecodeRequestKeepsSchemaOptionalFieldsOptional(t *testing.T) {
-	var input commitNextInput
-	if err := decodeRequest([]byte(`{
-  "schema_version": 2,
-  "occurred_at": "2026-07-22T10:00:00Z",
-  "attempt_id": "attempt-one"
-}`), &input); err != nil {
-		t.Fatalf("optional commit body was required: %v", err)
-	}
-	var reviewFix applyReviewFixInput
+	var input recordReviewGateInput
 	if err := decodeRequest([]byte(`{
   "schema_version": 2,
   "occurred_at": "2026-07-22T10:00:00Z",
   "attempt_id": "attempt-one",
-  "ordinal": 1,
-  "accepted_finding_ids": [],
-  "body": "apply the accepted fixes"
-}`), &reviewFix); err != nil {
-		t.Fatalf("valid review fix body: %v", err)
+	  "dispatch_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	  "verdict": "failed_to_run",
+	  "evidence_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}`), &input); err != nil {
+		t.Fatalf("valid review gate record envelope: %v", err)
 	}
 }
 
-func TestReportDirectiveSchemaKeepsChoicesOptional(t *testing.T) {
-	reports := ReportSchemas()["reports"].(map[string]any)
-	scheduler := reports["scheduler"].(map[string]any)
-	properties := scheduler["properties"].(map[string]any)
-	units := properties["units"].(map[string]any)
+func TestWorkspaceViewSchemaOmitsRetiredDirectiveFields(t *testing.T) {
+	view := WorkspaceViewSchema()
+	if view["additionalProperties"] != false {
+		t.Fatalf("workspace view schema permits unknown fields: %+v", view)
+	}
+	properties := view["properties"].(map[string]any)
+	scheduler := properties["scheduler"].(map[string]any)
+	schedulerProperties := scheduler["properties"].(map[string]any)
+	units := schedulerProperties["units"].(map[string]any)
 	unit := units["items"].(map[string]any)
 	unitProperties := unit["properties"].(map[string]any)
+	if _, exists := unitProperties["branch"]; exists {
+		t.Fatalf("workspace unit schema still exposes retired branch: %+v", unitProperties)
+	}
 	directives := unitProperties["pending_directives"].(map[string]any)
 	directive := directives["items"].(map[string]any)
 	required := directive["required"].([]string)
 	boundaryKindRequired := false
 	for _, name := range required {
-		if name == "choices" {
-			t.Fatalf("directive schema still requires omitted empty choices: %+v", required)
-		}
 		if name == "boundary_kind" {
 			boundaryKindRequired = true
 		}
 	}
 	directiveProperties := directive["properties"].(map[string]any)
-	if _, exists := directiveProperties["choices"]; !exists {
-		t.Fatalf("directive schema no longer describes choices: %+v", directiveProperties)
+	expectedDirectiveFields := map[string]bool{
+		"kind": true, "boundary_kind": true, "workspace_id": true,
+		"generation": true, "attempt_id": true, "boundary_id": true,
+		"goal_id": true, "goal_scope": true, "head": true,
+	}
+	if len(directiveProperties) != len(expectedDirectiveFields) {
+		t.Fatalf("directive schema fields = %+v", directiveProperties)
+	}
+	for field := range expectedDirectiveFields {
+		if _, exists := directiveProperties[field]; !exists {
+			t.Fatalf("directive schema omits %q: %+v", field, directiveProperties)
+		}
 	}
 	if _, exists := directiveProperties["boundary_kind"]; !exists || !boundaryKindRequired {
 		t.Fatalf("directive schema does not require boundary kind: %+v / %+v", required, directiveProperties)
+	}
+	kinds := directiveProperties["kind"].(map[string]any)["enum"].([]string)
+	if len(kinds) != 1 || kinds[0] != "boundary_pending" {
+		t.Fatalf("directive schema kinds = %+v", kinds)
+	}
+	blockers := unitProperties["blockers"].(map[string]any)
+	blocker := blockers["items"].(map[string]any)
+	if blocker["type"] != "string" {
+		t.Fatalf("workspace view blocker is not a string: %+v", blocker)
+	}
+	if _, exists := blocker["properties"]; exists {
+		t.Fatalf("workspace view blocker retains object properties: %+v", blocker)
+	}
+	attempts := properties["attempts"].(map[string]any)
+	attempt := attempts["items"].(map[string]any)
+	attemptProperties := attempt["properties"].(map[string]any)
+	if _, exists := attemptProperties["branch"]; exists {
+		t.Fatalf("workspace attempt schema still exposes retired branch: %+v", attemptProperties)
 	}
 }
 
@@ -308,6 +239,8 @@ func TestDeferredLocalCommandsStrictlyDecodeTheirFinalEnvelopes(
 }
 
 func TestExecuteIntegrationSucceedsAndRetriesIdempotently(t *testing.T) {
+	t.Parallel()
+
 	repositoryRoot := canonicalWorkspaceCommandTempDir(t)
 	runGitTest(t, repositoryRoot, "init", "-b", "main")
 	runGitTest(t, repositoryRoot, "config", "user.name", "Feature Test")
@@ -393,8 +326,6 @@ policy:
   require_passing_checks: true
   allow_write_network: false
   max_attempts: 2
-  max_review_rounds: 2
-  max_review_fixes: 1
 profiles:
   - id: standard
     runner: codex
@@ -402,8 +333,6 @@ profiles:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 2
-      max_review_rounds: 2
-      max_review_fixes: 1
 merge_units:
   - plan_id: alpha-plan
     merge_unit_id: unit-one
@@ -416,37 +345,39 @@ merge_units:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 2
-      max_review_rounds: 2
-      max_review_fixes: 1
 `)
 	if _, err := Execute(context.Background(), Options{
-		Action:           "validate",
-		BundleDir:        bundleRoot,
-		WriteLocks:       true,
-		GeneratorVersion: "test",
+		Action:     "validate",
+		BundleDir:  bundleRoot,
+		WriteLocks: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	runGitTest(t, bundleRoot, "init", "-b", "main")
 	runGitTest(t, bundleRoot, "config", "user.name", "Feature Test")
 	runGitTest(t, bundleRoot, "config", "user.email", "feature@example.test")
-	runGitTest(t, bundleRoot, "add", ".")
+	runGitTest(
+		t, bundleRoot, "add",
+		workspace.WorkspaceBundleFileName,
+		"feature.workspace.yaml",
+		"plans/alpha.yaml",
+		"config/execution.yaml",
+		workspace.WorkspaceLockFileName,
+	)
 	runGitTest(t, bundleRoot, "commit", "-m", "Committed plan locks")
 	bundle, err := workspace.LoadWorkspaceBundle(bundleRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
 	workspaceDir := canonicalWorkspaceCommandTempDir(t)
-	worktreeRoot := canonicalWorkspaceCommandTempDir(t)
 	if _, err := initializeWorkspace(
 		context.Background(), bundle,
 		Options{
 			WorkspaceDir: workspaceDir,
-			Input: []byte(fmt.Sprintf(`{
+			Input: []byte(`{
   "schema_version": 2,
-  "occurred_at": "2026-07-25T18:00:00Z",
-  "worktree_root": %q
-}`, worktreeRoot)),
+	  "occurred_at": "2026-07-25T18:00:00Z"
+}`),
 		},
 	); err != nil {
 		t.Fatal(err)
@@ -472,24 +403,12 @@ merge_units:
 	if err != nil {
 		t.Fatal(err)
 	}
-	attempt, err := workspace.ReserveAttempt(
+	attempt, err := workspace.StartAttempt(
 		context.Background(), journal, bundle.Definition(), attemptGit,
-		workspace.ReserveAttemptRequest{
+		workspace.StartAttemptRequest{
 			MergeUnit: mergeUnit, AttemptNumber: 1, Goal: goal,
 			OccurredAt: time.Date(
 				2026, time.July, 25, 18, 0, 1, 0, time.UTC,
-			),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	attempt, err = workspace.MaterializeAttempt(
-		context.Background(), journal, bundle.Definition(), attemptGit,
-		workspace.MaterializeAttemptRequest{
-			AttemptID: attempt.AttemptID(),
-			OccurredAt: time.Date(
-				2026, time.July, 25, 18, 0, 2, 0, time.UTC,
 			),
 		},
 	)
@@ -504,7 +423,10 @@ merge_units:
 	}
 	runGitTest(t, attempt.Worktree(), "add", "integration.txt")
 	runGitTest(
-		t, attempt.Worktree(), "commit", "-m",
+		t, attempt.Worktree(),
+		"-c", "user.name=Command Test",
+		"-c", "user.email=command@example.test",
+		"commit", "-m",
 		"Accepted command implementation",
 	)
 	repository := localReviewRepository{
@@ -558,6 +480,36 @@ merge_units:
 			first.Report.Integration,
 		)
 	}
+	t.Run("workspace validate uses durable integration head", func(t *testing.T) {
+		if _, err := Execute(context.Background(), Options{
+			Action:       "validate",
+			BundleDir:    bundleRoot,
+			WorkspaceDir: workspaceDir,
+			WriteLocks:   true,
+		}); err != nil {
+			t.Fatalf("validate integrated workspace: %v", err)
+		}
+		featureRef := bundle.Definition().Workspace().FeatureRef()
+		runGitTest(
+			t, repositoryRoot,
+			"update-ref", featureRef,
+			strings.TrimPrefix(base.String(), "sha1:"),
+		)
+		if _, err := Execute(context.Background(), Options{
+			Action:       "validate",
+			BundleDir:    bundleRoot,
+			WorkspaceDir: workspaceDir,
+			WriteLocks:   true,
+		}); err == nil || !strings.Contains(err.Error(), featureRef) ||
+			!strings.Contains(err.Error(), "expected recorded head") {
+			t.Fatalf("validate drifted integrated workspace error = %v", err)
+		}
+		runGitTest(
+			t, repositoryRoot,
+			"update-ref", featureRef,
+			strings.TrimPrefix(first.Report.Target.FeatureHead, "sha1:"),
+		)
+	})
 	journal, err = workspace.OpenWorkspaceJournal(
 		workspaceDir, workspace.JournalReadOnly,
 	)
@@ -756,7 +708,7 @@ merge_units:
 			"post-completion feature-ref drift was not rejected",
 		)
 	}
-	drifted, err := readReport(
+	drifted, err := readWorkspaceView(
 		context.Background(), bundle, workspaceDir,
 	)
 	if err != nil {

@@ -15,101 +15,28 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 const maxAttemptGitOutputBytes = 8 * 1024 * 1024
 const maxAttemptGitRecordBytes = 1024 * 1024
-const maxAttemptWorktreeClaimBytes = 16 * 1024
-
-type AttemptRefInventory struct {
-	local []string
-}
-
-func NewAttemptRefInventory(local []string) (AttemptRefInventory, error) {
-	inventory := AttemptRefInventory{
-		local: append([]string(nil), local...),
-	}
-	for _, value := range inventory.local {
-		if _, err := normalizeHeadRef(value); err != nil {
-			return AttemptRefInventory{}, err
-		}
-	}
-	sort.Strings(inventory.local)
-	return inventory, nil
-}
-
-func (inventory AttemptRefInventory) Local() []string {
-	return append([]string(nil), inventory.local...)
-}
 
 type AttemptGitInspection struct {
-	branchExists       bool
-	branchHead         GitObjectID
-	worktreeExists     bool
-	worktreeRegistered bool
-	worktreeBranch     string
-	worktreeHead       GitObjectID
-	worktreeTree       GitObjectID
-	worktreeBinding    AttemptWorktreeGitBinding
-	clean              bool
-	digest             Digest
-}
-
-func NewAttemptGitInspection(
-	branchExists bool,
-	branchHead GitObjectID,
-	worktreeExists, worktreeRegistered bool,
-	worktreeBranch string,
-	worktreeHead GitObjectID,
-	clean bool,
-) (AttemptGitInspection, error) {
-	inspection := AttemptGitInspection{
-		branchExists: branchExists, branchHead: branchHead,
-		worktreeExists: worktreeExists, worktreeRegistered: worktreeRegistered,
-		worktreeBranch: worktreeBranch, worktreeHead: worktreeHead, clean: clean,
-	}
-	return newAttemptGitInspection(inspection)
-}
-
-func NewBoundAttemptGitInspection(
-	branchHead GitObjectID,
-	worktreeBranch string,
-	worktreeHead GitObjectID,
-	worktreeTree GitObjectID,
-	worktreeBinding AttemptWorktreeGitBinding,
-	clean bool,
-) (AttemptGitInspection, error) {
-	return newAttemptGitInspection(AttemptGitInspection{
-		branchExists: true, branchHead: branchHead,
-		worktreeExists: true, worktreeRegistered: true,
-		worktreeBranch: worktreeBranch, worktreeHead: worktreeHead,
-		worktreeTree: worktreeTree, worktreeBinding: worktreeBinding,
-		clean: clean,
-	})
+	worktreeExists  bool
+	worktreeHead    GitObjectID
+	worktreeTree    GitObjectID
+	worktreeBinding AttemptWorktreeGitBinding
+	clean           bool
+	digest          Digest
 }
 
 func newAttemptGitInspection(
 	inspection AttemptGitInspection,
 ) (AttemptGitInspection, error) {
-	if inspection.branchExists != !inspection.branchHead.IsZero() {
-		return AttemptGitInspection{}, fmt.Errorf("branch existence and object identity disagree")
-	}
-	if inspection.worktreeRegistered &&
-		strings.TrimSpace(inspection.worktreeBranch) == "" {
-		return AttemptGitInspection{}, fmt.Errorf("registered worktree requires its branch")
-	}
-	if inspection.worktreeRegistered && inspection.worktreeExists &&
-		inspection.worktreeHead.IsZero() {
-		return AttemptGitInspection{}, fmt.Errorf("existing registered worktree requires its head")
-	}
-	if inspection.clean && (!inspection.worktreeExists ||
-		!inspection.worktreeRegistered || inspection.worktreeHead.IsZero()) {
-		return AttemptGitInspection{}, fmt.Errorf("clean state requires an existing registered worktree")
+	if inspection.clean && (!inspection.worktreeExists || inspection.worktreeHead.IsZero()) {
+		return AttemptGitInspection{}, fmt.Errorf("clean state requires an existing worktree")
 	}
 	if !inspection.worktreeBinding.IsZero() &&
-		(!inspection.worktreeExists || !inspection.worktreeRegistered ||
-			inspection.worktreeHead.IsZero() ||
+		(!inspection.worktreeExists || inspection.worktreeHead.IsZero() ||
 			inspection.worktreeTree.IsZero()) {
 		return AttemptGitInspection{}, fmt.Errorf(
 			"bound attempt worktree inspection requires exact worktree Git state",
@@ -134,110 +61,49 @@ func newAttemptGitInspection(
 	return inspection, nil
 }
 
-func (inspection AttemptGitInspection) BranchExists() bool      { return inspection.branchExists }
-func (inspection AttemptGitInspection) BranchHead() GitObjectID { return inspection.branchHead }
-func (inspection AttemptGitInspection) WorktreeExists() bool    { return inspection.worktreeExists }
-func (inspection AttemptGitInspection) WorktreeRegistered() bool {
-	return inspection.worktreeRegistered
-}
-func (inspection AttemptGitInspection) WorktreeBranch() string    { return inspection.worktreeBranch }
+func (inspection AttemptGitInspection) WorktreeExists() bool      { return inspection.worktreeExists }
 func (inspection AttemptGitInspection) WorktreeHead() GitObjectID { return inspection.worktreeHead }
 func (inspection AttemptGitInspection) WorktreeTree() GitObjectID { return inspection.worktreeTree }
-func (inspection AttemptGitInspection) WorktreeGitBinding() AttemptWorktreeGitBinding {
-	return inspection.worktreeBinding
-}
-func (inspection AttemptGitInspection) Clean() bool    { return inspection.clean }
-func (inspection AttemptGitInspection) Digest() Digest { return inspection.digest }
+func (inspection AttemptGitInspection) Clean() bool               { return inspection.clean }
+func (inspection AttemptGitInspection) Digest() Digest            { return inspection.digest }
 
-// AttemptWorktreeClaim is the durable ownership proof used while Git is
-// materializing an attempt worktree. The claim is written beside the target
-// before Git is invoked, so a partial worktree can be recovered on retry
-// without treating an unrelated pre-existing path as attempt-owned.
-type AttemptWorktreeClaim struct {
-	attemptID  ID
-	generation Digest
-	base       GitObjectID
-	branch     string
-	worktree   string
+// NewScratchAttemptGitInspection records an independent, detached attempt
+// repository.
+func NewScratchAttemptGitInspection(
+	worktreeHead, worktreeTree GitObjectID,
+	worktreeBinding AttemptWorktreeGitBinding,
+	clean bool,
+) (AttemptGitInspection, error) {
+	return newAttemptGitInspection(AttemptGitInspection{
+		worktreeExists: true, worktreeHead: worktreeHead,
+		worktreeTree: worktreeTree, worktreeBinding: worktreeBinding,
+		clean: clean,
+	})
 }
-
-func NewAttemptWorktreeClaim(
-	attemptID ID,
-	generation Digest,
-	base GitObjectID,
-	branch, worktree string,
-) (AttemptWorktreeClaim, error) {
-	worktree = filepath.Clean(strings.TrimSpace(worktree))
-	if attemptID.IsZero() || generation.IsZero() || base.IsZero() || !filepath.IsAbs(worktree) {
-		return AttemptWorktreeClaim{}, fmt.Errorf("attempt worktree claim requires attempt, generation, base, and absolute path")
-	}
-	if err := validateAttemptBranchSyntax(branch); err != nil {
-		return AttemptWorktreeClaim{}, err
-	}
-	return AttemptWorktreeClaim{
-		attemptID: attemptID, generation: generation, base: base,
-		branch: branch, worktree: worktree,
-	}, nil
-}
-
-func (claim AttemptWorktreeClaim) AttemptID() ID      { return claim.attemptID }
-func (claim AttemptWorktreeClaim) Generation() Digest { return claim.generation }
-func (claim AttemptWorktreeClaim) Base() GitObjectID  { return claim.base }
-func (claim AttemptWorktreeClaim) Branch() string     { return claim.branch }
-func (claim AttemptWorktreeClaim) Worktree() string   { return claim.worktree }
 
 type AttemptGitPort interface {
-	ValidateAttemptBranch(context.Context, string, string) error
 	ValidateAttemptWorktreeRoot(context.Context, string, string) error
-	InspectAttemptRefs(context.Context, string) (AttemptRefInventory, error)
-	InspectAttemptWorktree(context.Context, string, string, string) (AttemptGitInspection, error)
-	PrepareAttemptWorktree(context.Context, string, AttemptWorktreeClaim, bool) error
-	ReleaseAttemptWorktreeClaim(context.Context, AttemptWorktreeClaim) error
-	CreateAttemptWorktree(context.Context, string, AttemptWorktreeClaim, bool, bool) error
+	InspectAttemptWorktree(context.Context, string, string) (AttemptGitInspection, error)
+	MaterializeAttemptTree(context.Context, string, GitObjectID, string) (AttemptGitInspection, error)
 }
-
-type AttemptWorktreeClaimFaultPoint string
-
-const (
-	AttemptWorktreeClaimFaultAfterTemporaryCreated AttemptWorktreeClaimFaultPoint = "after_temporary_created"
-	AttemptWorktreeClaimFaultAfterTemporaryWritten AttemptWorktreeClaimFaultPoint = "after_temporary_written"
-	AttemptWorktreeClaimFaultAfterTemporarySynced  AttemptWorktreeClaimFaultPoint = "after_temporary_synced"
-	AttemptWorktreeClaimFaultAfterPublished        AttemptWorktreeClaimFaultPoint = "after_published"
-)
-
-type AttemptWorktreeClaimFaultInjector func(AttemptWorktreeClaimFaultPoint) error
 
 type AttemptWorktreeMaterializationFaultPoint string
 
 const (
 	AttemptMaterializationFaultAfterDirectoryBinding AttemptWorktreeMaterializationFaultPoint = "after_directory_binding"
-	AttemptMaterializationFaultAfterRegistration     AttemptWorktreeMaterializationFaultPoint = "after_registration"
-	AttemptMaterializationFaultAfterIndex            AttemptWorktreeMaterializationFaultPoint = "after_index"
+	AttemptMaterializationFaultAfterPathCreation     AttemptWorktreeMaterializationFaultPoint = "after_path_creation"
 	AttemptMaterializationFaultAfterPath             AttemptWorktreeMaterializationFaultPoint = "after_path"
+	AttemptMaterializationFaultAfterGitInit          AttemptWorktreeMaterializationFaultPoint = "after_git_init"
 )
 
 type AttemptWorktreeMaterializationFaultInjector func(
 	AttemptWorktreeMaterializationFaultPoint,
 ) error
 
-type AttemptWorktreeCleanupFaultPoint string
-
-const (
-	AttemptCleanupFaultBeforeMaterializationEffect AttemptWorktreeCleanupFaultPoint = "before_materialization_cleanup_effect"
-	AttemptCleanupFaultBeforeRecoveryEffect        AttemptWorktreeCleanupFaultPoint = "before_recovery_cleanup_effect"
-	AttemptCleanupFaultAfterRecoveryContents       AttemptWorktreeCleanupFaultPoint = "after_recovery_contents"
-)
-
-type AttemptWorktreeCleanupFaultInjector func(
-	AttemptWorktreeCleanupFaultPoint,
-) error
-
 type LocalAttemptGitAdapter struct {
 	executable               string
 	environment              []EnvironmentVariable
-	worktreeClaimFault       AttemptWorktreeClaimFaultInjector
 	worktreeMaterializeFault AttemptWorktreeMaterializationFaultInjector
-	worktreeCleanupFault     AttemptWorktreeCleanupFaultInjector
 }
 
 func NewLocalAttemptGitAdapter(executable string, environment []EnvironmentVariable) (LocalAttemptGitAdapter, error) {
@@ -267,13 +133,6 @@ func DefaultLocalAttemptGitAdapter() LocalAttemptGitAdapter {
 	return adapter
 }
 
-func (adapter LocalAttemptGitAdapter) WithAttemptWorktreeClaimFaultInjector(
-	injector AttemptWorktreeClaimFaultInjector,
-) LocalAttemptGitAdapter {
-	adapter.worktreeClaimFault = injector
-	return adapter
-}
-
 func (adapter LocalAttemptGitAdapter) WithAttemptWorktreeMaterializationFaultInjector(
 	injector AttemptWorktreeMaterializationFaultInjector,
 ) LocalAttemptGitAdapter {
@@ -281,674 +140,16 @@ func (adapter LocalAttemptGitAdapter) WithAttemptWorktreeMaterializationFaultInj
 	return adapter
 }
 
-func (adapter LocalAttemptGitAdapter) WithAttemptWorktreeCleanupFaultInjector(
-	injector AttemptWorktreeCleanupFaultInjector,
-) LocalAttemptGitAdapter {
-	adapter.worktreeCleanupFault = injector
-	return adapter
-}
-
-func (adapter LocalAttemptGitAdapter) ValidateAttemptBranch(ctx context.Context, repositoryRoot, branch string) error {
-	if err := validateAttemptBranchSyntax(branch); err != nil {
-		return err
-	}
-	_, exitCode, err := adapter.run(ctx, repositoryRoot, "check-ref-format", "--branch", branch)
-	if err != nil {
-		return fmt.Errorf("validate attempt branch: %w", err)
-	}
-	if exitCode != 0 {
-		return fmt.Errorf("Git rejected attempt branch %q", branch)
-	}
-	return nil
-}
-
-func (adapter LocalAttemptGitAdapter) InspectAttemptRefs(
-	ctx context.Context,
-	repositoryRoot string,
-) (AttemptRefInventory, error) {
-	localOutput, exitCode, err := adapter.run(ctx, repositoryRoot, "for-each-ref", "--format=%(refname)", "refs/heads")
-	if err != nil || exitCode != 0 {
-		if err == nil {
-			err = fmt.Errorf("Git exited with status %d", exitCode)
-		}
-		return AttemptRefInventory{}, fmt.Errorf("inspect local branches: %w", err)
-	}
-	local, err := parseLocalHeadRefs(localOutput)
-	if err != nil {
-		return AttemptRefInventory{}, err
-	}
-	return NewAttemptRefInventory(local)
-}
-
 func (adapter LocalAttemptGitAdapter) InspectAttemptWorktree(
 	ctx context.Context,
-	repositoryRoot, branch, worktree string,
+	repositoryRoot, worktree string,
 ) (AttemptGitInspection, error) {
-	algorithm, err := adapter.objectFormat(ctx, repositoryRoot)
+	commit := LocalCommitGitAdapter{git: adapter}
+	source, err := commit.captureTrustedWorktreeBinding(ctx, repositoryRoot)
 	if err != nil {
-		return AttemptGitInspection{}, err
+		return AttemptGitInspection{}, fmt.Errorf("inspect target Git binding: %w", err)
 	}
-	branchOutput, branchExit, err := adapter.run(ctx, repositoryRoot, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
-	if err != nil {
-		return AttemptGitInspection{}, fmt.Errorf("inspect attempt branch: %w", err)
-	}
-	branchExists := branchExit == 0
-	if branchExit != 0 && branchExit != 1 {
-		return AttemptGitInspection{}, fmt.Errorf("inspect attempt branch: Git exited with status %d", branchExit)
-	}
-	var branchHead GitObjectID
-	if branchExists {
-		branchHead, err = qualifyGitObjectID(algorithm, strings.TrimSpace(string(branchOutput)))
-		if err != nil {
-			return AttemptGitInspection{}, fmt.Errorf("inspect attempt branch object: %w", err)
-		}
-	}
-	listOutput, exitCode, err := adapter.run(ctx, repositoryRoot, "worktree", "list", "--porcelain", "-z")
-	if err != nil || exitCode != 0 {
-		if err == nil {
-			err = fmt.Errorf("Git exited with status %d", exitCode)
-		}
-		return AttemptGitInspection{}, fmt.Errorf("inspect registered worktrees: %w", err)
-	}
-	registered, err := parseRegisteredWorktrees(listOutput)
-	if err != nil {
-		return AttemptGitInspection{}, err
-	}
-	worktree = filepath.Clean(worktree)
-	_, statErr := os.Lstat(worktree)
-	worktreeExists := statErr == nil
-	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree path: %w", statErr)
-	}
-	registeredPath := canonicalWorktreePath(worktree)
-	record, worktreeRegistered := registered[registeredPath]
-	if !worktreeRegistered || !worktreeExists {
-		return NewAttemptGitInspection(
-			branchExists, branchHead, worktreeExists, worktreeRegistered,
-			record.branch, GitObjectID{}, false,
-		)
-	}
-	if record.detached {
-		return AttemptGitInspection{}, fmt.Errorf("attempt worktree %s is detached", worktree)
-	}
-	parentPath, err := canonicalizeTrustedRootPath(filepath.Dir(worktree))
-	if err != nil {
-		return AttemptGitInspection{}, err
-	}
-	parent, err := OpenVerifiedRoot(RootRoleWorktree, parentPath, false)
-	if err != nil {
-		return AttemptGitInspection{}, fmt.Errorf(
-			"open attempt worktree parent for inspection: %w", err,
-		)
-	}
-	defer parent.Close()
-	worktreeName := filepath.Base(worktree)
-	worktree = filepath.Join(parent.Path(), worktreeName)
-	worktreeRoot, err := openClaimedAttemptWorktreeDirectory(
-		parent, worktreeName, worktree,
-	)
-	if err != nil {
-		return AttemptGitInspection{}, fmt.Errorf(
-			"open exact attempt worktree for inspection: %w", err,
-		)
-	}
-	defer worktreeRoot.Close()
-	commitAdapter := LocalCommitGitAdapter{git: adapter}
-	binding, err := commitAdapter.captureTrustedWorktreeBinding(
-		ctx, worktreeRoot.Path(),
-	)
-	if err != nil {
-		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree binding: %w", err)
-	}
-	if binding.root != worktreeRoot.Path() {
-		return AttemptGitInspection{}, fmt.Errorf(
-			"attempt Git top-level does not match its exact worktree path",
-		)
-	}
-	gitRoot, err := OpenVerifiedRoot(
-		RootRoleGitDirectory, binding.gitDir, false,
-	)
-	if err != nil {
-		return AttemptGitInspection{}, fmt.Errorf(
-			"open attempt worktree Git directory: %w", err,
-		)
-	}
-	defer gitRoot.Close()
-	commonRoot, err := OpenVerifiedRoot(
-		RootRoleGitCommon, binding.commonDir, false,
-	)
-	if err != nil {
-		return AttemptGitInspection{}, fmt.Errorf(
-			"open attempt worktree Git common directory: %w", err,
-		)
-	}
-	defer commonRoot.Close()
-	exactBinding, err := NewAttemptWorktreeGitBinding(
-		AttemptWorktreeGitBindingOptions{
-			Worktree:             worktreeRoot.Path(),
-			GitDirectory:         gitRoot.Path(),
-			CommonDirectory:      commonRoot.Path(),
-			AdministrationDigest: binding.admin,
-			ConfigurationDigest:  binding.config,
-		},
-	)
-	if err != nil {
-		return AttemptGitInspection{}, err
-	}
-	worktree = worktreeRoot.Path()
-	headOutput, headExit, err := adapter.run(ctx, worktree, "rev-parse", "--verify", "HEAD")
-	if err != nil || headExit != 0 {
-		if err == nil {
-			err = fmt.Errorf("Git exited with status %d", headExit)
-		}
-		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree head: %w", err)
-	}
-	head, err := qualifyGitObjectID(algorithm, strings.TrimSpace(string(headOutput)))
-	if err != nil {
-		return AttemptGitInspection{}, err
-	}
-	branchOutput, branchExit, err = adapter.run(ctx, worktree, "symbolic-ref", "--quiet", "--short", "HEAD")
-	if err != nil || branchExit != 0 {
-		if err == nil {
-			err = fmt.Errorf("Git exited with status %d", branchExit)
-		}
-		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree branch: %w", err)
-	}
-	worktreeBranch := strings.TrimSpace(string(branchOutput))
-	indexTree, err := commitAdapter.writeTree(ctx, worktree, algorithm)
-	if err != nil {
-		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree index tree: %w", err)
-	}
-	if err := commitAdapter.rejectHiddenIndexEntries(ctx, worktree); err != nil {
-		return AttemptGitInspection{}, fmt.Errorf(
-			"inspect attempt worktree index flags: %w", err,
-		)
-	}
-	tree, err := commitAdapter.resolveObject(ctx, worktree, algorithm, objectHex(head)+"^{tree}")
-	if err != nil {
-		return AttemptGitInspection{}, fmt.Errorf("inspect attempt worktree tree: %w", err)
-	}
-	clean := indexTree == tree
-	if clean {
-		if err := commitAdapter.verifyRawTreeMaterialization(ctx, worktree, tree); err != nil {
-			if isRawTreeMaterializationMismatch(err) {
-				clean = false
-			} else {
-				return AttemptGitInspection{}, fmt.Errorf("inspect attempt raw worktree: %w", err)
-			}
-		}
-	}
-	if err := commitAdapter.confirmTrustedCommitState(ctx, binding, worktreeBranch, head, indexTree); err != nil {
-		return AttemptGitInspection{}, fmt.Errorf("confirm attempt worktree Git state: %w", err)
-	}
-	confirmedBranch, confirmedExit, err := adapter.run(
-		ctx, repositoryRoot, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch,
-	)
-	if err != nil || confirmedExit != 0 {
-		if err == nil {
-			err = fmt.Errorf("Git exited with status %d", confirmedExit)
-		}
-		return AttemptGitInspection{}, fmt.Errorf("confirm attempt branch: %w", err)
-	}
-	confirmedBranchHead, err := qualifyGitObjectID(algorithm, strings.TrimSpace(string(confirmedBranch)))
-	if err != nil {
-		return AttemptGitInspection{}, err
-	}
-	if !branchExists || confirmedBranchHead != branchHead {
-		return AttemptGitInspection{}, fmt.Errorf("attempt branch changed during worktree verification")
-	}
-	if err := worktreeRoot.VerifyPath(); err != nil {
-		return AttemptGitInspection{}, fmt.Errorf(
-			"verify exact attempt worktree after inspection: %w", err,
-		)
-	}
-	if err := parent.VerifyPath(); err != nil {
-		return AttemptGitInspection{}, fmt.Errorf(
-			"verify attempt worktree parent after inspection: %w", err,
-		)
-	}
-	if err := gitRoot.VerifyPath(); err != nil {
-		return AttemptGitInspection{}, fmt.Errorf(
-			"verify attempt worktree Git directory after inspection: %w", err,
-		)
-	}
-	if err := commonRoot.VerifyPath(); err != nil {
-		return AttemptGitInspection{}, fmt.Errorf(
-			"verify attempt worktree common directory after inspection: %w", err,
-		)
-	}
-	return NewBoundAttemptGitInspection(
-		branchHead, worktreeBranch, head, tree, exactBinding, clean,
-	)
-}
-
-func (adapter LocalAttemptGitAdapter) CreateAttemptWorktree(
-	ctx context.Context,
-	repositoryRoot string,
-	claim AttemptWorktreeClaim,
-	createBranch, recoverRegistered bool,
-) error {
-	if claim.base.IsZero() || !filepath.IsAbs(claim.worktree) {
-		return fmt.Errorf("attempt worktree creation requires an exact base and absolute path")
-	}
-	marker := attemptWorktreeClaimPath(claim.worktree)
-	parentPath, err := canonicalizeTrustedRootPath(filepath.Dir(marker))
-	if err != nil {
-		return err
-	}
-	parent, err := OpenVerifiedRoot(RootRoleWorktree, parentPath, false)
-	if err != nil {
-		return fmt.Errorf("reopen claimed attempt worktree root: %w", err)
-	}
-	defer parent.Close()
-	worktree := filepath.Join(
-		parent.Path(), filepath.Base(filepath.Clean(claim.worktree)),
-	)
-	expectedClaim, err := canonicalAttemptWorktreeClaim(
-		claim, worktree,
-	)
-	if err != nil {
-		return err
-	}
-	markerName := filepath.Base(marker)
-	durableClaim, err := readAttemptWorktreeClaim(parent, markerName)
-	if err != nil {
-		return fmt.Errorf("reopen durable attempt worktree claim: %w", err)
-	}
-	if !bytes.Equal(durableClaim, expectedClaim) {
-		return fmt.Errorf(
-			"attempt worktree claim %s does not match the active attempt",
-			marker,
-		)
-	}
-	if err := parent.VerifyPath(); err != nil {
-		return fmt.Errorf("verify claimed attempt worktree root before Git creation: %w", err)
-	}
-	commitAdapter := LocalCommitGitAdapter{git: adapter}
-	binding, err := commitAdapter.captureTrustedWorktreeBinding(ctx, repositoryRoot)
-	if err != nil {
-		return fmt.Errorf("inspect attempt materialization Git binding: %w", err)
-	}
-	registered, err := adapter.inspectRegisteredWorktrees(ctx, binding.root)
-	if err != nil {
-		return err
-	}
-	registeredPath := canonicalWorktreePath(worktree)
-	record, worktreeRegistered := registered[registeredPath]
-	_, worktreeExists, err := parent.adapter.inspectExact(filepath.Base(worktree))
-	if err != nil {
-		return fmt.Errorf("inspect claimed attempt worktree before Git creation: %w", err)
-	}
-	switch {
-	case worktreeRegistered:
-		if createBranch || !recoverRegistered {
-			return fmt.Errorf("existing attempt worktree registration was not admitted for recovery")
-		}
-		if record.detached || record.branch != claim.branch {
-			return fmt.Errorf("existing attempt worktree registration does not match branch %s", claim.branch)
-		}
-	case recoverRegistered:
-		return fmt.Errorf("attempt worktree registration changed before recovery")
-	}
-	if !worktreeRegistered && worktreeExists {
-		return fmt.Errorf(
-			"unregistered attempt worktree appeared after ownership claim",
-		)
-	}
-	baseText := strings.TrimPrefix(
-		claim.base.String(), string(claim.base.algorithm)+":",
-	)
-	var arguments []string
-	if !worktreeRegistered || !worktreeExists {
-		arguments = []string{"worktree", "add", "--no-checkout"}
-		if createBranch {
-			if recoverRegistered {
-				return fmt.Errorf("new attempt branch cannot recover an existing worktree registration")
-			}
-			arguments = append(
-				arguments, "--no-track", "-b", claim.branch, worktree, baseText,
-			)
-		} else {
-			if recoverRegistered {
-				arguments = append(arguments, "--force")
-			}
-			arguments = append(arguments, worktree, claim.branch)
-		}
-	}
-	if err := parent.VerifyPath(); err != nil {
-		return fmt.Errorf("revalidate claimed attempt worktree root before Git effect: %w", err)
-	}
-	preEffectClaim, err := readAttemptWorktreeClaim(parent, markerName)
-	if err != nil {
-		return fmt.Errorf("revalidate durable attempt worktree claim before Git effect: %w", err)
-	}
-	if !bytes.Equal(preEffectClaim, expectedClaim) {
-		return fmt.Errorf("durable attempt worktree claim changed before Git creation")
-	}
-	var attemptRoot *VerifiedRoot
-	if len(arguments) != 0 && !worktreeExists {
-		created, err := parent.adapter.makeDirectory(
-			filepath.Base(worktree), 0o700,
-		)
-		if err != nil {
-			return fmt.Errorf("create bound attempt worktree directory: %w", err)
-		}
-		if !created {
-			return fmt.Errorf(
-				"attempt worktree directory appeared before Git registration",
-			)
-		}
-		attemptRoot, err = openClaimedAttemptWorktreeDirectory(
-			parent, filepath.Base(worktree), worktree,
-		)
-		if err != nil {
-			return fmt.Errorf("open pre-registered attempt worktree directory: %w", err)
-		}
-		defer attemptRoot.Close()
-		worktreeExists = true
-		if err := parent.VerifyPath(); err != nil {
-			return fmt.Errorf(
-				"verify attempt parent after pre-registration directory creation: %w",
-				err,
-			)
-		}
-		if err := injectAttemptWorktreeMaterializationFault(
-			adapter.worktreeMaterializeFault,
-			AttemptMaterializationFaultAfterDirectoryBinding,
-		); err != nil {
-			return err
-		}
-	}
-	var effectErr error
-	registrationCompleted := worktreeRegistered && worktreeExists
-	if len(arguments) != 0 {
-		_, exitCode, gitErr := adapter.run(ctx, repositoryRoot, arguments...)
-		if gitErr != nil {
-			effectErr = fmt.Errorf("create no-checkout attempt worktree: %w", gitErr)
-		} else if exitCode != 0 {
-			effectErr = fmt.Errorf(
-				"create no-checkout attempt worktree: Git exited with status %d", exitCode,
-			)
-		} else {
-			registrationCompleted = true
-		}
-	}
-	if err := parent.VerifyPath(); err != nil {
-		return errors.Join(
-			effectErr,
-			fmt.Errorf("verify claimed attempt worktree root after Git creation: %w", err),
-		)
-	}
-	confirmedClaim, err := readAttemptWorktreeClaim(parent, markerName)
-	if err != nil {
-		return errors.Join(
-			effectErr,
-			fmt.Errorf("confirm durable attempt worktree claim: %w", err),
-		)
-	}
-	if !bytes.Equal(confirmedClaim, expectedClaim) {
-		return errors.Join(
-			effectErr,
-			fmt.Errorf("durable attempt worktree claim changed during Git creation"),
-		)
-	}
-	var expectedRegistered map[string]registeredWorktree
-	if registrationCompleted {
-		expectedRegistered = make(
-			map[string]registeredWorktree, len(registered)+1,
-		)
-		for path, registeredRecord := range registered {
-			expectedRegistered[path] = registeredRecord
-		}
-		expectedRegistered[registeredPath] = registeredWorktree{
-			branch: claim.branch,
-		}
-		confirmedRegistered, registrationErr := adapter.inspectRegisteredWorktrees(
-			ctx, binding.root,
-		)
-		if registrationErr != nil {
-			return errors.Join(effectErr, registrationErr)
-		}
-		if !sameRegisteredWorktrees(expectedRegistered, confirmedRegistered) {
-			return errors.Join(
-				effectErr,
-				fmt.Errorf("registered Git worktrees changed during attempt creation"),
-			)
-		}
-	}
-	if effectErr != nil {
-		return effectErr
-	}
-	confirmed, err := commitAdapter.captureTrustedWorktreeBinding(ctx, binding.root)
-	if err != nil {
-		return fmt.Errorf("confirm attempt materialization Git binding: %w", err)
-	}
-	if confirmed != binding {
-		return fmt.Errorf("Git worktree administration changed during attempt materialization")
-	}
-	if attemptRoot == nil {
-		attemptRoot, err = openClaimedAttemptWorktreeDirectory(
-			parent, filepath.Base(worktree), worktree,
-		)
-		if err != nil {
-			return fmt.Errorf("bind claimed attempt worktree directory: %w", err)
-		}
-		defer attemptRoot.Close()
-	} else if err := attemptRoot.VerifyPath(); err != nil {
-		return fmt.Errorf(
-			"verify retained attempt worktree directory after Git registration: %w",
-			err,
-		)
-	}
-	attemptBinding, err := commitAdapter.captureTrustedWorktreeBinding(
-		ctx, attemptRoot.Path(),
-	)
-	if err != nil {
-		return fmt.Errorf("inspect claimed attempt worktree Git binding: %w", err)
-	}
-	if attemptBinding.root != attemptRoot.Path() ||
-		attemptBinding.commonDir != binding.commonDir {
-		return fmt.Errorf(
-			"claimed attempt worktree Git top-level or common directory does not match its exact binding",
-		)
-	}
-	if err := attemptRoot.VerifyPath(); err != nil {
-		return fmt.Errorf("verify claimed attempt worktree after Git inspection: %w", err)
-	}
-	if err := parent.VerifyPath(); err != nil {
-		return fmt.Errorf("verify attempt parent after Git registration: %w", err)
-	}
-	if err := injectAttemptWorktreeMaterializationFault(
-		adapter.worktreeMaterializeFault,
-		AttemptMaterializationFaultAfterRegistration,
-	); err != nil {
-		return err
-	}
-	if err := adapter.materializeAttemptWorktree(
-		ctx, binding, attemptBinding, attemptRoot, claim,
-	); err != nil {
-		return err
-	}
-	finalRegistered, err := adapter.inspectRegisteredWorktrees(ctx, binding.root)
-	if err != nil {
-		return err
-	}
-	if !sameRegisteredWorktrees(expectedRegistered, finalRegistered) {
-		return fmt.Errorf("registered Git worktrees changed during attempt materialization")
-	}
-	if err := parent.VerifyPath(); err != nil {
-		return fmt.Errorf("finalize claimed attempt worktree root verification: %w", err)
-	}
-	finalClaim, err := readAttemptWorktreeClaim(parent, markerName)
-	if err != nil {
-		return fmt.Errorf("finalize durable attempt worktree claim verification: %w", err)
-	}
-	if !bytes.Equal(finalClaim, expectedClaim) {
-		return fmt.Errorf("durable attempt worktree claim changed after Git creation")
-	}
-	if err := attemptRoot.VerifyPath(); err != nil {
-		return fmt.Errorf("finalize claimed attempt worktree verification: %w", err)
-	}
-	return nil
-}
-
-func (adapter LocalAttemptGitAdapter) materializeAttemptWorktree(
-	ctx context.Context,
-	source trustedWorktreeBinding,
-	binding trustedWorktreeBinding,
-	root *VerifiedRoot,
-	claim AttemptWorktreeClaim,
-) (resultErr error) {
-	commitAdapter := LocalCommitGitAdapter{git: adapter}
-	if root == nil || binding.root != root.Path() {
-		return fmt.Errorf(
-			"no-checkout attempt worktree requires its retained exact directory binding",
-		)
-	}
-	if binding.commonDir != source.commonDir {
-		return fmt.Errorf("attempt worktree does not share the bound repository administration")
-	}
-	if err := root.VerifyPath(); err != nil {
-		return fmt.Errorf("verify retained no-checkout attempt worktree: %w", err)
-	}
-	algorithm, err := adapter.objectFormat(ctx, binding.root)
-	if err != nil {
-		return err
-	}
-	if claim.base.Algorithm() != algorithm {
-		return fmt.Errorf("attempt base does not match the repository object format")
-	}
-	branch, err := commitAdapter.symbolicBranch(ctx, binding.root)
-	if err != nil {
-		return fmt.Errorf("inspect no-checkout attempt branch: %w", err)
-	}
-	if branch != claim.branch {
-		return fmt.Errorf("no-checkout attempt branch is %q, expected %q", branch, claim.branch)
-	}
-	head, err := commitAdapter.resolveObject(ctx, binding.root, algorithm, "HEAD")
-	if err != nil {
-		return fmt.Errorf("inspect no-checkout attempt head: %w", err)
-	}
-	if head != claim.base {
-		return fmt.Errorf("no-checkout attempt head is %s, expected %s", head, claim.base)
-	}
-	tree, err := commitAdapter.resolveObject(
-		ctx, binding.root, algorithm, objectHex(claim.base)+"^{tree}",
-	)
-	if err != nil {
-		return fmt.Errorf("resolve exact attempt base tree: %w", err)
-	}
-	entries, err := commitAdapter.inspectRawTreeEntries(ctx, binding.root, tree)
-	if err != nil {
-		return fmt.Errorf("inspect exact attempt base tree: %w", err)
-	}
-	directories, err := validateAttemptTreeEntries(entries)
-	if err != nil {
-		return err
-	}
-	if err := clearAttemptWorktree(
-		root,
-		func() error {
-			return injectAttemptWorktreeCleanupFault(
-				adapter.worktreeCleanupFault,
-				AttemptCleanupFaultBeforeMaterializationEffect,
-			)
-		},
-	); err != nil {
-		return fmt.Errorf("clear partial attempt materialization: %w", err)
-	}
-	if err := root.VerifyPath(); err != nil {
-		return fmt.Errorf("verify attempt root before index population: %w", err)
-	}
-	_, exitCode, err := adapter.run(
-		ctx, binding.root, "read-tree", "--reset", objectHex(claim.base),
-	)
-	if err != nil || exitCode != 0 {
-		if err == nil {
-			err = fmt.Errorf("Git exited with status %d", exitCode)
-		}
-		return fmt.Errorf("populate exact attempt index: %w", err)
-	}
-	if err := injectAttemptWorktreeMaterializationFault(
-		adapter.worktreeMaterializeFault,
-		AttemptMaterializationFaultAfterIndex,
-	); err != nil {
-		return err
-	}
-	if err := commitAdapter.rejectHiddenIndexEntries(ctx, binding.root); err != nil {
-		return fmt.Errorf("verify populated attempt index flags: %w", err)
-	}
-	indexTree, err := commitAdapter.writeTree(ctx, binding.root, algorithm)
-	if err != nil {
-		return fmt.Errorf("write populated attempt index tree: %w", err)
-	}
-	if indexTree != tree {
-		return fmt.Errorf("populated attempt index tree is %s, expected %s", indexTree, tree)
-	}
-	for _, directory := range directories {
-		if _, err := root.adapter.makeDirectory(directory, 0o755); err != nil {
-			return fmt.Errorf("create attempt tree directory %s: %w", directory, err)
-		}
-	}
-	target := LocalTargetGitAdapter{git: adapter}
-	for _, entry := range entries {
-		switch entry.mode {
-		case GitModeRegular:
-			err = adapter.materializeAttemptBlob(
-				ctx, source.root, root.adapter, entry, algorithm, 0o644,
-			)
-		case GitModeExecutable:
-			err = adapter.materializeAttemptBlob(
-				ctx, source.root, root.adapter, entry, algorithm, 0o755,
-			)
-		case GitModeSymlink:
-			var content []byte
-			content, err = target.readBlob(ctx, source.root, entry.object)
-			if err == nil {
-				var object GitObjectID
-				object, err = gitBlobObjectID(algorithm, content)
-				if err == nil && object != entry.object {
-					err = fmt.Errorf(
-						"attempt tree path did not resolve to its recorded blob",
-					)
-				}
-			}
-			if err == nil {
-				err = validateRepositorySymlink(entry.path, content)
-			}
-			if err == nil {
-				err = root.adapter.writeSymlinkExclusive(
-					entry.path, string(content),
-				)
-			}
-		default:
-			err = fmt.Errorf("unsupported attempt tree mode %s", entry.mode)
-		}
-		if err != nil {
-			return fmt.Errorf("materialize attempt tree path %s: %w", entry.path, err)
-		}
-		if err := injectAttemptWorktreeMaterializationFault(
-			adapter.worktreeMaterializeFault,
-			AttemptMaterializationFaultAfterPath,
-		); err != nil {
-			return err
-		}
-	}
-	if err := root.Sync(); err != nil {
-		return fmt.Errorf("synchronize exact attempt tree: %w", err)
-	}
-	if err := root.VerifyPath(); err != nil {
-		return fmt.Errorf("verify attempt root after tree publication: %w", err)
-	}
-	if err := commitAdapter.verifyRawTreeMaterialization(ctx, binding.root, tree); err != nil {
-		return fmt.Errorf("verify exact attempt tree publication: %w", err)
-	}
-	if err := commitAdapter.confirmTrustedCommitState(
-		ctx, binding, claim.branch, claim.base, tree,
-	); err != nil {
-		return fmt.Errorf("confirm exact attempt Git state: %w", err)
-	}
-	return nil
+	return adapter.inspectScratchAttemptWorktree(ctx, source, worktree)
 }
 
 func (adapter LocalAttemptGitAdapter) materializeAttemptBlob(
@@ -958,14 +159,14 @@ func (adapter LocalAttemptGitAdapter) materializeAttemptBlob(
 	entry rawGitTreeEntry,
 	algorithm GitHashAlgorithm,
 	permission os.FileMode,
-) error {
+) (os.FileInfo, error) {
 	size, err := adapter.gitBlobSize(ctx, sourceRoot, entry.object)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	digest, err := newGitBlobHasher(algorithm, size)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	return root.writeFileExclusiveWith(
 		entry.path, permission,
@@ -1057,6 +258,13 @@ func validateAttemptTreeEntries(entries []rawGitTreeEntry) ([]string, error) {
 	for _, entry := range entries {
 		switch entry.mode {
 		case GitModeRegular, GitModeExecutable, GitModeSymlink:
+		case GitModeSubmodule:
+			if entry.kind != "commit" {
+				return nil, fmt.Errorf(
+					"attempt tree path %s has inconsistent gitlink type %s",
+					entry.path, entry.kind,
+				)
+			}
 		default:
 			return nil, fmt.Errorf(
 				"attempt tree path %s has unsupported mode %s",
@@ -1119,64 +327,6 @@ func isRepositoryAttributesPath(relative string) bool {
 	return false
 }
 
-func clearAttemptWorktree(
-	root *VerifiedRoot,
-	beforeEffect func() error,
-) error {
-	if root == nil || root.adapter == nil {
-		return fmt.Errorf("attempt worktree root is closed")
-	}
-	directory, err := root.adapter.openDirectoryExact("")
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	admin, exists, err := inspectRootEntryExact(directory, ".git")
-	if err != nil {
-		return err
-	}
-	if !exists || !admin.Mode().IsRegular() {
-		return fmt.Errorf("attempt worktree Git administration is missing or invalid")
-	}
-	return clearVerifiedRootContents(
-		root, directory, map[string]struct{}{".git": {}}, beforeEffect,
-	)
-}
-
-func clearClaimedAttemptWorktree(
-	root *VerifiedRoot,
-	beforeEffect func() error,
-) error {
-	if root == nil || root.adapter == nil {
-		return fmt.Errorf("attempt worktree root is closed")
-	}
-	directory, err := root.adapter.openDirectoryExact("")
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	return clearVerifiedRootContents(root, directory, nil, beforeEffect)
-}
-
-func clearVerifiedRootContents(
-	root *VerifiedRoot,
-	directory *os.Root,
-	preserved map[string]struct{},
-	beforeEffect func() error,
-) error {
-	revalidate := func() error {
-		if beforeEffect != nil {
-			if err := beforeEffect(); err != nil {
-				return err
-			}
-		}
-		return root.VerifyPath()
-	}
-	return removeRootContentsExceptExactGuarded(
-		directory, root.Path(), preserved, revalidate,
-	)
-}
-
 func injectAttemptWorktreeMaterializationFault(
 	injector AttemptWorktreeMaterializationFaultInjector,
 	point AttemptWorktreeMaterializationFaultPoint,
@@ -1185,508 +335,6 @@ func injectAttemptWorktreeMaterializationFault(
 		return nil
 	}
 	return injector(point)
-}
-
-func injectAttemptWorktreeCleanupFault(
-	injector AttemptWorktreeCleanupFaultInjector,
-	point AttemptWorktreeCleanupFaultPoint,
-) error {
-	if injector == nil {
-		return nil
-	}
-	return injector(point)
-}
-
-func (adapter LocalAttemptGitAdapter) PrepareAttemptWorktree(
-	ctx context.Context,
-	repositoryRoot string,
-	claim AttemptWorktreeClaim,
-	recoverUnregistered bool,
-) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	guard, err := adapter.openAttemptWorktreeRootGuard(
-		ctx, repositoryRoot, claim.worktree, true,
-	)
-	if err != nil {
-		return err
-	}
-	defer guard.Close()
-	parent := guard.worktree
-	if err := guard.Verify(ctx, adapter); err != nil {
-		return fmt.Errorf("verify attempt worktree roots before capability probe: %w", err)
-	}
-	if effectErr := parent.ProbeDurability(); effectErr != nil {
-		return errors.Join(
-			fmt.Errorf("preflight attempt worktree root capabilities: %w", effectErr),
-			guard.verifyAfterEffect(ctx, adapter, "capability probe"),
-		)
-	}
-	if err := guard.Verify(ctx, adapter); err != nil {
-		return fmt.Errorf("verify attempt worktree roots after capability probe: %w", err)
-	}
-	marker := attemptWorktreeClaimPath(claim.worktree)
-	worktreeName := filepath.Base(filepath.Clean(claim.worktree))
-	markerName := filepath.Base(marker)
-	canonicalWorktree := filepath.Join(parent.Path(), worktreeName)
-	payload, err := canonicalAttemptWorktreeClaim(claim, canonicalWorktree)
-	if err != nil {
-		return err
-	}
-	created, effectErr := createOrVerifyAttemptWorktreeClaim(
-		parent, markerName, worktreeName, payload, adapter.worktreeClaimFault,
-	)
-	if effectErr != nil {
-		return errors.Join(
-			effectErr,
-			guard.verifyAfterEffect(ctx, adapter, "claim publication"),
-		)
-	}
-	if err := guard.Verify(ctx, adapter); err != nil {
-		return fmt.Errorf("verify attempt worktree roots after claim publication: %w", err)
-	}
-	info, worktreeExists, err := parent.adapter.inspectExact(worktreeName)
-	if err != nil {
-		return fmt.Errorf("inspect claimed attempt worktree: %w", err)
-	}
-	if created && worktreeExists {
-		_, removeErr := parent.adapter.removeFileContentExact(
-			markerName, payload, int64(len(payload)), parent.VerifyPath,
-		)
-		return errors.Join(
-			fmt.Errorf(
-				"attempt worktree path %s appeared while ownership was being claimed",
-				canonicalWorktree,
-			),
-			removeErr,
-			guard.verifyAfterEffect(ctx, adapter, "raced claim cleanup"),
-		)
-	}
-	if !worktreeExists {
-		return nil
-	}
-	if !recoverUnregistered {
-		return fmt.Errorf("attempt worktree path %s exists but recovery was not requested", canonicalWorktree)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return fmt.Errorf("claimed attempt worktree path %s is not a recoverable directory", canonicalWorktree)
-	}
-	boundRoot, err := openClaimedAttemptWorktreeDirectory(
-		parent, worktreeName, canonicalWorktree,
-	)
-	if err != nil {
-		return fmt.Errorf("verify recoverable attempt worktree: %w", err)
-	}
-	defer boundRoot.Close()
-	if err := guard.Verify(ctx, adapter); err != nil {
-		return fmt.Errorf("verify attempt worktree roots before partial recovery: %w", err)
-	}
-	if effectErr := clearClaimedAttemptWorktree(
-		boundRoot,
-		func() error {
-			return injectAttemptWorktreeCleanupFault(
-				adapter.worktreeCleanupFault,
-				AttemptCleanupFaultBeforeRecoveryEffect,
-			)
-		},
-	); effectErr != nil {
-		return errors.Join(
-			fmt.Errorf(
-				"clear partial attempt worktree %s: %w",
-				canonicalWorktree, effectErr,
-			),
-			guard.verifyAfterEffect(ctx, adapter, "partial recovery clearing"),
-		)
-	}
-	if effectErr := injectAttemptWorktreeCleanupFault(
-		adapter.worktreeCleanupFault,
-		AttemptCleanupFaultAfterRecoveryContents,
-	); effectErr != nil {
-		return errors.Join(
-			effectErr,
-			guard.verifyAfterEffect(ctx, adapter, "partial recovery clearing"),
-		)
-	}
-	if err := boundRoot.VerifyPath(); err != nil {
-		return fmt.Errorf(
-			"verify cleared attempt worktree before directory removal: %w", err,
-		)
-	}
-	removed, effectErr := parent.adapter.removeEmptyDirectoryExact(
-		worktreeName,
-		func() error {
-			if err := boundRoot.VerifyPath(); err != nil {
-				return err
-			}
-			return guard.Verify(ctx, adapter)
-		},
-	)
-	if effectErr != nil {
-		return errors.Join(
-			fmt.Errorf(
-				"remove cleared attempt worktree %s: %w",
-				canonicalWorktree, effectErr,
-			),
-			guard.verifyAfterEffect(ctx, adapter, "partial recovery directory removal"),
-		)
-	}
-	if !removed {
-		return errors.Join(
-			fmt.Errorf(
-				"cleared attempt worktree %s became non-empty before exact removal",
-				canonicalWorktree,
-			),
-			guard.verifyAfterEffect(ctx, adapter, "partial recovery directory removal"),
-		)
-	}
-	if err := boundRoot.Close(); err != nil {
-		return err
-	}
-	if err := guard.Verify(ctx, adapter); err != nil {
-		return fmt.Errorf("synchronize recovered attempt worktree roots: %w", err)
-	}
-	return nil
-}
-
-func (adapter LocalAttemptGitAdapter) ReleaseAttemptWorktreeClaim(
-	ctx context.Context,
-	claim AttemptWorktreeClaim,
-) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	marker := attemptWorktreeClaimPath(claim.worktree)
-	parentPath, err := canonicalizeTrustedRootPath(filepath.Dir(marker))
-	if err != nil {
-		return err
-	}
-	parent, err := OpenVerifiedRoot(RootRoleWorktree, parentPath, false)
-	if err != nil {
-		return fmt.Errorf("open attempt worktree root: %w", err)
-	}
-	defer parent.Close()
-	canonicalWorktree := filepath.Join(parent.Path(), filepath.Base(filepath.Clean(claim.worktree)))
-	payload, err := canonicalAttemptWorktreeClaim(claim, canonicalWorktree)
-	if err != nil {
-		return err
-	}
-	markerName := filepath.Base(marker)
-	existing, err := readAttemptWorktreeClaim(parent, markerName)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if !bytes.Equal(existing, payload) {
-		return fmt.Errorf("attempt worktree claim %s belongs to different immutable bindings", marker)
-	}
-	if err := parent.VerifyPath(); err != nil {
-		return fmt.Errorf("verify attempt worktree parent before claim release: %w", err)
-	}
-	removed, err := parent.adapter.removeFileContentExact(
-		markerName, payload, int64(len(payload)), parent.VerifyPath,
-	)
-	if err != nil {
-		return fmt.Errorf("release attempt worktree claim: %w", err)
-	}
-	if !removed {
-		return fmt.Errorf("release attempt worktree claim: claim disappeared")
-	}
-	return nil
-}
-
-func canonicalAttemptWorktreeClaim(
-	claim AttemptWorktreeClaim,
-	canonicalWorktree string,
-) ([]byte, error) {
-	if claim.attemptID.IsZero() || claim.generation.IsZero() || claim.base.IsZero() ||
-		!filepath.IsAbs(canonicalWorktree) {
-		return nil, fmt.Errorf("attempt worktree claim is incomplete")
-	}
-	if err := validateAttemptBranchSyntax(claim.branch); err != nil {
-		return nil, err
-	}
-	type claimJSON struct {
-		SchemaVersion int    `json:"schema_version"`
-		Kind          string `json:"kind"`
-		AttemptID     string `json:"attempt_id"`
-		Generation    string `json:"generation"`
-		Base          string `json:"base"`
-		Branch        string `json:"branch"`
-		Worktree      string `json:"worktree"`
-	}
-	return json.Marshal(claimJSON{
-		SchemaVersion: RuntimeFormatSchemaVersion, Kind: "attempt_worktree_claim",
-		AttemptID: claim.attemptID.String(), Generation: claim.generation.String(),
-		Base: claim.base.String(), Branch: claim.branch, Worktree: canonicalWorktree,
-	})
-}
-
-func attemptWorktreeClaimPath(worktree string) string {
-	return filepath.Clean(worktree) + ".feature-attempt-claim"
-}
-
-func openClaimedAttemptWorktreeDirectory(
-	parent *VerifiedRoot,
-	worktreeName, worktree string,
-) (*VerifiedRoot, error) {
-	if parent == nil {
-		return nil, fmt.Errorf("claimed attempt worktree parent is required")
-	}
-	worktree = filepath.Clean(strings.TrimSpace(worktree))
-	if worktree != filepath.Join(parent.Path(), worktreeName) {
-		return nil, fmt.Errorf(
-			"claimed attempt worktree path does not match its verified parent",
-		)
-	}
-	if err := parent.VerifyPath(); err != nil {
-		return nil, err
-	}
-	info, exists, err := parent.adapter.inspectExact(worktreeName)
-	if err != nil {
-		return nil, err
-	}
-	if !exists || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return nil, fmt.Errorf(
-			"claimed attempt worktree %s is missing or is not an exact directory",
-			worktree,
-		)
-	}
-	root, err := OpenVerifiedRoot(
-		RootRoleRegisteredWorktree, worktree, false,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("open claimed attempt worktree: %w", err)
-	}
-	closeRoot := true
-	defer func() {
-		if closeRoot {
-			_ = root.Close()
-		}
-	}()
-	if !os.SameFile(info, root.info) {
-		return nil, fmt.Errorf(
-			"claimed attempt worktree identity changed while it was opened",
-		)
-	}
-	if err := parent.VerifyPath(); err != nil {
-		return nil, err
-	}
-	if err := root.VerifyPath(); err != nil {
-		return nil, err
-	}
-	closeRoot = false
-	return root, nil
-}
-
-func createOrVerifyAttemptWorktreeClaim(
-	root *VerifiedRoot,
-	marker, worktree string,
-	payload []byte,
-	fault AttemptWorktreeClaimFaultInjector,
-) (bool, error) {
-	for {
-		published, retry, err := createOrVerifyAttemptWorktreeClaimOnce(
-			root, marker, worktree, payload, fault,
-		)
-		if retry {
-			continue
-		}
-		return published, err
-	}
-}
-
-func createOrVerifyAttemptWorktreeClaimOnce(
-	root *VerifiedRoot,
-	marker, worktree string,
-	payload []byte,
-	fault AttemptWorktreeClaimFaultInjector,
-) (bool, bool, error) {
-	if root == nil {
-		return false, false, fmt.Errorf("attempt worktree claim requires a verified root")
-	}
-	if _, exists, err := root.adapter.inspectExact(marker); err != nil {
-		return false, false, fmt.Errorf("inspect attempt worktree claim: %w", err)
-	} else if exists {
-		existing, readErr := readAttemptWorktreeClaim(root, marker)
-		if readErr != nil {
-			return false, false, readErr
-		}
-		if !bytes.Equal(existing, payload) {
-			return false, false, fmt.Errorf("attempt worktree claim %s belongs to different immutable bindings", marker)
-		}
-		if err := root.Sync(); err != nil {
-			return false, false, fmt.Errorf("synchronize existing attempt worktree claim: %w", err)
-		}
-		return false, false, nil
-	}
-	if _, exists, err := root.adapter.inspectExact(worktree); err != nil {
-		return false, false, fmt.Errorf("inspect attempt worktree before claim: %w", err)
-	} else if exists {
-		return false, false, fmt.Errorf("attempt worktree path %s predates its ownership claim", worktree)
-	}
-
-	pending := marker + ".pending"
-	file, created, err := root.adapter.openRegularFileExact(
-		pending, os.O_RDWR, 0o600, true,
-	)
-	if err != nil {
-		return false, false, fmt.Errorf("open pending attempt worktree claim: %w", err)
-	}
-	fileOpen := true
-	locked := false
-	defer func() {
-		if locked {
-			_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
-		}
-		if fileOpen {
-			_ = file.Close()
-		}
-	}()
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-			return false, false, fmt.Errorf("pending attempt worktree claim %s is active", pending)
-		}
-		return false, false, fmt.Errorf("lock pending attempt worktree claim: %w", err)
-	}
-	locked = true
-	if err := root.verifyOwnedRegularFile(pending, file); err != nil {
-		return false, false, err
-	}
-	openedInfo, err := file.Stat()
-	if err != nil {
-		return false, false, fmt.Errorf("inspect pending attempt worktree claim: %w", err)
-	}
-	if err := root.adapter.verifyOpenedFileExact(pending, file); err != nil {
-		return false, false, err
-	}
-	if !created {
-		existing, readErr := readOpenedFileBounded(file, maxAttemptWorktreeClaimBytes)
-		if readErr != nil {
-			return false, false, fmt.Errorf("read pending attempt worktree claim: %w", readErr)
-		}
-		if !bytes.Equal(existing, payload) {
-			if json.Valid(existing) {
-				return false, false, fmt.Errorf(
-					"pending attempt worktree claim belongs to different immutable bindings",
-				)
-			}
-			removed, removeErr := root.adapter.removeFileIdentityExact(
-				pending,
-				openedInfo,
-				func() error {
-					if err := root.VerifyPath(); err != nil {
-						return err
-					}
-					if _, exists, err := root.adapter.inspectExact(marker); err != nil {
-						return err
-					} else if exists {
-						return fmt.Errorf("attempt worktree claim appeared during pending recovery")
-					}
-					if _, exists, err := root.adapter.inspectExact(worktree); err != nil {
-						return err
-					} else if exists {
-						return fmt.Errorf("attempt worktree appeared during pending recovery")
-					}
-					return root.adapter.verifyOpenedFileExact(pending, file)
-				},
-			)
-			if removeErr != nil {
-				return false, false, fmt.Errorf(
-					"recover partial pending attempt worktree claim: %w", removeErr,
-				)
-			}
-			if !removed {
-				return false, false, fmt.Errorf(
-					"recover partial pending attempt worktree claim: staging file disappeared",
-				)
-			}
-			if err := root.Sync(); err != nil {
-				return false, false, fmt.Errorf(
-					"synchronize recovered pending attempt worktree claim: %w", err,
-				)
-			}
-			return false, true, nil
-		}
-	}
-	removeOnFailure := true
-	defer func() {
-		if removeOnFailure && created {
-			_, _ = root.adapter.removeFileIdentityExact(pending, openedInfo, nil)
-		}
-	}()
-	if created {
-		if err := injectAttemptWorktreeClaimFault(fault, AttemptWorktreeClaimFaultAfterTemporaryCreated); err != nil {
-			return false, false, err
-		}
-		if err := writeAll(file, payload); err != nil {
-			return false, false, fmt.Errorf("write pending attempt worktree claim: %w", err)
-		}
-		if err := injectAttemptWorktreeClaimFault(fault, AttemptWorktreeClaimFaultAfterTemporaryWritten); err != nil {
-			return false, false, err
-		}
-	}
-	if err := file.Sync(); err != nil {
-		return false, false, fmt.Errorf("synchronize pending attempt worktree claim: %w", err)
-	}
-	if err := root.adapter.verifyOpenedFileExact(pending, file); err != nil {
-		return false, false, err
-	}
-	if created {
-		if err := injectAttemptWorktreeClaimFault(fault, AttemptWorktreeClaimFaultAfterTemporarySynced); err != nil {
-			return false, false, err
-		}
-	}
-	if err := root.adapter.renameFileNoReplace(pending, marker); err != nil {
-		if existing, readErr := readAttemptWorktreeClaim(root, marker); readErr == nil &&
-			bytes.Equal(existing, payload) {
-			_, _ = root.adapter.removeFileContentExact(
-				pending, payload, int64(len(payload)), nil,
-			)
-			removeOnFailure = false
-			return false, false, root.Sync()
-		}
-		return false, false, fmt.Errorf("publish attempt worktree claim without replacement: %w", err)
-	}
-	removeOnFailure = false
-	if err := injectAttemptWorktreeClaimFault(fault, AttemptWorktreeClaimFaultAfterPublished); err != nil {
-		return false, false, err
-	}
-	if err := root.Sync(); err != nil {
-		return false, false, fmt.Errorf("publish attempt worktree claim: %w", err)
-	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_UN); err != nil {
-		return false, false, fmt.Errorf("unlock published attempt worktree claim: %w", err)
-	}
-	locked = false
-	if err := file.Close(); err != nil {
-		return false, false, fmt.Errorf("close published attempt worktree claim: %w", err)
-	}
-	fileOpen = false
-	return true, false, nil
-}
-
-func injectAttemptWorktreeClaimFault(
-	injector AttemptWorktreeClaimFaultInjector,
-	point AttemptWorktreeClaimFaultPoint,
-) error {
-	if injector == nil {
-		return nil
-	}
-	if err := injector(point); err != nil {
-		return fmt.Errorf("attempt worktree claim fault at %s: %w", point, err)
-	}
-	return nil
-}
-
-func readAttemptWorktreeClaim(root *VerifiedRoot, marker string) ([]byte, error) {
-	content, err := root.ReadBounded(marker, maxAttemptWorktreeClaimBytes)
-	if err != nil {
-		return nil, fmt.Errorf("read attempt worktree claim: %w", err)
-	}
-	return content, nil
 }
 
 type registeredWorktree struct {
@@ -1770,21 +418,6 @@ func canonicalWorktreePath(path string) string {
 	}
 }
 
-func parseLocalHeadRefs(content []byte) ([]string, error) {
-	var result []string
-	for _, line := range strings.Split(strings.TrimSpace(string(content)), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if !strings.HasPrefix(line, "refs/heads/") {
-			return nil, fmt.Errorf("Git returned non-head local ref %q", line)
-		}
-		result = append(result, strings.TrimPrefix(line, "refs/heads/"))
-	}
-	return result, nil
-}
-
 func qualifyGitObjectID(algorithm GitHashAlgorithm, raw string) (GitObjectID, error) {
 	return ParseGitObjectID(string(algorithm) + ":" + strings.TrimSpace(raw))
 }
@@ -1830,7 +463,11 @@ func (adapter LocalAttemptGitAdapter) run(
 		var exitError *exec.ExitError
 		if errors.As(err, &exitError) {
 			exitCode = exitError.ExitCode()
-			return stdout.bytes(), exitCode, nil
+			output := stdout.bytes()
+			if len(output) == 0 {
+				output = stderr.bytes()
+			}
+			return output, exitCode, nil
 		}
 		return nil, -1, err
 	}
@@ -2135,16 +772,12 @@ func trustedGitArguments(repositoryRoot string, arguments ...string) []string {
 
 func digestAttemptGitInspection(inspection AttemptGitInspection) (Digest, error) {
 	type inspectionJSON struct {
-		SchemaVersion      int                            `json:"schema_version"`
-		BranchExists       bool                           `json:"branch_exists"`
-		BranchHead         string                         `json:"branch_head,omitempty"`
-		WorktreeExists     bool                           `json:"worktree_exists"`
-		WorktreeRegistered bool                           `json:"worktree_registered"`
-		WorktreeBranch     string                         `json:"worktree_branch,omitempty"`
-		WorktreeHead       string                         `json:"worktree_head,omitempty"`
-		WorktreeTree       string                         `json:"worktree_tree,omitempty"`
-		WorktreeBinding    *attemptWorktreeGitBindingWire `json:"worktree_binding,omitempty"`
-		Clean              bool                           `json:"clean"`
+		SchemaVersion   int                            `json:"schema_version"`
+		WorktreeExists  bool                           `json:"worktree_exists"`
+		WorktreeHead    string                         `json:"worktree_head,omitempty"`
+		WorktreeTree    string                         `json:"worktree_tree,omitempty"`
+		WorktreeBinding *attemptWorktreeGitBindingWire `json:"worktree_binding,omitempty"`
+		Clean           bool                           `json:"clean"`
 	}
 	var worktreeBinding *attemptWorktreeGitBindingWire
 	if !inspection.worktreeBinding.IsZero() {
@@ -2154,10 +787,9 @@ func digestAttemptGitInspection(inspection AttemptGitInspection) (Digest, error)
 		worktreeBinding = &wire
 	}
 	content, err := json.Marshal(inspectionJSON{
-		SchemaVersion: JournalSchemaVersion,
-		BranchExists:  inspection.branchExists, BranchHead: inspection.branchHead.String(),
-		WorktreeExists: inspection.worktreeExists, WorktreeRegistered: inspection.worktreeRegistered,
-		WorktreeBranch: inspection.worktreeBranch, WorktreeHead: inspection.worktreeHead.String(),
+		SchemaVersion:   JournalSchemaVersion,
+		WorktreeExists:  inspection.worktreeExists,
+		WorktreeHead:    inspection.worktreeHead.String(),
 		WorktreeTree:    inspection.worktreeTree.String(),
 		WorktreeBinding: worktreeBinding, Clean: inspection.clean,
 	})

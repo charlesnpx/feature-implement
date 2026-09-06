@@ -41,9 +41,10 @@ func TestPublishedPublicContractIncludesLicenseOperationsAndNotices(t *testing.T
 		"### Deferred GitHub design",
 		"### License and third-party notices",
 		"Local completion is not",
-		"runtime without the local v5 marker must",
+		"runtime without the local v9 marker must",
 		"committed plan and current lock",
-		"The target must be a local non-bare Git repository",
+		"The target must be a primary local non-bare Git worktree",
+		"pinned base commit object to remain present; the base ref's movement or deletion",
 	} {
 		if !strings.Contains(readme, required) {
 			t.Fatalf("README public contract omits %q", required)
@@ -56,6 +57,7 @@ func TestPublishedPublicContractIncludesLicenseOperationsAndNotices(t *testing.T
 		"golang.org/x/sys",
 		"golang.org/x/text",
 		"gopkg.in/yaml.v3",
+		"github.com/charlesnpx/witness",
 		"Copyright 2011-2016 Canonical Ltd.",
 	} {
 		if !strings.Contains(notices, required) {

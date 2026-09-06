@@ -64,7 +64,7 @@ func CompleteWorkspace(
 			}
 	}
 	target, exists := runtime.LocalTarget()
-	if !exists || !target.Created() {
+	if !exists {
 		return WorkspaceCompletionResult{}, fmt.Errorf(
 			"workspace completion requires a durable local target",
 		)
@@ -88,7 +88,7 @@ func CompleteWorkspace(
 		}, nil
 	}
 
-	report, err := RebuildWorkspaceReport(snapshot, definition)
+	report, err := RebuildWorkspaceView(snapshot, definition)
 	if err != nil {
 		return WorkspaceCompletionResult{}, err
 	}
@@ -108,8 +108,8 @@ func CompleteWorkspace(
 	if err != nil {
 		return WorkspaceCompletionResult{}, err
 	}
-	appendRequest, err := completionJournalAppend(
-		event, request.OccurredAt, snapshot,
+	appendRequest, err := newWorkflowJournalAppend(
+		event, request.OccurredAt,
 	)
 	if err != nil {
 		return WorkspaceCompletionResult{}, err
@@ -219,38 +219,7 @@ func readCompletionRuntime(
 				"completion definition does not match the active workspace generation",
 			)
 	}
-	if err := verifyWorkspaceWorktreeRootBinding(
-		runtime.worktreeRoot,
-	); err != nil {
-		return JournalSnapshot{}, ReviewRuntimeProjection{},
-			WorkspaceRuntimeProjection{}, err
-	}
 	return snapshot, reviews, runtime, nil
-}
-
-func completionJournalAppend(
-	event WorkspaceCompletedJournalEvent,
-	occurredAt time.Time,
-	snapshot JournalSnapshot,
-) (JournalAppend, error) {
-	reads, writes, ok := completionJournalEventResources(event)
-	if !ok {
-		return JournalAppend{}, fmt.Errorf(
-			"completion append requires a workspace completion event",
-		)
-	}
-	readSet := make(
-		[]JournalResourceRevision, 0, len(reads),
-	)
-	for _, resource := range reads {
-		revision, _ := NewJournalResourceRevision(
-			resource, snapshot.Revision(resource),
-		)
-		readSet = append(readSet, revision)
-	}
-	return newPrivilegedJournalAppend(
-		event, occurredAt, readSet, writes,
-	)
 }
 
 func verifyRecordedWorkspaceCompletion(
@@ -296,13 +265,8 @@ func preCompletionReportDigest(
 		[]JournalRecord(nil),
 		snapshot.records[:completionIndex]...,
 	)
-	for _, record := range prefix.records {
-		prefix.head = record.eventHash
-		prefix.revisions = applyJournalWrites(
-			prefix.revisions, record.writeSet,
-		)
-	}
-	report, err := RebuildWorkspaceReport(prefix, definition)
+	prefix.head = snapshot.records[completionIndex].previousHash
+	report, err := RebuildWorkspaceView(prefix, definition)
 	if err != nil {
 		return Digest{}, fmt.Errorf(
 			"rebuild canonical pre-completion report: %w", err,

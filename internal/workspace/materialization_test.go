@@ -1,12 +1,13 @@
 package workspace_test
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -15,50 +16,6 @@ import (
 )
 
 const testGeneratorVersion = "materialization-test/v2"
-
-var _ workspace.FilesystemPort = (*workspace.RootedFilesystemAdapter)(nil)
-
-func TestRootedFilesystemAdapterRejectsCrossRootAndSymlinkTraversal(t *testing.T) {
-	t.Parallel()
-
-	root := canonicalMaterializationTestTempDir(t)
-	if err := os.WriteFile(filepath.Join(root, "safe.txt"), []byte("safe\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	external := canonicalMaterializationTestTempDir(t)
-	if err := os.WriteFile(filepath.Join(external, "outside.txt"), []byte("outside\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(external, filepath.Join(root, "link")); err != nil {
-		t.Fatal(err)
-	}
-	adapter, err := workspace.OpenRootedFilesystemAdapter(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer adapter.Close()
-	safe, err := workspace.NewRootedPath(root, "safe.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if content, err := adapter.ReadFile(context.Background(), safe); err != nil || string(content) != "safe\n" {
-		t.Fatalf("safe read content=%q err=%v", content, err)
-	}
-	linked, err := workspace.NewRootedPath(root, "link/outside.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := adapter.ReadFile(context.Background(), linked); err == nil || !strings.Contains(err.Error(), "symlink") {
-		t.Fatalf("symlink traversal error = %v", err)
-	}
-	other, err := workspace.NewRootedPath(external, "outside.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := adapter.ReadFile(context.Background(), other); err == nil || !strings.Contains(err.Error(), "different filesystem root") {
-		t.Fatalf("cross-root read error = %v", err)
-	}
-}
 
 func TestMaterializationRejectsSymlinkedDestinationRootsAndAncestors(t *testing.T) {
 	t.Parallel()
@@ -94,6 +51,8 @@ func TestMaterializationRejectsSymlinkedDestinationRootsAndAncestors(t *testing.
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			external := canonicalMaterializationTestTempDir(t)
 			root := test.root(t, external)
 			if _, err := workspace.SynchronizeMaterialization(
@@ -126,11 +85,13 @@ func TestMaterializationRejectsHiddenDestinationAncestors(t *testing.T) {
 	}
 }
 
-func TestMaterializationBootstrapsAbsentOrEmptyDestinationWithV2Inventory(t *testing.T) {
+func TestMaterializationBootstrapsAbsentOrEmptyDestination(t *testing.T) {
 	t.Parallel()
 
 	for _, existing := range []bool{false, true} {
 		t.Run(fmt.Sprintf("existing=%t", existing), func(t *testing.T) {
+			t.Parallel()
+
 			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 			if existing {
 				if err := os.Mkdir(root, 0o755); err != nil {
@@ -322,6 +283,8 @@ func TestMaterializationPreservesModifiedOrMissingOwnedArtifacts(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 			initial := materializationArtifacts(t,
 				artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"},
@@ -386,6 +349,8 @@ func TestMaterializationTreatsLaterMissingOrCorruptInventoryAsCorruption(t *test
 		},
 	} {
 		t.Run(mutate.name, func(t *testing.T) {
+			t.Parallel()
+
 			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 			artifacts := materializationArtifacts(t, artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"})
 			if _, err := workspace.SynchronizeMaterialization(root, testGeneratorVersion, artifacts, workspace.MaterializationOptions{}); err != nil {
@@ -407,6 +372,8 @@ func TestMaterializationRejectsSymlinkTraversalAndPathAliases(t *testing.T) {
 	t.Parallel()
 
 	t.Run("symlink traversal", func(t *testing.T) {
+		t.Parallel()
+
 		root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 		base := materializationArtifacts(t, artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"})
 		if _, err := workspace.SynchronizeMaterialization(root, testGeneratorVersion, base, workspace.MaterializationOptions{}); err != nil {
@@ -431,6 +398,8 @@ func TestMaterializationRejectsSymlinkTraversalAndPathAliases(t *testing.T) {
 	})
 
 	t.Run("existing case alias", func(t *testing.T) {
+		t.Parallel()
+
 		requireFullSuite(t, "materialization path-alias permutation")
 
 		root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
@@ -453,6 +422,8 @@ func TestMaterializationRejectsSymlinkTraversalAndPathAliases(t *testing.T) {
 	})
 
 	t.Run("desired aliases and prefixes", func(t *testing.T) {
+		t.Parallel()
+
 		requireFullSuite(t, "materialization path-alias permutation")
 
 		caseAliases := materializationArtifacts(t,
@@ -478,6 +449,8 @@ func TestMaterializationRejectsSymlinkTraversalAndPathAliases(t *testing.T) {
 	})
 
 	t.Run("hidden and non-normalized Unicode", func(t *testing.T) {
+		t.Parallel()
+
 		requireFullSuite(t, "materialization path-alias permutation")
 
 		if _, err := workspace.NewMaterializationArtifact("story/hidden", ".git/config", []byte("a")); err == nil {
@@ -514,8 +487,25 @@ func TestMaterializationRecoversAcrossStagedUpdateFaults(t *testing.T) {
 		workspace.MaterializationFaultAfterInventoryActivation,
 		workspace.MaterializationFaultAfterStateActivation,
 	}
+	capturePoints := points
+	if testing.Short() {
+		capturePoints = []workspace.MaterializationFaultPoint{
+			workspace.MaterializationFaultAfterPending,
+			workspace.MaterializationFaultAfterInventoryActivation,
+		}
+	}
+	root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
+	artifacts := materializationArtifacts(t,
+		artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"},
+		artifactFixture{id: "story/a", path: "docs/nested/story.md", content: "story\n"},
+	)
+	snapshots := captureMaterializationRecoverySnapshots(
+		t, root, testGeneratorVersion, artifacts, capturePoints,
+	)
 	for _, point := range points {
 		t.Run(string(point), func(t *testing.T) {
+			t.Parallel()
+
 			requireFullSuiteCase(
 				t,
 				point == workspace.MaterializationFaultAfterPending ||
@@ -524,24 +514,7 @@ func TestMaterializationRecoversAcrossStagedUpdateFaults(t *testing.T) {
 			)
 
 			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
-			artifacts := materializationArtifacts(t,
-				artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"},
-				artifactFixture{id: "story/a", path: "docs/nested/story.md", content: "story\n"},
-			)
-			failed := false
-			fault := func(observed workspace.MaterializationFaultPoint) error {
-				if !failed && observed == point {
-					failed = true
-					return errors.New("simulated crash")
-				}
-				return nil
-			}
-			if _, err := workspace.SynchronizeMaterialization(
-				root, testGeneratorVersion, artifacts, workspace.MaterializationOptions{FaultInjector: fault},
-			); err == nil || !failed {
-				t.Fatalf("fault %s did not interrupt materialization: %v", point, err)
-			}
-
+			moveTestFilesystemTree(t, snapshots[point], root)
 			if _, err := workspace.SynchronizeMaterialization(root, testGeneratorVersion, artifacts, workspace.MaterializationOptions{}); err != nil {
 				t.Fatalf("recover after %s: %v", point, err)
 			}
@@ -557,6 +530,8 @@ func TestMaterializationRecoveryNeverClaimsTargetsThatAppearAfterPending(t *test
 	t.Parallel()
 
 	t.Run("matching file", func(t *testing.T) {
+		t.Parallel()
+
 		root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 		initial := materializationArtifacts(t, artifactFixture{
 			id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n",
@@ -596,6 +571,8 @@ func TestMaterializationRecoveryNeverClaimsTargetsThatAppearAfterPending(t *test
 	})
 
 	t.Run("directory", func(t *testing.T) {
+		t.Parallel()
+
 		requireFullSuite(t, "appearing materialization target permutation")
 
 		root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
@@ -643,6 +620,35 @@ func TestMaterializationRecoveryNeverClaimsTargetsThatAppearAfterPending(t *test
 func TestMaterializationRecoveryPreservesTransactionPathsWithoutExactIdentity(t *testing.T) {
 	t.Parallel()
 	requireFullSuite(t, "exhaustive materialization identity-replacement matrix")
+
+	sourceRoot := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
+	initial := materializationArtifacts(t, artifactFixture{
+		id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n",
+	})
+	if _, err := workspace.SynchronizeMaterialization(
+		sourceRoot, testGeneratorVersion, initial, workspace.MaterializationOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	desired := materializationArtifacts(t,
+		artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"},
+		artifactFixture{id: "story/a", path: "story.md", content: "generated story\n"},
+	)
+	var pending pendingMaterializationFixture
+	if _, err := workspace.SynchronizeMaterialization(
+		sourceRoot, testGeneratorVersion, desired,
+		workspace.MaterializationOptions{FaultInjector: func(point workspace.MaterializationFaultPoint) error {
+			if point != workspace.MaterializationFaultAfterPending {
+				return nil
+			}
+			pending = readPendingMaterializationFixture(t, sourceRoot)
+			return errors.New("simulated crash")
+		}},
+	); err == nil {
+		t.Fatal("pending fault did not interrupt materialization")
+	}
+	pendingSnapshot := filepath.Join(canonicalMaterializationTestTempDir(t), "pending")
+	copyTestFilesystemTree(t, sourceRoot, pendingSnapshot)
 
 	for _, test := range []struct {
 		name              string
@@ -760,31 +766,11 @@ func TestMaterializationRecoveryPreservesTransactionPathsWithoutExactIdentity(t 
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
-			initial := materializationArtifacts(t, artifactFixture{
-				id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n",
-			})
-			if _, err := workspace.SynchronizeMaterialization(root, testGeneratorVersion, initial, workspace.MaterializationOptions{}); err != nil {
-				t.Fatal(err)
-			}
-			desired := materializationArtifacts(t,
-				artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"},
-				artifactFixture{id: "story/a", path: "story.md", content: "generated story\n"},
-			)
-			var pending pendingMaterializationFixture
-			fault := func(point workspace.MaterializationFaultPoint) error {
-				if point != workspace.MaterializationFaultAfterPending {
-					return nil
-				}
-				pending = readPendingMaterializationFixture(t, root)
-				test.mutate(t, root, pending)
-				return errors.New("simulated crash")
-			}
-			if _, err := workspace.SynchronizeMaterialization(
-				root, testGeneratorVersion, desired, workspace.MaterializationOptions{FaultInjector: fault},
-			); err == nil {
-				t.Fatal("pending fault did not interrupt materialization")
-			}
+			copyTestFilesystemTree(t, pendingSnapshot, root)
+			test.mutate(t, root, pending)
 
 			if _, err := workspace.SynchronizeMaterialization(root, testGeneratorVersion, desired, workspace.MaterializationOptions{}); err == nil {
 				t.Fatal("recovery accepted a transaction path without exact identity")
@@ -812,6 +798,8 @@ func TestMaterializationControlActivationNeverOverwritesAppearingTargets(t *test
 		{name: "state", faultOrdinal: 2, target: workspace.MaterializationStateFileName},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 			artifacts := materializationArtifacts(t, artifactFixture{
 				id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n",
@@ -861,6 +849,8 @@ func TestMaterializationRecoversMissingControlTargetsAfterQuarantine(t *testing.
 		{name: "state", faultOrdinal: 2, target: workspace.MaterializationStateFileName},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			requireFullSuiteCase(
 				t,
 				test.name == "inventory",
@@ -1037,6 +1027,8 @@ func TestMaterializationQuarantinesBeforeHashingOwnedTargets(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 			if _, err := workspace.SynchronizeMaterialization(
 				root, testGeneratorVersion, materializationArtifacts(t, test.initial...), workspace.MaterializationOptions{},
@@ -1167,12 +1159,34 @@ func TestMaterializationPreservesUnownedReservedStagingPaths(t *testing.T) {
 func TestMaterializationRecoversStaleDeletionAndDirectoryCleanup(t *testing.T) {
 	t.Parallel()
 
-	for _, point := range []workspace.MaterializationFaultPoint{
+	points := []workspace.MaterializationFaultPoint{
 		workspace.MaterializationFaultAfterQuarantine,
 		workspace.MaterializationFaultAfterStaleDelete,
 		workspace.MaterializationFaultAfterDirectoryCleanup,
-	} {
+	}
+	capturePoints := points
+	if testing.Short() {
+		capturePoints = []workspace.MaterializationFaultPoint{
+			workspace.MaterializationFaultAfterQuarantine,
+			workspace.MaterializationFaultAfterStaleDelete,
+		}
+	}
+	root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
+	initial := materializationArtifacts(t,
+		artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"},
+		artifactFixture{id: "story/stale", path: "old/nested/stale.md", content: "stale\n"},
+	)
+	if _, err := workspace.SynchronizeMaterialization(root, testGeneratorVersion, initial, workspace.MaterializationOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	desired := materializationArtifacts(t, artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"})
+	snapshots := captureMaterializationRecoverySnapshots(
+		t, root, testGeneratorVersion, desired, capturePoints,
+	)
+	for _, point := range points {
 		t.Run(string(point), func(t *testing.T) {
+			t.Parallel()
+
 			requireFullSuiteCase(
 				t,
 				point != workspace.MaterializationFaultAfterDirectoryCleanup,
@@ -1180,27 +1194,7 @@ func TestMaterializationRecoversStaleDeletionAndDirectoryCleanup(t *testing.T) {
 			)
 
 			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
-			initial := materializationArtifacts(t,
-				artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"},
-				artifactFixture{id: "story/stale", path: "old/nested/stale.md", content: "stale\n"},
-			)
-			if _, err := workspace.SynchronizeMaterialization(root, testGeneratorVersion, initial, workspace.MaterializationOptions{}); err != nil {
-				t.Fatal(err)
-			}
-			desired := materializationArtifacts(t, artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest\n"})
-			failed := false
-			fault := func(observed workspace.MaterializationFaultPoint) error {
-				if !failed && observed == point {
-					failed = true
-					return errors.New("simulated crash")
-				}
-				return nil
-			}
-			if _, err := workspace.SynchronizeMaterialization(
-				root, testGeneratorVersion, desired, workspace.MaterializationOptions{FaultInjector: fault},
-			); err == nil || !failed {
-				t.Fatalf("fault %s did not interrupt update: %v", point, err)
-			}
+			moveTestFilesystemTree(t, snapshots[point], root)
 			if _, err := workspace.SynchronizeMaterialization(root, testGeneratorVersion, desired, workspace.MaterializationOptions{}); err != nil {
 				t.Fatalf("recover after %s: %v", point, err)
 			}
@@ -1216,7 +1210,7 @@ func TestMaterializationRecoversOwnedUpdatesAcrossTransactionFaults(t *testing.T
 	t.Parallel()
 	requireFullSuite(t, "exhaustive owned-update recovery matrix")
 
-	for _, point := range []workspace.MaterializationFaultPoint{
+	points := []workspace.MaterializationFaultPoint{
 		workspace.MaterializationFaultAfterStaging,
 		workspace.MaterializationFaultAfterPending,
 		workspace.MaterializationFaultAfterQuarantine,
@@ -1224,33 +1218,28 @@ func TestMaterializationRecoversOwnedUpdatesAcrossTransactionFaults(t *testing.T
 		workspace.MaterializationFaultAfterArtifactWrite,
 		workspace.MaterializationFaultAfterInventoryActivation,
 		workspace.MaterializationFaultAfterStateActivation,
-	} {
+	}
+	root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
+	initial := materializationArtifacts(t, artifactFixture{
+		id: "manifest/sample", path: "feature.plan.yaml", content: "v1\n",
+	})
+	if _, err := workspace.SynchronizeMaterialization(
+		root, testGeneratorVersion, initial, workspace.MaterializationOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	desired := materializationArtifacts(t, artifactFixture{
+		id: "manifest/sample", path: "feature.plan.yaml", content: "v2\n",
+	})
+	snapshots := captureMaterializationRecoverySnapshots(
+		t, root, testGeneratorVersion, desired, points,
+	)
+	for _, point := range points {
 		t.Run(string(point), func(t *testing.T) {
+			t.Parallel()
+
 			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
-			initial := materializationArtifacts(t, artifactFixture{
-				id: "manifest/sample", path: "feature.plan.yaml", content: "v1\n",
-			})
-			if _, err := workspace.SynchronizeMaterialization(
-				root, testGeneratorVersion, initial, workspace.MaterializationOptions{},
-			); err != nil {
-				t.Fatal(err)
-			}
-			desired := materializationArtifacts(t, artifactFixture{
-				id: "manifest/sample", path: "feature.plan.yaml", content: "v2\n",
-			})
-			failed := false
-			fault := func(observed workspace.MaterializationFaultPoint) error {
-				if !failed && observed == point {
-					failed = true
-					return errors.New("simulated crash")
-				}
-				return nil
-			}
-			if _, err := workspace.SynchronizeMaterialization(
-				root, testGeneratorVersion, desired, workspace.MaterializationOptions{FaultInjector: fault},
-			); err == nil || !failed {
-				t.Fatalf("fault %s did not interrupt update: %v", point, err)
-			}
+			moveTestFilesystemTree(t, snapshots[point], root)
 			if _, err := workspace.SynchronizeMaterialization(
 				root, testGeneratorVersion, desired, workspace.MaterializationOptions{},
 			); err != nil {
@@ -1266,61 +1255,57 @@ func TestMaterializationCleanupRecoversEveryPersistedPrefix(t *testing.T) {
 	t.Parallel()
 	requireFullSuite(t, "exhaustive materialization cleanup-prefix matrix")
 
-	run := func(t *testing.T, failOrdinal int) (string, int, error) {
-		t.Helper()
-		root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
-		initial := materializationArtifacts(t,
-			artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "v1\n"},
-			artifactFixture{id: "story/stale", path: "old/nested/stale.md", content: "stale\n"},
-		)
-		if _, err := workspace.SynchronizeMaterialization(
-			root, testGeneratorVersion, initial, workspace.MaterializationOptions{},
-		); err != nil {
-			t.Fatal(err)
-		}
-		desired := materializationArtifacts(t,
-			artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "v2\n"},
-			artifactFixture{id: "story/new", path: "new/nested/story.md", content: "story\n"},
-		)
-		observed := 0
-		fault := func(point workspace.MaterializationFaultPoint) error {
+	root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
+	initial := materializationArtifacts(t,
+		artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "v1\n"},
+		artifactFixture{id: "story/stale", path: "old/nested/stale.md", content: "stale\n"},
+	)
+	if _, err := workspace.SynchronizeMaterialization(
+		root, testGeneratorVersion, initial, workspace.MaterializationOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	desired := materializationArtifacts(t,
+		artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "v2\n"},
+		artifactFixture{id: "story/new", path: "new/nested/story.md", content: "story\n"},
+	)
+
+	// Each snapshot is the exact durable state immediately after one cleanup
+	// write. Replaying every snapshot retains the prior fault-prefix matrix
+	// without rebuilding the same transaction once per prefix.
+	var snapshots []string
+	if _, err := workspace.SynchronizeMaterialization(
+		root, testGeneratorVersion+"-next", desired,
+		workspace.MaterializationOptions{FaultInjector: func(point workspace.MaterializationFaultPoint) error {
 			if point != workspace.MaterializationFaultAfterCleanupStep {
 				return nil
 			}
-			observed++
-			if failOrdinal != 0 && observed == failOrdinal {
-				return errors.New("simulated cleanup crash")
-			}
+			snapshot := filepath.Join(
+				canonicalMaterializationTestTempDir(t),
+				fmt.Sprintf("step-%02d", len(snapshots)+1),
+			)
+			copyTestFilesystemTree(t, root, snapshot)
+			snapshots = append(snapshots, snapshot)
 			return nil
-		}
-		_, err := workspace.SynchronizeMaterialization(
-			root, testGeneratorVersion+"-next", desired,
-			workspace.MaterializationOptions{FaultInjector: fault},
-		)
-		return root, observed, err
+		}},
+	); err != nil {
+		t.Fatalf("capture cleanup prefixes: %v", err)
 	}
-
-	_, cleanupSteps, err := run(t, 0)
-	if err != nil {
-		t.Fatalf("count cleanup steps: %v", err)
-	}
+	cleanupSteps := len(snapshots)
 	if cleanupSteps < 10 {
 		t.Fatalf("cleanup exercised only %d persisted steps", cleanupSteps)
 	}
-	for ordinal := 1; ordinal <= cleanupSteps; ordinal++ {
-		t.Run(fmt.Sprintf("step-%02d", ordinal), func(t *testing.T) {
-			root, observed, err := run(t, ordinal)
-			if err == nil || observed != ordinal {
-				t.Fatalf("cleanup fault %d observed=%d, err=%v", ordinal, observed, err)
-			}
-			desired := materializationArtifacts(t,
-				artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "v2\n"},
-				artifactFixture{id: "story/new", path: "new/nested/story.md", content: "story\n"},
-			)
+	for ordinal, snapshot := range snapshots {
+		ordinal, snapshot := ordinal, snapshot
+		t.Run(fmt.Sprintf("step-%02d", ordinal+1), func(t *testing.T) {
+			t.Parallel()
+
+			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
+			moveTestFilesystemTree(t, snapshot, root)
 			if _, err := workspace.SynchronizeMaterialization(
 				root, testGeneratorVersion+"-next", desired, workspace.MaterializationOptions{},
 			); err != nil {
-				t.Fatalf("recover cleanup step %d: %v", ordinal, err)
+				t.Fatalf("recover cleanup step %d: %v", ordinal+1, err)
 			}
 			assertFileContent(t, filepath.Join(root, "feature.plan.yaml"), "v2\n")
 			assertFileContent(t, filepath.Join(root, "new", "nested", "story.md"), "story\n")
@@ -1451,6 +1436,8 @@ func TestMaterializationRecoveryRechecksOwnedBytesBeforeOverwriteOrDelete(t *tes
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			root := filepath.Join(canonicalMaterializationTestTempDir(t), "plan")
 			initial := materializationArtifacts(t,
 				artifactFixture{id: "manifest/sample", path: "feature.plan.yaml", content: "manifest v1\n"},
@@ -1665,5 +1652,168 @@ func assertNoMaterializationTransaction(t *testing.T, root string) {
 		return nil
 	}); err != nil {
 		t.Fatalf("inspect materialization transaction cleanup: %v", err)
+	}
+}
+
+// captureMaterializationRecoverySnapshots observes the first occurrence of
+// each requested durable fault boundary during one successful transaction.
+// Its images are equivalent to crashing immediately after those writes, but
+// avoid repeating identical setup and publication work for every boundary.
+func captureMaterializationRecoverySnapshots(
+	t *testing.T,
+	root, generatorVersion string,
+	artifacts []workspace.MaterializationArtifact,
+	points []workspace.MaterializationFaultPoint,
+) map[workspace.MaterializationFaultPoint]string {
+	t.Helper()
+	wanted := make(map[workspace.MaterializationFaultPoint]bool, len(points))
+	for _, point := range points {
+		wanted[point] = true
+	}
+	snapshotDirectory := canonicalMaterializationTestTempDir(t)
+	snapshots := make(map[workspace.MaterializationFaultPoint]string, len(points))
+	if _, err := workspace.SynchronizeMaterialization(
+		root, generatorVersion, artifacts,
+		workspace.MaterializationOptions{FaultInjector: func(point workspace.MaterializationFaultPoint) error {
+			if !wanted[point] || snapshots[point] != "" {
+				return nil
+			}
+			snapshot := filepath.Join(snapshotDirectory, fmt.Sprintf("%02d-%s", len(snapshots)+1, point))
+			copyTestFilesystemTree(t, root, snapshot)
+			snapshots[point] = snapshot
+			return nil
+		}},
+	); err != nil {
+		t.Fatalf("capture materialization recovery boundaries: %v", err)
+	}
+	for _, point := range points {
+		if snapshots[point] == "" {
+			t.Fatalf("materialization fault boundary %s was not observed", point)
+		}
+	}
+	return snapshots
+}
+
+// copyTestFilesystemTree makes an independent filesystem image while
+// preserving hard-link identity within that image. Some fixtures use hard
+// links as durable proofs, so ordinary byte copies can change their state.
+func copyTestFilesystemTree(t *testing.T, source, destination string) {
+	t.Helper()
+	rootInfo, err := os.Stat(source)
+	if err != nil {
+		t.Fatalf("stat materialization snapshot source: %v", err)
+	}
+	if !rootInfo.IsDir() {
+		t.Fatalf("materialization snapshot source is not a directory: %s", source)
+	}
+	if runtime.GOOS == "darwin" {
+		copyTestFilesystemTreeClone(t, source, destination)
+		return
+	}
+	output, err := exec.Command("cp", "-a", source, destination).CombinedOutput()
+	if err != nil {
+		t.Fatalf("copy materialization snapshot: %v\n%s", err, output)
+	}
+}
+
+// cloneGitTestFilesystemTree uses a copy-on-write clone for a Git fixture.
+// Unlike materialization images, Git fixtures do not use hard-link identity as
+// a durable proof, so walking both trees to reconstruct that topology would
+// only add setup work to every integration partition.
+func cloneGitTestFilesystemTree(t *testing.T, source, destination string) {
+	t.Helper()
+	rootInfo, err := os.Stat(source)
+	if err != nil {
+		t.Fatalf("stat Git fixture source: %v", err)
+	}
+	if !rootInfo.IsDir() {
+		t.Fatalf("Git fixture source is not a directory: %s", source)
+	}
+	if runtime.GOOS != "darwin" {
+		copyTestFilesystemTree(t, source, destination)
+		return
+	}
+	output, err := exec.Command("cp", "-cR", source, destination).CombinedOutput()
+	if err != nil {
+		t.Fatalf("clone Git fixture: %v\n%s", err, output)
+	}
+}
+
+// copyTestFilesystemTreeClone uses APFS copy-on-write clones for the large
+// real-Git fixtures. cp does not retain hard-link topology within the copied
+// tree, so repair it from the source after cloning before exposing the image
+// to a recovery test.
+func copyTestFilesystemTreeClone(t *testing.T, source, destination string) {
+	t.Helper()
+	output, err := exec.Command("cp", "-cR", source, destination).CombinedOutput()
+	if err != nil {
+		t.Fatalf("clone materialization snapshot: %v\n%s", err, output)
+	}
+	repairTestFilesystemHardLinks(t, source, destination)
+}
+
+func repairTestFilesystemHardLinks(t *testing.T, source, destination string) {
+	t.Helper()
+	type copiedFile struct {
+		info        os.FileInfo
+		destination string
+	}
+	var copied []copiedFile
+	if err := filepath.WalkDir(source, func(current string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if current == source {
+			return nil
+		}
+		relative, err := filepath.Rel(source, current)
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		target := filepath.Join(destination, relative)
+		for _, prior := range copied {
+			if !os.SameFile(info, prior.info) {
+				continue
+			}
+			if err := os.Remove(target); err != nil {
+				return err
+			}
+			return os.Link(prior.destination, target)
+		}
+		copied = append(copied, copiedFile{info: info, destination: target})
+		return nil
+	}); err != nil {
+		t.Fatalf("repair materialization snapshot hard links: %v", err)
+	}
+}
+
+// moveTestFilesystemTree consumes a one-shot snapshot without copying its
+// contents. The recovery matrices below use each captured durable image once,
+// so renaming retains the exact inode identities while avoiding repeated
+// fixture-copy work before the operation under test.
+func moveTestFilesystemTree(t *testing.T, source, destination string) {
+	t.Helper()
+	if filepath.Clean(source) == filepath.Clean(destination) {
+		t.Fatalf("test filesystem snapshot source and destination are the same path: %s", source)
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		t.Fatalf("stat one-shot test filesystem snapshot: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("one-shot test filesystem snapshot is not a directory: %s", source)
+	}
+	if err := os.RemoveAll(destination); err != nil {
+		t.Fatalf("remove one-shot test filesystem destination %s: %v", destination, err)
+	}
+	if err := os.Rename(source, destination); err != nil {
+		t.Fatalf("move one-shot test filesystem snapshot into place: %v", err)
 	}
 }

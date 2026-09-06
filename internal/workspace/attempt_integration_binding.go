@@ -67,18 +67,6 @@ func NewAttemptWorktreeGitBinding(
 func (binding AttemptWorktreeGitBinding) Worktree() string {
 	return binding.worktree
 }
-func (binding AttemptWorktreeGitBinding) GitDirectory() string {
-	return binding.gitDirectory
-}
-func (binding AttemptWorktreeGitBinding) CommonDirectory() string {
-	return binding.commonDirectory
-}
-func (binding AttemptWorktreeGitBinding) AdministrationDigest() Digest {
-	return binding.administrationDigest
-}
-func (binding AttemptWorktreeGitBinding) ConfigurationDigest() Digest {
-	return binding.configurationDigest
-}
 func (binding AttemptWorktreeGitBinding) Digest() Digest {
 	return binding.digest
 }

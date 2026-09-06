@@ -1,6 +1,6 @@
 ---
 name: feature
-description: Explicit $feature invocation only. Create an implementation-ready local workspace-v2 bundle with stories, merge units, execution policy, review policy, and exact Git bindings.
+description: Explicit $feature invocation only. Create an implementation-ready local workspace bundle with stories, merge units, execution policy, review policy, and exact Git bindings.
 ---
 
 # Feature Planning
@@ -33,8 +33,8 @@ can execute locally.
    dependency and review boundaries genuinely belong together.
 5. Assign every merge unit exactly one execution profile, effective policy,
    and explicit boundary. Default to `pause_only` with a stable serial segment.
-   Add a review loop and matching review-fix protocol only when governed review
-   is required.
+   When governed review is required, add one whole optional `review_gate` block
+   with `adapter`, `recipe`, and `policy_file`.
 6. Treat commit protocols as optional. Add one only when exact subjects, path
    constraints, ordered commits, or structured check checkpoints are part of
    the contract.
@@ -50,7 +50,7 @@ can execute locally.
    preceding review reported a Critical or High finding. Stop after a review
    with no Critical or High findings or after the third iteration.
 10. Run `feature workspace validate --bundle <bundle-dir> --write-locks --json`,
-    commit the plan sources and generated locks in the bundle repository, and
+    commit the plan sources and the single generated `feature.workspace.lock.json` in the bundle repository, and
     verify the plan repository is clean at the committed `HEAD`.
 
 If the target root, base ref, exact base commit, feature branch, execution
@@ -72,7 +72,7 @@ The descriptor is strict JSON:
 }
 ```
 
-Every descriptor path is relative, non-hidden, outside `generated/`, uniquely
+Every descriptor path is relative, non-hidden, uniquely
 owned by one source role, and rooted beneath the bundle.
 
 The workspace manifest owns local target and composition bindings:
@@ -103,12 +103,10 @@ Every policy level explicitly defines:
 - `require_passing_checks`
 - `allow_write_network`
 - `max_attempts`
-- `max_review_rounds`
-- `max_review_fixes`
 
-Child policies may only narrow their parent. Review profiles declare an ID,
-runner, and `retain` or `fresh_each_invocation` reviewer policy. A configured
-review loop requires a matching review-fix protocol.
+Child policies may only narrow their parent. A merge unit either inherits the
+complete root `review_gate` or replaces it with another complete block; partial
+overrides are rejected.
 
 Use `feature workspace schema bundle --json`,
 `feature workspace schema requests --json`, and `feature workspace example` as

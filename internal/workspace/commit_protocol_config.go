@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
-	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -15,14 +14,12 @@ const (
 	maxCommitProtocolSteps   = 256
 	maxCommitChecksPerStep   = 128
 	maxCommitPathPatterns    = 2048
-	maxCheckFailureIDs       = 4096
-	maxCheckFailureIDBytes   = 4096
 	maxCheckCommandArguments = 1024
 )
 
 // CommitBodyPolicy controls the body independently from the exact subject.
 // Exact bodies are useful when a commit is itself a protocol checkpoint;
-// required and optional bodies are supplied to the imperative transaction.
+// the other policies constrain bodies observed in final history.
 type CommitBodyPolicy string
 
 const (
@@ -71,34 +68,6 @@ func NewCommitMessagePolicy(subject string, body CommitBodyPolicy, exactBody *st
 
 func (policy CommitMessagePolicy) Subject() string              { return policy.subject }
 func (policy CommitMessagePolicy) BodyPolicy() CommitBodyPolicy { return policy.body }
-func (policy CommitMessagePolicy) ExactBody() string            { return policy.exactBody }
-
-func (policy CommitMessagePolicy) ResolveBody(supplied string) (string, error) {
-	if err := validateCommitBody(supplied); err != nil {
-		return "", err
-	}
-	switch policy.body {
-	case CommitBodyForbidden:
-		if supplied != "" {
-			return "", fmt.Errorf("commit body is forbidden")
-		}
-		return "", nil
-	case CommitBodyOptional:
-		return supplied, nil
-	case CommitBodyRequired:
-		if supplied == "" {
-			return "", fmt.Errorf("commit body is required")
-		}
-		return supplied, nil
-	case CommitBodyExact:
-		if supplied != "" && supplied != policy.exactBody {
-			return "", fmt.Errorf("supplied commit body does not match exact_body")
-		}
-		return policy.exactBody, nil
-	default:
-		return "", fmt.Errorf("invalid commit body policy %q", policy.body)
-	}
-}
 
 func (policy CommitMessagePolicy) Validate(subject, body string) error {
 	if subject != policy.subject {
@@ -273,12 +242,6 @@ func NewCommitPathPolicy(allowed, frozen []string) (CommitPathPolicy, error) {
 	return CommitPathPolicy{allowed: allowedPatterns, frozen: frozenPatterns, digest: DigestBytes(content)}, nil
 }
 
-func (policy CommitPathPolicy) Allowed() []CommitPathPattern {
-	return append([]CommitPathPattern(nil), policy.allowed...)
-}
-func (policy CommitPathPolicy) Frozen() []CommitPathPattern {
-	return append([]CommitPathPattern(nil), policy.frozen...)
-}
 func (policy CommitPathPolicy) Digest() Digest { return policy.digest }
 
 func (policy CommitPathPolicy) Validate(pathValue string) error {
@@ -299,118 +262,35 @@ func (policy CommitPathPolicy) Validate(pathValue string) error {
 	return fmt.Errorf("path %q is outside configured allowed_paths", normalized)
 }
 
-type CheckExpectationKind string
-
-const (
-	CheckExpectationPass                CheckExpectationKind = "pass"
-	CheckExpectationExpectedTestFailure CheckExpectationKind = "expected_test_failure"
-)
-
-func (kind CheckExpectationKind) valid() bool {
-	return kind == CheckExpectationPass || kind == CheckExpectationExpectedTestFailure
-}
-
-type CheckExpectation struct {
-	kind       CheckExpectationKind
-	failureIDs []string
-}
-
-func NewCheckExpectation(kind CheckExpectationKind, failureIDs []string) (CheckExpectation, error) {
-	if !kind.valid() {
-		return CheckExpectation{}, fmt.Errorf("unsupported check expectation %q", kind)
-	}
-	if len(failureIDs) > maxCheckFailureIDs {
-		return CheckExpectation{}, fmt.Errorf("check expectation exceeds %d failure identities", maxCheckFailureIDs)
-	}
-	values := append([]string(nil), failureIDs...)
-	seen := make(map[string]struct{}, len(values))
-	for index, value := range values {
-		if value == "" || strings.TrimSpace(value) != value || len(value) > maxCheckFailureIDBytes ||
-			!utf8.ValidString(value) || strings.ContainsAny(value, "\x00\r\n") {
-			return CheckExpectation{}, fmt.Errorf("failure_ids[%d] is invalid", index)
-		}
-		if _, exists := seen[value]; exists {
-			return CheckExpectation{}, fmt.Errorf("duplicate expected failure identity %q", value)
-		}
-		seen[value] = struct{}{}
-	}
-	sort.Strings(values)
-	if kind == CheckExpectationPass && len(values) != 0 {
-		return CheckExpectation{}, fmt.Errorf("pass expectation cannot include failure_ids")
-	}
-	if kind == CheckExpectationExpectedTestFailure && len(values) == 0 {
-		return CheckExpectation{}, fmt.Errorf("expected_test_failure requires structured failure_ids")
-	}
-	return CheckExpectation{kind: kind, failureIDs: values}, nil
-}
-
-func (expectation CheckExpectation) Kind() CheckExpectationKind { return expectation.kind }
-func (expectation CheckExpectation) FailureIDs() []string {
-	return append([]string(nil), expectation.failureIDs...)
-}
-
-type CheckParserKind string
-
-const (
-	CheckParserGoTestJSON     CheckParserKind = "go-test-json"
-	CheckParserAssertionJSON  CheckParserKind = "assertion-json"
-	CheckParserDiagnosticJSON CheckParserKind = "diagnostic-json"
-)
-
-func (kind CheckParserKind) valid() bool {
-	switch kind {
-	case CheckParserGoTestJSON, CheckParserAssertionJSON, CheckParserDiagnosticJSON:
-		return true
-	default:
-		return false
-	}
-}
-
 type CommitCheck struct {
-	id          ID
-	runner      ID
-	parser      CheckParserKind
-	command     Argv
-	expectation CheckExpectation
-	digest      Digest
+	id      ID
+	runner  ID
+	command Argv
+	digest  Digest
 }
 
-func NewCommitCheck(id, runner ID, parser CheckParserKind, command Argv, expectation CheckExpectation) (CommitCheck, error) {
-	if id.IsZero() || runner.IsZero() || !parser.valid() || len(command.values) == 0 || !expectation.kind.valid() {
-		return CommitCheck{}, fmt.Errorf("commit check requires id, runner, parser, command, and expectation")
+func NewCommitCheck(id, runner ID, command Argv) (CommitCheck, error) {
+	if id.IsZero() || runner.IsZero() || len(command.values) == 0 {
+		return CommitCheck{}, fmt.Errorf("commit check requires id, runner, and command")
 	}
 	if len(command.values) > maxCheckCommandArguments {
 		return CommitCheck{}, fmt.Errorf("commit check command exceeds %d arguments", maxCheckCommandArguments)
 	}
-	if _, err := NewCheckExpectation(expectation.kind, expectation.failureIDs); err != nil {
-		return CommitCheck{}, err
-	}
 	type canonical struct {
-		ID          string               `json:"id"`
-		Runner      string               `json:"runner"`
-		Parser      CheckParserKind      `json:"parser"`
-		Command     []string             `json:"command"`
-		Expectation CheckExpectationKind `json:"expectation"`
-		FailureIDs  []string             `json:"failure_ids"`
+		ID      string   `json:"id"`
+		Runner  string   `json:"runner"`
+		Command []string `json:"command"`
 	}
 	content, _ := json.Marshal(canonical{
-		ID: id.String(), Runner: runner.String(), Parser: parser, Command: command.Values(),
-		Expectation: expectation.kind, FailureIDs: expectation.FailureIDs(),
+		ID: id.String(), Runner: runner.String(), Command: command.Values(),
 	})
 	return CommitCheck{
-		id: id, runner: runner, parser: parser, command: Argv{values: command.Values()},
-		expectation: CheckExpectation{kind: expectation.kind, failureIDs: expectation.FailureIDs()},
-		digest:      DigestBytes(content),
+		id: id, runner: runner, command: Argv{values: command.Values()}, digest: DigestBytes(content),
 	}, nil
 }
 
-func (check CommitCheck) ID() ID                  { return check.id }
-func (check CommitCheck) Runner() ID              { return check.runner }
-func (check CommitCheck) Parser() CheckParserKind { return check.parser }
-func (check CommitCheck) Command() Argv           { return Argv{values: check.command.Values()} }
-func (check CommitCheck) Expectation() CheckExpectation {
-	return CheckExpectation{kind: check.expectation.kind, failureIDs: check.expectation.FailureIDs()}
-}
+func (check CommitCheck) ID() ID         { return check.id }
+func (check CommitCheck) Command() Argv  { return Argv{values: check.command.Values()} }
 func (check CommitCheck) Digest() Digest { return check.digest }
 
 type CommitStep struct {
@@ -473,7 +353,6 @@ func NewCommitProtocol(steps []CommitStep) (CommitProtocol, error) {
 	}
 	copySteps := cloneCommitSteps(steps)
 	ids := make(map[string]struct{}, len(copySteps))
-	subjects := make(map[string]struct{}, len(copySteps))
 	digests := make([]string, 0, len(copySteps))
 	for _, step := range copySteps {
 		if step.id.IsZero() || step.digest.IsZero() {
@@ -482,124 +361,17 @@ func NewCommitProtocol(steps []CommitStep) (CommitProtocol, error) {
 		if _, exists := ids[step.id.String()]; exists {
 			return CommitProtocol{}, fmt.Errorf("duplicate commit step id %s", step.id)
 		}
-		if _, exists := subjects[step.message.subject]; exists {
-			return CommitProtocol{}, fmt.Errorf("duplicate exact commit subject %q makes rebase mapping ambiguous", step.message.subject)
-		}
 		ids[step.id.String()] = struct{}{}
-		subjects[step.message.subject] = struct{}{}
 		digests = append(digests, step.digest.String())
 	}
 	content, _ := json.Marshal(struct {
 		Steps []string `json:"steps"`
 	}{Steps: digests})
-	protocol := CommitProtocol{steps: copySteps, digest: DigestBytes(content)}
-	if err := validateCommitProtocolJournalFootprint(protocol); err != nil {
-		return CommitProtocol{}, err
-	}
-	return protocol, nil
-}
-
-func validateCommitProtocolJournalFootprint(protocol CommitProtocol) error {
-	identifier := maxCommitJournalIdentifier()
-	base, _ := ParseGitObjectID("sha256:" + strings.Repeat("f", 64))
-	if _, err := NewCommitProtocolStartedJournalEvent(
-		identifier, DigestBytes([]byte("commit-protocol-footprint")), identifier, base, protocol,
-	); err != nil {
-		return fmt.Errorf("commit protocol journal footprint: %w", err)
-	}
-	return nil
+	return CommitProtocol{steps: copySteps, digest: DigestBytes(content)}, nil
 }
 
 func (protocol CommitProtocol) Steps() []CommitStep { return cloneCommitSteps(protocol.steps) }
 func (protocol CommitProtocol) Digest() Digest      { return protocol.digest }
-
-// ReviewFixProtocol is intentionally separate from the implementation
-// sequence. Each accepted fix gets a derived stable ordinal and consumes the
-// merge unit's max_review_fixes budget while sharing this narrower rule.
-type ReviewFixProtocol struct {
-	subjectPrefix string
-	body          CommitBodyPolicy
-	paths         CommitPathPolicy
-	checks        []CommitCheck
-	digest        Digest
-}
-
-func NewReviewFixProtocol(subjectPrefix string, body CommitBodyPolicy, paths CommitPathPolicy, checks []CommitCheck) (ReviewFixProtocol, error) {
-	if subjectPrefix == "" || strings.TrimSpace(subjectPrefix) != subjectPrefix ||
-		len(subjectPrefix) > maxCommitSubjectBytes-24 || strings.ContainsAny(subjectPrefix, "\r\n\x00") || !utf8.ValidString(subjectPrefix) {
-		return ReviewFixProtocol{}, fmt.Errorf("review-fix subject_prefix is invalid")
-	}
-	if body != CommitBodyForbidden && body != CommitBodyOptional && body != CommitBodyRequired {
-		return ReviewFixProtocol{}, fmt.Errorf("review-fix body policy must be forbidden, optional, or required")
-	}
-	if paths.digest.IsZero() || len(checks) > maxCommitChecksPerStep {
-		return ReviewFixProtocol{}, fmt.Errorf("review-fix protocol requires path policy and bounded checks")
-	}
-	copyChecks := cloneCommitChecks(checks)
-	seen := make(map[string]struct{}, len(copyChecks))
-	digests := make([]string, 0, len(copyChecks))
-	for _, check := range copyChecks {
-		if check.id.IsZero() || check.digest.IsZero() {
-			return ReviewFixProtocol{}, fmt.Errorf("review-fix protocol contains an invalid check")
-		}
-		if _, exists := seen[check.id.String()]; exists {
-			return ReviewFixProtocol{}, fmt.Errorf("duplicate review-fix check id %s", check.id)
-		}
-		seen[check.id.String()] = struct{}{}
-		digests = append(digests, check.digest.String())
-	}
-	content, _ := json.Marshal(struct {
-		SubjectPrefix string           `json:"subject_prefix"`
-		Body          CommitBodyPolicy `json:"body_policy"`
-		PathPolicy    string           `json:"path_policy"`
-		Checks        []string         `json:"checks"`
-	}{subjectPrefix, body, paths.digest.String(), digests})
-	protocol := ReviewFixProtocol{
-		subjectPrefix: subjectPrefix, body: body, paths: paths,
-		checks: copyChecks, digest: DigestBytes(content),
-	}
-	if err := validateReviewFixProtocolJournalFootprint(protocol); err != nil {
-		return ReviewFixProtocol{}, err
-	}
-	return protocol, nil
-}
-
-func validateReviewFixProtocolJournalFootprint(protocol ReviewFixProtocol) error {
-	identifier := maxCommitJournalIdentifier()
-	base, _ := ParseGitObjectID("sha256:" + strings.Repeat("f", 64))
-	maximum := ^uint16(0)
-	if _, err := NewReviewFixReservedJournalEvent(
-		identifier, DigestBytes([]byte("review-fix-protocol-footprint")), identifier,
-		protocol, maximum, maximum, base,
-	); err != nil {
-		return fmt.Errorf("review-fix protocol journal footprint: %w", err)
-	}
-	return nil
-}
-
-func (protocol ReviewFixProtocol) SubjectPrefix() string        { return protocol.subjectPrefix }
-func (protocol ReviewFixProtocol) BodyPolicy() CommitBodyPolicy { return protocol.body }
-func (protocol ReviewFixProtocol) Paths() CommitPathPolicy {
-	return cloneCommitPathPolicy(protocol.paths)
-}
-func (protocol ReviewFixProtocol) Checks() []CommitCheck { return cloneCommitChecks(protocol.checks) }
-func (protocol ReviewFixProtocol) Digest() Digest        { return protocol.digest }
-
-func (protocol ReviewFixProtocol) Step(ordinal uint16) (CommitStep, error) {
-	if ordinal == 0 {
-		return CommitStep{}, fmt.Errorf("review-fix ordinal must be positive")
-	}
-	id, err := NewID(fmt.Sprintf("review-fix-%d", ordinal))
-	if err != nil {
-		return CommitStep{}, err
-	}
-	subject := fmt.Sprintf("%s %d", protocol.subjectPrefix, ordinal)
-	message, err := NewCommitMessagePolicy(subject, protocol.body, nil)
-	if err != nil {
-		return CommitStep{}, err
-	}
-	return NewCommitStep(id, message, protocol.paths, protocol.checks)
-}
 
 func normalizeCommitProtocol(wire *commitProtocolWire, runner ID, location string) (*CommitProtocol, error) {
 	if wire == nil {
@@ -614,28 +386,6 @@ func normalizeCommitProtocol(wire *commitProtocolWire, runner ID, location strin
 		steps = append(steps, step)
 	}
 	protocol, err := NewCommitProtocol(steps)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", location, err)
-	}
-	return &protocol, nil
-}
-
-func normalizeReviewFixProtocol(wire *reviewFixProtocolWire, runner ID, location string) (*ReviewFixProtocol, error) {
-	if wire == nil {
-		return nil, nil
-	}
-	if wire.AllowedPaths == nil || wire.FrozenPaths == nil || wire.Checks == nil {
-		return nil, fmt.Errorf("%s must explicitly define allowed_paths, frozen_paths, and checks", location)
-	}
-	paths, err := NewCommitPathPolicy(*wire.AllowedPaths, *wire.FrozenPaths)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", location, err)
-	}
-	checks, err := normalizeCommitChecks(*wire.Checks, runner, location+".checks")
-	if err != nil {
-		return nil, err
-	}
-	protocol, err := NewReviewFixProtocol(wire.SubjectPrefix, CommitBodyPolicy(wire.BodyPolicy), paths, checks)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", location, err)
 	}
@@ -690,14 +440,7 @@ func normalizeCommitChecks(wires []commitCheckWire, runner ID, location string) 
 		if err != nil {
 			return nil, fmt.Errorf("%s[%d].command: %w", location, index, err)
 		}
-		if wire.Expectation.FailureIDs == nil {
-			return nil, fmt.Errorf("%s[%d].expectation.failure_ids must be explicit", location, index)
-		}
-		expectation, err := NewCheckExpectation(CheckExpectationKind(wire.Expectation.Kind), *wire.Expectation.FailureIDs)
-		if err != nil {
-			return nil, fmt.Errorf("%s[%d].expectation: %w", location, index, err)
-		}
-		check, err := NewCommitCheck(checkID, checkRunner, CheckParserKind(wire.Parser), command, expectation)
+		check, err := NewCommitCheck(checkID, checkRunner, command)
 		if err != nil {
 			return nil, fmt.Errorf("%s[%d]: %w", location, index, err)
 		}
@@ -716,7 +459,6 @@ func cloneCommitChecks(checks []CommitCheck) []CommitCheck {
 	result := append([]CommitCheck(nil), checks...)
 	for index := range result {
 		result[index].command = Argv{values: result[index].command.Values()}
-		result[index].expectation.failureIDs = result[index].expectation.FailureIDs()
 	}
 	return result
 }
@@ -736,15 +478,5 @@ func cloneCommitProtocol(protocol *CommitProtocol) *CommitProtocol {
 	}
 	copyProtocol := *protocol
 	copyProtocol.steps = cloneCommitSteps(protocol.steps)
-	return &copyProtocol
-}
-
-func cloneReviewFixProtocol(protocol *ReviewFixProtocol) *ReviewFixProtocol {
-	if protocol == nil {
-		return nil
-	}
-	copyProtocol := *protocol
-	copyProtocol.paths = cloneCommitPathPolicy(protocol.paths)
-	copyProtocol.checks = cloneCommitChecks(protocol.checks)
 	return &copyProtocol
 }

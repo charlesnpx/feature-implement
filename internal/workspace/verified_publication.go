@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"syscall"
 )
 
 type PublicationFaultPoint string
@@ -51,100 +52,206 @@ func (root *VerifiedRoot) PublishReplaceable(
 	if maximum < 0 || int64(len(content)) > maximum {
 		return fmt.Errorf("replaceable rooted file %s exceeds %d bytes", relative, maximum)
 	}
-	rooted, err := NewRootedPath(root.path, relative)
-	if err != nil {
-		return err
-	}
-	relative = rooted.Relative()
-	if err := root.RecoverReplaceable(relative); err != nil {
-		return err
-	}
+	return root.withReplaceablePublication(
+		relative,
+		replaceablePublicationWrite,
+		func(relative string) error {
+			oldContent, readErr := root.ReadBounded(relative, maximum)
+			oldExists := readErr == nil
+			if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+				return readErr
+			}
+			if oldExists && bytes.Equal(oldContent, content) {
+				return root.Sync()
+			}
 
-	oldContent, readErr := root.ReadBounded(relative, maximum)
-	oldExists := readErr == nil
-	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-		return readErr
-	}
-	if oldExists && bytes.Equal(oldContent, content) {
-		return root.Sync()
-	}
-
-	intentPath, pendingPath, backupPath := publicationControlPaths(relative)
-	wire := replaceablePublicationWire{
-		SchemaVersion: RuntimeFormatSchemaVersion,
-		Target:        relative,
-		Pending:       pendingPath,
-		Backup:        backupPath,
-		NewDigest:     DigestBytes(content).String(),
-		Maximum:       maximum,
-	}
-	if oldExists {
-		wire.OldDigest = DigestBytes(oldContent).String()
-	}
-	intentBytes, err := json.Marshal(wire)
-	if err != nil {
-		return err
-	}
-	if err := root.WriteExclusive(intentPath, intentBytes, 0o600); err != nil {
-		return fmt.Errorf("prepare replaceable publication for %s: %w", relative, err)
-	}
-	if err := injectPublicationFault(options, PublicationFaultAfterIntent); err != nil {
-		return err
-	}
-	if err := root.WriteExclusive(pendingPath, content, permission); err != nil {
-		return fmt.Errorf("write replaceable publication for %s: %w", relative, err)
-	}
-	if err := injectPublicationFault(options, PublicationFaultAfterPending); err != nil {
-		return err
-	}
-	if oldExists {
-		if err := root.adapter.renameFileNoReplace(relative, backupPath); err != nil {
-			return fmt.Errorf("quarantine prior rooted file %s: %w", relative, err)
-		}
-		if err := root.VerifyPath(); err != nil {
-			return err
-		}
-	}
-	if err := injectPublicationFault(options, PublicationFaultAfterQuarantine); err != nil {
-		return err
-	}
-	if err := root.adapter.renameFileNoReplace(pendingPath, relative); err != nil {
-		return fmt.Errorf("publish replaceable rooted file %s: %w", relative, err)
-	}
-	if err := injectPublicationFault(options, PublicationFaultAfterPublish); err != nil {
-		return err
-	}
-	if err := root.finishReplaceablePublication(wire, intentBytes); err != nil {
-		return err
-	}
-	published, err := root.ReadBounded(relative, maximum)
-	if err != nil {
-		return err
-	}
-	if !bytes.Equal(published, content) {
-		return fmt.Errorf("replaceable rooted file %s does not match its publication", relative)
-	}
-	return nil
+			intentPath, pendingPath, backupPath := publicationControlPaths(relative)
+			wire := replaceablePublicationWire{
+				SchemaVersion: RuntimeFormatSchemaVersion,
+				Target:        relative,
+				Pending:       pendingPath,
+				Backup:        backupPath,
+				NewDigest:     DigestBytes(content).String(),
+				Maximum:       maximum,
+			}
+			if oldExists {
+				wire.OldDigest = DigestBytes(oldContent).String()
+			}
+			intentBytes, err := json.Marshal(wire)
+			if err != nil {
+				return err
+			}
+			if err := root.WriteExclusive(intentPath, intentBytes, 0o600); err != nil {
+				return fmt.Errorf("prepare replaceable publication for %s: %w", relative, err)
+			}
+			if err := injectPublicationFault(options, PublicationFaultAfterIntent); err != nil {
+				return err
+			}
+			if err := root.WriteExclusive(pendingPath, content, permission); err != nil {
+				return fmt.Errorf("write replaceable publication for %s: %w", relative, err)
+			}
+			if err := injectPublicationFault(options, PublicationFaultAfterPending); err != nil {
+				return err
+			}
+			if oldExists {
+				if err := root.adapter.renameFileNoReplace(relative, backupPath); err != nil {
+					return fmt.Errorf("quarantine prior rooted file %s: %w", relative, err)
+				}
+				if err := root.VerifyPath(); err != nil {
+					return err
+				}
+			}
+			if err := injectPublicationFault(options, PublicationFaultAfterQuarantine); err != nil {
+				return err
+			}
+			if err := root.adapter.renameFileNoReplace(pendingPath, relative); err != nil {
+				return fmt.Errorf("publish replaceable rooted file %s: %w", relative, err)
+			}
+			if err := injectPublicationFault(options, PublicationFaultAfterPublish); err != nil {
+				return err
+			}
+			if err := root.finishReplaceablePublication(wire, intentBytes); err != nil {
+				return err
+			}
+			published, err := root.ReadBounded(relative, maximum)
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal(published, content) {
+				return fmt.Errorf("replaceable rooted file %s does not match its publication", relative)
+			}
+			return nil
+		},
+	)
 }
 
 // ReadReplaceable recovers a previously interrupted publication before
 // returning the current stable file.
 func (root *VerifiedRoot) ReadReplaceable(relative string, maximum int64) ([]byte, error) {
-	if err := root.RecoverReplaceable(relative); err != nil {
-		return nil, err
-	}
-	return root.ReadBounded(relative, maximum)
+	var content []byte
+	err := root.withReplaceablePublication(
+		relative,
+		replaceablePublicationRead,
+		func(relative string) error {
+			var readErr error
+			content, readErr = root.ReadBounded(relative, maximum)
+			return readErr
+		},
+	)
+	return content, err
 }
 
 func (root *VerifiedRoot) RecoverReplaceable(relative string) error {
+	return root.withReplaceablePublication(
+		relative,
+		replaceablePublicationRead,
+		func(string) error { return nil },
+	)
+}
+
+type replaceablePublicationAccess uint8
+
+const (
+	replaceablePublicationRead replaceablePublicationAccess = iota + 1
+	replaceablePublicationWrite
+)
+
+func (root *VerifiedRoot) withReplaceablePublication(
+	relative string,
+	access replaceablePublicationAccess,
+	operation func(relative string) error,
+) (resultErr error) {
 	if root == nil || root.adapter == nil {
 		return fmt.Errorf("verified root is closed")
+	}
+	if err := root.VerifyPath(); err != nil {
+		return err
 	}
 	rooted, err := NewRootedPath(root.path, relative)
 	if err != nil {
 		return err
 	}
 	relative = rooted.Relative()
+	if access == replaceablePublicationRead {
+		controlsPending, err := root.replaceablePublicationControlsPending(relative)
+		if err != nil {
+			return err
+		}
+		if !controlsPending {
+			// Production journal readers hold the journal flock before this
+			// inspection, and publishers take that flock before this sidecar.
+			// Therefore an absent control cannot conceal a mid-publication
+			// journal target.
+			return operation(relative)
+		}
+	} else if access != replaceablePublicationWrite {
+		return fmt.Errorf("unsupported replaceable publication access %d", access)
+	}
+
+	releasePublication, err := root.lockReplaceablePublication(relative)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if releaseErr := releasePublication(); releaseErr != nil {
+			resultErr = errors.Join(resultErr, releaseErr)
+		}
+	}()
+	if err := root.recoverReplaceable(relative); err != nil {
+		return err
+	}
+	return operation(relative)
+}
+
+func (root *VerifiedRoot) replaceablePublicationControlsPending(relative string) (bool, error) {
+	intentPath, pendingPath, backupPath := publicationControlPaths(relative)
+	for _, controlPath := range []string{intentPath, pendingPath, backupPath} {
+		if _, exists, err := root.adapter.inspectExact(controlPath); err != nil {
+			return false, fmt.Errorf("inspect replaceable publication control for %s: %w", relative, err)
+		} else if exists {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (root *VerifiedRoot) lockReplaceablePublication(relative string) (func() error, error) {
+	lockPath := relative + ".publication.lock"
+	file, _, err := root.openOwnedRegularFile(lockPath, os.O_RDWR, 0o600, true)
+	if err != nil {
+		return nil, fmt.Errorf("open replaceable publication lock for %s: %w", relative, err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("acquire replaceable publication lock for %s: %w", relative, err)
+	}
+	if err := root.verifyOwnedRegularFile(lockPath, file); err != nil {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+		return nil, fmt.Errorf("verify replaceable publication lock for %s: %w", relative, err)
+	}
+	return func() error {
+		verifyErr := root.verifyOwnedRegularFile(lockPath, file)
+		unlockErr := syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		closeErr := file.Close()
+		if verifyErr != nil {
+			verifyErr = fmt.Errorf(
+				"replaceable publication lock for %s was replaced before release: %w",
+				relative,
+				verifyErr,
+			)
+		}
+		if unlockErr != nil {
+			unlockErr = fmt.Errorf("unlock replaceable publication lock for %s: %w", relative, unlockErr)
+		}
+		if closeErr != nil {
+			closeErr = fmt.Errorf("close replaceable publication lock for %s: %w", relative, closeErr)
+		}
+		return errors.Join(verifyErr, unlockErr, closeErr)
+	}, nil
+}
+
+func (root *VerifiedRoot) recoverReplaceable(relative string) error {
 	intentPath, expectedPending, expectedBackup := publicationControlPaths(relative)
 	intentBytes, err := root.ReadBounded(intentPath, 16*1024)
 	if errors.Is(err, os.ErrNotExist) {

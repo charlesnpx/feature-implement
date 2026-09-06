@@ -31,8 +31,6 @@ func main() {
 		err = validateCommand(os.Args[2:])
 	case "workspace":
 		err = workspaceCommand(os.Args[2:])
-	case "status", "implement":
-		err = fmt.Errorf("feature %s was removed; use feature workspace with a schema-version-2 bundle", os.Args[1])
 	case "version":
 		fmt.Println(Version)
 	case "-h", "--help", "help":
@@ -56,7 +54,7 @@ func usage(w io.Writer) {
   feature workspace schema [bundle|requests|reports] [--json]
   feature workspace example
   feature workspace validate --bundle <dir> [--write-locks] [--json]
-  feature workspace <action> [<subaction>] --bundle <dir> --workspace <dir> [--input <json-file|->] [--json]
+  feature workspace <action> [<subaction>] --bundle <dir> [--input <json-file|->] [--json]
   feature version`)
 }
 
@@ -213,15 +211,11 @@ func workspaceCommand(args []string) error {
 		return nil
 	}
 	action := args[0]
+	if !workspacecmd.IsSupportedAction(action) {
+		return fmt.Errorf("unsupported workspace command %q", action)
+	}
 	remaining := args[1:]
 	subaction := ""
-	switch action {
-	case "queue", "receipts", "reconcile", "control", "provider":
-		return fmt.Errorf(
-			"workspace %s was removed from the local-only workflow",
-			action,
-		)
-	}
 	if hasHelpFlag(remaining) {
 		usageWorkspace(os.Stdout)
 		return nil
@@ -235,19 +229,13 @@ func workspaceCommand(args []string) error {
 	if action == "schema" && len(remaining) > 0 && !strings.HasPrefix(remaining[0], "-") {
 		subaction, remaining = remaining[0], remaining[1:]
 	}
-	if action == "commit" && subaction == "rebase" {
-		return fmt.Errorf(
-			"workspace commit rebase was removed; attempt bases are immutable",
-		)
-	}
 	fs := flag.NewFlagSet("workspace "+action, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	bundle := fs.String("bundle", "", "Directory containing feature.workspace.bundle.json")
-	workspaceDir := fs.String("workspace", "", "Journal-backed workspace state directory")
 	inputPath := fs.String("input", "", "Strict JSON request file, or - for stdin")
-	writeLocks := fs.Bool("write-locks", false, "Synchronize immutable generated lock projections")
+	writeLocks := fs.Bool("write-locks", false, "Write the canonical workspace lock")
 	fs.Bool("json", false, "Emit JSON (workspace commands always emit JSON)")
-	if err := parsePermissive(fs, remaining, "bundle", "workspace", "input"); err != nil {
+	if err := parsePermissive(fs, remaining, "bundle", "input"); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
@@ -266,7 +254,7 @@ func workspaceCommand(args []string) error {
 	}
 	result, err := workspacecmd.Execute(context.Background(), workspacecmd.Options{
 		Action: action, Subaction: subaction, BundleDir: *bundle,
-		WorkspaceDir: *workspaceDir, Input: input, WriteLocks: *writeLocks, GeneratorVersion: Version,
+		Input: input, WriteLocks: *writeLocks,
 	})
 	if err != nil {
 		return err
@@ -276,7 +264,7 @@ func workspaceCommand(args []string) error {
 
 func workspaceActionRequiresSubaction(action string) bool {
 	switch action {
-	case "attempt", "commit", "review", "integrate", "complete":
+	case "attempt", "review", "integrate", "complete":
 		return true
 	default:
 		return false
@@ -417,15 +405,14 @@ func usageWorkspace(w io.Writer) {
   feature workspace schema [bundle|requests|reports] [--json]
   feature workspace example
   feature workspace validate --bundle <dir> [--write-locks] [--json]
-  feature workspace init|recover --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
-  feature workspace status|scheduler|gates|report --bundle <dir> --workspace <dir> [--json]
-  feature workspace attempt reserve|materialize|adopt-head|boundary|next-goal|acknowledge|owner-response|resume --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
-  feature workspace commit next --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
-  feature workspace review start|reserve|record|reserve-fix|apply-fix|record-fix|ready --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
-  feature workspace integrate merge-unit --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
-  feature workspace complete verify --bundle <dir> --workspace <dir> --input <json-file|-> [--json]
+  feature workspace init|recover --bundle <dir> --input <json-file|-> [--json]
+  feature workspace status --bundle <dir> [--json]
+  feature workspace attempt start|adopt-head|pause|resume|abandon --bundle <dir> --input <json-file|-> [--json]
+  feature workspace review dispatch|record|record-document|ready --bundle <dir> --input <json-file|-> [--json]
+  feature workspace integrate merge-unit --bundle <dir> --input <json-file|-> [--json]
+  feature workspace complete verify --bundle <dir> --input <json-file|-> [--json]
 
-The attempt boundary request requires kind: checkpoint or escalation.
+The attempt pause request requires kind: checkpoint or escalation.
 
 All mutations accept one strict schema-version-2 JSON request and record typed local journal events.`)
 }

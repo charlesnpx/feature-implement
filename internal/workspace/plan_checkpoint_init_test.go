@@ -23,7 +23,6 @@ func TestWorkspaceInitializationUsesCommittedPlanHeadCheckpoint(t *testing.T) {
 		t.Fatalf("verify committed checkpoint: %v", err)
 	}
 	if verified.CheckpointID().IsZero() ||
-		verified.ArtifactDigest().IsZero() ||
 		!strings.HasPrefix(verified.CheckpointID().String(), "sha256:") {
 		t.Fatalf("verified checkpoint is incomplete: %#v", verified)
 	}
@@ -32,7 +31,6 @@ func TestWorkspaceInitializationUsesCommittedPlanHeadCheckpoint(t *testing.T) {
 	request, err := json.Marshal(map[string]any{
 		"schema_version": 2,
 		"occurred_at":    "2026-07-23T14:03:00Z",
-		"worktree_root":  workspaceTestWorktreeRoot(t, runtimeRoot),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -50,15 +48,6 @@ func TestWorkspaceInitializationUsesCommittedPlanHeadCheckpoint(t *testing.T) {
 	if initialized.PlanCheckpoint != verified.CheckpointID().String() {
 		t.Fatalf("initialized checkpoint = %s, want %s", initialized.PlanCheckpoint, verified.CheckpointID())
 	}
-	artifactPath := filepath.Join(runtimeRoot, workspace.WorkspaceStateDirectoryName, workspace.PlanCheckpointArtifactFileName)
-	artifact, err := os.ReadFile(artifactPath)
-	if err != nil {
-		t.Fatalf("read runtime checkpoint artifact: %v", err)
-	}
-	if workspace.DigestBytes(artifact) != verified.ArtifactDigest() {
-		t.Fatalf("runtime checkpoint artifact digest = %s, want %s", workspace.DigestBytes(artifact), verified.ArtifactDigest())
-	}
-
 	snapshot, err := workspace.ReadWorkspaceJournalSnapshot(runtimeRoot)
 	if err != nil {
 		t.Fatalf("read initialized journal: %v", err)
@@ -67,11 +56,9 @@ func TestWorkspaceInitializationUsesCommittedPlanHeadCheckpoint(t *testing.T) {
 	if !ok {
 		t.Fatalf("first event = %T", snapshot.Records()[0].Event())
 	}
-	if event.PlanCheckpoint() != verified.CheckpointID() ||
-		event.PlanCheckpointArtifactDigest() != verified.ArtifactDigest() {
-		t.Fatalf("initialization event checkpoint = %s/%s, want %s/%s",
-			event.PlanCheckpoint(), event.PlanCheckpointArtifactDigest(),
-			verified.CheckpointID(), verified.ArtifactDigest())
+	if event.PlanCheckpoint() != verified.CheckpointID() {
+		t.Fatalf("initialization event checkpoint = %s, want %s",
+			event.PlanCheckpoint(), verified.CheckpointID())
 	}
 }
 
@@ -142,8 +129,6 @@ policy:
   require_passing_checks: true
   allow_write_network: false
   max_attempts: 1
-  max_review_rounds: 1
-  max_review_fixes: 1
 profiles:
   - id: standard
     runner: codex
@@ -151,8 +136,6 @@ profiles:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 1
-      max_review_rounds: 1
-      max_review_fixes: 1
 merge_units:
   - plan_id: alpha-plan
     merge_unit_id: unit-one
@@ -165,14 +148,11 @@ merge_units:
       require_passing_checks: true
       allow_write_network: false
       max_attempts: 1
-      max_review_rounds: 1
-      max_review_fixes: 1
 `)
 	if _, err := workspacecmd.Execute(context.Background(), workspacecmd.Options{
-		Action:           "validate",
-		BundleDir:        root,
-		WriteLocks:       true,
-		GeneratorVersion: "test",
+		Action:     "validate",
+		BundleDir:  root,
+		WriteLocks: true,
 	}); err != nil {
 		t.Fatalf("write generated locks: %v", err)
 	}
