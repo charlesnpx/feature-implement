@@ -313,7 +313,6 @@ type noReviewIntegrationHarness struct {
 	attempt    workspace.RuntimeAttemptProjection
 	repository *reviewRepositoryStub
 	git        *integrationGitStub
-	adoption   workspace.AttemptHeadAdoptionResult
 }
 
 type noReviewIntegrationHarnessSnapshot struct {
@@ -326,7 +325,6 @@ type noReviewIntegrationHarnessSnapshot struct {
 	attemptID          workspace.ID
 	verifiedHead       workspace.GitObjectID
 	repositorySnapshot workspace.ReviewRepositorySnapshot
-	adoption           workspace.AttemptHeadAdoptionResult
 	repositoryImage    string
 	workspaceImage     string
 }
@@ -1422,7 +1420,7 @@ func newNoReviewIntegrationHarness(
 		t.Fatal(err)
 	}
 	repository := &reviewRepositoryStub{snapshot: repositorySnapshot}
-	adoption, err := workspace.AdoptAttemptHead(
+	_, err = workspace.AdoptAttemptHead(
 		context.Background(), core.journal, core.definition, repository,
 		workspace.AdoptAttemptHeadRequest{
 			AttemptID:  attempt.AttemptID(),
@@ -1451,7 +1449,6 @@ func newNoReviewIntegrationHarness(
 		git: &integrationGitStub{
 			featureHead: core.base,
 		},
-		adoption: adoption,
 	}
 }
 
@@ -1482,7 +1479,6 @@ func snapshotNoReviewIntegrationHarness(
 		attemptID:          harness.attempt.AttemptID(),
 		verifiedHead:       harness.attempt.VerifiedHead(),
 		repositorySnapshot: harness.repository.snapshot,
-		adoption:           harness.adoption,
 		repositoryImage:    repositoryImage,
 		workspaceImage:     workspaceImage,
 	}
@@ -1522,7 +1518,6 @@ func (snapshot noReviewIntegrationHarnessSnapshot) restore(t *testing.T) *noRevi
 		attempt:    attempt,
 		repository: &reviewRepositoryStub{snapshot: snapshot.repositorySnapshot},
 		git:        &integrationGitStub{featureHead: snapshot.base},
-		adoption:   snapshot.adoption,
 	}
 }
 

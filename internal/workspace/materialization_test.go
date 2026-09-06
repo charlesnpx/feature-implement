@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1711,7 +1710,10 @@ func copyTestFilesystemTree(t *testing.T, source, destination string) {
 		copyTestFilesystemTreeClone(t, source, destination)
 		return
 	}
-	copyTestFilesystemTreePortable(t, source, destination, rootInfo)
+	output, err := exec.Command("cp", "-a", source, destination).CombinedOutput()
+	if err != nil {
+		t.Fatalf("copy materialization snapshot: %v\n%s", err, output)
+	}
 }
 
 // cloneGitTestFilesystemTree uses a copy-on-write clone for a Git fixture.
@@ -1789,92 +1791,6 @@ func repairTestFilesystemHardLinks(t *testing.T, source, destination string) {
 		return nil
 	}); err != nil {
 		t.Fatalf("repair materialization snapshot hard links: %v", err)
-	}
-}
-
-func copyTestFilesystemTreePortable(
-	t *testing.T,
-	source, destination string,
-	rootInfo os.FileInfo,
-) {
-	t.Helper()
-	if err := os.Mkdir(destination, rootInfo.Mode().Perm()); err != nil {
-		t.Fatalf("create materialization snapshot destination: %v", err)
-	}
-	if err := os.Chmod(destination, rootInfo.Mode().Perm()); err != nil {
-		t.Fatalf("set materialization snapshot root mode: %v", err)
-	}
-
-	type copiedFile struct {
-		info        os.FileInfo
-		destination string
-	}
-	var copied []copiedFile
-	if err := filepath.WalkDir(source, func(current string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if current == source {
-			return nil
-		}
-		relative, err := filepath.Rel(source, current)
-		if err != nil {
-			return err
-		}
-		target := filepath.Join(destination, relative)
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		switch {
-		case info.IsDir():
-			if err := os.Mkdir(target, info.Mode().Perm()); err != nil {
-				return err
-			}
-			return os.Chmod(target, info.Mode().Perm())
-		case info.Mode()&os.ModeSymlink != 0:
-			link, err := os.Readlink(current)
-			if err != nil {
-				return err
-			}
-			return os.Symlink(link, target)
-		case info.Mode().IsRegular():
-			for _, prior := range copied {
-				if os.SameFile(info, prior.info) {
-					return os.Link(prior.destination, target)
-				}
-			}
-			input, err := os.Open(current)
-			if err != nil {
-				return err
-			}
-			output, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
-			if err != nil {
-				_ = input.Close()
-				return err
-			}
-			if _, err := io.Copy(output, input); err != nil {
-				_ = output.Close()
-				_ = input.Close()
-				return err
-			}
-			if err := output.Close(); err != nil {
-				_ = input.Close()
-				return err
-			}
-			if err := input.Close(); err != nil {
-				return err
-			}
-			if err := os.Chmod(target, info.Mode().Perm()); err != nil {
-				return err
-			}
-			copied = append(copied, copiedFile{info: info, destination: target})
-			return nil
-		default:
-			return fmt.Errorf("unsupported materialization snapshot entry %s (%s)", current, info.Mode())
-		}
-	}); err != nil {
-		t.Fatalf("copy materialization snapshot: %v", err)
 	}
 }
 
