@@ -304,7 +304,6 @@ func TestWorkspaceCompletionRetryRecoversBeforeAndAfterAppendFaults(
 		workspace.CompletionFaultBeforeAppend,
 		workspace.CompletionFaultAfterAppend,
 	} {
-		point := point
 		t.Run(string(point), func(t *testing.T) {
 			t.Parallel()
 

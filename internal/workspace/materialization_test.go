@@ -51,7 +51,6 @@ func TestMaterializationRejectsSymlinkedDestinationRootsAndAncestors(t *testing.
 			},
 		},
 	} {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -91,7 +90,6 @@ func TestMaterializationBootstrapsAbsentOrEmptyDestination(t *testing.T) {
 	t.Parallel()
 
 	for _, existing := range []bool{false, true} {
-		existing := existing
 		t.Run(fmt.Sprintf("existing=%t", existing), func(t *testing.T) {
 			t.Parallel()
 
@@ -285,7 +283,6 @@ func TestMaterializationPreservesModifiedOrMissingOwnedArtifacts(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -352,7 +349,6 @@ func TestMaterializationTreatsLaterMissingOrCorruptInventoryAsCorruption(t *test
 			},
 		},
 	} {
-		mutate := mutate
 		t.Run(mutate.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -508,7 +504,6 @@ func TestMaterializationRecoversAcrossStagedUpdateFaults(t *testing.T) {
 		t, root, testGeneratorVersion, artifacts, capturePoints,
 	)
 	for _, point := range points {
-		point := point
 		t.Run(string(point), func(t *testing.T) {
 			t.Parallel()
 
@@ -771,7 +766,6 @@ func TestMaterializationRecoveryPreservesTransactionPathsWithoutExactIdentity(t 
 			},
 		},
 	} {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -804,7 +798,6 @@ func TestMaterializationControlActivationNeverOverwritesAppearingTargets(t *test
 		{name: "inventory", faultOrdinal: 1, target: workspace.MaterializationInventoryFileName},
 		{name: "state", faultOrdinal: 2, target: workspace.MaterializationStateFileName},
 	} {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -856,7 +849,6 @@ func TestMaterializationRecoversMissingControlTargetsAfterQuarantine(t *testing.
 		{name: "inventory", faultOrdinal: 1, target: workspace.MaterializationInventoryFileName},
 		{name: "state", faultOrdinal: 2, target: workspace.MaterializationStateFileName},
 	} {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -1035,7 +1027,6 @@ func TestMaterializationQuarantinesBeforeHashingOwnedTargets(t *testing.T) {
 			mutatePath: "stale.md",
 		},
 	} {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -1194,7 +1185,6 @@ func TestMaterializationRecoversStaleDeletionAndDirectoryCleanup(t *testing.T) {
 		t, root, testGeneratorVersion, desired, capturePoints,
 	)
 	for _, point := range points {
-		point := point
 		t.Run(string(point), func(t *testing.T) {
 			t.Parallel()
 
@@ -1246,7 +1236,6 @@ func TestMaterializationRecoversOwnedUpdatesAcrossTransactionFaults(t *testing.T
 		t, root, testGeneratorVersion, desired, points,
 	)
 	for _, point := range points {
-		point := point
 		t.Run(string(point), func(t *testing.T) {
 			t.Parallel()
 
@@ -1447,7 +1436,6 @@ func TestMaterializationRecoveryRechecksOwnedBytesBeforeOverwriteOrDelete(t *tes
 			mutatePath: "stale.md",
 		},
 	} {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 

@@ -125,7 +125,6 @@ func TestWitnessAdapterRejectsMismatchedReportBindingsBeforeRecording(t *testing
 		},
 	}
 	for _, test := range tests {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 

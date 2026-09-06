@@ -344,7 +344,6 @@ func TestWorkspaceRuntimeViewsProjectPausedBoundaryKinds(
 		{name: "planned checkpoint", boundaryKind: workspace.AttemptBoundaryKindCheckpoint},
 		{name: "raised escalation", boundaryKind: workspace.AttemptBoundaryKindEscalation},
 	} {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 

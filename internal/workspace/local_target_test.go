@@ -19,7 +19,6 @@ func TestLocalTargetInitializationLeavesFeatureRefAbsent(t *testing.T) {
 		workspace.GitHashSHA1,
 		workspace.GitHashSHA256,
 	} {
-		algorithm := algorithm
 		t.Run(string(algorithm), func(t *testing.T) {
 			t.Parallel()
 

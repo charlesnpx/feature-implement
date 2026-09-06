@@ -797,7 +797,6 @@ func TestPauseAttemptPreservesPlannedAndExceptionStops(t *testing.T) {
 			checkpoint: workspace.AttemptCheckpointPauseOnly,
 		},
 	} {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -837,7 +836,6 @@ func TestLocalAttemptInspectionRejectsHiddenIndexFlags(t *testing.T) {
 		{name: "assume unchanged", flag: "--assume-unchanged"},
 		{name: "skip worktree", flag: "--skip-worktree"},
 	} {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
