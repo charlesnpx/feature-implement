@@ -126,6 +126,36 @@ func TestWorkspaceBundleRejectsReservedLockPolicySourceBeforeMutation(t *testing
 	}
 }
 
+func TestWorkspaceBundleRejectsCaseFoldedReservedLockSources(t *testing.T) {
+	t.Parallel()
+
+	for _, reservedPath := range []string{
+		strings.ToUpper(workspace.WorkspaceLockFileName),
+		strings.ToUpper(workspace.WorkspaceLockFileName + ".publication.lock"),
+	} {
+		t.Run(reservedPath, func(t *testing.T) {
+			fixture, _, _ := configuredReviewGateFixture(t)
+			configuration := string(fixture.sources.ExecutionConfig.Bytes)
+			updated := strings.Replace(configuration, "policies/root-review.md", reservedPath, 1)
+			if updated == configuration {
+				t.Fatal("configured review-gate fixture omitted root policy path")
+			}
+			fixture.sources.ExecutionConfig.Bytes = []byte(updated)
+			for index := range fixture.sources.ReviewPolicies {
+				if fixture.sources.ReviewPolicies[index].Path == "policies/root-review.md" {
+					fixture.sources.ReviewPolicies[index].Path = reservedPath
+				}
+			}
+			root := writeDefinitionBundle(t, fixture, nil)
+			if _, err := workspace.LoadWorkspaceBundle(root); err == nil ||
+				!strings.Contains(err.Error(), "reserved generated file") ||
+				!strings.Contains(err.Error(), reservedPath) {
+				t.Fatalf("case-folded reserved source error = %v", err)
+			}
+		})
+	}
+}
+
 func TestWorkspaceBundleRejectsReservedDerivedRootSuffix(t *testing.T) {
 	t.Parallel()
 

@@ -105,19 +105,24 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 	// claimed. A source must not be able to become the object later written by
 	// lock publication.
 	reservedSourcePaths := map[string]struct{}{
-		WorkspaceBundleFileName:          {},
-		WorkspaceLockFileName:            {},
-		workspaceLockPublicationLockName: {},
+		materializationCollisionKey(WorkspaceBundleFileName):          {},
+		materializationCollisionKey(WorkspaceLockFileName):            {},
+		materializationCollisionKey(workspaceLockPublicationLockName): {},
 	}
-	sourceOwners := make(map[string]string)
+	type sourceClaim struct {
+		path  string
+		owner string
+	}
+	sourceOwners := make(map[string]sourceClaim)
 	claimSourcePath := func(path, owner string) error {
-		if _, reserved := reservedSourcePaths[path]; reserved {
+		key := materializationCollisionKey(path)
+		if _, reserved := reservedSourcePaths[key]; reserved {
 			return fmt.Errorf("workspace bundle source path %s is a reserved generated file", path)
 		}
-		if prior, exists := sourceOwners[path]; exists {
-			return fmt.Errorf("workspace bundle source path %s is claimed by both %s and %s", path, prior, owner)
+		if prior, exists := sourceOwners[key]; exists {
+			return fmt.Errorf("workspace bundle source path %s is claimed by both %s and %s", path, prior.owner, owner)
 		}
-		sourceOwners[path] = owner
+		sourceOwners[key] = sourceClaim{path: path, owner: owner}
 		return nil
 	}
 	if err := claimSourcePath(workspacePath, "workspace"); err != nil {
@@ -204,8 +209,8 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 	}
 	sourcePaths := make([]string, 0, len(sourceOwners)+1)
 	sourcePaths = append(sourcePaths, WorkspaceBundleFileName)
-	for sourcePath := range sourceOwners {
-		sourcePaths = append(sourcePaths, sourcePath)
+	for _, source := range sourceOwners {
+		sourcePaths = append(sourcePaths, source.path)
 	}
 	sort.Strings(sourcePaths)
 	sourceFiles := make(map[string][]byte, len(sourcePaths))
