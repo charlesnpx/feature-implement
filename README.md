@@ -248,9 +248,11 @@ derived plan checkpoint and needs no root paths in its request:
 }
 ```
 
-Runtime state is append-only under `<runtime-root>/state/`. A runtime without
-the local v9 format marker is rejected with a regeneration diagnostic; it is
-not interpreted or migrated.
+Under `<runtime-root>/state/`, the journal is append-only; projections and
+recovery controls are disposable or replaceable; raw review documents are
+content-addressed retained evidence. A runtime without the local v9 format
+marker is rejected with a regeneration diagnostic; it is not interpreted or
+migrated.
 
 ## Local execution
 

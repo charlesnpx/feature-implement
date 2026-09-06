@@ -38,7 +38,9 @@ func TestWorkspaceBundleRejectsHiddenDuplicateAndAmbiguousSources(t *testing.T) 
 
 	t.Run("descriptor self reference", func(t *testing.T) {
 		root := writeDefinitionBundle(t, fixture, map[string]any{"workspace": workspace.WorkspaceBundleFileName})
-		if _, err := workspace.LoadWorkspaceBundle(root); err == nil || !strings.Contains(err.Error(), "cannot reference its descriptor") {
+		if _, err := workspace.LoadWorkspaceBundle(root); err == nil ||
+			!strings.Contains(err.Error(), "reserved generated file") ||
+			!strings.Contains(err.Error(), workspace.WorkspaceBundleFileName) {
 			t.Fatalf("descriptor self-reference error = %v", err)
 		}
 	})
@@ -82,6 +84,46 @@ func TestWorkspaceBundleRejectsHiddenDuplicateAndAmbiguousSources(t *testing.T) 
 			t.Fatalf("duplicate descriptor key error = %v", err)
 		}
 	})
+}
+
+func TestWorkspaceBundleRejectsReservedLockPolicySourceBeforeMutation(t *testing.T) {
+	t.Parallel()
+
+	fixture, _, _ := configuredReviewGateFixture(t)
+	configuration := string(fixture.sources.ExecutionConfig.Bytes)
+	updated := strings.Replace(
+		configuration,
+		"policies/root-review.md",
+		workspace.WorkspaceLockFileName,
+		1,
+	)
+	if updated == configuration {
+		t.Fatal("configured review-gate fixture omitted root policy path")
+	}
+	fixture.sources.ExecutionConfig.Bytes = []byte(updated)
+	for index := range fixture.sources.ReviewPolicies {
+		if fixture.sources.ReviewPolicies[index].Path == "policies/root-review.md" {
+			fixture.sources.ReviewPolicies[index].Path = workspace.WorkspaceLockFileName
+		}
+	}
+	root := writeDefinitionBundle(t, fixture, nil)
+	lockPath := filepath.Join(root, workspace.WorkspaceLockFileName)
+	before, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.LoadWorkspaceBundle(root); err == nil ||
+		!strings.Contains(err.Error(), "reserved generated file") ||
+		!strings.Contains(err.Error(), workspace.WorkspaceLockFileName) {
+		t.Fatalf("reserved policy source error = %v", err)
+	}
+	after, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("reserved lock source changed during bundle load: %q", after)
+	}
 }
 
 func TestWorkspaceBundleRejectsReservedDerivedRootSuffix(t *testing.T) {

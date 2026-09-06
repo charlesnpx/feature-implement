@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"syscall"
 )
 
 type PublicationFaultPoint string
@@ -44,19 +45,25 @@ func (root *VerifiedRoot) PublishReplaceable(
 	permission os.FileMode,
 	maximum int64,
 	options PublicationOptions,
-) error {
+) (resultErr error) {
 	if root == nil || root.adapter == nil {
 		return fmt.Errorf("verified root is closed")
 	}
 	if maximum < 0 || int64(len(content)) > maximum {
 		return fmt.Errorf("replaceable rooted file %s exceeds %d bytes", relative, maximum)
 	}
-	rooted, err := NewRootedPath(root.path, relative)
+	var releasePublication func() error
+	var err error
+	relative, releasePublication, err = root.lockReplaceablePublication(relative)
 	if err != nil {
 		return err
 	}
-	relative = rooted.Relative()
-	if err := root.RecoverReplaceable(relative); err != nil {
+	defer func() {
+		if releaseErr := releasePublication(); releaseErr != nil {
+			resultErr = errors.Join(resultErr, releaseErr)
+		}
+	}()
+	if err := root.recoverReplaceable(relative); err != nil {
 		return err
 	}
 
@@ -129,22 +136,84 @@ func (root *VerifiedRoot) PublishReplaceable(
 
 // ReadReplaceable recovers a previously interrupted publication before
 // returning the current stable file.
-func (root *VerifiedRoot) ReadReplaceable(relative string, maximum int64) ([]byte, error) {
-	if err := root.RecoverReplaceable(relative); err != nil {
+func (root *VerifiedRoot) ReadReplaceable(relative string, maximum int64) (content []byte, resultErr error) {
+	var releasePublication func() error
+	var err error
+	relative, releasePublication, err = root.lockReplaceablePublication(relative)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if releaseErr := releasePublication(); releaseErr != nil {
+			resultErr = errors.Join(resultErr, releaseErr)
+		}
+	}()
+	if err := root.recoverReplaceable(relative); err != nil {
 		return nil, err
 	}
 	return root.ReadBounded(relative, maximum)
 }
 
-func (root *VerifiedRoot) RecoverReplaceable(relative string) error {
-	if root == nil || root.adapter == nil {
-		return fmt.Errorf("verified root is closed")
-	}
-	rooted, err := NewRootedPath(root.path, relative)
+func (root *VerifiedRoot) RecoverReplaceable(relative string) (resultErr error) {
+	var releasePublication func() error
+	var err error
+	relative, releasePublication, err = root.lockReplaceablePublication(relative)
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if releaseErr := releasePublication(); releaseErr != nil {
+			resultErr = errors.Join(resultErr, releaseErr)
+		}
+	}()
+	return root.recoverReplaceable(relative)
+}
+
+func (root *VerifiedRoot) lockReplaceablePublication(relative string) (string, func() error, error) {
+	if root == nil || root.adapter == nil {
+		return "", nil, fmt.Errorf("verified root is closed")
+	}
+	rooted, err := NewRootedPath(root.path, relative)
+	if err != nil {
+		return "", nil, err
+	}
 	relative = rooted.Relative()
+	lockPath := relative + ".publication.lock"
+	file, _, err := root.openOwnedRegularFile(lockPath, os.O_RDWR, 0o600, true)
+	if err != nil {
+		return "", nil, fmt.Errorf("open replaceable publication lock for %s: %w", relative, err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
+		_ = file.Close()
+		return "", nil, fmt.Errorf("acquire replaceable publication lock for %s: %w", relative, err)
+	}
+	if err := root.verifyOwnedRegularFile(lockPath, file); err != nil {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+		return "", nil, fmt.Errorf("verify replaceable publication lock for %s: %w", relative, err)
+	}
+	return relative, func() error {
+		verifyErr := root.verifyOwnedRegularFile(lockPath, file)
+		unlockErr := syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		closeErr := file.Close()
+		if verifyErr != nil {
+			verifyErr = fmt.Errorf(
+				"replaceable publication lock for %s was replaced before release: %w",
+				relative,
+				verifyErr,
+			)
+		}
+		if unlockErr != nil {
+			unlockErr = fmt.Errorf("unlock replaceable publication lock for %s: %w", relative, unlockErr)
+		}
+		if closeErr != nil {
+			closeErr = fmt.Errorf("close replaceable publication lock for %s: %w", relative, closeErr)
+		}
+		return errors.Join(verifyErr, unlockErr, closeErr)
+	}, nil
+}
+
+func (root *VerifiedRoot) recoverReplaceable(relative string) error {
 	intentPath, expectedPending, expectedBackup := publicationControlPaths(relative)
 	intentBytes, err := root.ReadBounded(intentPath, 16*1024)
 	if errors.Is(err, os.ErrNotExist) {

@@ -433,7 +433,16 @@ func TestReplaceablePublicationRaceLeavesOneCompleteStableObject(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	candidates := [][]byte{[]byte("candidate-a\n"), []byte("candidate-b\n")}
+	candidates := [][]byte{
+		[]byte("candidate-a\n"),
+		[]byte("candidate-b\n"),
+		[]byte("candidate-c\n"),
+		[]byte("candidate-d\n"),
+		[]byte("candidate-e\n"),
+		[]byte("candidate-f\n"),
+		[]byte("candidate-g\n"),
+		[]byte("candidate-h\n"),
+	}
 	start := make(chan struct{})
 	results := make(chan error, len(candidates))
 	var group sync.WaitGroup
@@ -461,15 +470,31 @@ func TestReplaceablePublicationRaceLeavesOneCompleteStableObject(t *testing.T) {
 			successes++
 		}
 	}
-	if successes == 0 {
-		t.Fatal("concurrent publications produced no stable winner")
+	if successes != len(candidates) {
+		t.Fatalf("concurrent publications succeeded %d of %d times", successes, len(candidates))
 	}
 	content, err := root.ReadReplaceable("projection.json", 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(content) != string(candidates[0]) && string(content) != string(candidates[1]) {
+	matched := false
+	for _, candidate := range candidates {
+		if string(content) == string(candidate) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
 		t.Fatalf("concurrent publication content = %q", content)
+	}
+	entries, err := root.adapter.readDirectory(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.name, "runtime-publication-") {
+			t.Fatalf("concurrent publication left control file %s", entry.name)
+		}
 	}
 }
 

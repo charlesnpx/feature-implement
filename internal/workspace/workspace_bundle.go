@@ -101,8 +101,19 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 	if err != nil {
 		return WorkspaceBundle{}, err
 	}
+	// Generated artifacts occupy these paths before any bundle source is
+	// claimed. A source must not be able to become the object later written by
+	// lock publication.
+	reservedSourcePaths := map[string]struct{}{
+		WorkspaceBundleFileName:          {},
+		WorkspaceLockFileName:            {},
+		workspaceLockPublicationLockName: {},
+	}
 	sourceOwners := make(map[string]string)
 	claimSourcePath := func(path, owner string) error {
+		if _, reserved := reservedSourcePaths[path]; reserved {
+			return fmt.Errorf("workspace bundle source path %s is a reserved generated file", path)
+		}
 		if prior, exists := sourceOwners[path]; exists {
 			return fmt.Errorf("workspace bundle source path %s is claimed by both %s and %s", path, prior, owner)
 		}
@@ -281,9 +292,6 @@ func normalizeBundleSourcePath(field, value string) (string, error) {
 		if strings.HasPrefix(component, ".") {
 			return "", fmt.Errorf("workspace bundle %s cannot reference hidden path %s", field, path)
 		}
-	}
-	if path == WorkspaceBundleFileName || path == WorkspaceLockFileName {
-		return "", fmt.Errorf("workspace bundle %s cannot reference its descriptor", field)
 	}
 	return path, nil
 }
