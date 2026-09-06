@@ -798,6 +798,8 @@ func TestPauseAttemptPreservesPlannedAndExceptionStops(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			harness := test.harness(t)
 			attempt := harness.reserve(t, "2026-07-21T12:10:00Z")
 			harness.git.setHead(
@@ -835,6 +837,8 @@ func TestLocalAttemptInspectionRejectsHiddenIndexFlags(t *testing.T) {
 		{name: "skip worktree", flag: "--skip-worktree"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			repository, _, base := newProtocolRepository(t)
 			worktree := filepath.Join(t.TempDir(), "attempt")
 			adapter := workspace.DefaultLocalAttemptGitAdapter()

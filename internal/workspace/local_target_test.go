@@ -20,6 +20,8 @@ func TestLocalTargetInitializationLeavesFeatureRefAbsent(t *testing.T) {
 		workspace.GitHashSHA256,
 	} {
 		t.Run(string(algorithm), func(t *testing.T) {
+			t.Parallel()
+
 			root, base := initializeTargetRepository(t, algorithm)
 			definition := localTargetDefinition(
 				t, root, base, "feature/local-target-binding",
@@ -60,6 +62,8 @@ func TestLocalTargetInitializationLeavesFeatureRefAbsent(t *testing.T) {
 	}
 
 	t.Run("accepts deleted base ref after initialization", func(t *testing.T) {
+		t.Parallel()
+
 		root, base := initializeTargetRepository(t, workspace.GitHashSHA1)
 		definition := localTargetDefinition(
 			t, root, base, "feature/deleted-base-ref",
@@ -116,6 +120,8 @@ func TestLocalTargetAdmissionUsesNarrowedProfile(t *testing.T) {
 	t.Parallel()
 
 	t.Run("allows sparse settings when the pinned object is available", func(t *testing.T) {
+		t.Parallel()
+
 		fixture := newDefinitionFixture(t)
 		definition := mustDefinition(t, fixture.sources)
 		root := definition.Workspace().RepositoryRoot()
@@ -127,6 +133,8 @@ func TestLocalTargetAdmissionUsesNarrowedProfile(t *testing.T) {
 	})
 
 	t.Run("rejects bare repository", func(t *testing.T) {
+		t.Parallel()
+
 		source, base := initializeTargetRepository(t, workspace.GitHashSHA1)
 		bare := filepath.Join(canonicalTestDirectory(t), "target.git")
 		runTargetGitTest(
@@ -141,6 +149,8 @@ func TestLocalTargetAdmissionUsesNarrowedProfile(t *testing.T) {
 	})
 
 	t.Run("rejects linked worktree", func(t *testing.T) {
+		t.Parallel()
+
 		root, base := initializeTargetRepository(t, workspace.GitHashSHA1)
 		linked := filepath.Join(canonicalTestDirectory(t), "linked")
 		runTargetGitTest(t, root, "worktree", "add", "--quiet", "--detach", linked, baseObjectHex(base))
@@ -152,6 +162,8 @@ func TestLocalTargetAdmissionUsesNarrowedProfile(t *testing.T) {
 	})
 
 	t.Run("rejects feature branch checked out elsewhere", func(t *testing.T) {
+		t.Parallel()
+
 		root, base := initializeTargetRepository(t, workspace.GitHashSHA1)
 		branch := "feature/checked-out"
 		runTargetGitTest(t, root, "branch", branch, baseObjectHex(base))
@@ -165,6 +177,8 @@ func TestLocalTargetAdmissionUsesNarrowedProfile(t *testing.T) {
 	})
 
 	t.Run("rejects external text conversion", func(t *testing.T) {
+		t.Parallel()
+
 		fixture := newDefinitionFixture(t)
 		definition := mustDefinition(t, fixture.sources)
 		root := definition.Workspace().RepositoryRoot()

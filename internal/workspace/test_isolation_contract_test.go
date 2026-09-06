@@ -39,7 +39,12 @@ func TestExternalWorkspaceTestsDeclareParallelIsolation(t *testing.T) {
 
 	// Exceptions are deliberately narrow and must explain why sharing process
 	// state cannot affect another parallel test. Keep this empty by default.
-	exceptions := map[string]string{}
+	exceptions := map[string]string{
+		"integration_template_test.go:<package>:mutable package global \"targetRepositoryTemplateSHA1\"":            "sync.OnceValues publishes one immutable template; every caller clones it before mutation.",
+		"integration_template_test.go:<package>:mutable package global \"targetRepositoryTemplateSHA256\"":          "sync.OnceValues publishes one immutable template; every caller clones it before mutation.",
+		"integration_template_test.go:<package>:mutable package global \"realIntegrationRepositoryTemplateSHA1\"":   "sync.OnceValues publishes one immutable template; every caller clones it before mutation.",
+		"integration_template_test.go:<package>:mutable package global \"realIntegrationRepositoryTemplateSHA256\"": "sync.OnceValues publishes one immutable template; every caller clones it before mutation.",
+	}
 	usedExceptions := make(map[string]bool, len(exceptions))
 	violations := make([]string, 0)
 	addViolation := func(filename, scope, rule string, position token.Pos) {

@@ -313,7 +313,20 @@ type noReviewIntegrationHarness struct {
 	attempt    workspace.RuntimeAttemptProjection
 	repository *reviewRepositoryStub
 	git        *integrationGitStub
-	adoption   workspace.AttemptHeadAdoptionResult
+}
+
+type noReviewIntegrationHarnessSnapshot struct {
+	definition         workspace.EffectiveWorkspaceDefinition
+	workspace          string
+	repositoryRoot     string
+	base               workspace.GitObjectID
+	unit               workspace.MergeUnitReference
+	goal               workspace.GoalBinding
+	attemptID          workspace.ID
+	verifiedHead       workspace.GitObjectID
+	repositorySnapshot workspace.ReviewRepositorySnapshot
+	repositoryImage    string
+	workspaceImage     string
 }
 
 func TestNoReviewIntegrationRequiresDurableSameHeadAdoption(t *testing.T) {
@@ -526,6 +539,7 @@ func TestIntegrationRecoversEveryDurableEffectBoundaryDeterministically(
 		workspace.IntegrationFaultBeforeCompletion,
 		workspace.IntegrationFaultAfterCompletion,
 	}
+	snapshot := snapshotNoReviewIntegrationHarness(t, newNoReviewIntegrationHarness(t, false))
 	for _, point := range points {
 		t.Run(string(point), func(t *testing.T) {
 			requireFullSuiteCase(
@@ -535,7 +549,7 @@ func TestIntegrationRecoversEveryDurableEffectBoundaryDeterministically(
 				"intermediate integration durability boundary",
 			)
 
-			harness := newNoReviewIntegrationHarness(t, false)
+			harness := snapshot.restore(t)
 			_, err := workspace.IntegrateMergeUnit(
 				context.Background(),
 				harness.journal,
@@ -1406,7 +1420,7 @@ func newNoReviewIntegrationHarness(
 		t.Fatal(err)
 	}
 	repository := &reviewRepositoryStub{snapshot: repositorySnapshot}
-	adoption, err := workspace.AdoptAttemptHead(
+	_, err = workspace.AdoptAttemptHead(
 		context.Background(), core.journal, core.definition, repository,
 		workspace.AdoptAttemptHeadRequest{
 			AttemptID:  attempt.AttemptID(),
@@ -1435,7 +1449,75 @@ func newNoReviewIntegrationHarness(
 		git: &integrationGitStub{
 			featureHead: core.base,
 		},
-		adoption: adoption,
+	}
+}
+
+// snapshotNoReviewIntegrationHarness captures the accepted fake-adapter
+// fixture once. Each durable integration fault gets a restored journal and
+// local-target repository at the original absolute paths, so the table keeps
+// its partitions without sharing mutable state between subtests.
+func snapshotNoReviewIntegrationHarness(
+	t *testing.T,
+	harness *noReviewIntegrationHarness,
+) noReviewIntegrationHarnessSnapshot {
+	t.Helper()
+	if err := harness.journal.Close(); err != nil {
+		t.Fatalf("close no-review integration harness before snapshot: %v", err)
+	}
+	imageRoot := canonicalMaterializationTestTempDir(t)
+	repositoryImage := filepath.Join(imageRoot, "repository")
+	workspaceImage := filepath.Join(imageRoot, "workspace")
+	copyTestFilesystemTree(t, harness.definition.Workspace().RepositoryRoot(), repositoryImage)
+	copyTestFilesystemTree(t, harness.workspace, workspaceImage)
+	return noReviewIntegrationHarnessSnapshot{
+		definition:         harness.definition,
+		workspace:          harness.workspace,
+		repositoryRoot:     harness.definition.Workspace().RepositoryRoot(),
+		base:               harness.base,
+		unit:               harness.unit,
+		goal:               harness.goal,
+		attemptID:          harness.attempt.AttemptID(),
+		verifiedHead:       harness.attempt.VerifiedHead(),
+		repositorySnapshot: harness.repository.snapshot,
+		repositoryImage:    repositoryImage,
+		workspaceImage:     workspaceImage,
+	}
+}
+
+func (snapshot noReviewIntegrationHarnessSnapshot) restore(t *testing.T) *noReviewIntegrationHarness {
+	t.Helper()
+	restoreTestFilesystemTree(t, snapshot.repositoryImage, snapshot.repositoryRoot)
+	restoreTestFilesystemTree(t, snapshot.workspaceImage, snapshot.workspace)
+	journal, err := workspace.OpenWorkspaceJournal(snapshot.workspace, workspace.JournalReadWrite)
+	if err != nil {
+		t.Fatalf("open restored no-review integration journal: %v", err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	journalSnapshot, err := journal.ReadSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := workspace.RebuildWorkspaceRuntime(journalSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, exists := runtime.Attempt(snapshot.attemptID)
+	if !exists || attempt.VerifiedHead() != snapshot.verifiedHead {
+		t.Fatalf("restored no-review attempt = %#v exists=%t", attempt, exists)
+	}
+	return &noReviewIntegrationHarness{
+		attemptHarness: attemptHarness{
+			definition: snapshot.definition,
+			journal:    journal,
+			workspace:  snapshot.workspace,
+			git:        &fakeAttemptGit{},
+			base:       snapshot.base,
+			unit:       snapshot.unit,
+			goal:       snapshot.goal,
+		},
+		attempt:    attempt,
+		repository: &reviewRepositoryStub{snapshot: snapshot.repositorySnapshot},
+		git:        &integrationGitStub{featureHead: snapshot.base},
 	}
 }
 

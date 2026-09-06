@@ -239,6 +239,8 @@ func TestDeferredLocalCommandsStrictlyDecodeTheirFinalEnvelopes(
 }
 
 func TestExecuteIntegrationSucceedsAndRetriesIdempotently(t *testing.T) {
+	t.Parallel()
+
 	repositoryRoot := canonicalWorkspaceCommandTempDir(t)
 	runGitTest(t, repositoryRoot, "init", "-b", "main")
 	runGitTest(t, repositoryRoot, "config", "user.name", "Feature Test")
