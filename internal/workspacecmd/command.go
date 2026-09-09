@@ -41,6 +41,7 @@ type Options struct {
 	Subaction    string
 	BundleDir    string
 	WorkspaceDir string
+	CharterPath  string
 	Input        []byte
 	WriteLocks   bool
 }

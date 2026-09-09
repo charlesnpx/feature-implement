@@ -80,22 +80,26 @@ interprets a policy.
 3. Run the host-side adapter step after dispatch:
 
    ```sh
-   feature workspace review run --bundle <bundle-dir> --input <review-run.json> --json
+   feature workspace review run --bundle <bundle-dir> --charter <charter-path> --input <review-run.json> --json
    ```
 
    The strict request contains `schema_version`, `occurred_at`, and
-   `attempt_id`. `feature-implement` invokes the configured adapter as
-   `<adapter> review run`; the bundled default is `witness review run`. It
-   supplies the dispatch's frozen copy, opaque policy, and frozen review
-   configuration (the exact bytes or `bundled-default`) through the adapter
-   invocation, then observes the adapter's stdout completion envelope and
-   report artifact paths/digests. Adapter exit codes mean `0` = `satisfied`,
-   `20` = `not_satisfied`, and `21` = `failed_to_run`.
-4. The host constructs fresh execution evidence from the subprocess exit and
-   the report files it actually observes, then records the typed
-   `review-request-v2` / `review-completion-v1` pair through the in-process completion seam.
-   A subprocess that cannot start, exits with an unknown code,
-   or emits no parseable completion is recorded as `failed_to_run`, never
+   `attempt_id`. The operator supplies the Charter path; Feature Implement
+   passes it as `-charter` and does not interpret or invent a Charter.
+   `feature-implement` invokes the configured adapter as `<adapter> review run`
+   (the bundled default is `witness review run`) with flags for the frozen
+   source, output directory, frozen configuration when present, subject
+   head/tree, and `feature-implement` consumer identity. The adapter writes
+   canonical `review-request.json`, `charter.freeze.json`, and
+   `review-completion.json` into the output directory and prints a summary.
+   The host reads the request and completion documents from that directory;
+   stdout is only the adapter summary. Adapter exit codes mean `0` =
+   `satisfied`, `20` = `not_satisfied`, and `21` = `failed_to_run`.
+4. The host constructs fresh execution evidence from the subprocess
+   observations, then records the typed `review-request-v2` /
+   `review-completion-v1` pair through the in-process completion seam. A
+   subprocess that cannot start, exits with an unknown code, or produces a
+   missing/undecodable document is recorded as `failed_to_run`, never
    `satisfied`. The persisted completion JSON is an audit record with inert
    decoded evidence, not proof; it must not be loaded to establish a verdict.
    A failure to run is not a negative verdict and does not alter the attempt

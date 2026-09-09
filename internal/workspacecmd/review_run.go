@@ -3,7 +3,6 @@ package workspacecmd
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,61 +16,42 @@ import (
 )
 
 const (
-	reviewRunInvocationSchema = "feature-review-run-v1"
-	maxReviewAdapterOutput    = 4 * workspace.MaxArtifactBytes
-	failedReviewOutputID      = "review-result"
+	maxReviewAdapterOutput = 4 * workspace.MaxArtifactBytes
+	failedReviewOutputID   = "review-result"
 )
 
 // ReviewRunView is the host's observation of one adapter subprocess and the
-// terminal gate record made from that observation. The report artifact paths
-// are operational observations; the durable gate retains the completion
-// document and its digest, not these external paths.
+// terminal gate record made from that observation.
 type ReviewRunView struct {
-	DispatchDigest   string                           `json:"dispatch_digest"`
-	GateRecordDigest string                           `json:"gate_record_digest"`
-	Verdict          string                           `json:"verdict"`
-	ExitCode         int                              `json:"exit_code"`
-	RequestDigest    string                           `json:"request_digest"`
-	CompletionDigest string                           `json:"completion_digest"`
-	ReportArtifacts  map[string]ReviewRunArtifactView `json:"report_artifacts,omitempty"`
-	Observation      string                           `json:"observation,omitempty"`
+	DispatchDigest   string `json:"dispatch_digest"`
+	GateRecordDigest string `json:"gate_record_digest"`
+	Verdict          string `json:"verdict"`
+	ExitCode         int    `json:"exit_code"`
+	RequestDigest    string `json:"request_digest"`
+	CompletionDigest string `json:"completion_digest"`
+	Observation      string `json:"observation,omitempty"`
 }
 
-// ReviewRunArtifactView exposes the path and digest the host observed for a
-// required report output. It does not make the output a review finding.
-type ReviewRunArtifactView struct {
-	Path   string `json:"path"`
-	Digest string `json:"digest"`
+type reviewRunSummary struct {
+	OK                bool                  `json:"ok"`
+	Verdict           string                `json:"verdict"`
+	RequestPath       string                `json:"request_path"`
+	CharterFreezePath string                `json:"charter_freeze_path"`
+	CompletionPath    string                `json:"completion_path"`
+	Jobs              []reviewRunJobSummary `json:"jobs"`
+	Diagnostics       []string              `json:"diagnostics,omitempty"`
 }
 
-type reviewRunInvocation struct {
-	SchemaVersion             string `json:"schema_version"`
-	WorkspaceID               string `json:"workspace_id"`
-	AttemptID                 string `json:"attempt_id"`
-	DispatchDigest            string `json:"dispatch_digest"`
-	Adapter                   string `json:"adapter"`
-	Recipe                    string `json:"recipe"`
-	PolicyDigest              string `json:"policy_digest"`
-	Policy                    string `json:"policy"`
-	Head                      string `json:"head"`
-	Tree                      string `json:"tree"`
-	FrozenCopy                string `json:"frozen_copy"`
-	OutputDirectory           string `json:"output_directory"`
-	ReviewConfigurationSource string `json:"review_configuration_source"`
-	ReviewConfigurationDigest string `json:"review_configuration_digest"`
-	ReviewConfigurationPath   string `json:"review_configuration_path,omitempty"`
-	ReviewConfigurationBytes  []byte `json:"review_configuration_bytes,omitempty"`
-}
-
-type reviewRunOutput struct {
-	Request         *witnessreview.ReviewRequestV2Document  `json:"request,omitempty"`
-	Completion      *witnessreview.ReviewCompletionDocument `json:"completion,omitempty"`
-	ReportArtifacts map[string]reviewRunArtifact            `json:"report_artifacts,omitempty"`
-}
-
-type reviewRunArtifact struct {
-	Path   string `json:"path"`
-	Digest string `json:"digest"`
+type reviewRunJobSummary struct {
+	Reviewer                string `json:"reviewer"`
+	JobID                   string `json:"job_id"`
+	State                   string `json:"state"`
+	StateExitCode           int    `json:"state_exit_code"`
+	ReportStatus            string `json:"report_status"`
+	ResultArtifactAvailable bool   `json:"result_artifact_available"`
+	TranscriptComplete      bool   `json:"transcript_complete"`
+	TranscriptGap           bool   `json:"transcript_gap"`
+	ResultError             string `json:"result_error,omitempty"`
 }
 
 type reviewRunProcess struct {
@@ -126,6 +106,9 @@ func executeReviewRun(
 		configuration.Digest() != dispatchedConfiguration.Digest() {
 		return nil, fmt.Errorf("review run configuration does not match the frozen workspace bundle")
 	}
+	if strings.TrimSpace(options.CharterPath) == "" {
+		return nil, fmt.Errorf("workspace review run requires --charter <path>")
+	}
 
 	outputDirectory, err := os.MkdirTemp("", "feature-implement-review-run-")
 	if err != nil {
@@ -141,78 +124,101 @@ func executeReviewRun(
 		return nil, err
 	}
 
-	invocation := reviewRunInvocation{
-		SchemaVersion:             reviewRunInvocationSchema,
-		WorkspaceID:               dispatched.Dispatch().WorkspaceID().String(),
-		AttemptID:                 dispatched.Dispatch().AttemptID().String(),
-		DispatchDigest:            dispatched.Dispatch().Digest().String(),
-		Adapter:                   dispatched.Dispatch().Adapter().String(),
-		Recipe:                    dispatched.Dispatch().Recipe().String(),
-		PolicyDigest:              dispatched.Dispatch().PolicyDigest().String(),
-		Policy:                    string(dispatched.Policy()),
-		Head:                      dispatched.Dispatch().Head().String(),
-		Tree:                      dispatched.Dispatch().Tree().String(),
-		FrozenCopy:                dispatched.FrozenCopy(),
-		OutputDirectory:           outputDirectory,
-		ReviewConfigurationSource: configuration.Source(),
-		ReviewConfigurationDigest: configuration.Digest().String(),
-		ReviewConfigurationPath:   configurationPath,
-		ReviewConfigurationBytes:  configuration.Bytes(),
-	}
-	invocationBytes, err := json.Marshal(invocation)
-	if err != nil {
-		return nil, fmt.Errorf("encode review adapter invocation: %w", err)
-	}
-	process := runReviewAdapter(ctx, dispatched.Dispatch().Adapter().String(), dispatched.FrozenCopy(), invocationBytes)
-
-	output, outputErr := parseReviewRunOutput(process.stdout)
-	expectedVerdict, recognizedExit := reviewRunExitVerdict(process.exitCode)
-	var (
-		request         witnessreview.ReviewRequestV2Document
-		completion      witnessreview.ReviewCompletionDocument
-		evidence        witnessreview.HostExecutionEvidence
-		observed        witnessreview.ObservedReviewExecution
-		reportArtifacts map[string]ReviewRunArtifactView
-		observation     string
+	process := runReviewAdapter(
+		ctx,
+		dispatched.Dispatch().Adapter().String(),
+		dispatched.FrozenCopy(),
+		outputDirectory,
+		configurationPath,
+		dispatched.Dispatch().Head().String(),
+		dispatched.Dispatch().Tree().String(),
+		dispatched.Dispatch().WorkspaceID().String(),
+		options.CharterPath,
 	)
 
-	if process.started && recognizedExit && outputErr == nil && output.Request != nil && output.Completion != nil &&
-		output.Completion.Verdict == expectedVerdict && reviewRunCompletionMatchesRequest(*output.Request, *output.Completion) {
-		request = *output.Request
-		observed, reportArtifacts = observeReviewRunArtifacts(
-			request,
-			output.Completion.RequiredReportDigests,
-			output.ReportArtifacts,
-			dispatched.FrozenCopy(),
-			outputDirectory,
-			expectedVerdict,
-		)
-		evidence, err = witnessreview.NewHostExecutionEvidence(observed)
+	summary, summaryErr := parseReviewRunSummary(process.stdout)
+	expectedVerdict, recognizedExit := reviewRunExitVerdict(process.exitCode)
+	var (
+		request     witnessreview.ReviewRequestV2Document
+		completion  witnessreview.ReviewCompletionDocument
+		evidence    witnessreview.HostExecutionEvidence
+		observed    witnessreview.ObservedReviewExecution
+		observation string
+	)
+
+	requestBytes, requestReadErr := readReviewRunDocument(outputDirectory, "review-request.json")
+	completionBytes, completionReadErr := readReviewRunDocument(outputDirectory, "review-completion.json")
+	var (
+		decodedRequest      witnessreview.ReviewRequestV2Document
+		requestDecodeErr    error
+		adapterCompletion   witnessreview.ReviewCompletionDocument
+		completionDecodeErr error
+	)
+	if requestReadErr == nil {
+		decodedRequest, requestDecodeErr = witnessreview.DecodeAndValidateReviewRequestV2(requestBytes)
+	}
+	if completionReadErr == nil {
+		adapterCompletion, completionDecodeErr = witnessreview.DecodeReviewCompletion(completionBytes)
+	}
+	requestDocumentErr := requestReadErr
+	if requestDocumentErr == nil {
+		requestDocumentErr = requestDecodeErr
+	}
+	if requestDocumentErr == nil && !reviewRunRequestMatchesDispatch(decodedRequest, dispatched.Dispatch()) {
+		requestDocumentErr = errors.New("review request does not match the review gate dispatch")
+	}
+	if requestDocumentErr == nil {
+		request = decodedRequest
+	}
+	completionDocumentErr := completionReadErr
+	if completionDocumentErr == nil {
+		completionDocumentErr = completionDecodeErr
+	}
+	if process.started && recognizedExit && summaryErr == nil &&
+		summary.Verdict == expectedVerdict && summary.OK == (expectedVerdict == witnessreview.CompletionVerdictSatisfied) &&
+		requestDocumentErr == nil && completionDocumentErr == nil {
+		if adapterCompletion.Verdict != expectedVerdict || !reviewRunCompletionMatchesRequest(request, adapterCompletion) {
+			err = errors.New("review completion does not match the request or adapter exit verdict")
+		}
+		if err == nil {
+			observed, err = observeReviewRunSummary(request, summary, expectedVerdict)
+		}
+		if err == nil {
+			evidence, err = witnessreview.NewHostExecutionEvidence(observed)
+		}
 		if err == nil {
 			completion, err = witnessreview.NewReviewCompletionDocument(
 				request,
 				evidence,
-				cloneReviewReportDigests(output.Completion.RequiredReportDigests),
+				cloneReviewReportDigests(adapterCompletion.RequiredReportDigests),
 				expectedVerdict,
 			)
 		}
 		if err != nil {
-			observation = fmt.Sprintf("adapter output could not be recorded as observed completion: %v", err)
+			observation = fmt.Sprintf("adapter output documents could not be recorded as observed completion: %v", err)
 		}
 	} else {
-		observation = reviewRunFailureObservation(process, outputErr, expectedVerdict, recognizedExit)
+		observation = reviewRunFailureObservation(
+			process,
+			summaryErr,
+			expectedVerdict,
+			recognizedExit,
+			requestDocumentErr,
+			completionDocumentErr,
+		)
 	}
 
 	if completion.SchemaVersion == "" {
-		// A missing process, unknown exit code, malformed/no stdout completion, or
-		// any unusable completion is failed_to_run. The synthetic request is a
-		// failure-only binding; it is never allowed to claim satisfaction.
-		request, err = failedReviewRequest(dispatched.Dispatch())
-		if err != nil {
-			return nil, fmt.Errorf("construct failed-to-run review request: %w", err)
+		// A missing process, unknown exit code, malformed/no stdout summary, or any
+		// unusable output document is failed_to_run. Retain a valid adapter request
+		// when one exists so the recorded failure still binds the supplied Charter.
+		if requestDocumentErr != nil {
+			request, err = failedReviewRequest(dispatched.Dispatch())
+			if err != nil {
+				return nil, fmt.Errorf("construct failed-to-run review request: %w", err)
+			}
 		}
-		observed = failedReviewExecution()
-		reportArtifacts = nil
+		observed = failedReviewExecution(request)
 		evidence, err = witnessreview.NewHostExecutionEvidence(observed)
 		if err != nil {
 			return nil, fmt.Errorf("construct failed-to-run host evidence: %w", err)
@@ -252,7 +258,6 @@ func executeReviewRun(
 		ExitCode:         process.exitCode,
 		RequestDigest:    requestDigest,
 		CompletionDigest: completionDigest,
-		ReportArtifacts:  reportArtifacts,
 		Observation:      observation,
 	}
 	return reviewCommandResult("review.run", detail, journal, definition)
@@ -293,10 +298,34 @@ func materializeReviewConfiguration(outputDirectory string, configuration worksp
 	return resolved, nil
 }
 
-func runReviewAdapter(ctx context.Context, adapter, frozenCopy string, invocation []byte) reviewRunProcess {
-	command := exec.CommandContext(ctx, adapter, "review", "run")
+func runReviewAdapter(
+	ctx context.Context,
+	adapter string,
+	frozenCopy string,
+	outputDirectory string,
+	configurationPath string,
+	head string,
+	tree string,
+	workspaceID string,
+	charterPath string,
+) reviewRunProcess {
+	arguments := []string{
+		"review", "run",
+		"-source-dir", frozenCopy,
+		"-out-dir", outputDirectory,
+	}
+	if strings.TrimSpace(configurationPath) != "" {
+		arguments = append(arguments, "-config", configurationPath)
+	}
+	arguments = append(arguments,
+		"-subject-head", head,
+		"-subject-tree", tree,
+		"-consumer-kind", "feature-implement",
+		"-consumer-id", workspaceID,
+		"-charter", charterPath,
+	)
+	command := exec.CommandContext(ctx, adapter, arguments...)
 	command.Dir = frozenCopy
-	command.Stdin = bytes.NewReader(invocation)
 	stdout := &boundedReviewOutput{limit: maxReviewAdapterOutput}
 	stderr := &boundedReviewOutput{limit: maxReviewAdapterOutput}
 	command.Stdout = stdout
@@ -335,18 +364,95 @@ func (output *boundedReviewOutput) Write(value []byte) (int, error) {
 	return output.Buffer.Write(value)
 }
 
-func parseReviewRunOutput(source []byte) (reviewRunOutput, error) {
+func parseReviewRunSummary(source []byte) (reviewRunSummary, error) {
 	if len(bytes.TrimSpace(source)) == 0 {
-		return reviewRunOutput{}, errors.New("review adapter produced no parseable completion on stdout")
+		return reviewRunSummary{}, errors.New("review adapter produced no parseable summary on stdout")
 	}
-	var output reviewRunOutput
-	if err := workspace.DecodeStrictJSON(source, &output); err != nil {
-		return reviewRunOutput{}, fmt.Errorf("decode review adapter stdout completion: %w", err)
+	var summary reviewRunSummary
+	if err := workspace.DecodeStrictJSON(source, &summary); err != nil {
+		return reviewRunSummary{}, fmt.Errorf("decode review adapter stdout summary: %w", err)
 	}
-	if output.Request == nil || output.Completion == nil {
-		return reviewRunOutput{}, errors.New("review adapter stdout must contain request and completion")
+	if strings.TrimSpace(summary.Verdict) == "" ||
+		strings.TrimSpace(summary.RequestPath) == "" ||
+		strings.TrimSpace(summary.CharterFreezePath) == "" ||
+		strings.TrimSpace(summary.CompletionPath) == "" ||
+		summary.Jobs == nil {
+		return reviewRunSummary{}, errors.New("review adapter stdout summary is missing required fields")
 	}
-	return output, nil
+	return summary, nil
+}
+
+func readReviewRunDocument(outputDirectory, name string) ([]byte, error) {
+	root, err := filepath.EvalSymlinks(outputDirectory)
+	if err != nil {
+		return nil, fmt.Errorf("resolve review adapter output directory: %w", err)
+	}
+	path := filepath.Join(root, name)
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve review adapter document %q: %w", name, err)
+	}
+	relative, err := filepath.Rel(root, resolved)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("review adapter document %q resolves outside output directory", name)
+	}
+	file, err := os.Open(resolved)
+	if err != nil {
+		return nil, fmt.Errorf("open review adapter document %q: %w", name, err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat review adapter document %q: %w", name, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > int64(workspace.MaxArtifactBytes) {
+		return nil, fmt.Errorf("review adapter document %q is not a bounded regular file", name)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, int64(workspace.MaxArtifactBytes)+1))
+	if err != nil {
+		return nil, fmt.Errorf("read review adapter document %q: %w", name, err)
+	}
+	if len(data) > workspace.MaxArtifactBytes {
+		return nil, fmt.Errorf("review adapter document %q exceeds %d bytes", name, workspace.MaxArtifactBytes)
+	}
+	return data, nil
+}
+
+func observeReviewRunSummary(
+	request witnessreview.ReviewRequestV2Document,
+	summary reviewRunSummary,
+	verdict string,
+) (witnessreview.ObservedReviewExecution, error) {
+	observed := witnessreview.ObservedReviewExecution{
+		Complete:                verdict != witnessreview.CompletionVerdictFailedToRun,
+		ResultArtifactAvailable: true,
+		ReportOutcomes:          make(map[string]witnessreview.ObservedReportOutcome, len(request.RequiredOutputs)),
+	}
+	seen := make(map[string]struct{}, len(summary.Jobs))
+	for _, job := range summary.Jobs {
+		reviewer := strings.TrimSpace(job.Reviewer)
+		if reviewer == "" {
+			return witnessreview.ObservedReviewExecution{}, errors.New("review adapter summary contains a job without a reviewer")
+		}
+		if _, exists := seen[reviewer]; exists {
+			return witnessreview.ObservedReviewExecution{}, fmt.Errorf("review adapter summary repeats reviewer %q", reviewer)
+		}
+		seen[reviewer] = struct{}{}
+		observed.ReportOutcomes[reviewer] = witnessreview.ObservedReportOutcome{Status: job.ReportStatus}
+		if !job.ResultArtifactAvailable {
+			observed.ResultArtifactAvailable = false
+		}
+		if job.State != "completed" && job.State != "completed_noncompliant" {
+			observed.Complete = false
+		}
+	}
+	for _, reviewer := range request.RequiredOutputs {
+		if _, exists := seen[reviewer]; !exists {
+			observed.ReportOutcomes[reviewer] = witnessreview.ObservedReportOutcome{Status: witnessreview.ExecutionReportMissing}
+			observed.ResultArtifactAvailable = false
+		}
+	}
+	return observed, nil
 }
 
 func reviewRunCompletionMatchesRequest(
@@ -358,6 +464,21 @@ func reviewRunCompletionMatchesRequest(
 	}
 	requestDigest, err := witnessreview.ReviewRequestV2Digest(request)
 	return err == nil && completion.RequestDigest == requestDigest
+}
+
+func reviewRunRequestMatchesDispatch(
+	request witnessreview.ReviewRequestV2Document,
+	dispatch workspace.ReviewGateDispatch,
+) bool {
+	if request.Adapter != dispatch.Adapter().String() ||
+		request.ConsumerIdentity.Kind != "feature-implement" ||
+		request.ConsumerIdentity.ID != dispatch.WorkspaceID().String() ||
+		request.Subject.Head != dispatch.Head().String() ||
+		request.Subject.Tree != dispatch.Tree().String() {
+		return false
+	}
+	recipe, err := witnessreview.ReviewRequestV2Recipe(request)
+	return err == nil && recipe.RecipeID == dispatch.Recipe().String()
 }
 
 func reviewRunExitVerdict(exitCode int) (string, bool) {
@@ -378,11 +499,13 @@ func reviewRunExitVerdict(exitCode int) (string, bool) {
 
 func reviewRunFailureObservation(
 	process reviewRunProcess,
-	outputErr error,
+	summaryErr error,
 	expectedVerdict string,
 	recognizedExit bool,
+	requestErr error,
+	completionErr error,
 ) string {
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 5)
 	if !process.started {
 		parts = append(parts, "review adapter subprocess could not be started")
 	}
@@ -391,8 +514,14 @@ func reviewRunFailureObservation(
 	} else if expectedVerdict != "" {
 		parts = append(parts, fmt.Sprintf("review adapter exit maps to %s", expectedVerdict))
 	}
-	if outputErr != nil {
-		parts = append(parts, outputErr.Error())
+	if summaryErr != nil {
+		parts = append(parts, summaryErr.Error())
+	}
+	if requestErr != nil {
+		parts = append(parts, requestErr.Error())
+	}
+	if completionErr != nil {
+		parts = append(parts, completionErr.Error())
 	}
 	if process.err != nil && process.started && !recognizedExit {
 		parts = append(parts, process.err.Error())
@@ -404,106 +533,6 @@ func reviewRunFailureObservation(
 		return "review adapter completion was unusable; recorded failed_to_run"
 	}
 	return strings.Join(append(parts, "recorded failed_to_run"), "; ")
-}
-
-func observeReviewRunArtifacts(
-	request witnessreview.ReviewRequestV2Document,
-	reportDigests map[string]string,
-	locations map[string]reviewRunArtifact,
-	frozenCopy string,
-	outputDirectory string,
-	verdict string,
-) (witnessreview.ObservedReviewExecution, map[string]ReviewRunArtifactView) {
-	observed := witnessreview.ObservedReviewExecution{
-		Complete:                verdict != witnessreview.CompletionVerdictFailedToRun,
-		ResultArtifactAvailable: true,
-		ReportOutcomes:          make(map[string]witnessreview.ObservedReportOutcome, len(request.RequiredOutputs)),
-	}
-	views := make(map[string]ReviewRunArtifactView, len(request.RequiredOutputs))
-	for _, reviewer := range request.RequiredOutputs {
-		location, exists := locations[reviewer]
-		if !exists || strings.TrimSpace(location.Path) == "" {
-			observed.ReportOutcomes[reviewer] = witnessreview.ObservedReportOutcome{Status: witnessreview.ExecutionReportMissing}
-			observed.ResultArtifactAvailable = false
-			continue
-		}
-		view := ReviewRunArtifactView{Path: location.Path, Digest: location.Digest}
-		resolved, data, err := readReviewRunArtifact(location.Path, frozenCopy, outputDirectory)
-		if err != nil {
-			observed.ReportOutcomes[reviewer] = witnessreview.ObservedReportOutcome{Status: witnessreview.ExecutionReportUnavailable}
-			observed.ResultArtifactAvailable = false
-			views[reviewer] = view
-			continue
-		}
-		actual := workspace.DigestBytes(data).String()
-		view.Path = resolved
-		view.Digest = actual
-		if actual != location.Digest || actual != reportDigests[reviewer] {
-			observed.ReportOutcomes[reviewer] = witnessreview.ObservedReportOutcome{Status: witnessreview.ExecutionReportUnavailable}
-			observed.ResultArtifactAvailable = false
-			views[reviewer] = view
-			continue
-		}
-		observed.ReportOutcomes[reviewer] = witnessreview.ObservedReportOutcome{Status: witnessreview.ExecutionReportValid}
-		views[reviewer] = view
-	}
-	return observed, views
-}
-
-func readReviewRunArtifact(rawPath, frozenCopy, outputDirectory string) (string, []byte, error) {
-	rawPath = strings.TrimSpace(rawPath)
-	if rawPath == "" {
-		return "", nil, errors.New("review artifact path is required")
-	}
-	candidates := []string{}
-	if filepath.IsAbs(rawPath) {
-		candidates = append(candidates, rawPath)
-	} else {
-		candidates = append(candidates, filepath.Join(outputDirectory, rawPath), filepath.Join(frozenCopy, rawPath))
-	}
-	var lastErr error
-	for _, candidate := range candidates {
-		resolved, err := filepath.EvalSymlinks(filepath.Clean(candidate))
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		file, err := os.Open(resolved)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		info, statErr := file.Stat()
-		if statErr != nil {
-			_ = file.Close()
-			lastErr = statErr
-			continue
-		}
-		if !info.Mode().IsRegular() || info.Size() > int64(workspace.MaxArtifactBytes) {
-			_ = file.Close()
-			lastErr = fmt.Errorf("review artifact is not a bounded regular file")
-			continue
-		}
-		data, readErr := io.ReadAll(io.LimitReader(file, int64(workspace.MaxArtifactBytes)+1))
-		closeErr := file.Close()
-		if readErr != nil {
-			lastErr = readErr
-			continue
-		}
-		if closeErr != nil {
-			lastErr = closeErr
-			continue
-		}
-		if len(data) > workspace.MaxArtifactBytes {
-			lastErr = fmt.Errorf("review artifact exceeds %d bytes", workspace.MaxArtifactBytes)
-			continue
-		}
-		return resolved, data, nil
-	}
-	if lastErr == nil {
-		lastErr = errors.New("review artifact could not be resolved")
-	}
-	return "", nil, lastErr
 }
 
 func failedReviewRequest(dispatch workspace.ReviewGateDispatch) (witnessreview.ReviewRequestV2Document, error) {
@@ -540,12 +569,13 @@ func failedReviewRequest(dispatch workspace.ReviewGateDispatch) (witnessreview.R
 	return request, nil
 }
 
-func failedReviewExecution() witnessreview.ObservedReviewExecution {
+func failedReviewExecution(request witnessreview.ReviewRequestV2Document) witnessreview.ObservedReviewExecution {
+	outcomes := make(map[string]witnessreview.ObservedReportOutcome, len(request.RequiredOutputs))
+	for _, reviewer := range request.RequiredOutputs {
+		outcomes[reviewer] = witnessreview.ObservedReportOutcome{Status: witnessreview.ExecutionReportMissing}
+	}
 	return witnessreview.ObservedReviewExecution{
-		Complete: false, ResultArtifactAvailable: false,
-		ReportOutcomes: map[string]witnessreview.ObservedReportOutcome{
-			failedReviewOutputID: {Status: witnessreview.ExecutionReportMissing},
-		},
+		Complete: false, ResultArtifactAvailable: false, ReportOutcomes: outcomes,
 	}
 }
 

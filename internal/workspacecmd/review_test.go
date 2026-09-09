@@ -92,6 +92,90 @@ func TestReviewDispatchExposesFrozenConfigurationWithoutAdapterSpecificPacket(t 
 
 func TestReviewRunRecordsObservedNotSatisfiedSubprocess(t *testing.T) {
 	fixture := newAttemptBoundaryCommandFixture(t, true)
+	request := reviewRunTestRequest(t, fixture)
+	var err error
+	observed := witnessreview.ObservedReviewExecution{
+		Complete: true, ResultArtifactAvailable: true,
+		ReportOutcomes: map[string]witnessreview.ObservedReportOutcome{
+			"reviewer-a": {Status: witnessreview.ExecutionReportValid},
+		},
+	}
+	evidence, err := witnessreview.NewHostExecutionEvidence(observed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completion, err := witnessreview.NewReviewCompletionDocument(
+		request, evidence, map[string]string{}, witnessreview.CompletionVerdictNotSatisfied,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeDirectory := canonicalWorkspaceCommandTempDir(t)
+	installReviewRunFake(t, fakeDirectory, request, completion, 20, true)
+	t.Setenv("PATH", fakeDirectory+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	result, err := Execute(context.Background(), Options{
+		Action:       "review",
+		Subaction:    "run",
+		BundleDir:    fixture.bundleRoot,
+		WorkspaceDir: fixture.workspaceDir,
+		CharterPath:  fixture.charterPath,
+		Input:        reviewCommandInput(fixture.attemptID, "2026-09-03T12:00:02Z"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, ok := result.(ReviewCommandResult)
+	if !ok || run.Action != "review.run" {
+		t.Fatalf("review run result = %#v", result)
+	}
+	detail, ok := run.Detail.(ReviewRunView)
+	if !ok || detail.Verdict != string(workspace.ReviewGateNotSatisfied) || detail.ExitCode != 20 {
+		t.Fatalf("review run detail = %#v", run.Detail)
+	}
+}
+
+func TestReviewRunRecordsFailedToRunWhenAdapterHasNoCompletion(t *testing.T) {
+	fixture := newAttemptBoundaryCommandFixture(t, true)
+	request := reviewRunTestRequest(t, fixture)
+	fakeDirectory := canonicalWorkspaceCommandTempDir(t)
+	installReviewRunFake(
+		t, fakeDirectory,
+		request, witnessreview.ReviewCompletionDocument{}, 21, false,
+	)
+	t.Setenv("PATH", fakeDirectory+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	result, err := Execute(context.Background(), Options{
+		Action:       "review",
+		Subaction:    "run",
+		BundleDir:    fixture.bundleRoot,
+		WorkspaceDir: fixture.workspaceDir,
+		CharterPath:  fixture.charterPath,
+		Input:        reviewCommandInput(fixture.attemptID, "2026-09-03T12:00:01Z"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, ok := result.(ReviewCommandResult)
+	if !ok {
+		t.Fatalf("review run result = %#v", result)
+	}
+	detail, ok := run.Detail.(ReviewRunView)
+	if !ok || detail.Verdict != string(workspace.ReviewGateFailedToRun) || detail.ExitCode != 21 ||
+		!strings.Contains(detail.Observation, "review-completion.json") {
+		t.Fatalf("failed-to-run detail = %#v", run.Detail)
+	}
+	expectedRequestDigest, err := witnessreview.ReviewRequestV2Digest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.RequestDigest != expectedRequestDigest {
+		t.Fatalf("failed-to-run request digest = %q, want adapter request %q", detail.RequestDigest, expectedRequestDigest)
+	}
+}
+
+func reviewRunTestRequest(t *testing.T, fixture attemptBoundaryCommandFixture) witnessreview.ReviewRequestV2Document {
+	t.Helper()
 	dispatchResult, err := Execute(context.Background(), Options{
 		Action:       "review",
 		Subaction:    "dispatch",
@@ -126,7 +210,7 @@ func TestReviewRunRecordsObservedNotSatisfiedSubprocess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := witnessreview.ReviewRequestV2Document{
+	return witnessreview.ReviewRequestV2Document{
 		SchemaVersion: witnessreview.ReviewRequestV2,
 		ConsumerIdentity: witnessreview.Identity{
 			Kind: "feature-implement", ID: bundle.Definition().Workspace().ID().String(),
@@ -137,99 +221,6 @@ func TestReviewRunRecordsObservedNotSatisfiedSubprocess(t *testing.T) {
 		FrozenRecipe:      recipeBytes, RecipeDigest: recipeDigest,
 		Adapter: dispatch.Adapter, RequiredOutputs: []string{"reviewer-a"},
 	}
-	observed := witnessreview.ObservedReviewExecution{
-		Complete: true, ResultArtifactAvailable: true,
-		ReportOutcomes: map[string]witnessreview.ObservedReportOutcome{
-			"reviewer-a": {Status: witnessreview.ExecutionReportValid},
-		},
-	}
-	evidence, err := witnessreview.NewHostExecutionEvidence(observed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	reportBytes := []byte("reviewer-a report")
-	reportPath := filepath.Join(canonicalWorkspaceCommandTempDir(t), "reviewer-a.json")
-	if err := os.WriteFile(reportPath, reportBytes, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	reportDigest := workspace.DigestBytes(reportBytes).String()
-	completion, err := witnessreview.NewReviewCompletionDocument(
-		request, evidence, map[string]string{"reviewer-a": reportDigest}, witnessreview.CompletionVerdictNotSatisfied,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	outputBytes, err := json.Marshal(map[string]any{
-		"request": request, "completion": completion,
-		"report_artifacts": map[string]any{
-			"reviewer-a": map[string]string{"path": reportPath, "digest": reportDigest},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	fakeDirectory := canonicalWorkspaceCommandTempDir(t)
-	outputPath := filepath.Join(fakeDirectory, "adapter-output.json")
-	if err := os.WriteFile(outputPath, outputBytes, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(fakeDirectory, "witness"), []byte("#!/bin/sh\ncat \"$FEATURE_TEST_REVIEW_OUTPUT\"\nexit 20\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("FEATURE_TEST_REVIEW_OUTPUT", outputPath)
-	t.Setenv("PATH", fakeDirectory+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	result, err := Execute(context.Background(), Options{
-		Action:       "review",
-		Subaction:    "run",
-		BundleDir:    fixture.bundleRoot,
-		WorkspaceDir: fixture.workspaceDir,
-		Input:        reviewCommandInput(fixture.attemptID, "2026-09-03T12:00:02Z"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	run, ok := result.(ReviewCommandResult)
-	if !ok || run.Action != "review.run" {
-		t.Fatalf("review run result = %#v", result)
-	}
-	detail, ok := run.Detail.(ReviewRunView)
-	if !ok || detail.Verdict != string(workspace.ReviewGateNotSatisfied) || detail.ExitCode != 20 {
-		t.Fatalf("review run detail = %#v", run.Detail)
-	}
-	artifact, ok := detail.ReportArtifacts["reviewer-a"]
-	if !ok || artifact.Digest != reportDigest {
-		t.Fatalf("host-observed report artifact = %#v", detail.ReportArtifacts)
-	}
-}
-
-func TestReviewRunRecordsFailedToRunWhenAdapterHasNoCompletion(t *testing.T) {
-	fixture := newAttemptBoundaryCommandFixture(t, true)
-	fakeDirectory := canonicalWorkspaceCommandTempDir(t)
-	if err := os.WriteFile(filepath.Join(fakeDirectory, "witness"), []byte("#!/bin/sh\nexit 21\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", fakeDirectory+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	result, err := Execute(context.Background(), Options{
-		Action:       "review",
-		Subaction:    "run",
-		BundleDir:    fixture.bundleRoot,
-		WorkspaceDir: fixture.workspaceDir,
-		Input:        reviewCommandInput(fixture.attemptID, "2026-09-03T12:00:01Z"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	run, ok := result.(ReviewCommandResult)
-	if !ok {
-		t.Fatalf("review run result = %#v", result)
-	}
-	detail, ok := run.Detail.(ReviewRunView)
-	if !ok || detail.Verdict != string(workspace.ReviewGateFailedToRun) || detail.ExitCode != 21 ||
-		!strings.Contains(detail.Observation, "no parseable completion") {
-		t.Fatalf("failed-to-run detail = %#v", run.Detail)
-	}
 }
 
 func reviewCommandInput(attemptID workspace.ID, occurredAt string) []byte {
@@ -238,4 +229,115 @@ func reviewCommandInput(attemptID workspace.ID, occurredAt string) []byte {
   "occurred_at": %q,
   "attempt_id": %q
 }`, occurredAt, attemptID.String()))
+}
+
+func installReviewRunFake(
+	t *testing.T,
+	directory string,
+	request witnessreview.ReviewRequestV2Document,
+	completion witnessreview.ReviewCompletionDocument,
+	exitCode int,
+	writeCompletion bool,
+) {
+	t.Helper()
+	requestBytes, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var completionBytes []byte
+	if writeCompletion {
+		completionBytes, err = json.Marshal(completion)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	requestPath := filepath.Join(directory, "request.json")
+	completionPath := filepath.Join(directory, "completion.json")
+	charterPath := filepath.Join(directory, "charter.freeze.json")
+	for path, content := range map[string][]byte{
+		requestPath: requestBytes, completionPath: completionBytes, charterPath: []byte("{}\n"),
+	} {
+		if err := os.WriteFile(path, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	verdict := witnessreview.CompletionVerdictSatisfied
+	ok := "true"
+	jobs := `[{"reviewer":"reviewer-a","job_id":"fake-job","state":"completed","state_exit_code":0,"report_status":"valid","result_artifact_available":true,"transcript_complete":true,"transcript_gap":false}]`
+	switch exitCode {
+	case 20:
+		verdict = witnessreview.CompletionVerdictNotSatisfied
+		ok = "false"
+	case 21:
+		verdict = witnessreview.CompletionVerdictFailedToRun
+		ok = "false"
+		jobs = `[]`
+	}
+	writeCompletionValue := "0"
+	if writeCompletion {
+		writeCompletionValue = "1"
+	}
+	script := `#!/bin/sh
+set -eu
+[ "$#" -ge 2 ] && [ "$1" = "review" ] && [ "$2" = "run" ] || exit 2
+shift 2
+source_dir=""
+out_dir=""
+config_path=""
+subject_head=""
+subject_tree=""
+consumer_kind=""
+consumer_id=""
+charter_path=""
+while [ "$#" -gt 0 ]; do
+  flag="$1"
+  case "$flag" in
+    -source-dir|-out-dir|-config|-subject-head|-subject-tree|-consumer-kind|-consumer-id|-charter)
+      [ "$#" -ge 2 ] || exit 2
+      value="$2"
+      case "$flag" in
+        -source-dir) source_dir="$value" ;;
+        -out-dir) out_dir="$value" ;;
+        -config) config_path="$value" ;;
+        -subject-head) subject_head="$value" ;;
+        -subject-tree) subject_tree="$value" ;;
+        -consumer-kind) consumer_kind="$value" ;;
+        -consumer-id) consumer_id="$value" ;;
+        -charter) charter_path="$value" ;;
+      esac
+      shift 2
+      ;;
+    *)
+      echo "unknown adapter argument: $flag" >&2
+      exit 2
+      ;;
+  esac
+done
+[ -n "$source_dir" ] && [ -d "$source_dir" ] || exit 2
+[ -n "$out_dir" ] && [ -d "$out_dir" ] || exit 2
+[ -n "$subject_head" ] && [ -n "$subject_tree" ] || exit 2
+[ "$consumer_kind" = "feature-implement" ] || exit 2
+[ -n "$consumer_id" ] || exit 2
+[ -n "$charter_path" ] && [ -f "$charter_path" ] || exit 2
+cp "$FEATURE_TEST_REVIEW_REQUEST" "$out_dir/review-request.json"
+cp "$FEATURE_TEST_REVIEW_CHARTER" "$out_dir/charter.freeze.json"
+if [ "$FEATURE_TEST_REVIEW_WRITE_COMPLETION" = "1" ]; then
+  cp "$FEATURE_TEST_REVIEW_COMPLETION" "$out_dir/review-completion.json"
+fi
+printf '{"ok":%s,"verdict":"%s","request_path":"review-request.json","charter_freeze_path":"charter.freeze.json","completion_path":"review-completion.json","jobs":%s}\n' \
+  "$FEATURE_TEST_REVIEW_OK" "$FEATURE_TEST_REVIEW_VERDICT" "$FEATURE_TEST_REVIEW_JOBS"
+exit "$FEATURE_TEST_REVIEW_EXIT"
+`
+	if err := os.WriteFile(filepath.Join(directory, "witness"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FEATURE_TEST_REVIEW_REQUEST", requestPath)
+	t.Setenv("FEATURE_TEST_REVIEW_COMPLETION", completionPath)
+	t.Setenv("FEATURE_TEST_REVIEW_CHARTER", charterPath)
+	t.Setenv("FEATURE_TEST_REVIEW_WRITE_COMPLETION", writeCompletionValue)
+	t.Setenv("FEATURE_TEST_REVIEW_OK", ok)
+	t.Setenv("FEATURE_TEST_REVIEW_VERDICT", verdict)
+	t.Setenv("FEATURE_TEST_REVIEW_JOBS", jobs)
+	t.Setenv("FEATURE_TEST_REVIEW_EXIT", fmt.Sprint(exitCode))
 }

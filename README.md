@@ -278,20 +278,27 @@ migrated.
    Then run the host invocation:
 
    ```sh
-   feature workspace review run --bundle <bundle-root> --input <review-run.json> --json
+   feature workspace review run --bundle <bundle-root> --charter <charter-path> --input <review-run.json> --json
    ```
 
    where `review-run.json` contains the schema-version-two `occurred_at` and
-   `attempt_id` used for the dispatch. The command invokes the configured
-   adapter as `<adapter> review run` (the bundled default is `witness review
-   run`), supplies the frozen copy, policy, and configuration, and observes its
-   stdout completion envelope and report artifacts. Adapter exit `0` means
-   `satisfied`, `20` means `not_satisfied`, and `21` means `failed_to_run`.
-   A subprocess that cannot start, exits with another code, or emits no
-   parseable completion is recorded as `failed_to_run`, never `satisfied`.
-   Feature-implement reconstructs host execution evidence from the process and
-   artifact bytes it observed. The persisted completion JSON is retained for
-   audit and inspection only; decoded completion JSON is never used as proof.
+   `attempt_id` used for the dispatch. The operator supplies the Charter path;
+   Feature Implement passes it through without interpreting or inventing a
+   Charter. The command invokes the configured adapter as `<adapter> review run`
+   (the bundled default is `witness review run`) with flags for the frozen
+   source directory, temporary output directory, frozen configuration when
+   present, subject head/tree, `feature-implement` consumer identity, and
+   `-charter <charter-path>`. The adapter writes canonical
+   `review-request.json`, `charter.freeze.json`, and `review-completion.json`
+   into the output directory and prints a summary; Feature Implement reads the
+   request and completion documents from there and treats stdout only as the
+   adapter summary. Adapter exit `0` means `satisfied`, `20` means
+   `not_satisfied`, and `21` means `failed_to_run`. A subprocess that cannot
+   start, exits with another code, or produces a missing/undecodable document
+   is recorded as `failed_to_run`, never `satisfied`.
+   Feature-implement constructs host execution evidence from the subprocess
+   observations. The persisted completion JSON is an audit record, not proof;
+   decoded completion JSON is never used to establish a verdict.
    A changed head or tree requires a fresh dispatch.
 6. `review ready` is a read-only check for a satisfied gate against the exact
    current artifact. It does not conduct review. `not_satisfied` and
