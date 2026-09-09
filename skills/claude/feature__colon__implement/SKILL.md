@@ -72,11 +72,16 @@ interprets a policy.
 1. When a complete `review_gate` is configured, submit `review dispatch` after
    the attempt is clean. This records intent before it materializes a separate
    frozen copy at the exact head and tree.
-2. Give the named adapter only that frozen copy, the opaque gate policy, and
-   the bundle's frozen review-configuration bytes or `bundled-default` marker,
-   not the attempt worktree. A configured adapter may use a fresh Claude subagent
+2. Give the named adapter only that frozen copy and the bundle's frozen
+   review-configuration bytes or `bundled-default` marker, not the attempt
+   worktree or a host-side policy file. A configured adapter may use a fresh Claude subagent
    according to its own policy; this workflow does not prescribe an iteration
    scheme.
+   `review_gate.recipe` is the workspace's gate label, and
+   `review_gate.policy_file` is the operator's gate policy. Dispatch records
+   the policy digest, but neither field is conveyed to the review tool: a
+   v2 adapter takes its recipe from the frozen review configuration passed with
+   `-config` and has no input for a host-side policy file.
 3. Run the host-side adapter step after dispatch:
 
    ```sh
@@ -92,6 +97,8 @@ interprets a policy.
    head/tree, and `feature-implement` consumer identity. The adapter writes
    canonical `review-request.json`, `charter.freeze.json`, and
    `review-completion.json` into the output directory and prints a summary.
+   The bundled `witness` executable on `PATH` must be v0.9.0 or newer;
+   v0.9.0 is the minimum version supporting `review run`.
    The host reads the request and completion documents from that directory;
    stdout is only the adapter summary. Adapter exit codes mean `0` =
    `satisfied`, `20` = `not_satisfied`, and `21` = `failed_to_run`.

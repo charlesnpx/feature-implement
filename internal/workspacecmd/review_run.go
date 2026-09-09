@@ -103,15 +103,14 @@ func executeReviewRun(
 	}
 
 	configuration := bundle.ReviewConfiguration()
-	dispatchedConfiguration := dispatched.ReviewConfiguration()
-	if configuration.Source() != dispatchedConfiguration.Source() ||
-		configuration.Digest() != dispatchedConfiguration.Digest() {
-		return nil, fmt.Errorf("review run configuration does not match the frozen workspace bundle")
-	}
 	if strings.TrimSpace(options.CharterPath) == "" {
 		return nil, fmt.Errorf("workspace review run requires --charter <path>")
 	}
-	charterHash, err := reviewCharterHash(options.CharterPath)
+	charterPath, err := resolveReviewCharterPath(options.CharterPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve supplied Charter path: %w", err)
+	}
+	charterHash, err := reviewCharterHash(charterPath)
 	if err != nil {
 		return nil, fmt.Errorf("compute supplied Charter hash: %w", err)
 	}
@@ -139,7 +138,7 @@ func executeReviewRun(
 		dispatched.Dispatch().Head().String(),
 		dispatched.Dispatch().Tree().String(),
 		dispatched.Dispatch().WorkspaceID().String(),
-		options.CharterPath,
+		charterPath,
 	)
 
 	summary, summaryErr := parseReviewRunSummary(process.stdout)
@@ -196,7 +195,7 @@ func executeReviewRun(
 			completion, err = witnessreview.NewReviewCompletionDocument(
 				request,
 				evidence,
-				cloneReviewReportDigests(adapterCompletion.RequiredReportDigests),
+				adapterCompletion.RequiredReportDigests,
 				expectedVerdict,
 			)
 		}
@@ -267,6 +266,18 @@ func executeReviewRun(
 		Observation:      observation,
 	}
 	return reviewCommandResult("review.run", detail, journal, definition)
+}
+
+func resolveReviewCharterPath(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", err
+	}
+	return resolved, nil
 }
 
 func materializeReviewConfiguration(outputDirectory string, configuration workspace.ReviewConfiguration) (string, error) {
@@ -611,12 +622,4 @@ func failedReviewExecution(request witnessreview.ReviewRequestV2Document) witnes
 	return witnessreview.ObservedReviewExecution{
 		Complete: false, ResultArtifactAvailable: false, ReportOutcomes: outcomes,
 	}
-}
-
-func cloneReviewReportDigests(source map[string]string) map[string]string {
-	result := make(map[string]string, len(source))
-	for reviewer, digest := range source {
-		result[reviewer] = digest
-	}
-	return result
 }

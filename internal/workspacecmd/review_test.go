@@ -94,6 +94,18 @@ func TestReviewDispatchExposesFrozenConfigurationWithoutAdapterSpecificPacket(t 
 func TestReviewRunRecordsObservedSatisfiedSubprocess(t *testing.T) {
 	fixture := newAttemptBoundaryCommandFixture(t, true)
 	request := reviewRunTestRequest(t, fixture)
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relativeCharterPath, err := filepath.Rel(workingDirectory, fixture.charterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedCharterPath, err := filepath.EvalSymlinks(fixture.charterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	observed := witnessreview.ObservedReviewExecution{
 		Complete: true, ResultArtifactAvailable: true,
 		ReportOutcomes: map[string]witnessreview.ObservedReportOutcome{
@@ -115,6 +127,7 @@ func TestReviewRunRecordsObservedSatisfiedSubprocess(t *testing.T) {
 	}
 	fakeDirectory := canonicalWorkspaceCommandTempDir(t)
 	installReviewRunFake(t, fakeDirectory, request, completion, fixture.charterPath, 0, true)
+	t.Setenv("FEATURE_TEST_REVIEW_EXPECTED_CHARTER", resolvedCharterPath)
 	t.Setenv("PATH", fakeDirectory+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	result, err := Execute(context.Background(), Options{
@@ -122,7 +135,7 @@ func TestReviewRunRecordsObservedSatisfiedSubprocess(t *testing.T) {
 		Subaction:    "run",
 		BundleDir:    fixture.bundleRoot,
 		WorkspaceDir: fixture.workspaceDir,
-		CharterPath:  fixture.charterPath,
+		CharterPath:  relativeCharterPath,
 		Input:        reviewCommandInput(fixture.attemptID, "2026-09-03T12:00:02Z"),
 	})
 	if err != nil {
@@ -444,6 +457,7 @@ done
 [ "$consumer_kind" = "feature-implement" ] || exit 2
 [ -n "$consumer_id" ] || exit 2
 [ -n "$charter_path" ] && [ -f "$charter_path" ] || exit 2
+[ -z "${FEATURE_TEST_REVIEW_EXPECTED_CHARTER:-}" ] || [ "$charter_path" = "$FEATURE_TEST_REVIEW_EXPECTED_CHARTER" ] || exit 2
 cp "$FEATURE_TEST_REVIEW_REQUEST" "$out_dir/review-request.json"
 cp "$FEATURE_TEST_REVIEW_CHARTER" "$out_dir/charter.freeze.json"
 if [ "$FEATURE_TEST_REVIEW_WRITE_COMPLETION" = "1" ]; then

@@ -207,11 +207,16 @@ and isolated checks that exit zero—before gate dispatch or integration.
 
 A `review_gate` names `adapter`, `recipe`, and `policy_file` together. A merge
 unit either inherits the complete root gate or names another complete gate; a
-partial override is rejected. The policy file is ordinary bundle source text:
-its exact bytes are digested, retained in the generation, and handed to the
-adapter without interpretation by `feature-implement`. The adapter's policy
-specifies any iteration it performs; that policy is the adapter's concern, not
-local scheduling logic. Review tooling supplies a `review-request-v2` /
+partial override is rejected. `review_gate.recipe` is the workspace's gate
+label, and `review_gate.policy_file` is the operator's gate policy. Dispatch
+records the policy digest, but neither field is conveyed to the review
+tool: a v2 adapter takes its recipe from the frozen review configuration that
+the host passes with `-config` and has no input for a host-side policy file. The
+policy file is ordinary bundle source text: its exact bytes are digested and
+retained in the generation; `feature-implement` does not interpret it. The
+adapter's own policy specifies any iteration it performs; that policy is the
+adapter's concern, not local scheduling logic. Review tooling supplies a
+`review-request-v2` /
 `review-completion-v1` pair with host-produced execution evidence through the
 in-process completion seam. Persisted completion JSON is retained for
 inspection and is never reloaded as proof.
@@ -290,7 +295,9 @@ migrated.
    present, subject head/tree, `feature-implement` consumer identity, and
    `-charter <charter-path>`. The adapter writes canonical
    `review-request.json`, `charter.freeze.json`, and `review-completion.json`
-   into the output directory and prints a summary; Feature Implement reads the
+   into the output directory and prints a summary. The bundled `witness`
+   executable on `PATH` must be v0.9.0 or newer; v0.9.0 is the minimum version
+   supporting `review run`. Feature Implement reads the
    request and completion documents from there and treats stdout only as the
    adapter summary. Adapter exit `0` means `satisfied`, `20` means
    `not_satisfied`, and `21` means `failed_to_run`. A subprocess that cannot
