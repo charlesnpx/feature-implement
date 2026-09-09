@@ -178,14 +178,8 @@ func RecordAttemptReviewCompletion(
 	if journal == nil || request.AttemptID.IsZero() || request.DispatchDigest.IsZero() || request.OccurredAt.IsZero() {
 		return RecordedReviewCompletion{}, JournalRecord{}, fmt.Errorf("record review completion requires journal, attempt, dispatch, completion, and occurrence time")
 	}
-	if err := witnessreview.RequireValidReviewRequestV2(request.Request); err != nil {
-		return RecordedReviewCompletion{}, JournalRecord{}, fmt.Errorf("validate review request: %w", err)
-	}
 	if err := witnessreview.RequireValidReviewCompletion(request.Completion, request.Request); err != nil {
 		return RecordedReviewCompletion{}, JournalRecord{}, fmt.Errorf("validate review completion: %w", err)
-	}
-	if request.Completion.ExecutionEvidence.HostProduced() == false {
-		return RecordedReviewCompletion{}, JournalRecord{}, fmt.Errorf("review completion execution evidence was not produced by the observing host process")
 	}
 
 	snapshot, projection, err := readReviewRuntime(journal, definition)

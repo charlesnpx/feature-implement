@@ -152,7 +152,7 @@ func validateWorkspaceSubaction(action, subaction string) error {
 		)
 	case "review":
 		supported = stringSet(
-			"dispatch", "record", "ready",
+			"dispatch", "run", "record", "ready",
 		)
 	case "integrate":
 		supported = stringSet("merge-unit")
@@ -241,6 +241,7 @@ func RequestSchemas() map[string]any {
 		"attempt.resume":  request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
 		"attempt.abandon": request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
 		"review.dispatch": request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
+		"review.run":      request([]string{"occurred_at", "attempt_id"}, attemptIdentity()),
 		"review.record": request([]string{
 			"occurred_at", "attempt_id", "dispatch_digest", "verdict", "evidence_digest",
 		}, occurred(map[string]any{

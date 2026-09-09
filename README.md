@@ -48,7 +48,7 @@ feature workspace init|recover --bundle <bundle-root> --input <file|-> [--json]
 feature workspace status --bundle <bundle-root> [--json]
 
 feature workspace attempt start|adopt-head|pause|resume|abandon ...
-feature workspace review dispatch|record|ready ...
+feature workspace review dispatch|run|record|ready ...
 feature workspace integrate merge-unit ...
 feature workspace complete verify ...
 ```
@@ -274,12 +274,25 @@ migrated.
    integration.
 5. For a configured review gate, submit `review dispatch` after the attempt is
    clean. It records the request first and returns a separately materialized
-   frozen copy, opaque policy text, and the bundle-frozen review configuration;
-   give the adapter only those inputs. Review tooling returns a typed
-   `review-request-v2` / `review-completion-v1` pair with host-produced
-   execution evidence to the in-process completion seam. A persisted
-   completion is retained for inspection, but decoded completion JSON is never
-   used as proof. A changed head or tree requires a fresh dispatch.
+   frozen copy, opaque policy text, and the bundle-frozen review configuration.
+   Then run the host invocation:
+
+   ```sh
+   feature workspace review run --bundle <bundle-root> --input <review-run.json> --json
+   ```
+
+   where `review-run.json` contains the schema-version-two `occurred_at` and
+   `attempt_id` used for the dispatch. The command invokes the configured
+   adapter as `<adapter> review run` (the bundled default is `witness review
+   run`), supplies the frozen copy, policy, and configuration, and observes its
+   stdout completion envelope and report artifacts. Adapter exit `0` means
+   `satisfied`, `20` means `not_satisfied`, and `21` means `failed_to_run`.
+   A subprocess that cannot start, exits with another code, or emits no
+   parseable completion is recorded as `failed_to_run`, never `satisfied`.
+   Feature-implement reconstructs host execution evidence from the process and
+   artifact bytes it observed. The persisted completion JSON is retained for
+   audit and inspection only; decoded completion JSON is never used as proof.
+   A changed head or tree requires a fresh dispatch.
 6. `review ready` is a read-only check for a satisfied gate against the exact
    current artifact. It does not conduct review. `not_satisfied` and
    `failed_to_run` remain distinguishable terminal facts; use ordinary owner

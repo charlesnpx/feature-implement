@@ -170,9 +170,6 @@ func (event ReviewGateRecordedJournalEvent) validate() error {
 		event.record.tree != event.dispatch.tree {
 		return fmt.Errorf("review gate record event does not match its exact dispatch")
 	}
-	if err := validateReviewGateRecordDocument(event.record, event.document); err != nil {
-		return err
-	}
 	if event.document != nil {
 		if err := event.document.validate(); err != nil {
 			return err
@@ -181,14 +178,6 @@ func (event ReviewGateRecordedJournalEvent) validate() error {
 			return fmt.Errorf("review gate document evidence does not match the gate record")
 		}
 	}
-	return nil
-}
-
-// validateReviewGateRecordDocument validates an optional retained document
-// without inferring its contract from the adapter that produced it. The
-// recording seam decides whether a document is required from the document
-// identity it received; journal replay only verifies the durable locator.
-func validateReviewGateRecordDocument(record ReviewGateRecord, document *ReviewDocumentArtifact) error {
 	return nil
 }
 func (event ReviewGateRecordedJournalEvent) Dispatch() ReviewGateDispatch { return event.dispatch }

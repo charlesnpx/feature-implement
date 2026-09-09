@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -605,6 +606,78 @@ func TestWorkspaceBundleBindsDescriptorAndRejectsProviderEraFields(t *testing.T)
 	if _, err := workspace.LoadWorkspaceBundle(root); err == nil ||
 		!strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("provider-era descriptor field was accepted: %v", err)
+	}
+}
+
+func TestWorkspaceBundleWithoutReviewConfigurationKeepsLegacyGeneration(t *testing.T) {
+	t.Parallel()
+
+	fixture := newDefinitionFixture(t)
+	root := writeDefinitionBundle(t, fixture, nil)
+	bundle, err := workspace.LoadWorkspaceBundle(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	descriptor, err := os.ReadFile(filepath.Join(root, workspace.WorkspaceBundleFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyCanonicalDescriptor, err := json.Marshal(struct {
+		SchemaVersion   int      `json:"schema_version"`
+		Workspace       string   `json:"workspace"`
+		Plans           []string `json:"plans"`
+		ExecutionConfig string   `json:"execution_config"`
+	}{
+		SchemaVersion: 2, Workspace: "feature.workspace.yaml",
+		Plans: []string{"plans/alpha.yaml"}, ExecutionConfig: "config/execution.yaml",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, artifact := range bundle.Definition().Artifacts() {
+		if artifact.Kind() == workspace.ArtifactWorkspaceBundle &&
+			bytes.Contains(artifact.CanonicalBytes(), []byte("review_configuration")) {
+			t.Fatalf("legacy descriptor unexpectedly carries review configuration: %s", artifact.CanonicalBytes())
+		}
+	}
+
+	type generationArtifact struct {
+		Kind         workspace.ArtifactKind `json:"kind"`
+		ID           string                 `json:"id"`
+		Path         string                 `json:"path"`
+		SourceHash   string                 `json:"source_hash"`
+		SemanticHash string                 `json:"semantic_hash"`
+	}
+	artifacts := make([]generationArtifact, 0, len(bundle.Definition().Artifacts()))
+	for _, artifact := range bundle.Definition().Artifacts() {
+		if artifact.Kind() == workspace.ArtifactWorkspaceBundle {
+			artifacts = append(artifacts, generationArtifact{
+				Kind: artifact.Kind(), ID: artifact.ID().String(), Path: artifact.Path(),
+				SourceHash: workspace.DigestBytes(descriptor).String(), SemanticHash: workspace.DigestBytes(legacyCanonicalDescriptor).String(),
+			})
+			continue
+		}
+		artifacts = append(artifacts, generationArtifact{
+			Kind: artifact.Kind(), ID: artifact.ID().String(), Path: artifact.Path(),
+			SourceHash: artifact.SourceHash().String(), SemanticHash: artifact.SemanticHash().String(),
+		})
+	}
+	sort.Slice(artifacts, func(i, j int) bool {
+		left := string(artifacts[i].Kind) + "\x00" + artifacts[i].ID + "\x00" + artifacts[i].Path
+		right := string(artifacts[j].Kind) + "\x00" + artifacts[j].ID + "\x00" + artifacts[j].Path
+		return left < right
+	})
+	expectedBytes, err := json.Marshal(struct {
+		SchemaVersion int                  `json:"schema_version"`
+		WorkspaceID   string               `json:"workspace_id"`
+		Artifacts     []generationArtifact `json:"artifacts"`
+	}{SchemaVersion: 2, WorkspaceID: bundle.Definition().Workspace().ID().String(), Artifacts: artifacts})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := bundle.Definition().Generation(), workspace.DigestBytes(expectedBytes); got != want {
+		t.Fatalf("legacy bundle generation = %s, want %s", got, want)
 	}
 }
 

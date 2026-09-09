@@ -108,6 +108,7 @@ func TestRequestSchemasExposeOnlySupportedLocalMutations(t *testing.T) {
 		"attempt.resume",
 		"attempt.abandon",
 		"review.dispatch",
+		"review.run",
 		"review.record",
 		"review.ready",
 		"integrate.merge-unit",
@@ -117,7 +118,7 @@ func TestRequestSchemasExposeOnlySupportedLocalMutations(t *testing.T) {
 			t.Fatalf("request schemas omit %s", required)
 		}
 	}
-	if len(schemas) != 12 {
+	if len(schemas) != 13 {
 		t.Fatalf("request schema count = %d: %+v", len(schemas), schemas)
 	}
 }

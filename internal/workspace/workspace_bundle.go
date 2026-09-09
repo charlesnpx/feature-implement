@@ -20,7 +20,7 @@ type workspaceBundleWire struct {
 	Workspace           string   `json:"workspace"`
 	Plans               []string `json:"plans"`
 	ExecutionConfig     string   `json:"execution_config"`
-	ReviewConfiguration string   `json:"review_configuration,omitempty"`
+	ReviewConfiguration *string  `json:"review_configuration,omitempty"`
 }
 
 // WorkspaceBundle is a validated, immutable set of local source bytes. The
@@ -136,9 +136,10 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 		return WorkspaceBundle{}, err
 	}
 	reviewConfiguration := SourceArtifact{Path: BundledDefaultReviewConfiguration}
-	if strings.TrimSpace(wire.ReviewConfiguration) != "" &&
-		strings.TrimSpace(wire.ReviewConfiguration) != BundledDefaultReviewConfiguration {
-		reviewConfigurationPath, pathErr := normalizeBundleSourcePath("review_configuration", wire.ReviewConfiguration)
+	if wire.ReviewConfiguration != nil &&
+		strings.TrimSpace(*wire.ReviewConfiguration) != "" &&
+		strings.TrimSpace(*wire.ReviewConfiguration) != BundledDefaultReviewConfiguration {
+		reviewConfigurationPath, pathErr := normalizeBundleSourcePath("review_configuration", *wire.ReviewConfiguration)
 		if pathErr != nil {
 			return WorkspaceBundle{}, pathErr
 		}
@@ -221,6 +222,7 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 	}
 	definition, err = bindWorkspaceBundleDefinition(
 		definition, descriptor, workspacePath, planPaths, executionPath,
+		wire.ReviewConfiguration != nil,
 	)
 	if err != nil {
 		return WorkspaceBundle{}, fmt.Errorf("bind workspace bundle descriptor: %w", err)
@@ -278,7 +280,7 @@ type canonicalWorkspaceBundle struct {
 	Workspace           string   `json:"workspace"`
 	Plans               []string `json:"plans"`
 	ExecutionConfig     string   `json:"execution_config"`
-	ReviewConfiguration string   `json:"review_configuration"`
+	ReviewConfiguration *string  `json:"review_configuration,omitempty"`
 }
 
 func bindWorkspaceBundleDefinition(
@@ -287,12 +289,18 @@ func bindWorkspaceBundleDefinition(
 	workspacePath string,
 	planPaths []string,
 	executionPath string,
+	reviewConfigurationPresent bool,
 ) (EffectiveWorkspaceDefinition, error) {
+	var reviewConfiguration *string
+	if reviewConfigurationPresent {
+		value := definition.reviewConfiguration.Source()
+		reviewConfiguration = &value
+	}
 	canonical := canonicalWorkspaceBundle{
 		SchemaVersion: WorkspaceBundleSchemaVersion,
 		Workspace:     workspacePath, Plans: append([]string(nil), planPaths...),
 		ExecutionConfig:     executionPath,
-		ReviewConfiguration: definition.reviewConfiguration.Source(),
+		ReviewConfiguration: reviewConfiguration,
 	}
 	canonicalBytes, err := json.Marshal(canonical)
 	if err != nil {

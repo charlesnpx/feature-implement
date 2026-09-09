@@ -8,7 +8,7 @@ import (
 )
 
 // ReviewCommandResult preserves the common command envelope while exposing
-// only dispatch and terminal gate facts. This command never conducts review.
+// dispatch, adapter-run, and terminal gate facts.
 type ReviewCommandResult struct {
 	SchemaVersion int                     `json:"schema_version"`
 	Status        string                  `json:"status"`
@@ -103,6 +103,8 @@ func executeReview(ctx context.Context, bundle workspace.WorkspaceBundle, option
 		}
 		detail := reviewGateDispatchView(dispatched)
 		return reviewCommandResult("review.dispatch", detail, journal, definition)
+	case "run":
+		return executeReviewRun(ctx, bundle, options)
 	case "record":
 		var input recordReviewGateInput
 		if err := decodeRequest(options.Input, &input); err != nil {

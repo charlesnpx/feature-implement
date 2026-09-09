@@ -77,15 +77,29 @@ interprets a policy.
    not the attempt worktree. A configured adapter may use a fresh Claude subagent
    according to its own policy; this workflow does not prescribe an iteration
    scheme.
-3. The review tooling must return a typed `review-request-v2` /
-   `review-completion-v1` pair, including host-produced execution evidence, in
-   the same process that observed the run. Record that pair through the
-   in-process completion seam. A completion decoded from a persisted JSON file
-   is an audit record with inert evidence and must be refused as proof.
-4. Record exactly one terminal verdict: `satisfied`, `not_satisfied`, or
-   `failed_to_run`. A failure to run is not a negative verdict and does not
-   alter the attempt phase; use ordinary attempt lifecycle actions if the owner
-   chooses to retry.
+3. Run the host-side adapter step after dispatch:
+
+   ```sh
+   feature workspace review run --bundle <bundle-dir> --input <review-run.json> --json
+   ```
+
+   The strict request contains `schema_version`, `occurred_at`, and
+   `attempt_id`. `feature-implement` invokes the configured adapter as
+   `<adapter> review run`; the bundled default is `witness review run`. It
+   supplies the dispatch's frozen copy, opaque policy, and frozen review
+   configuration (the exact bytes or `bundled-default`) through the adapter
+   invocation, then observes the adapter's stdout completion envelope and
+   report artifact paths/digests. Adapter exit codes mean `0` = `satisfied`,
+   `20` = `not_satisfied`, and `21` = `failed_to_run`.
+4. The host constructs fresh execution evidence from the subprocess exit and
+   the report files it actually observes, then records the typed
+   `review-request-v2` / `review-completion-v1` pair through the in-process completion seam.
+   A subprocess that cannot start, exits with an unknown code,
+   or emits no parseable completion is recorded as `failed_to_run`, never
+   `satisfied`. The persisted completion JSON is an audit record with inert
+   decoded evidence, not proof; it must not be loaded to establish a verdict.
+   A failure to run is not a negative verdict and does not alter the attempt
+   phase; use ordinary attempt lifecycle actions if the owner chooses to retry.
 5. `review ready` only checks that a satisfied gate binds the exact current
    head and tree. It never runs an adapter. A changed artifact needs a fresh
    dispatch and terminal record.

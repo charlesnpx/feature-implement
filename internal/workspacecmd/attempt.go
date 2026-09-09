@@ -65,14 +65,6 @@ func (adapter localReviewRepository) InspectReviewSnapshot(
 	return workspace.NewReviewRepositorySnapshot(inspection.Commit(), inspection.Tree(), true)
 }
 
-func (adapter localReviewRepository) ReadReviewInput(
-	ctx context.Context,
-	worktree string,
-	base, head workspace.GitObjectID,
-) ([]byte, error) {
-	return adapter.git.ReadReviewInput(ctx, worktree, base, head)
-}
-
 func (adapter localReviewRepository) VerifyFinalHistory(
 	ctx context.Context,
 	protocol workspace.CommitProtocol,
