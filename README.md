@@ -48,7 +48,7 @@ feature workspace init|recover --bundle <bundle-root> --input <file|-> [--json]
 feature workspace status --bundle <bundle-root> [--json]
 
 feature workspace attempt start|adopt-head|pause|resume|abandon ...
-feature workspace review dispatch|record|record-document|ready ...
+feature workspace review dispatch|run|record|ready ...
 feature workspace integrate merge-unit ...
 feature workspace complete verify ...
 ```
@@ -71,7 +71,8 @@ sample-workspace/
 ├── plans/
 │   └── sample-plan.yaml
 ├── config/
-│   └── execution.yaml
+│   ├── execution.yaml
+│   └── review.json # omitted when the bundled-default marker is used
 ├── policies/
 │   └── review.md
 └── feature.workspace.lock.json # one canonical normalized definition lock
@@ -84,9 +85,15 @@ The descriptor contains only local source discovery:
   "schema_version": 2,
   "workspace": "feature.workspace.yaml",
   "plans": ["plans/sample-plan.yaml"],
-  "execution_config": "config/execution.yaml"
+  "execution_config": "config/execution.yaml",
+  "review_configuration": "config/review.json"
 }
 ```
+
+`review_configuration` is either the path to the exact bytes copied from
+`$XDG_CONFIG_HOME/review/config.json` (falling back to `~/.config/review/config.json`)
+or the literal `bundled-default` marker when that file is absent. The bytes are
+opaque to `feature-implement`; the review tooling interprets them.
 
 Every descriptor path is relative, non-hidden, uniquely owned by one source
 role, and rooted beneath the bundle. Source paths cannot traverse symlinks or
@@ -200,12 +207,19 @@ and isolated checks that exit zero—before gate dispatch or integration.
 
 A `review_gate` names `adapter`, `recipe`, and `policy_file` together. A merge
 unit either inherits the complete root gate or names another complete gate; a
-partial override is rejected. The policy file is ordinary bundle source text:
-its exact bytes are digested, retained in the generation, and handed to the
-adapter without interpretation by `feature-implement`. The natural-language
-adapter is the default implementation. Its policy specifies any iteration the
-adapter performs; that policy is the adapter's concern, not local scheduling
-logic.
+partial override is rejected. `review_gate.recipe` is the workspace's gate
+label, and `review_gate.policy_file` is the operator's gate policy. Dispatch
+records the policy digest, but neither field is conveyed to the review
+tool: a v2 adapter takes its recipe from the frozen review configuration that
+the host passes with `-config` and has no input for a host-side policy file. The
+policy file is ordinary bundle source text: its exact bytes are digested and
+retained in the generation; `feature-implement` does not interpret it. The
+adapter's own policy specifies any iteration it performs; that policy is the
+adapter's concern, not local scheduling logic. Review tooling supplies a
+`review-request-v2` /
+`review-completion-v1` pair with host-produced execution evidence through the
+in-process completion seam. Persisted completion JSON is retained for
+inspection and is never reloaded as proof.
 
 Each dispatch records intent before a frozen copy is materialized. Its terminal
 record is exactly one of `satisfied`, `not_satisfied`, or `failed_to_run`, and
@@ -213,9 +227,6 @@ always carries an evidence digest. The latter two are terminal facts rather
 than special scheduler paths. Without a configured review gate,
 `attempt adopt-head` records the exact clean accepted head and tree before
 integration.
-
-Witness review input is transported as a JSON string, so dispatch rejects
-non-UTF-8 review input.
 
 ## Locks and runtime state
 
@@ -268,11 +279,34 @@ migrated.
    integration.
 5. For a configured review gate, submit `review dispatch` after the attempt is
    clean. It records the request first and returns a separately materialized
-   frozen copy plus the opaque policy text; give the adapter only that copy.
-   When the adapter has a durable evidence record, submit `review record` with
-   its digest, or use `review record-document` for a Witness
-   `review-report-v1` document. The latter strictly validates and retains raw
-   report bytes. A changed head or tree requires a fresh dispatch.
+   frozen copy, opaque policy text, and the bundle-frozen review configuration.
+   Then run the host invocation:
+
+   ```sh
+   feature workspace review run --bundle <bundle-root> --charter <charter-path> --input <review-run.json> --json
+   ```
+
+   where `review-run.json` contains the schema-version-two `occurred_at` and
+   `attempt_id` used for the dispatch. The operator supplies the Charter path;
+   Feature Implement passes it through without interpreting or inventing a
+   Charter. The command invokes the configured adapter as `<adapter> review run`
+   (the bundled default is `witness review run`) with flags for the frozen
+   source directory, temporary output directory, frozen configuration when
+   present, subject head/tree, `feature-implement` consumer identity, and
+   `-charter <charter-path>`. The adapter writes canonical
+   `review-request.json`, `charter.freeze.json`, and `review-completion.json`
+   into the output directory and prints a summary. The bundled `witness`
+   executable on `PATH` must be v0.9.0 or newer; v0.9.0 is the minimum version
+   supporting `review run`. Feature Implement reads the
+   request and completion documents from there and treats stdout only as the
+   adapter summary. Adapter exit `0` means `satisfied`, `20` means
+   `not_satisfied`, and `21` means `failed_to_run`. A subprocess that cannot
+   start, exits with another code, or produces a missing/undecodable document
+   is recorded as `failed_to_run`, never `satisfied`.
+   Feature-implement constructs host execution evidence from the subprocess
+   observations. The persisted completion JSON is an audit record, not proof;
+   decoded completion JSON is never used to establish a verdict.
+   A changed head or tree requires a fresh dispatch.
 6. `review ready` is a read-only check for a satisfied gate against the exact
    current artifact. It does not conduct review. `not_satisfied` and
    `failed_to_run` remain distinguishable terminal facts; use ordinary owner

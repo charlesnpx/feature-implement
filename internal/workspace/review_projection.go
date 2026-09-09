@@ -121,9 +121,6 @@ func reduceReviewRuntime(current ReviewRuntimeProjection, record JournalRecord) 
 		if gateRecord.occurredAt != record.occurredAt {
 			return ReviewRuntimeProjection{}, fmt.Errorf("review gate record occurrence time does not match its journal record")
 		}
-		if err := validateReviewGateRecordDocumentContract(dispatch, gateRecord, event.document); err != nil {
-			return ReviewRuntimeProjection{}, err
-		}
 		state.records = append(state.records, gateRecord)
 		if event.document != nil {
 			state.documentedDispatches = append(state.documentedDispatches, gateRecord.dispatchDigest)

@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 type ReviewRepositoryRequest struct {
@@ -70,15 +69,19 @@ type ReviewGateDispatchRequest struct {
 }
 
 type ReviewGateDispatchResult struct {
-	dispatch   ReviewGateDispatch
-	frozenCopy string
-	policy     []byte
+	dispatch            ReviewGateDispatch
+	frozenCopy          string
+	policy              []byte
+	reviewConfiguration ReviewConfiguration
 }
 
 func (result ReviewGateDispatchResult) Dispatch() ReviewGateDispatch { return result.dispatch }
 func (result ReviewGateDispatchResult) FrozenCopy() string           { return result.frozenCopy }
 func (result ReviewGateDispatchResult) Policy() []byte {
 	return append([]byte(nil), result.policy...)
+}
+func (result ReviewGateDispatchResult) ReviewConfiguration() ReviewConfiguration {
+	return cloneReviewConfiguration(result.reviewConfiguration)
 }
 
 // DispatchAttemptReviewGate records the request before materializing a fresh
@@ -127,11 +130,6 @@ func DispatchAttemptReviewGate(
 	if err := verifyAttemptFinalHistory(ctx, repository, unit, attempt, artifact.head); err != nil {
 		return ReviewGateDispatchResult{}, fmt.Errorf("verify final history before review gate dispatch: %w", err)
 	}
-	if ReviewGateCarriesDocumentContract(config.adapter) {
-		if err := validateWitnessReviewInputTransport(ctx, repository, attempt, artifact.head); err != nil {
-			return ReviewGateDispatchResult{}, err
-		}
-	}
 	if artifact.head != attempt.verifiedHead {
 		adoption, adoptionErr := NewReviewHeadAdoptedJournalEvent(
 			definition.workspace.id, definition.generation, attempt.attemptID, attempt.mergeUnit,
@@ -171,7 +169,7 @@ func DispatchAttemptReviewGate(
 			if pending != dispatch {
 				return ReviewGateDispatchResult{}, fmt.Errorf("attempt %s has an unresolved review gate dispatch", attempt.attemptID)
 			}
-			return materializeReviewGateCopy(ctx, journal, materializer, attempt, pending, config.Policy())
+			return materializeReviewGateCopy(ctx, journal, materializer, attempt, pending, config.Policy(), definition.reviewConfiguration)
 		}
 	}
 	event, err := NewReviewGateDispatchedJournalEvent(dispatch)
@@ -181,27 +179,7 @@ func DispatchAttemptReviewGate(
 	if _, err := appendReviewJournalEvent(journal, snapshot, event, request.OccurredAt); err != nil {
 		return ReviewGateDispatchResult{}, err
 	}
-	return materializeReviewGateCopy(ctx, journal, materializer, attempt, dispatch, config.Policy())
-}
-
-func validateWitnessReviewInputTransport(
-	ctx context.Context,
-	repository ReviewRepositoryPort,
-	attempt RuntimeAttemptProjection,
-	head GitObjectID,
-) error {
-	reader, ok := repository.(ReviewAdapterRepositoryPort)
-	if !ok {
-		return fmt.Errorf("Witness review gate dispatch requires a review input reader")
-	}
-	reviewInput, err := reader.ReadReviewInput(ctx, attempt.worktree, attempt.base, head)
-	if err != nil {
-		return fmt.Errorf("read review input before review gate dispatch: %w", err)
-	}
-	if !utf8.Valid(reviewInput) {
-		return fmt.Errorf("review input is non-UTF-8")
-	}
-	return nil
+	return materializeReviewGateCopy(ctx, journal, materializer, attempt, dispatch, config.Policy(), definition.reviewConfiguration)
 }
 
 func materializeReviewGateCopy(
@@ -211,6 +189,7 @@ func materializeReviewGateCopy(
 	attempt RuntimeAttemptProjection,
 	dispatch ReviewGateDispatch,
 	policy []byte,
+	reviewConfiguration ReviewConfiguration,
 ) (ReviewGateDispatchResult, error) {
 	worktreeRoot, err := derivedWorkspaceWorktreeRootForJournal(journal)
 	if err != nil {
@@ -230,6 +209,7 @@ func materializeReviewGateCopy(
 	}
 	return ReviewGateDispatchResult{
 		dispatch: dispatch, frozenCopy: frozenCopy, policy: append([]byte(nil), policy...),
+		reviewConfiguration: cloneReviewConfiguration(reviewConfiguration),
 	}, nil
 }
 
@@ -253,8 +233,10 @@ type RecordAttemptReviewGateRequest struct {
 	OccurredAt     time.Time
 }
 
-// RecordAttemptReviewGate stores an opaque terminal result. Dispatches with a
-// document contract use this route only to record a failed-to-run outcome.
+// RecordAttemptReviewGate stores an opaque terminal result for adapters that
+// do not hand off a shared contract document. Shared-contract completions use
+// RecordAttemptReviewCompletion, whose contract identity determines the
+// document path rather than the adapter name.
 func RecordAttemptReviewGate(
 	journal *WorkspaceJournal,
 	definition EffectiveWorkspaceDefinition,
@@ -275,9 +257,6 @@ func RecordAttemptReviewGate(
 	dispatch, exists := state.Dispatch(request.DispatchDigest)
 	if !exists {
 		return ReviewGateRecord{}, fmt.Errorf("review gate dispatch %s is unknown for attempt %s", request.DispatchDigest, request.AttemptID)
-	}
-	if ReviewGateCarriesDocumentContract(dispatch.adapter) && request.Verdict != ReviewGateFailedToRun {
-		return ReviewGateRecord{}, fmt.Errorf("review gate dispatch %s requires a review document for %s", request.DispatchDigest, request.Verdict)
 	}
 	if existing, recorded := state.Record(request.DispatchDigest); recorded {
 		if existing.verdict == request.Verdict && existing.evidenceDigest == request.EvidenceDigest {

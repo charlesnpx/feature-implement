@@ -16,6 +16,7 @@ type attemptBoundaryCommandFixture struct {
 	bundleRoot   string
 	workspaceDir string
 	attemptID    workspace.ID
+	charterPath  string
 }
 
 func TestExecuteAttemptPauseRequiresKindAndRecordsPause(t *testing.T) {
@@ -279,8 +280,16 @@ merge_units:
 	if err != nil {
 		t.Fatal(err)
 	}
+	charterPath := ""
+	if witnessGate {
+		charterPath = filepath.Join(canonicalWorkspaceCommandTempDir(t), "charter.freeze.json")
+		if err := os.WriteFile(charterPath, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return attemptBoundaryCommandFixture{
 		bundleRoot: bundleRoot, workspaceDir: workspaceDir, attemptID: attempt.AttemptID(),
+		charterPath: charterPath,
 	}
 }
 

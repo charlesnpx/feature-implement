@@ -234,12 +234,23 @@ func workspaceCommand(args []string) error {
 	bundle := fs.String("bundle", "", "Directory containing feature.workspace.bundle.json")
 	inputPath := fs.String("input", "", "Strict JSON request file, or - for stdin")
 	writeLocks := fs.Bool("write-locks", false, "Write the canonical workspace lock")
+	var charterPath *string
+	if action == "review" && subaction == "run" {
+		charterPath = fs.String("charter", "", "Charter or frozen Charter JSON path")
+	}
 	fs.Bool("json", false, "Emit JSON (workspace commands always emit JSON)")
-	if err := parsePermissive(fs, remaining, "bundle", "input"); err != nil {
+	valueFlags := []string{"bundle", "input"}
+	if charterPath != nil {
+		valueFlags = append(valueFlags, "charter")
+	}
+	if err := parsePermissive(fs, remaining, valueFlags...); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("workspace %s accepts only flags", action)
+	}
+	if charterPath != nil && strings.TrimSpace(*charterPath) == "" {
+		return fmt.Errorf("workspace review run requires --charter <path>")
 	}
 	if action == "example" {
 		if subaction != "" {
@@ -254,7 +265,7 @@ func workspaceCommand(args []string) error {
 	}
 	result, err := workspacecmd.Execute(context.Background(), workspacecmd.Options{
 		Action: action, Subaction: subaction, BundleDir: *bundle,
-		Input: input, WriteLocks: *writeLocks,
+		CharterPath: valueOrEmpty(charterPath), Input: input, WriteLocks: *writeLocks,
 	})
 	if err != nil {
 		return err
@@ -269,6 +280,13 @@ func workspaceActionRequiresSubaction(action string) bool {
 	default:
 		return false
 	}
+}
+
+func valueOrEmpty(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func readWorkspaceInput(path string) ([]byte, error) {
@@ -408,7 +426,8 @@ func usageWorkspace(w io.Writer) {
   feature workspace init|recover --bundle <dir> --input <json-file|-> [--json]
   feature workspace status --bundle <dir> [--json]
   feature workspace attempt start|adopt-head|pause|resume|abandon --bundle <dir> --input <json-file|-> [--json]
-  feature workspace review dispatch|record|record-document|ready --bundle <dir> --input <json-file|-> [--json]
+  feature workspace review dispatch|record|ready --bundle <dir> --input <json-file|-> [--json]
+  feature workspace review run --bundle <dir> --charter <path> --input <json-file|-> [--json]
   feature workspace integrate merge-unit --bundle <dir> --input <json-file|-> [--json]
   feature workspace complete verify --bundle <dir> --input <json-file|-> [--json]
 

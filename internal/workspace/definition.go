@@ -16,16 +16,21 @@ type DefinitionSources struct {
 	Plans           []SourceArtifact
 	ExecutionConfig SourceArtifact
 	ReviewPolicies  []SourceArtifact
+	// ReviewConfiguration is either a bundle-relative source artifact or the
+	// BundledDefaultReviewConfiguration marker. Its bytes are opaque to this
+	// package and are passed to review tooling unchanged.
+	ReviewConfiguration SourceArtifact
 }
 
 type ArtifactKind string
 
 const (
-	ArtifactWorkspaceBundle ArtifactKind = "workspace_bundle"
-	ArtifactWorkspace       ArtifactKind = "workspace"
-	ArtifactPlan            ArtifactKind = "plan"
-	ArtifactExecutionConfig ArtifactKind = "execution_config"
-	ArtifactReviewPolicy    ArtifactKind = "review_policy"
+	ArtifactWorkspaceBundle     ArtifactKind = "workspace_bundle"
+	ArtifactWorkspace           ArtifactKind = "workspace"
+	ArtifactPlan                ArtifactKind = "plan"
+	ArtifactExecutionConfig     ArtifactKind = "execution_config"
+	ArtifactReviewPolicy        ArtifactKind = "review_policy"
+	ArtifactReviewConfiguration ArtifactKind = "review_configuration"
 )
 
 type NormalizedArtifact struct {
@@ -49,11 +54,12 @@ func (artifact NormalizedArtifact) CanonicalBytes() []byte {
 // EffectiveWorkspaceDefinition is a content-addressed, immutable composition
 // of all validated workspace inputs. It is pure with respect to checkout state.
 type EffectiveWorkspaceDefinition struct {
-	workspace  WorkspaceManifest
-	plans      []Plan
-	execution  ExecutionConfig
-	artifacts  []NormalizedArtifact
-	generation Digest
+	workspace           WorkspaceManifest
+	plans               []Plan
+	execution           ExecutionConfig
+	reviewConfiguration ReviewConfiguration
+	artifacts           []NormalizedArtifact
+	generation          Digest
 }
 
 func ValidateDefinition(sources DefinitionSources) (EffectiveWorkspaceDefinition, error) {
@@ -174,6 +180,21 @@ func ValidateDefinition(sources DefinitionSources) (EffectiveWorkspaceDefinition
 			ArtifactReviewPolicy, workspace.id, source.Path, source.Bytes, policyCanonical,
 		))
 	}
+	reviewConfiguration, reviewConfigurationArtifact, err := newReviewConfiguration(sources.ReviewConfiguration)
+	if err != nil {
+		return EffectiveWorkspaceDefinition{}, err
+	}
+	if reviewConfigurationArtifact != nil {
+		reviewConfigurationArtifact.id = workspace.id
+		if prior, exists := artifactPaths[reviewConfigurationArtifact.path]; exists {
+			return EffectiveWorkspaceDefinition{}, fmt.Errorf(
+				"artifact source path %s is claimed by both %s and review configuration",
+				reviewConfigurationArtifact.path, prior,
+			)
+		}
+		artifactPaths[reviewConfigurationArtifact.path] = "review configuration"
+		artifacts = append(artifacts, *reviewConfigurationArtifact)
+	}
 
 	sort.Slice(artifacts, func(i, j int) bool {
 		left := string(artifacts[i].kind) + "\x00" + artifacts[i].id.String() + "\x00" + artifacts[i].path
@@ -187,7 +208,7 @@ func ValidateDefinition(sources DefinitionSources) (EffectiveWorkspaceDefinition
 
 	return EffectiveWorkspaceDefinition{
 		workspace: workspace, plans: append([]Plan(nil), plans...), execution: execution,
-		artifacts:  cloneArtifacts(artifacts),
+		reviewConfiguration: cloneReviewConfiguration(reviewConfiguration), artifacts: cloneArtifacts(artifacts),
 		generation: DigestBytes(generationBytes),
 	}, nil
 }
@@ -200,6 +221,9 @@ func (definition EffectiveWorkspaceDefinition) Plans() []Plan {
 }
 func (definition EffectiveWorkspaceDefinition) ExecutionConfig() ExecutionConfig {
 	return definition.execution
+}
+func (definition EffectiveWorkspaceDefinition) ReviewConfiguration() ReviewConfiguration {
+	return cloneReviewConfiguration(definition.reviewConfiguration)
 }
 func (definition EffectiveWorkspaceDefinition) Profiles() []ExecutionProfile {
 	return definition.execution.Profiles()

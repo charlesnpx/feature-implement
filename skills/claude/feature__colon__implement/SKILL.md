@@ -72,26 +72,53 @@ interprets a policy.
 1. When a complete `review_gate` is configured, submit `review dispatch` after
    the attempt is clean. This records intent before it materializes a separate
    frozen copy at the exact head and tree.
-2. Give the named adapter only that frozen copy and its opaque policy text, not
-   the attempt worktree. A configured adapter may use a fresh Claude subagent
+2. Give the named adapter only that frozen copy and the bundle's frozen
+   review-configuration bytes or `bundled-default` marker, not the attempt
+   worktree or a host-side policy file. A configured adapter may use a fresh Claude subagent
    according to its own policy; this workflow does not prescribe an iteration
    scheme.
-3. After the adapter creates durable evidence, submit `review record` with its
-   evidence digest. For a completed Witness run, use `review record-document`
-   with its strict `review-report-v1` document instead; for Witness
-   `failed_to_run`, use `review record` with the durable failure-evidence
-   digest. The raw document is retained as the gate evidence.
-4. Record exactly one terminal verdict: `satisfied`, `not_satisfied`, or
-   `failed_to_run`. A failure to run is not a negative verdict and does not
-   alter the attempt phase; use ordinary attempt lifecycle actions if the owner
-   chooses to retry.
+   `review_gate.recipe` is the workspace's gate label, and
+   `review_gate.policy_file` is the operator's gate policy. Dispatch records
+   the policy digest, but neither field is conveyed to the review tool: a
+   v2 adapter takes its recipe from the frozen review configuration passed with
+   `-config` and has no input for a host-side policy file.
+3. Run the host-side adapter step after dispatch:
+
+   ```sh
+   feature workspace review run --bundle <bundle-dir> --charter <charter-path> --input <review-run.json> --json
+   ```
+
+   The strict request contains `schema_version`, `occurred_at`, and
+   `attempt_id`. The operator supplies the Charter path; Feature Implement
+   passes it as `-charter` and does not interpret or invent a Charter.
+   `feature-implement` invokes the configured adapter as `<adapter> review run`
+   (the bundled default is `witness review run`) with flags for the frozen
+   source, output directory, frozen configuration when present, subject
+   head/tree, and `feature-implement` consumer identity. The adapter writes
+   canonical `review-request.json`, `charter.freeze.json`, and
+   `review-completion.json` into the output directory and prints a summary.
+   The bundled `witness` executable on `PATH` must be v0.9.0 or newer;
+   v0.9.0 is the minimum version supporting `review run`.
+   The host reads the request and completion documents from that directory;
+   stdout is only the adapter summary. Adapter exit codes mean `0` =
+   `satisfied`, `20` = `not_satisfied`, and `21` = `failed_to_run`.
+4. The host constructs fresh execution evidence from the subprocess
+   observations, then records the typed `review-request-v2` /
+   `review-completion-v1` pair through the in-process completion seam. A
+   subprocess that cannot start, exits with an unknown code, or produces a
+   missing/undecodable document is recorded as `failed_to_run`, never
+   `satisfied`. The persisted completion JSON is an audit record with inert
+   decoded evidence, not proof; it must not be loaded to establish a verdict.
+   A failure to run is not a negative verdict and does not alter the attempt
+   phase; use ordinary attempt lifecycle actions if the owner chooses to retry.
 5. `review ready` only checks that a satisfied gate binds the exact current
    head and tree. It never runs an adapter. A changed artifact needs a fresh
    dispatch and terminal record.
 6. Without a configured review gate, submit `attempt adopt-head` for the exact
    clean accepted head and tree.
 
-Do not invent adapter evidence, terminal verdicts, or readiness.
+Do not invent adapter evidence, terminal verdicts, or readiness. The workflow
+does not interpret reviewer findings, recipes, or review methodology.
 
 ## Integrate, pause when needed, and complete
 

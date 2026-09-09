@@ -108,8 +108,8 @@ func TestRequestSchemasExposeOnlySupportedLocalMutations(t *testing.T) {
 		"attempt.resume",
 		"attempt.abandon",
 		"review.dispatch",
+		"review.run",
 		"review.record",
-		"review.record-document",
 		"review.ready",
 		"integrate.merge-unit",
 		"complete.verify",
@@ -120,11 +120,6 @@ func TestRequestSchemasExposeOnlySupportedLocalMutations(t *testing.T) {
 	}
 	if len(schemas) != 13 {
 		t.Fatalf("request schema count = %d: %+v", len(schemas), schemas)
-	}
-	recordDocument := schemas["review.record-document"].(map[string]any)
-	verdicts := recordDocument["properties"].(map[string]any)["verdict"].(map[string]any)["enum"].([]string)
-	if strings.Join(verdicts, ",") != "satisfied,not_satisfied" {
-		t.Fatalf("review document verdicts = %v", verdicts)
 	}
 }
 

@@ -246,9 +246,6 @@ func (state ReviewGateState) Satisfied(
 		dispatch, exists := state.Dispatch(record.dispatchDigest)
 		if exists && dispatch.adapter == record.adapter && dispatch.recipe == record.recipe &&
 			dispatch.policyDigest == record.policyDigest && dispatch.head == record.head && dispatch.tree == record.tree {
-			if reviewGateRecordRequiresDocumentArtifact(dispatch, record) && !state.hasDocumentArtifact(record.dispatchDigest) {
-				continue
-			}
 			return record, true
 		}
 	}
@@ -305,9 +302,6 @@ func newReviewGateReadiness(
 	record, satisfied := state.Satisfied(config, head, tree)
 	if !satisfied {
 		return ReviewGateReadiness{}, fmt.Errorf("attempt %s has no satisfied review gate for the exact head and tree", attempt.attemptID)
-	}
-	if ReviewGateCarriesDocumentContract(record.adapter) && !state.hasDocumentArtifact(record.dispatchDigest) {
-		return ReviewGateReadiness{}, fmt.Errorf("attempt %s satisfied review gate lacks its required document artifact", attempt.attemptID)
 	}
 	readiness := ReviewGateReadiness{
 		workspaceID: definition.workspace.id, generation: definition.generation,

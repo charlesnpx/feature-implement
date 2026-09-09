@@ -164,18 +164,12 @@ func decodeReviewJournalEvent(
 			return nil, true, err
 		}
 		if wire.Document == nil {
-			if err := validateReviewGateRecordDocumentContract(dispatch, record, nil); err != nil {
-				return nil, true, err
-			}
 			event, eventErr := NewReviewGateRecordedJournalEvent(dispatch, record)
 			return event, true, eventErr
 		}
 		document, documentErr := reviewDocumentArtifactFromWire(*wire.Document, record.evidenceDigest)
 		if documentErr != nil {
 			return nil, true, documentErr
-		}
-		if err := validateReviewGateRecordDocumentContract(dispatch, record, &document); err != nil {
-			return nil, true, err
 		}
 		event, eventErr := NewReviewGateRecordedDocumentJournalEvent(dispatch, record, document)
 		return event, true, eventErr

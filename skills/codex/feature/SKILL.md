@@ -28,6 +28,12 @@ can execute locally.
 3. Create `feature.workspace.bundle.json`, `feature.workspace.yaml`, one or
    more `plans/*.yaml` files, and `config/execution.yaml`. Quote YAML string
    scalars, keep integers and booleans typed, and include required empty lists.
+   Snapshot the active review configuration at this point: read
+   `$XDG_CONFIG_HOME/review/config.json`, falling back to
+   `~/.config/review/config.json`, and copy its exact bytes to a bundle-local
+   `config/review.json`. When the file is absent, do not create that file and
+   set the descriptor's `review_configuration` to `bundled-default`. Do not
+   parse or reinterpret these bytes.
 4. Give every story concrete acceptance, implementation, and testing criteria.
    Default to one merge unit per story. Group stories only when their
    dependency and review boundaries genuinely belong together.
@@ -68,9 +74,14 @@ The descriptor is strict JSON:
   "schema_version": 2,
   "workspace": "feature.workspace.yaml",
   "plans": ["plans/sample-plan.yaml"],
-  "execution_config": "config/execution.yaml"
+  "execution_config": "config/execution.yaml",
+  "review_configuration": "config/review.json"
 }
 ```
+
+`review_configuration` is either the relative path to the copied opaque bytes
+or the literal `bundled-default` marker. Older bundles without the field are
+treated as carrying the marker.
 
 Every descriptor path is relative, non-hidden, uniquely
 owned by one source role, and rooted beneath the bundle.
