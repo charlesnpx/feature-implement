@@ -82,7 +82,7 @@ func newGatedReviewHarness(t *testing.T) *gatedReviewHarness {
 }
 
 func newWitnessReviewHarness(t *testing.T) *gatedReviewHarness {
-	return newReviewGateHarness(t, workspace.WitnessReviewGateAdapter)
+	return newReviewGateHarness(t, "witness")
 }
 
 func newReviewGateHarness(t *testing.T, adapter string) *gatedReviewHarness {
@@ -269,7 +269,7 @@ func TestReviewGateDispatchRejectsConfiguredFinalHistoryBeforeAdoptionOrJournal(
 	}
 }
 
-func TestWitnessReviewDispatchRejectsNonUTF8ReviewInputBeforeJournal(t *testing.T) {
+func TestReviewDispatchDoesNotInspectAdapterSpecificInput(t *testing.T) {
 	t.Parallel()
 
 	harness := newWitnessReviewHarness(t)
@@ -284,22 +284,22 @@ func TestWitnessReviewDispatchRejectsNonUTF8ReviewInputBeforeJournal(t *testing.
 			AttemptID: harness.attempt.AttemptID(), OccurredAt: mustTime(t, "2026-09-03T12:00:01Z"),
 		},
 	)
-	if err == nil || !strings.Contains(err.Error(), "review input is non-UTF-8") {
-		t.Fatalf("invalid review input dispatch error = %v", err)
+	if err != nil {
+		t.Fatalf("adapter-specific input dispatch error = %v", err)
 	}
-	if harness.repository.reviewInputRuns != 1 {
-		t.Fatalf("review input reads = %d, want 1", harness.repository.reviewInputRuns)
+	if harness.repository.reviewInputRuns != 0 {
+		t.Fatalf("adapter-specific input reads = %d, want 0", harness.repository.reviewInputRuns)
 	}
 	after, err := harness.journal.ReadSnapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Head() != before.Head() || len(after.Records()) != len(before.Records()) {
-		t.Fatalf("non-UTF-8 review input journaled a dispatch: before=%s/%d after=%s/%d", before.Head(), len(before.Records()), after.Head(), len(after.Records()))
+	if after.Head() == before.Head() || len(after.Records()) != len(before.Records())+1 {
+		t.Fatalf("adapter-specific input prevented dispatch: before=%s/%d after=%s/%d", before.Head(), len(before.Records()), after.Head(), len(after.Records()))
 	}
 }
 
-func TestWitnessReviewTerminalRoutesAreExclusive(t *testing.T) {
+func TestReviewGateTerminalRouteDoesNotSpecialCaseAdapterNames(t *testing.T) {
 	t.Parallel()
 
 	harness := newWitnessReviewHarness(t)
@@ -309,29 +309,15 @@ func TestWitnessReviewTerminalRoutesAreExclusive(t *testing.T) {
 		EvidenceDigest: workspace.DigestBytes([]byte("generic-review-record")),
 		OccurredAt:     mustTime(t, "2026-09-03T12:00:02Z"),
 	}
-	if _, err := workspace.RecordAttemptReviewGate(
+	recorded, err := workspace.RecordAttemptReviewGate(
 		harness.journal, harness.definition, workspace.RecordAttemptReviewGateRequest{
 			AttemptID: recordRequest.AttemptID, DispatchDigest: recordRequest.DispatchDigest,
 			Verdict: workspace.ReviewGateSatisfied, EvidenceDigest: recordRequest.EvidenceDigest,
 			OccurredAt: recordRequest.OccurredAt,
 		},
-	); err == nil || !strings.Contains(err.Error(), "requires a review document") {
-		t.Fatalf("generic satisfied Witness record error = %v", err)
-	}
-	if _, _, err := workspace.RecordAttemptReviewDocument(
-		context.Background(), harness.journal, harness.definition, harness.repository,
-		workspace.RecordAttemptReviewDocumentRequest{
-			AttemptID: harness.attempt.AttemptID(), DispatchDigest: dispatch.Digest(),
-			Verdict: workspace.ReviewGateFailedToRun, Document: []byte(`{}`),
-			OccurredAt: mustTime(t, "2026-09-03T12:00:02Z"),
-		},
-	); err == nil || !strings.Contains(err.Error(), "does not accept failed_to_run") {
-		t.Fatalf("document failed-to-run Witness record error = %v", err)
-	}
-	recordRequest.Verdict = workspace.ReviewGateFailedToRun
-	recorded, err := workspace.RecordAttemptReviewGate(harness.journal, harness.definition, recordRequest)
-	if err != nil || recorded.Verdict() != workspace.ReviewGateFailedToRun {
-		t.Fatalf("generic failed-to-run Witness record = %#v error=%v", recorded, err)
+	)
+	if err != nil || recorded.Verdict() != workspace.ReviewGateSatisfied {
+		t.Fatalf("generic adapter-named record = %#v error=%v", recorded, err)
 	}
 }
 

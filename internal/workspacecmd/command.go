@@ -152,7 +152,7 @@ func validateWorkspaceSubaction(action, subaction string) error {
 		)
 	case "review":
 		supported = stringSet(
-			"dispatch", "record", "record-document", "ready",
+			"dispatch", "record", "ready",
 		)
 	case "integrate":
 		supported = stringSet("merge-unit")
@@ -185,7 +185,8 @@ func BundleExample() string {
   "schema_version": 2,
   "workspace": "feature.workspace.yaml",
   "plans": ["plans/example.yaml"],
-  "execution_config": "config/execution.yaml"
+  "execution_config": "config/execution.yaml",
+  "review_configuration": "bundled-default"
 }
 `
 }
@@ -246,16 +247,6 @@ func RequestSchemas() map[string]any {
 			"attempt_id": stringProperty(), "dispatch_digest": stringProperty(),
 			"verdict":         enumProperty("satisfied", "not_satisfied", "failed_to_run"),
 			"evidence_digest": stringProperty(),
-		})),
-		"review.record-document": request([]string{
-			"occurred_at", "attempt_id", "dispatch_digest", "verdict", "document",
-		}, occurred(map[string]any{
-			"attempt_id": stringProperty(), "dispatch_digest": stringProperty(),
-			"verdict": enumProperty("satisfied", "not_satisfied"),
-			"document": map[string]any{
-				"type":        "object",
-				"description": "Raw review-report-v1 document; the Witness contract performs strict decoding and validation.",
-			},
 		})),
 		"review.ready": request([]string{"attempt_id"}, map[string]any{"attempt_id": stringProperty()}),
 		"integrate.merge-unit": request([]string{"occurred_at", "attempt_id"}, occurred(map[string]any{

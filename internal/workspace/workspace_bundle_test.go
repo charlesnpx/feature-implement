@@ -637,6 +637,34 @@ func TestWorkspaceBundleLoadsConfiguredReviewGatePolicyFiles(t *testing.T) {
 	}
 }
 
+func TestWorkspaceBundleRetainsFrozenReviewConfigurationAfterGlobalChange(t *testing.T) {
+	t.Parallel()
+
+	fixture := newDefinitionFixture(t)
+	root := writeDefinitionBundle(t, fixture, map[string]any{
+		"review_configuration": "config/review.json",
+	})
+	configurationPath := filepath.Join(root, "config", "review.json")
+	configurationA := []byte(`{"adapter":{"id":"adapter-a"},"recipe":"recipe-a","policy":{"require_transcript":false}}`)
+	configurationB := []byte(`{"adapter":{"id":"adapter-b"},"recipe":"recipe-b","policy":{"require_transcript":true}}`)
+	if err := os.MkdirAll(filepath.Dir(configurationPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configurationPath, configurationA, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := workspace.LoadWorkspaceBundle(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "global-review-config.json"), configurationB, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if source := bundle.ReviewConfiguration(); source.Source() != "config/review.json" || !bytes.Equal(source.Bytes(), configurationA) {
+		t.Fatalf("frozen review configuration = source=%q bytes=%q", source.Source(), source.Bytes())
+	}
+}
+
 func writeDefinitionBundle(t *testing.T, fixture definitionFixture, overrides map[string]any) string {
 	t.Helper()
 	root := canonicalMaterializationTestTempDir(t)

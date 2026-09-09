@@ -2,7 +2,6 @@ package workspace
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -11,240 +10,15 @@ import (
 	"time"
 
 	"github.com/charlesnpx/witness/contract/canonjson"
-	witnesscharter "github.com/charlesnpx/witness/contract/charter"
-	witnessdigest "github.com/charlesnpx/witness/contract/digest"
 	witnessreview "github.com/charlesnpx/witness/contract/review"
 )
 
 const (
 	reviewDocumentDirectoryName = "review-documents"
-	WitnessReviewGateAdapter    = "witness"
 )
 
-// ReviewGateCarriesDocumentContract is the shared dispatch-routing predicate.
-func ReviewGateCarriesDocumentContract(adapter ID) bool {
-	return adapter.String() == WitnessReviewGateAdapter
-}
-
-// ReviewAdapterRepositoryPort reads an exact diff from a verified worktree.
-// BuildReviewAdapterRequest always supplies the adapter's frozen copy.
-type ReviewAdapterRepositoryPort interface {
-	ReadReviewInput(context.Context, string, GitObjectID, GitObjectID) ([]byte, error)
-}
-
-type ReviewAdapterBuildRequest struct {
-	AttemptID      ID
-	DispatchDigest Digest
-}
-
-// ReviewAdapterMaterialization is the deterministic input handed to a
-// document-based adapter.
-type ReviewAdapterMaterialization struct {
-	frozen            witnesscharter.FrozenCharter
-	charterJSON       []byte
-	requestJSON       []byte
-	reviewInput       []byte
-	reviewInputDigest Digest
-}
-
-func (materialization ReviewAdapterMaterialization) FrozenCharter() witnesscharter.FrozenCharter {
-	return materialization.frozen
-}
-func (materialization ReviewAdapterMaterialization) CharterJSON() []byte {
-	return append([]byte(nil), materialization.charterJSON...)
-}
-func (materialization ReviewAdapterMaterialization) RequestJSON() []byte {
-	return append([]byte(nil), materialization.requestJSON...)
-}
-func (materialization ReviewAdapterMaterialization) ReviewInput() []byte {
-	return append([]byte(nil), materialization.reviewInput...)
-}
-func (materialization ReviewAdapterMaterialization) ReviewInputDigest() Digest {
-	return materialization.reviewInputDigest
-}
-
-// BuildReviewAdapterRequest builds input from an already durable dispatch and
-// its frozen copy. A retained request can therefore be rebuilt without reading
-// the mutable attempt directory.
-func BuildReviewAdapterRequest(
-	ctx context.Context,
-	journal *WorkspaceJournal,
-	definition EffectiveWorkspaceDefinition,
-	repository ReviewAdapterRepositoryPort,
-	request ReviewAdapterBuildRequest,
-) (ReviewAdapterMaterialization, error) {
-	if ctx == nil || journal == nil || repository == nil || request.AttemptID.IsZero() || request.DispatchDigest.IsZero() {
-		return ReviewAdapterMaterialization{}, fmt.Errorf("review adapter request requires context, journal, adapter repository, attempt, and dispatch")
-	}
-	resolved, err := resolveReviewAdapterDispatch(journal, definition, request)
-	if err != nil {
-		return ReviewAdapterMaterialization{}, err
-	}
-	reviewInput, err := repository.ReadReviewInput(
-		ctx, resolved.frozenCopy, resolved.attempt.base, resolved.dispatch.head,
-	)
-	if err != nil {
-		return ReviewAdapterMaterialization{}, fmt.Errorf("read exact review input from frozen copy: %w", err)
-	}
-	return buildReviewAdapterMaterialization(definition, resolved, reviewInput)
-}
-
-type reviewAdapterDispatch struct {
-	attempt    RuntimeAttemptProjection
-	dispatch   ReviewGateDispatch
-	frozenCopy string
-}
-
-func resolveReviewAdapterDispatch(
-	journal *WorkspaceJournal,
-	definition EffectiveWorkspaceDefinition,
-	request ReviewAdapterBuildRequest,
-) (reviewAdapterDispatch, error) {
-	_, projection, err := readReviewRuntime(journal, definition)
-	if err != nil {
-		return reviewAdapterDispatch{}, err
-	}
-	state, exists := projection.State(request.AttemptID)
-	if !exists {
-		return reviewAdapterDispatch{}, fmt.Errorf("attempt %s has no review gate dispatch", request.AttemptID)
-	}
-	dispatch, exists := state.Dispatch(request.DispatchDigest)
-	if !exists {
-		return reviewAdapterDispatch{}, fmt.Errorf("review gate dispatch %s is unknown", request.DispatchDigest)
-	}
-	if _, recorded := state.Record(dispatch.digest); recorded {
-		return reviewAdapterDispatch{}, fmt.Errorf("review gate dispatch %s is already terminal", dispatch.digest)
-	}
-	attempt, exists := projection.core.Attempt(request.AttemptID)
-	if !exists || attempt.phase != AttemptActive || attempt.verifiedHead != dispatch.head {
-		return reviewAdapterDispatch{}, fmt.Errorf("review gate dispatch is stale against the active attempt")
-	}
-	unit, err := executionForMergeUnit(definition.execution, attempt.mergeUnit)
-	if err != nil {
-		return reviewAdapterDispatch{}, err
-	}
-	config, configured := unit.ReviewGate()
-	if !configured || !config.bound() || !reviewGateDispatchMatchesConfig(dispatch, config) {
-		return reviewAdapterDispatch{}, fmt.Errorf("review gate dispatch no longer matches configured adapter policy")
-	}
-	worktreeRoot, err := derivedWorkspaceWorktreeRootForJournal(journal)
-	if err != nil {
-		return reviewAdapterDispatch{}, err
-	}
-	frozenCopy, err := reviewGateFrozenCopyPath(worktreeRoot, dispatch.digest)
-	if err != nil {
-		return reviewAdapterDispatch{}, err
-	}
-	info, err := os.Stat(frozenCopy)
-	if err != nil || !info.IsDir() {
-		return reviewAdapterDispatch{}, fmt.Errorf("review gate frozen copy is unavailable: %w", err)
-	}
-	return reviewAdapterDispatch{attempt: attempt, dispatch: dispatch, frozenCopy: frozenCopy}, nil
-}
-
-func buildReviewAdapterMaterialization(
-	definition EffectiveWorkspaceDefinition,
-	resolved reviewAdapterDispatch,
-	reviewInput []byte,
-) (ReviewAdapterMaterialization, error) {
-	goals, unitName, err := reviewAdapterGoals(definition, resolved.dispatch.mergeUnit)
-	if err != nil {
-		return ReviewAdapterMaterialization{}, err
-	}
-	charter := witnesscharter.Charter{
-		SchemaVersion: witnesscharter.SchemaVersion,
-		Goals:         goals,
-		NonGoals:      []witnesscharter.Statement{},
-		OwnerEvents: []witnesscharter.OwnerEvent{{
-			ID:      reviewRequestOwnerEventID(resolved.dispatch.digest),
-			Type:    "review-gate-dispatch",
-			Actor:   "feature-implement",
-			Summary: unitName,
-			Details: map[string]any{"dispatch_digest": resolved.dispatch.digest.String()},
-		}},
-	}
-	frozen, err := witnesscharter.Freeze(charter, nil)
-	if err != nil {
-		return ReviewAdapterMaterialization{}, fmt.Errorf("freeze review charter: %w", err)
-	}
-	reviewInputDigest, err := ParseDigest(witnessdigest.RawBytes(reviewInput))
-	if err != nil {
-		return ReviewAdapterMaterialization{}, fmt.Errorf("parse review input digest: %w", err)
-	}
-	requestDocument := witnessreview.ReviewRequestDocument{
-		SchemaVersion:    witnessreview.ReviewRequestV1,
-		ConsumerIdentity: reviewAdapterConsumerIdentity(resolved.dispatch.workspaceID),
-		Subject: witnessreview.RequestSubject{
-			Head: resolved.dispatch.head.String(), Tree: resolved.dispatch.tree.String(),
-		},
-		CharterHash: frozen.CharterHash, ReviewInputDigest: reviewInputDigest.String(),
-	}
-	if err := witnessreview.RequireValidReviewRequest(requestDocument); err != nil {
-		return ReviewAdapterMaterialization{}, fmt.Errorf("validate constructed review request: %w", err)
-	}
-	charterJSON, err := canonjson.Marshal(charter)
-	if err != nil {
-		return ReviewAdapterMaterialization{}, fmt.Errorf("canonicalize review charter: %w", err)
-	}
-	requestJSON, err := canonjson.Marshal(requestDocument)
-	if err != nil {
-		return ReviewAdapterMaterialization{}, fmt.Errorf("canonicalize review request: %w", err)
-	}
-	return ReviewAdapterMaterialization{
-		frozen: frozen, charterJSON: charterJSON, requestJSON: requestJSON,
-		reviewInput: append([]byte(nil), reviewInput...), reviewInputDigest: reviewInputDigest,
-	}, nil
-}
-
-func reviewAdapterGoals(
-	definition EffectiveWorkspaceDefinition,
-	reference MergeUnitReference,
-) ([]witnesscharter.Statement, string, error) {
-	for _, plan := range definition.plans {
-		if plan.id != reference.planID {
-			continue
-		}
-		stories := make(map[string]Story, len(plan.stories))
-		for _, story := range plan.stories {
-			stories[story.id.String()] = story
-		}
-		for _, unit := range plan.mergeUnits {
-			if unit.id != reference.mergeUnitID {
-				continue
-			}
-			goals := make([]witnesscharter.Statement, 0)
-			for _, storyID := range unit.storyIDs {
-				story := stories[storyID.String()]
-				for index, acceptance := range story.acceptance {
-					goals = append(goals, witnesscharter.Statement{
-						ID: fmt.Sprintf("%s-ac-%d", story.id, index+1), Statement: acceptance,
-					})
-				}
-			}
-			return goals, unit.name, nil
-		}
-		return nil, "", fmt.Errorf("review adapter plan %s has no merge unit %s", reference.planID, reference.mergeUnitID)
-	}
-	return nil, "", fmt.Errorf("review adapter has no plan %s", reference.planID)
-}
-
-func reviewRequestOwnerEventID(digest Digest) string {
-	hex := strings.TrimPrefix(digest.String(), "sha256:")
-	if len(hex) > 16 {
-		hex = hex[:16]
-	}
-	return "review-gate-" + hex
-}
-
-func reviewAdapterConsumerIdentity(workspaceID ID) witnessreview.Identity {
+func reviewConsumerIdentity(workspaceID ID) witnessreview.Identity {
 	return witnessreview.Identity{Kind: "feature-implement", ID: workspaceID.String()}
-}
-
-func requireMatchingReviewConsumerIdentity(reportIdentity, requestIdentity witnessreview.Identity) error {
-	if reportIdentity != requestIdentity {
-		return fmt.Errorf("review report consumer identity {kind:%q id:%q} does not match review request consumer identity {kind:%q id:%q}", reportIdentity.Kind, reportIdentity.ID, requestIdentity.Kind, requestIdentity.ID)
-	}
-	return nil
 }
 
 // ReviewDocumentArtifact identifies raw report bytes retained under the
@@ -362,141 +136,206 @@ func removeReviewDocumentArtifactLocked(journal *WorkspaceJournal, artifact Revi
 	return nil
 }
 
-type RecordAttemptReviewDocumentRequest struct {
+// RecordAttemptReviewCompletionRequest is the in-process handoff from a
+// review runner that observed execution. The request and completion are typed
+// contract values rather than decoded persisted bytes: decoding a completion
+// intentionally produces inert execution evidence and can never satisfy a
+// gate.
+type RecordAttemptReviewCompletionRequest struct {
 	AttemptID      ID
 	DispatchDigest Digest
-	Verdict        ReviewGateVerdict
-	Document       []byte
+	Request        witnessreview.ReviewRequestV2Document
+	Completion     witnessreview.ReviewCompletionDocument
 	OccurredAt     time.Time
 }
 
-type RecordedReviewDocument struct {
+// RecordedReviewCompletion contains the terminal gate fact and the retained
+// completion document artifact. The completion is retained for inspection;
+// readiness uses the in-process validation that happened before recording.
+type RecordedReviewCompletion struct {
 	gateRecord ReviewGateRecord
 	artifact   ReviewDocumentArtifact
 }
 
-func (result RecordedReviewDocument) GateRecord() ReviewGateRecord     { return result.gateRecord }
-func (result RecordedReviewDocument) Artifact() ReviewDocumentArtifact { return result.artifact }
+func (result RecordedReviewCompletion) GateRecord() ReviewGateRecord {
+	return result.gateRecord
+}
 
-// RecordAttemptReviewDocument keeps the strict Witness decode and every raw
-// binding check, then uses the raw retained report as the gate evidence. The
-// report's contents never enter the local assessment model.
-func RecordAttemptReviewDocument(
-	ctx context.Context,
+func (result RecordedReviewCompletion) Artifact() ReviewDocumentArtifact {
+	return result.artifact
+}
+
+// RecordAttemptReviewCompletion validates a review-request-v2 /
+// review-completion-v1 pair in the process that observed the review run, then
+// records the completion as opaque evidence. It deliberately does not decode
+// a completion from the runtime artifact: persisted completion documents are
+// audit records, not re-validatable proof.
+func RecordAttemptReviewCompletion(
 	journal *WorkspaceJournal,
 	definition EffectiveWorkspaceDefinition,
-	repository ReviewAdapterRepositoryPort,
-	request RecordAttemptReviewDocumentRequest,
-) (RecordedReviewDocument, JournalRecord, error) {
-	if ctx == nil || journal == nil || repository == nil || request.AttemptID.IsZero() || request.DispatchDigest.IsZero() ||
-		!request.Verdict.valid() || len(request.Document) == 0 || len(request.Document) > MaxArtifactBytes || request.OccurredAt.IsZero() {
-		return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("record review document requires exact dispatch, verdict, bounded document, and occurrence time")
+	request RecordAttemptReviewCompletionRequest,
+) (RecordedReviewCompletion, JournalRecord, error) {
+	if journal == nil || request.AttemptID.IsZero() || request.DispatchDigest.IsZero() || request.OccurredAt.IsZero() {
+		return RecordedReviewCompletion{}, JournalRecord{}, fmt.Errorf("record review completion requires journal, attempt, dispatch, completion, and occurrence time")
 	}
-	if request.Verdict == ReviewGateFailedToRun {
-		return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("review document route does not accept failed_to_run")
+	if err := witnessreview.RequireValidReviewRequestV2(request.Request); err != nil {
+		return RecordedReviewCompletion{}, JournalRecord{}, fmt.Errorf("validate review request: %w", err)
 	}
+	if err := witnessreview.RequireValidReviewCompletion(request.Completion, request.Request); err != nil {
+		return RecordedReviewCompletion{}, JournalRecord{}, fmt.Errorf("validate review completion: %w", err)
+	}
+	if request.Completion.ExecutionEvidence.HostProduced() == false {
+		return RecordedReviewCompletion{}, JournalRecord{}, fmt.Errorf("review completion execution evidence was not produced by the observing host process")
+	}
+
 	snapshot, projection, err := readReviewRuntime(journal, definition)
 	if err != nil {
-		return RecordedReviewDocument{}, JournalRecord{}, err
-	}
-	if recorded, record, exists, lookupErr := recordedReviewDocumentForDispatch(snapshot, request); lookupErr != nil {
-		return RecordedReviewDocument{}, JournalRecord{}, lookupErr
-	} else if exists {
-		state, stateExists := projection.State(request.AttemptID)
-		if !stateExists {
-			return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("attempt %s has no review gate state", request.AttemptID)
-		}
-		dispatch, dispatchExists := state.Dispatch(request.DispatchDigest)
-		if !dispatchExists {
-			return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("review gate dispatch %s is unknown", request.DispatchDigest)
-		}
-		if err := discardReviewGateFrozenCopyForJournal(journal, dispatch); err != nil {
-			return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("discard terminal review gate frozen copy: %w", err)
-		}
-		return recorded, record, nil
+		return RecordedReviewCompletion{}, JournalRecord{}, err
 	}
 	state, exists := projection.State(request.AttemptID)
 	if !exists {
-		return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("attempt %s has no review gate state", request.AttemptID)
+		return RecordedReviewCompletion{}, JournalRecord{}, fmt.Errorf("attempt %s has no review gate dispatch", request.AttemptID)
 	}
 	dispatch, exists := state.Dispatch(request.DispatchDigest)
-	if !exists || !ReviewGateCarriesDocumentContract(dispatch.adapter) {
-		return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("review document requires a Witness gate dispatch")
+	if !exists {
+		return RecordedReviewCompletion{}, JournalRecord{}, fmt.Errorf("review gate dispatch %s is unknown for attempt %s", request.DispatchDigest, request.AttemptID)
 	}
-	materialization, err := BuildReviewAdapterRequest(ctx, journal, definition, repository, ReviewAdapterBuildRequest{
-		AttemptID: request.AttemptID, DispatchDigest: request.DispatchDigest,
-	})
+	if err := validateReviewCompletionDispatchBinding(dispatch, request.Request); err != nil {
+		return RecordedReviewCompletion{}, JournalRecord{}, err
+	}
+
+	completionBytes, err := canonjson.Marshal(request.Completion)
 	if err != nil {
-		return RecordedReviewDocument{}, JournalRecord{}, err
+		return RecordedReviewCompletion{}, JournalRecord{}, fmt.Errorf("canonicalize review completion: %w", err)
 	}
-	document, err := witnessreview.DecodeAndValidateReviewReport(request.Document, materialization.FrozenCharter(), materialization.ReviewInputDigest().String())
+	artifact, err := NewReviewDocumentArtifact(completionBytes)
 	if err != nil {
-		return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("validate review report document: %w", err)
+		return RecordedReviewCompletion{}, JournalRecord{}, fmt.Errorf("retain review completion evidence: %w", err)
 	}
-	if err := requireMatchingReviewConsumerIdentity(document.ConsumerIdentity, reviewAdapterConsumerIdentity(dispatch.WorkspaceID())); err != nil {
-		return RecordedReviewDocument{}, JournalRecord{}, err
+	if existing, existingRecord, found, lookupErr := recordedReviewCompletionForDispatch(snapshot, request, artifact); lookupErr != nil {
+		return RecordedReviewCompletion{}, JournalRecord{}, lookupErr
+	} else if found {
+		if err := discardReviewGateFrozenCopyForJournal(journal, dispatch); err != nil {
+			return RecordedReviewCompletion{}, JournalRecord{}, fmt.Errorf("discard terminal review gate frozen copy: %w", err)
+		}
+		return existing, existingRecord, nil
 	}
-	artifact, err := NewReviewDocumentArtifact(request.Document)
+	attempt, exists := projection.core.Attempt(request.AttemptID)
+	if !exists || attempt.phase != AttemptActive || attempt.verifiedHead != dispatch.head {
+		return RecordedReviewCompletion{}, JournalRecord{}, fmt.Errorf("review completion is stale against the active exact review-gate source")
+	}
+
+	verdict, err := reviewGateVerdictFromCompletion(request.Completion.Verdict)
 	if err != nil {
-		return RecordedReviewDocument{}, JournalRecord{}, err
+		return RecordedReviewCompletion{}, JournalRecord{}, err
 	}
 	gateRecord, err := NewReviewGateRecord(ReviewGateRecordOptions{
-		Dispatch: dispatch, Verdict: request.Verdict, EvidenceDigest: artifact.RawDocumentDigest(), OccurredAt: request.OccurredAt,
+		Dispatch: dispatch, Verdict: verdict, EvidenceDigest: artifact.RawDocumentDigest(), OccurredAt: request.OccurredAt,
 	})
 	if err != nil {
-		return RecordedReviewDocument{}, JournalRecord{}, err
+		return RecordedReviewCompletion{}, JournalRecord{}, err
 	}
 	event, err := NewReviewGateRecordedDocumentJournalEvent(dispatch, gateRecord, artifact)
 	if err != nil {
-		return RecordedReviewDocument{}, JournalRecord{}, err
+		return RecordedReviewCompletion{}, JournalRecord{}, err
 	}
-	created, err := writeReviewDocumentArtifact(journal, artifact, request.Document)
+	created, err := writeReviewDocumentArtifact(journal, artifact, completionBytes)
 	if err != nil {
-		return RecordedReviewDocument{}, JournalRecord{}, err
+		return RecordedReviewCompletion{}, JournalRecord{}, err
 	}
 	journalRecord, err := appendReviewJournalEvent(journal, snapshot, event, request.OccurredAt)
 	if err != nil {
-		if recovered, existingRecord, exists, lookupErr := recheckRecordedReviewDocument(journal, request); lookupErr == nil && exists {
+		if recovered, recoveredRecord, found, lookupErr := recheckRecordedReviewCompletion(journal, request, artifact); lookupErr == nil && found {
 			if cleanupErr := discardReviewGateFrozenCopyForJournal(journal, dispatch); cleanupErr != nil {
-				return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("discard terminal review gate frozen copy: %w", cleanupErr)
+				return RecordedReviewCompletion{}, JournalRecord{}, fmt.Errorf("discard terminal review gate frozen copy: %w", cleanupErr)
 			}
-			return recovered, existingRecord, nil
+			return recovered, recoveredRecord, nil
 		}
 		if created {
-			if cleanupErr := removeReviewDocumentArtifact(journal, artifact, request.Document); cleanupErr != nil {
-				return RecordedReviewDocument{}, JournalRecord{}, errors.Join(err, fmt.Errorf("remove new raw review document after journal append failure: %w", cleanupErr))
+			if cleanupErr := removeReviewDocumentArtifact(journal, artifact, completionBytes); cleanupErr != nil {
+				return RecordedReviewCompletion{}, JournalRecord{}, errors.Join(err, fmt.Errorf("remove new review completion artifact after journal append failure: %w", cleanupErr))
 			}
 		}
-		return RecordedReviewDocument{}, JournalRecord{}, err
+		return RecordedReviewCompletion{}, JournalRecord{}, err
 	}
 	if err := discardReviewGateFrozenCopyForJournal(journal, dispatch); err != nil {
-		return RecordedReviewDocument{}, JournalRecord{}, fmt.Errorf("discard terminal review gate frozen copy: %w", err)
+		return RecordedReviewCompletion{}, JournalRecord{}, fmt.Errorf("discard terminal review gate frozen copy: %w", err)
 	}
-	return RecordedReviewDocument{gateRecord: gateRecord, artifact: artifact}, journalRecord, nil
+	return RecordedReviewCompletion{gateRecord: gateRecord, artifact: artifact}, journalRecord, nil
 }
 
-func recordedReviewDocumentForDispatch(snapshot JournalSnapshot, request RecordAttemptReviewDocumentRequest) (RecordedReviewDocument, JournalRecord, bool, error) {
+func validateReviewCompletionDispatchBinding(
+	dispatch ReviewGateDispatch,
+	request witnessreview.ReviewRequestV2Document,
+) error {
+	if request.Adapter != dispatch.adapter.String() {
+		return fmt.Errorf("review request adapter %q does not match review gate dispatch adapter %q", request.Adapter, dispatch.adapter)
+	}
+	if request.ConsumerIdentity != reviewConsumerIdentity(dispatch.workspaceID) {
+		return fmt.Errorf("review request consumer identity {kind:%q id:%q} does not match workspace %s", request.ConsumerIdentity.Kind, request.ConsumerIdentity.ID, dispatch.workspaceID)
+	}
+	recipe, err := witnessreview.ReviewRequestV2Recipe(request)
+	if err != nil {
+		return fmt.Errorf("decode frozen review recipe for dispatch binding: %w", err)
+	}
+	if recipe.RecipeID != dispatch.recipe.String() {
+		return fmt.Errorf("review request frozen recipe %q does not match review gate dispatch recipe %q", recipe.RecipeID, dispatch.recipe)
+	}
+	if request.Subject.Head != dispatch.head.String() {
+		return fmt.Errorf("review request subject head %q does not match review gate dispatch head %q", request.Subject.Head, dispatch.head)
+	}
+	if strings.TrimSpace(request.Subject.Tree) == "" {
+		return fmt.Errorf("review request subject tree is required for the exact review gate source")
+	}
+	if request.Subject.Tree != dispatch.tree.String() {
+		return fmt.Errorf("review request subject tree %q does not match review gate dispatch tree %q", request.Subject.Tree, dispatch.tree)
+	}
+	return nil
+}
+
+func reviewGateVerdictFromCompletion(verdict string) (ReviewGateVerdict, error) {
+	switch verdict {
+	case witnessreview.CompletionVerdictSatisfied:
+		return ReviewGateSatisfied, nil
+	case witnessreview.CompletionVerdictNotSatisfied:
+		return ReviewGateNotSatisfied, nil
+	case witnessreview.CompletionVerdictFailedToRun:
+		return ReviewGateFailedToRun, nil
+	default:
+		return "", fmt.Errorf("review completion verdict %q is not supported", verdict)
+	}
+}
+
+func recordedReviewCompletionForDispatch(
+	snapshot JournalSnapshot,
+	request RecordAttemptReviewCompletionRequest,
+	artifact ReviewDocumentArtifact,
+) (RecordedReviewCompletion, JournalRecord, bool, error) {
 	for _, journalRecord := range snapshot.Records() {
 		event, ok := journalRecord.Event().(ReviewGateRecordedJournalEvent)
 		if !ok || event.Dispatch().AttemptID() != request.AttemptID || event.Dispatch().Digest() != request.DispatchDigest {
 			continue
 		}
-		artifact, hasArtifact := event.DocumentArtifact()
+		recordedArtifact, hasArtifact := event.DocumentArtifact()
 		if !hasArtifact {
-			return RecordedReviewDocument{}, JournalRecord{}, true, fmt.Errorf("review document cannot attach raw evidence to an existing gate record")
+			return RecordedReviewCompletion{}, JournalRecord{}, true, fmt.Errorf("review completion cannot attach to an existing gate record without retained evidence")
 		}
-		if artifact.RawDocumentDigest() != DigestBytes(request.Document) || event.Record().Verdict() != request.Verdict {
-			return RecordedReviewDocument{}, JournalRecord{}, true, fmt.Errorf("recorded review document does not match the requested terminal record")
+		if recordedArtifact.RawDocumentDigest() != artifact.RawDocumentDigest() {
+			return RecordedReviewCompletion{}, JournalRecord{}, true, fmt.Errorf("recorded review completion does not match the requested terminal record")
 		}
-		return RecordedReviewDocument{gateRecord: event.Record(), artifact: artifact}, journalRecord, true, nil
+		return RecordedReviewCompletion{gateRecord: event.Record(), artifact: recordedArtifact}, journalRecord, true, nil
 	}
-	return RecordedReviewDocument{}, JournalRecord{}, false, nil
+	return RecordedReviewCompletion{}, JournalRecord{}, false, nil
 }
 
-func recheckRecordedReviewDocument(journal *WorkspaceJournal, request RecordAttemptReviewDocumentRequest) (RecordedReviewDocument, JournalRecord, bool, error) {
+func recheckRecordedReviewCompletion(
+	journal *WorkspaceJournal,
+	request RecordAttemptReviewCompletionRequest,
+	artifact ReviewDocumentArtifact,
+) (RecordedReviewCompletion, JournalRecord, bool, error) {
 	snapshot, err := journal.ReadSnapshot()
 	if err != nil {
-		return RecordedReviewDocument{}, JournalRecord{}, false, err
+		return RecordedReviewCompletion{}, JournalRecord{}, false, err
 	}
-	return recordedReviewDocumentForDispatch(snapshot, request)
+	return recordedReviewCompletionForDispatch(snapshot, request, artifact)
 }

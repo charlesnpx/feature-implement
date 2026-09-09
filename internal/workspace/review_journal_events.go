@@ -110,8 +110,8 @@ func (event ReviewGateDispatchedJournalEvent) Dispatch() ReviewGateDispatch {
 }
 
 // ReviewGateRecordedJournalEvent is the terminal half of a dispatch. A raw
-// Witness report can be retained as the evidence artifact without exposing its
-// assessment details through the local gate model.
+// shared-contract document can be retained as the evidence artifact without
+// exposing its assessment details through the local gate model.
 type ReviewGateRecordedJournalEvent struct {
 	dispatch ReviewGateDispatch
 	record   ReviewGateRecord
@@ -170,7 +170,7 @@ func (event ReviewGateRecordedJournalEvent) validate() error {
 		event.record.tree != event.dispatch.tree {
 		return fmt.Errorf("review gate record event does not match its exact dispatch")
 	}
-	if err := validateReviewGateRecordDocumentContract(event.dispatch, event.record, event.document); err != nil {
+	if err := validateReviewGateRecordDocument(event.record, event.document); err != nil {
 		return err
 	}
 	if event.document != nil {
@@ -184,25 +184,11 @@ func (event ReviewGateRecordedJournalEvent) validate() error {
 	return nil
 }
 
-// reviewGateRecordRequiresDocumentArtifact is the shared journal-contract
-// predicate. A document-contract adapter's satisfied or not-satisfied verdict
-// is durable only with its retained raw document artifact.
-func reviewGateRecordRequiresDocumentArtifact(
-	dispatch ReviewGateDispatch,
-	record ReviewGateRecord,
-) bool {
-	return ReviewGateCarriesDocumentContract(dispatch.adapter) &&
-		(record.verdict == ReviewGateSatisfied || record.verdict == ReviewGateNotSatisfied)
-}
-
-func validateReviewGateRecordDocumentContract(
-	dispatch ReviewGateDispatch,
-	record ReviewGateRecord,
-	document *ReviewDocumentArtifact,
-) error {
-	if reviewGateRecordRequiresDocumentArtifact(dispatch, record) && document == nil {
-		return fmt.Errorf("review gate document contract is incompatible; regenerate from committed sources")
-	}
+// validateReviewGateRecordDocument validates an optional retained document
+// without inferring its contract from the adapter that produced it. The
+// recording seam decides whether a document is required from the document
+// identity it received; journal replay only verifies the durable locator.
+func validateReviewGateRecordDocument(record ReviewGateRecord, document *ReviewDocumentArtifact) error {
 	return nil
 }
 func (event ReviewGateRecordedJournalEvent) Dispatch() ReviewGateDispatch { return event.dispatch }

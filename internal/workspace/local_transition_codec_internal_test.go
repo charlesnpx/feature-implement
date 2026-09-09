@@ -57,13 +57,13 @@ func TestReviewGateRecordedCodecRetainsExactTerminalBindings(t *testing.T) {
 	}
 }
 
-func TestReviewGateRecordedCodecRejectsWitnessSatisfiedRecordWithoutDocumentOnReplay(t *testing.T) {
+func TestReviewGateRecordedCodecDoesNotSpecialCaseAdapterNames(t *testing.T) {
 	head, _ := ParseGitObjectID("sha1:" + strings.Repeat("a", 40))
 	tree, _ := ParseGitObjectID("sha1:" + strings.Repeat("b", 40))
 	dispatch, err := NewReviewGateDispatch(ReviewGateDispatchOptions{
 		WorkspaceID: MustID("codec-workspace"), Generation: DigestBytes([]byte("codec-generation")),
 		AttemptID: MustID("codec-attempt"), MergeUnit: MergeUnitReference{planID: MustID("codec-plan"), mergeUnitID: MustID("codec-unit")},
-		Adapter: MustID(WitnessReviewGateAdapter), Recipe: MustID("default"), PolicyDigest: DigestBytes([]byte("codec-policy")),
+		Adapter: MustID("witness"), Recipe: MustID("default"), PolicyDigest: DigestBytes([]byte("codec-policy")),
 		Head: head, Tree: tree,
 	})
 	if err != nil {
@@ -82,9 +82,9 @@ func TestReviewGateRecordedCodecRejectsWitnessSatisfiedRecordWithoutDocumentOnRe
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, supported, err := decodeReviewJournalEvent(JournalEventReviewGateRecorded, payload); !supported || err == nil ||
-		!strings.Contains(err.Error(), "regenerate from committed sources") {
-		t.Fatalf("generic Witness satisfied replay = supported=%t error=%v", supported, err)
+	decoded, supported, err := decodeReviewJournalEvent(JournalEventReviewGateRecorded, payload)
+	if err != nil || !supported {
+		t.Fatalf("adapter-named satisfied replay = event=%#v supported=%t error=%v", decoded, supported, err)
 	}
 }
 

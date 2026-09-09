@@ -16,10 +16,11 @@ const (
 )
 
 type workspaceBundleWire struct {
-	SchemaVersion   int      `json:"schema_version"`
-	Workspace       string   `json:"workspace"`
-	Plans           []string `json:"plans"`
-	ExecutionConfig string   `json:"execution_config"`
+	SchemaVersion       int      `json:"schema_version"`
+	Workspace           string   `json:"workspace"`
+	Plans               []string `json:"plans"`
+	ExecutionConfig     string   `json:"execution_config"`
+	ReviewConfiguration string   `json:"review_configuration,omitempty"`
 }
 
 // WorkspaceBundle is a validated, immutable set of local source bytes. The
@@ -36,6 +37,9 @@ type WorkspaceBundle struct {
 func (bundle WorkspaceBundle) Root() string                             { return bundle.root }
 func (bundle WorkspaceBundle) DescriptorDigest() Digest                 { return bundle.descriptorDigest }
 func (bundle WorkspaceBundle) Definition() EffectiveWorkspaceDefinition { return bundle.definition }
+func (bundle WorkspaceBundle) ReviewConfiguration() ReviewConfiguration {
+	return bundle.definition.ReviewConfiguration()
+}
 func (bundle WorkspaceBundle) SourcePaths() []string {
 	return append([]string(nil), bundle.sourcePaths...)
 }
@@ -131,6 +135,22 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 	if err := claimSourcePath(executionPath, "execution_config"); err != nil {
 		return WorkspaceBundle{}, err
 	}
+	reviewConfiguration := SourceArtifact{Path: BundledDefaultReviewConfiguration}
+	if strings.TrimSpace(wire.ReviewConfiguration) != "" &&
+		strings.TrimSpace(wire.ReviewConfiguration) != BundledDefaultReviewConfiguration {
+		reviewConfigurationPath, pathErr := normalizeBundleSourcePath("review_configuration", wire.ReviewConfiguration)
+		if pathErr != nil {
+			return WorkspaceBundle{}, pathErr
+		}
+		if claimErr := claimSourcePath(reviewConfigurationPath, "review_configuration"); claimErr != nil {
+			return WorkspaceBundle{}, claimErr
+		}
+		content, readErr := readWorkspaceBundleFile(filesystem, reviewConfigurationPath, MaxArtifactBytes)
+		if readErr != nil {
+			return WorkspaceBundle{}, fmt.Errorf("read review configuration %s: %w", reviewConfigurationPath, readErr)
+		}
+		reviewConfiguration = SourceArtifact{Path: reviewConfigurationPath, Bytes: content}
+	}
 	workspaceBytes, err := readWorkspaceBundleFile(filesystem, workspacePath, MaxArtifactBytes)
 	if err != nil {
 		return WorkspaceBundle{}, fmt.Errorf("read workspace source %s: %w", workspacePath, err)
@@ -189,10 +209,11 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 	}
 
 	sources := DefinitionSources{
-		Workspace:       SourceArtifact{Path: workspacePath, Bytes: workspaceBytes},
-		Plans:           plans,
-		ExecutionConfig: SourceArtifact{Path: executionPath, Bytes: executionBytes},
-		ReviewPolicies:  policies,
+		Workspace:           SourceArtifact{Path: workspacePath, Bytes: workspaceBytes},
+		Plans:               plans,
+		ExecutionConfig:     SourceArtifact{Path: executionPath, Bytes: executionBytes},
+		ReviewPolicies:      policies,
+		ReviewConfiguration: reviewConfiguration,
 	}
 	definition, err := ValidateDefinition(sources)
 	if err != nil {
@@ -217,6 +238,9 @@ func LoadWorkspaceBundle(bundleRoot string) (WorkspaceBundle, error) {
 	sourceFiles[WorkspaceBundleFileName] = append([]byte(nil), descriptor...)
 	sourceFiles[workspacePath] = append([]byte(nil), workspaceBytes...)
 	sourceFiles[executionPath] = append([]byte(nil), executionBytes...)
+	if reviewConfiguration.Path != BundledDefaultReviewConfiguration {
+		sourceFiles[reviewConfiguration.Path] = append([]byte(nil), reviewConfiguration.Bytes...)
+	}
 	for _, plan := range plans {
 		sourceFiles[plan.Path] = append([]byte(nil), plan.Bytes...)
 	}
@@ -250,10 +274,11 @@ func rejectReservedDerivedBundleRoot(bundleRoot string) error {
 }
 
 type canonicalWorkspaceBundle struct {
-	SchemaVersion   int      `json:"schema_version"`
-	Workspace       string   `json:"workspace"`
-	Plans           []string `json:"plans"`
-	ExecutionConfig string   `json:"execution_config"`
+	SchemaVersion       int      `json:"schema_version"`
+	Workspace           string   `json:"workspace"`
+	Plans               []string `json:"plans"`
+	ExecutionConfig     string   `json:"execution_config"`
+	ReviewConfiguration string   `json:"review_configuration"`
 }
 
 func bindWorkspaceBundleDefinition(
@@ -266,7 +291,8 @@ func bindWorkspaceBundleDefinition(
 	canonical := canonicalWorkspaceBundle{
 		SchemaVersion: WorkspaceBundleSchemaVersion,
 		Workspace:     workspacePath, Plans: append([]string(nil), planPaths...),
-		ExecutionConfig: executionPath,
+		ExecutionConfig:     executionPath,
+		ReviewConfiguration: definition.reviewConfiguration.Source(),
 	}
 	canonicalBytes, err := json.Marshal(canonical)
 	if err != nil {
@@ -317,10 +343,11 @@ func readWorkspaceBundleFile(filesystem *VerifiedRoot, relative string, maximum 
 
 func cloneDefinitionSources(source DefinitionSources) DefinitionSources {
 	result := DefinitionSources{
-		Workspace:       SourceArtifact{Path: source.Workspace.Path, Bytes: append([]byte(nil), source.Workspace.Bytes...)},
-		ExecutionConfig: SourceArtifact{Path: source.ExecutionConfig.Path, Bytes: append([]byte(nil), source.ExecutionConfig.Bytes...)},
-		Plans:           make([]SourceArtifact, 0, len(source.Plans)),
-		ReviewPolicies:  make([]SourceArtifact, 0, len(source.ReviewPolicies)),
+		Workspace:           SourceArtifact{Path: source.Workspace.Path, Bytes: append([]byte(nil), source.Workspace.Bytes...)},
+		ExecutionConfig:     SourceArtifact{Path: source.ExecutionConfig.Path, Bytes: append([]byte(nil), source.ExecutionConfig.Bytes...)},
+		Plans:               make([]SourceArtifact, 0, len(source.Plans)),
+		ReviewPolicies:      make([]SourceArtifact, 0, len(source.ReviewPolicies)),
+		ReviewConfiguration: SourceArtifact{Path: source.ReviewConfiguration.Path, Bytes: append([]byte(nil), source.ReviewConfiguration.Bytes...)},
 	}
 	for _, plan := range source.Plans {
 		result.Plans = append(result.Plans, SourceArtifact{Path: plan.Path, Bytes: append([]byte(nil), plan.Bytes...)})
@@ -338,10 +365,11 @@ func WorkspaceBundleSchema() map[string]any {
 		"additionalProperties": false,
 		"required":             []string{"schema_version", "workspace", "plans", "execution_config"},
 		"properties": map[string]any{
-			"schema_version":   map[string]any{"const": WorkspaceBundleSchemaVersion},
-			"workspace":        map[string]any{"type": "string", "minLength": 1},
-			"plans":            map[string]any{"type": "array", "minItems": 1, "uniqueItems": true, "items": map[string]any{"type": "string", "minLength": 1}},
-			"execution_config": map[string]any{"type": "string", "minLength": 1},
+			"schema_version":       map[string]any{"const": WorkspaceBundleSchemaVersion},
+			"workspace":            map[string]any{"type": "string", "minLength": 1},
+			"plans":                map[string]any{"type": "array", "minItems": 1, "uniqueItems": true, "items": map[string]any{"type": "string", "minLength": 1}},
+			"execution_config":     map[string]any{"type": "string", "minLength": 1},
+			"review_configuration": map[string]any{"type": "string", "minLength": 1},
 		},
 	}
 }

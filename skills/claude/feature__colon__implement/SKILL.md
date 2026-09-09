@@ -72,15 +72,16 @@ interprets a policy.
 1. When a complete `review_gate` is configured, submit `review dispatch` after
    the attempt is clean. This records intent before it materializes a separate
    frozen copy at the exact head and tree.
-2. Give the named adapter only that frozen copy and its opaque policy text, not
-   the attempt worktree. A configured adapter may use a fresh Claude subagent
+2. Give the named adapter only that frozen copy, the opaque gate policy, and
+   the bundle's frozen review-configuration bytes or `bundled-default` marker,
+   not the attempt worktree. A configured adapter may use a fresh Claude subagent
    according to its own policy; this workflow does not prescribe an iteration
    scheme.
-3. After the adapter creates durable evidence, submit `review record` with its
-   evidence digest. For a completed Witness run, use `review record-document`
-   with its strict `review-report-v1` document instead; for Witness
-   `failed_to_run`, use `review record` with the durable failure-evidence
-   digest. The raw document is retained as the gate evidence.
+3. The review tooling must return a typed `review-request-v2` /
+   `review-completion-v1` pair, including host-produced execution evidence, in
+   the same process that observed the run. Record that pair through the
+   in-process completion seam. A completion decoded from a persisted JSON file
+   is an audit record with inert evidence and must be refused as proof.
 4. Record exactly one terminal verdict: `satisfied`, `not_satisfied`, or
    `failed_to_run`. A failure to run is not a negative verdict and does not
    alter the attempt phase; use ordinary attempt lifecycle actions if the owner
@@ -91,7 +92,8 @@ interprets a policy.
 6. Without a configured review gate, submit `attempt adopt-head` for the exact
    clean accepted head and tree.
 
-Do not invent adapter evidence, terminal verdicts, or readiness.
+Do not invent adapter evidence, terminal verdicts, or readiness. The workflow
+does not interpret reviewer findings, recipes, or review methodology.
 
 ## Integrate, pause when needed, and complete
 

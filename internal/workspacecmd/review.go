@@ -2,7 +2,6 @@ package workspacecmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/charlesnpx/feature-implement/internal/workspace"
@@ -19,23 +18,17 @@ type ReviewCommandResult struct {
 }
 
 type ReviewGateDispatchView struct {
-	DispatchDigest string                           `json:"dispatch_digest"`
-	Adapter        string                           `json:"adapter"`
-	Recipe         string                           `json:"recipe"`
-	PolicyDigest   string                           `json:"policy_digest"`
-	Policy         string                           `json:"policy"`
-	Head           string                           `json:"head"`
-	Tree           string                           `json:"tree"`
-	FrozenCopy     string                           `json:"frozen_copy"`
-	WitnessPacket  *WitnessReviewDispatchPacketView `json:"witness_packet,omitempty"`
-}
-
-// WitnessReviewDispatchPacketView is the deterministic handoff used to build
-// a review-report-v1 document from a witness dispatch alone.
-type WitnessReviewDispatchPacketView struct {
-	CharterDocument json.RawMessage `json:"charter_document"`
-	RequestDocument json.RawMessage `json:"request_document"`
-	ReviewInput     string          `json:"review_input"`
+	DispatchDigest            string `json:"dispatch_digest"`
+	Adapter                   string `json:"adapter"`
+	Recipe                    string `json:"recipe"`
+	PolicyDigest              string `json:"policy_digest"`
+	Policy                    string `json:"policy"`
+	Head                      string `json:"head"`
+	Tree                      string `json:"tree"`
+	FrozenCopy                string `json:"frozen_copy"`
+	ReviewConfigurationSource string `json:"review_configuration_source"`
+	ReviewConfigurationDigest string `json:"review_configuration_digest"`
+	ReviewConfigurationBytes  []byte `json:"review_configuration_bytes,omitempty"`
 }
 
 type ReviewGateRecordView struct {
@@ -79,20 +72,6 @@ type recordReviewGateInput struct {
 	EvidenceDigest string `json:"evidence_digest"`
 }
 
-type recordReviewDocumentInput struct {
-	SchemaVersion  int             `json:"schema_version"`
-	OccurredAt     string          `json:"occurred_at"`
-	AttemptID      string          `json:"attempt_id"`
-	DispatchDigest string          `json:"dispatch_digest"`
-	Verdict        string          `json:"verdict"`
-	Document       json.RawMessage `json:"document"`
-}
-
-type ReviewDocumentRecordDetail struct {
-	GateRecord      ReviewGateRecordView `json:"gate_record"`
-	RawDocumentPath string               `json:"raw_document_path"`
-}
-
 func executeReview(ctx context.Context, bundle workspace.WorkspaceBundle, options Options) (any, error) {
 	definition := bundle.Definition()
 	repository := localReviewRepository{git: workspace.DefaultLocalCommitGitAdapter()}
@@ -123,17 +102,6 @@ func executeReview(ctx context.Context, bundle workspace.WorkspaceBundle, option
 			return nil, err
 		}
 		detail := reviewGateDispatchView(dispatched)
-		if workspace.ReviewGateCarriesDocumentContract(dispatched.Dispatch().Adapter()) {
-			materialization, err := workspace.BuildReviewAdapterRequest(
-				ctx, journal, definition, repository, workspace.ReviewAdapterBuildRequest{
-					AttemptID: attemptID, DispatchDigest: dispatched.Dispatch().Digest(),
-				},
-			)
-			if err != nil {
-				return nil, err
-			}
-			detail.WitnessPacket = witnessReviewDispatchPacketView(materialization)
-		}
 		return reviewCommandResult("review.dispatch", detail, journal, definition)
 	case "record":
 		var input recordReviewGateInput
@@ -173,52 +141,6 @@ func executeReview(ctx context.Context, bundle workspace.WorkspaceBundle, option
 			return nil, err
 		}
 		return reviewCommandResult("review.record", reviewGateRecordView(recorded), journal, definition)
-	case "record-document":
-		var input recordReviewDocumentInput
-		if err := decodeRequest(options.Input, &input); err != nil {
-			return nil, err
-		}
-		if len(input.Document) == 0 || len(input.Document) > workspace.MaxArtifactBytes {
-			return nil, fmt.Errorf("review document must contain at most %d raw bytes", workspace.MaxArtifactBytes)
-		}
-		occurredAt, err := parseOccurredAt(input.SchemaVersion, input.OccurredAt)
-		if err != nil {
-			return nil, err
-		}
-		attemptID, err := parseID(input.AttemptID, "attempt_id")
-		if err != nil {
-			return nil, err
-		}
-		dispatch, err := parseDigest(input.DispatchDigest, "dispatch_digest")
-		if err != nil {
-			return nil, err
-		}
-		verdict, err := parseReviewGateVerdict(input.Verdict)
-		if err != nil {
-			return nil, err
-		}
-		journal, workspaceDir, err := openWritableJournal(options)
-		if err != nil {
-			return nil, err
-		}
-		defer journal.Close()
-		recorded, _, err := workspace.RecordAttemptReviewDocument(
-			ctx, journal, definition, repository, workspace.RecordAttemptReviewDocumentRequest{
-				AttemptID: attemptID, DispatchDigest: dispatch, Verdict: verdict,
-				Document: input.Document, OccurredAt: occurredAt,
-			},
-		)
-		if err != nil {
-			return nil, err
-		}
-		artifactPath, err := workspace.ReviewDocumentArtifactPath(workspaceDir, recorded.Artifact())
-		if err != nil {
-			return nil, err
-		}
-		return reviewCommandResult("review.record-document", ReviewDocumentRecordDetail{
-			GateRecord:      reviewGateRecordView(recorded.GateRecord()),
-			RawDocumentPath: artifactPath,
-		}, journal, definition)
 	case "ready":
 		var input struct {
 			SchemaVersion int    `json:"schema_version"`
@@ -279,18 +201,13 @@ func reviewReadResult(action string, detail any, journal *workspace.WorkspaceJou
 
 func reviewGateDispatchView(result workspace.ReviewGateDispatchResult) ReviewGateDispatchView {
 	dispatch := result.Dispatch()
+	reviewConfiguration := result.ReviewConfiguration()
 	return ReviewGateDispatchView{
 		DispatchDigest: dispatch.Digest().String(), Adapter: dispatch.Adapter().String(), Recipe: dispatch.Recipe().String(),
 		PolicyDigest: dispatch.PolicyDigest().String(), Policy: string(result.Policy()),
 		Head: dispatch.Head().String(), Tree: dispatch.Tree().String(), FrozenCopy: result.FrozenCopy(),
-	}
-}
-
-func witnessReviewDispatchPacketView(materialization workspace.ReviewAdapterMaterialization) *WitnessReviewDispatchPacketView {
-	return &WitnessReviewDispatchPacketView{
-		CharterDocument: json.RawMessage(materialization.CharterJSON()),
-		RequestDocument: json.RawMessage(materialization.RequestJSON()),
-		ReviewInput:     string(materialization.ReviewInput()),
+		ReviewConfigurationSource: reviewConfiguration.Source(), ReviewConfigurationDigest: reviewConfiguration.Digest().String(),
+		ReviewConfigurationBytes: reviewConfiguration.Bytes(),
 	}
 }
 

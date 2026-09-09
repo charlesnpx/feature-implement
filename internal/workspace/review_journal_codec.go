@@ -164,7 +164,7 @@ func decodeReviewJournalEvent(
 			return nil, true, err
 		}
 		if wire.Document == nil {
-			if err := validateReviewGateRecordDocumentContract(dispatch, record, nil); err != nil {
+			if err := validateReviewGateRecordDocument(record, nil); err != nil {
 				return nil, true, err
 			}
 			event, eventErr := NewReviewGateRecordedJournalEvent(dispatch, record)
@@ -174,7 +174,7 @@ func decodeReviewJournalEvent(
 		if documentErr != nil {
 			return nil, true, documentErr
 		}
-		if err := validateReviewGateRecordDocumentContract(dispatch, record, &document); err != nil {
+		if err := validateReviewGateRecordDocument(record, &document); err != nil {
 			return nil, true, err
 		}
 		event, eventErr := NewReviewGateRecordedDocumentJournalEvent(dispatch, record, document)
