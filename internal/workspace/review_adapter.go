@@ -262,18 +262,8 @@ func validateReviewCompletionDispatchBinding(
 	dispatch ReviewGateDispatch,
 	request witnessreview.ReviewRequestV2Document,
 ) error {
-	if request.Adapter != dispatch.adapter.String() {
-		return fmt.Errorf("review request adapter %q does not match review gate dispatch adapter %q", request.Adapter, dispatch.adapter)
-	}
 	if request.ConsumerIdentity != reviewConsumerIdentity(dispatch.workspaceID) {
 		return fmt.Errorf("review request consumer identity {kind:%q id:%q} does not match workspace %s", request.ConsumerIdentity.Kind, request.ConsumerIdentity.ID, dispatch.workspaceID)
-	}
-	recipe, err := witnessreview.ReviewRequestV2Recipe(request)
-	if err != nil {
-		return fmt.Errorf("decode frozen review recipe for dispatch binding: %w", err)
-	}
-	if recipe.RecipeID != dispatch.recipe.String() {
-		return fmt.Errorf("review request frozen recipe %q does not match review gate dispatch recipe %q", recipe.RecipeID, dispatch.recipe)
 	}
 	if request.Subject.Head != dispatch.head.String() {
 		return fmt.Errorf("review request subject head %q does not match review gate dispatch head %q", request.Subject.Head, dispatch.head)

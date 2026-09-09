@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/charlesnpx/feature-implement/internal/workspace"
+	"github.com/charlesnpx/witness/contract/charter"
 	witnessreview "github.com/charlesnpx/witness/contract/review"
 )
 
@@ -90,6 +91,53 @@ func TestReviewDispatchExposesFrozenConfigurationWithoutAdapterSpecificPacket(t 
 	}
 }
 
+func TestReviewRunRecordsObservedSatisfiedSubprocess(t *testing.T) {
+	fixture := newAttemptBoundaryCommandFixture(t, true)
+	request := reviewRunTestRequest(t, fixture)
+	observed := witnessreview.ObservedReviewExecution{
+		Complete: true, ResultArtifactAvailable: true,
+		ReportOutcomes: map[string]witnessreview.ObservedReportOutcome{
+			"reviewer-a": {Status: witnessreview.ExecutionReportValid},
+		},
+	}
+	evidence, err := witnessreview.NewHostExecutionEvidence(observed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completion, err := witnessreview.NewReviewCompletionDocument(
+		request,
+		evidence,
+		map[string]string{"reviewer-a": workspace.DigestBytes([]byte("fake reviewer report")).String()},
+		witnessreview.CompletionVerdictSatisfied,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeDirectory := canonicalWorkspaceCommandTempDir(t)
+	installReviewRunFake(t, fakeDirectory, request, completion, fixture.charterPath, 0, true)
+	t.Setenv("PATH", fakeDirectory+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	result, err := Execute(context.Background(), Options{
+		Action:       "review",
+		Subaction:    "run",
+		BundleDir:    fixture.bundleRoot,
+		WorkspaceDir: fixture.workspaceDir,
+		CharterPath:  fixture.charterPath,
+		Input:        reviewCommandInput(fixture.attemptID, "2026-09-03T12:00:02Z"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, ok := result.(ReviewCommandResult)
+	if !ok || run.Action != "review.run" {
+		t.Fatalf("review run result = %#v", result)
+	}
+	detail, ok := run.Detail.(ReviewRunView)
+	if !ok || detail.Verdict != string(workspace.ReviewGateSatisfied) || detail.ExitCode != 0 {
+		t.Fatalf("satisfied review run detail = %#v", run.Detail)
+	}
+}
+
 func TestReviewRunRecordsObservedNotSatisfiedSubprocess(t *testing.T) {
 	fixture := newAttemptBoundaryCommandFixture(t, true)
 	request := reviewRunTestRequest(t, fixture)
@@ -111,7 +159,7 @@ func TestReviewRunRecordsObservedNotSatisfiedSubprocess(t *testing.T) {
 		t.Fatal(err)
 	}
 	fakeDirectory := canonicalWorkspaceCommandTempDir(t)
-	installReviewRunFake(t, fakeDirectory, request, completion, 20, true)
+	installReviewRunFake(t, fakeDirectory, request, completion, fixture.charterPath, 20, true)
 	t.Setenv("PATH", fakeDirectory+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	result, err := Execute(context.Background(), Options{
@@ -135,13 +183,62 @@ func TestReviewRunRecordsObservedNotSatisfiedSubprocess(t *testing.T) {
 	}
 }
 
+func TestReviewRunRecordsFailedToRunWhenRequestCharterDiffers(t *testing.T) {
+	fixture := newAttemptBoundaryCommandFixture(t, true)
+	request := reviewRunTestRequest(t, fixture)
+	request.CharterHash = workspace.DigestBytes([]byte("different-test-charter")).String()
+	observed := witnessreview.ObservedReviewExecution{
+		Complete: true, ResultArtifactAvailable: true,
+		ReportOutcomes: map[string]witnessreview.ObservedReportOutcome{
+			"reviewer-a": {Status: witnessreview.ExecutionReportValid},
+		},
+	}
+	evidence, err := witnessreview.NewHostExecutionEvidence(observed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completion, err := witnessreview.NewReviewCompletionDocument(
+		request,
+		evidence,
+		map[string]string{"reviewer-a": workspace.DigestBytes([]byte("fake reviewer report")).String()},
+		witnessreview.CompletionVerdictSatisfied,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeDirectory := canonicalWorkspaceCommandTempDir(t)
+	installReviewRunFake(t, fakeDirectory, request, completion, fixture.charterPath, 0, true)
+	t.Setenv("PATH", fakeDirectory+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	result, err := Execute(context.Background(), Options{
+		Action:       "review",
+		Subaction:    "run",
+		BundleDir:    fixture.bundleRoot,
+		WorkspaceDir: fixture.workspaceDir,
+		CharterPath:  fixture.charterPath,
+		Input:        reviewCommandInput(fixture.attemptID, "2026-09-03T12:00:02Z"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, ok := result.(ReviewCommandResult)
+	if !ok {
+		t.Fatalf("review run result = %#v", result)
+	}
+	detail, ok := run.Detail.(ReviewRunView)
+	if !ok || detail.Verdict != string(workspace.ReviewGateFailedToRun) || detail.ExitCode != 0 ||
+		!strings.Contains(detail.Observation, "Charter") {
+		t.Fatalf("Charter-mismatch detail = %#v", run.Detail)
+	}
+}
+
 func TestReviewRunRecordsFailedToRunWhenAdapterHasNoCompletion(t *testing.T) {
 	fixture := newAttemptBoundaryCommandFixture(t, true)
 	request := reviewRunTestRequest(t, fixture)
 	fakeDirectory := canonicalWorkspaceCommandTempDir(t)
 	installReviewRunFake(
 		t, fakeDirectory,
-		request, witnessreview.ReviewCompletionDocument{}, 21, false,
+		request, witnessreview.ReviewCompletionDocument{}, fixture.charterPath, 21, false,
 	)
 	t.Setenv("PATH", fakeDirectory+string(os.PathListSeparator)+os.Getenv("PATH"))
 
@@ -176,6 +273,7 @@ func TestReviewRunRecordsFailedToRunWhenAdapterHasNoCompletion(t *testing.T) {
 
 func reviewRunTestRequest(t *testing.T, fixture attemptBoundaryCommandFixture) witnessreview.ReviewRequestV2Document {
 	t.Helper()
+	writeReviewRunTestCharter(t, fixture.charterPath)
 	dispatchResult, err := Execute(context.Background(), Options{
 		Action:       "review",
 		Subaction:    "dispatch",
@@ -199,7 +297,7 @@ func reviewRunTestRequest(t *testing.T, fixture attemptBoundaryCommandFixture) w
 		t.Fatal(err)
 	}
 	recipe := witnessreview.ReviewRecipe{
-		RecipeID: dispatch.Recipe, Instructions: "opaque review instructions",
+		RecipeID: "defect-and-economy", Instructions: "opaque review instructions",
 		RequiredOutputs: []string{"reviewer-a"}, Policy: map[string]any{},
 	}
 	recipeBytes, err := witnessreview.ReviewRecipeCanonicalBytes(recipe)
@@ -210,16 +308,37 @@ func reviewRunTestRequest(t *testing.T, fixture attemptBoundaryCommandFixture) w
 	if err != nil {
 		t.Fatal(err)
 	}
+	input, err := charter.ReadFile(fixture.charterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen, err := charter.Freeze(input, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return witnessreview.ReviewRequestV2Document{
 		SchemaVersion: witnessreview.ReviewRequestV2,
 		ConsumerIdentity: witnessreview.Identity{
 			Kind: "feature-implement", ID: bundle.Definition().Workspace().ID().String(),
 		},
 		Subject:           witnessreview.RequestSubject{Head: dispatch.Head, Tree: dispatch.Tree},
-		CharterHash:       workspace.DigestBytes([]byte("test-charter")).String(),
+		CharterHash:       frozen.CharterHash,
 		ReviewInputDigest: workspace.DigestBytes([]byte("test-review-input")).String(),
 		FrozenRecipe:      recipeBytes, RecipeDigest: recipeDigest,
-		Adapter: dispatch.Adapter, RequiredOutputs: []string{"reviewer-a"},
+		Adapter: "simple", RequiredOutputs: []string{"reviewer-a"},
+	}
+}
+
+func writeReviewRunTestCharter(t *testing.T, path string) {
+	t.Helper()
+	input := charter.InitSkeleton("test-owner", "test-charter", "Charter used by the review run tests.")
+	input.Goals = []charter.Statement{{ID: "test-goal", Statement: "The review test binds the supplied Charter."}}
+	data, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -236,6 +355,7 @@ func installReviewRunFake(
 	directory string,
 	request witnessreview.ReviewRequestV2Document,
 	completion witnessreview.ReviewCompletionDocument,
+	suppliedCharterPath string,
 	exitCode int,
 	writeCompletion bool,
 ) {
@@ -251,11 +371,15 @@ func installReviewRunFake(
 			t.Fatal(err)
 		}
 	}
+	charterBytes, err := os.ReadFile(suppliedCharterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	requestPath := filepath.Join(directory, "request.json")
 	completionPath := filepath.Join(directory, "completion.json")
-	charterPath := filepath.Join(directory, "charter.freeze.json")
+	charterOutputPath := filepath.Join(directory, "charter.freeze.json")
 	for path, content := range map[string][]byte{
-		requestPath: requestBytes, completionPath: completionBytes, charterPath: []byte("{}\n"),
+		requestPath: requestBytes, completionPath: completionBytes, charterOutputPath: charterBytes,
 	} {
 		if err := os.WriteFile(path, content, 0o600); err != nil {
 			t.Fatal(err)
@@ -334,7 +458,7 @@ exit "$FEATURE_TEST_REVIEW_EXIT"
 	}
 	t.Setenv("FEATURE_TEST_REVIEW_REQUEST", requestPath)
 	t.Setenv("FEATURE_TEST_REVIEW_COMPLETION", completionPath)
-	t.Setenv("FEATURE_TEST_REVIEW_CHARTER", charterPath)
+	t.Setenv("FEATURE_TEST_REVIEW_CHARTER", charterOutputPath)
 	t.Setenv("FEATURE_TEST_REVIEW_WRITE_COMPLETION", writeCompletionValue)
 	t.Setenv("FEATURE_TEST_REVIEW_OK", ok)
 	t.Setenv("FEATURE_TEST_REVIEW_VERDICT", verdict)

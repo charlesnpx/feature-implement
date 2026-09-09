@@ -12,7 +12,9 @@ import (
 	"strings"
 
 	"github.com/charlesnpx/feature-implement/internal/workspace"
+	"github.com/charlesnpx/witness/contract/charter"
 	witnessreview "github.com/charlesnpx/witness/contract/review"
+	"github.com/charlesnpx/witness/contract/strictjson"
 )
 
 const (
@@ -109,6 +111,10 @@ func executeReviewRun(
 	if strings.TrimSpace(options.CharterPath) == "" {
 		return nil, fmt.Errorf("workspace review run requires --charter <path>")
 	}
+	charterHash, err := reviewCharterHash(options.CharterPath)
+	if err != nil {
+		return nil, fmt.Errorf("compute supplied Charter hash: %w", err)
+	}
 
 	outputDirectory, err := os.MkdirTemp("", "feature-implement-review-run-")
 	if err != nil {
@@ -164,8 +170,8 @@ func executeReviewRun(
 	if requestDocumentErr == nil {
 		requestDocumentErr = requestDecodeErr
 	}
-	if requestDocumentErr == nil && !reviewRunRequestMatchesDispatch(decodedRequest, dispatched.Dispatch()) {
-		requestDocumentErr = errors.New("review request does not match the review gate dispatch")
+	if requestDocumentErr == nil && !reviewRunRequestMatchesDispatch(decodedRequest, dispatched.Dispatch(), charterHash) {
+		requestDocumentErr = errors.New("review request does not match the review gate dispatch or supplied Charter")
 	}
 	if requestDocumentErr == nil {
 		request = decodedRequest
@@ -213,7 +219,7 @@ func executeReviewRun(
 		// unusable output document is failed_to_run. Retain a valid adapter request
 		// when one exists so the recorded failure still binds the supplied Charter.
 		if requestDocumentErr != nil {
-			request, err = failedReviewRequest(dispatched.Dispatch())
+			request, err = failedReviewRequest(dispatched.Dispatch(), charterHash)
 			if err != nil {
 				return nil, fmt.Errorf("construct failed-to-run review request: %w", err)
 			}
@@ -296,6 +302,34 @@ func materializeReviewConfiguration(outputDirectory string, configuration worksp
 		return "", fmt.Errorf("resolve frozen review configuration: %w", err)
 	}
 	return resolved, nil
+}
+
+func reviewCharterHash(path string) (string, error) {
+	input, sourceErr := charter.ReadFile(path)
+	if sourceErr == nil {
+		frozen, err := charter.Freeze(input, nil)
+		if err != nil {
+			return "", fmt.Errorf("freeze Charter: %w", err)
+		}
+		return frozen.CharterHash, nil
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read Charter or frozen Charter: %w", err)
+	}
+	frozen, frozenErr := strictjson.DecodeBytes[charter.FrozenCharter](data, strictjson.DefaultMaxBytes)
+	if frozenErr != nil {
+		return "", fmt.Errorf("decode Charter or frozen Charter: Charter: %v; frozen Charter: %w", sourceErr, frozenErr)
+	}
+	expected, err := charter.Hash(frozen.Charter)
+	if err != nil {
+		return "", fmt.Errorf("hash frozen Charter: %w", err)
+	}
+	if frozen.CharterHash != expected {
+		return "", fmt.Errorf("frozen Charter hash %q does not match its embedded Charter hash %q", frozen.CharterHash, expected)
+	}
+	return expected, nil
 }
 
 func runReviewAdapter(
@@ -469,16 +503,16 @@ func reviewRunCompletionMatchesRequest(
 func reviewRunRequestMatchesDispatch(
 	request witnessreview.ReviewRequestV2Document,
 	dispatch workspace.ReviewGateDispatch,
+	charterHash string,
 ) bool {
-	if request.Adapter != dispatch.Adapter().String() ||
-		request.ConsumerIdentity.Kind != "feature-implement" ||
-		request.ConsumerIdentity.ID != dispatch.WorkspaceID().String() ||
-		request.Subject.Head != dispatch.Head().String() ||
-		request.Subject.Tree != dispatch.Tree().String() {
-		return false
-	}
-	recipe, err := witnessreview.ReviewRequestV2Recipe(request)
-	return err == nil && recipe.RecipeID == dispatch.Recipe().String()
+	// Adapter and recipe IDs belong to the review tool's vocabulary, not the
+	// host gate labels. The frozen configuration already selects that behavior,
+	// so this check binds only dispatch facts and the supplied Charter.
+	return request.ConsumerIdentity.Kind == "feature-implement" &&
+		request.ConsumerIdentity.ID == dispatch.WorkspaceID().String() &&
+		request.Subject.Head == dispatch.Head().String() &&
+		request.Subject.Tree == dispatch.Tree().String() &&
+		request.CharterHash == charterHash
 }
 
 func reviewRunExitVerdict(exitCode int) (string, bool) {
@@ -535,7 +569,7 @@ func reviewRunFailureObservation(
 	return strings.Join(append(parts, "recorded failed_to_run"), "; ")
 }
 
-func failedReviewRequest(dispatch workspace.ReviewGateDispatch) (witnessreview.ReviewRequestV2Document, error) {
+func failedReviewRequest(dispatch workspace.ReviewGateDispatch, charterHash string) (witnessreview.ReviewRequestV2Document, error) {
 	recipe := witnessreview.ReviewRecipe{
 		RecipeID:        dispatch.Recipe().String(),
 		Instructions:    "The configured review adapter did not produce a parseable completion record.",
@@ -559,7 +593,7 @@ func failedReviewRequest(dispatch workspace.ReviewGateDispatch) (witnessreview.R
 		Subject: witnessreview.RequestSubject{
 			Head: dispatch.Head().String(), Tree: dispatch.Tree().String(),
 		},
-		CharterHash:       workspace.DigestBytes([]byte("feature-implement-review-failure-charter:" + marker)).String(),
+		CharterHash:       charterHash,
 		ReviewInputDigest: workspace.DigestBytes([]byte("feature-implement-review-failure-input:" + marker)).String(),
 		FrozenRecipe:      recipeBytes,
 		RecipeDigest:      recipeDigest,
