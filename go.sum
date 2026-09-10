@@ -1,5 +1,5 @@
-github.com/charlesnpx/witness v0.8.0 h1:N+zmMq9UMXTSTQU8x22KPuApDBilT5W3BQzCS6Ygny8=
-github.com/charlesnpx/witness v0.8.0/go.mod h1:iXwk4TY9ye6YaCUhuZ/8aUE7pRJSXQVkz/l5i4xRseQ=
+github.com/charlesnpx/witness v0.9.2 h1:q7UkiT0pIubQVm29E4OPy0gv5zdckAt9ClayF83sL4E=
+github.com/charlesnpx/witness v0.9.2/go.mod h1:1d/HzQF2XtU58vy8HIAVlujH8ejXGjC/ZjBZA8sspzw=
 github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 h1:KRzFb2m7YtdldCEkzs6KqmJw4nqEVZGK7IN2kJkjTuQ=
 github.com/santhosh-tekuri/jsonschema/v6 v6.0.2/go.mod h1:JXeL+ps8p7/KNMjDQk3TCwPpBy0wYklyWTfbkIzdIFU=
 golang.org/x/sys v0.47.0 h1:o7XGOvZQCADBQQ4Y7VNq2dRWQR7JmOUW8Kxx4ZsNgWs=
